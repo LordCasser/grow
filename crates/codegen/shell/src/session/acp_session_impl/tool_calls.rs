@@ -225,6 +225,258 @@ fn recognizable_shell_write(command: &str) -> bool {
         .any(|token| command.contains(token))
 }
 
+/// Project a frozen shell invocation into RWX. The parser is shared with the
+/// hard permission boundary: parsed non-mutating commands observe state and
+/// execute; recognized mutations additionally require W; opaque syntax and
+/// common network/process launchers fail closed as All.
+fn shell_required_access(command: &str) -> tool_protocol::ToolAccess {
+    let Some(tree) = workspace::permission::bash_command_splitting::try_parse_shell(command) else {
+        return tool_protocol::ToolAccess::All;
+    };
+    if tree.root_node().has_error()
+        || workspace::permission::tree_has_opaque_shell(tree.root_node(), command)
+    {
+        return tool_protocol::ToolAccess::All;
+    }
+    let lower = command.to_ascii_lowercase();
+    let externally_emitting = [
+        "curl ",
+        "wget ",
+        "ssh ",
+        "scp ",
+        "rsync ",
+        "nc ",
+        "ncat ",
+        "socat ",
+        "git push",
+        "git fetch",
+        "git pull",
+        "git clone",
+        "gh ",
+        "kubectl ",
+        "docker push",
+        "docker pull",
+        "npm publish",
+        "cargo publish",
+    ]
+    .iter()
+    .any(|token| lower.starts_with(token) || lower.contains(&format!(" {token}")));
+    let writes = !workspace::permission::command_write_paths_in_tree(tree.root_node(), command)
+        .is_empty()
+        || recognizable_shell_write(command);
+    if externally_emitting || writes {
+        tool_protocol::ToolAccess::All
+    } else {
+        tool_protocol::ToolAccess::ReadExecute
+    }
+}
+
+/// The one native call projector. Descriptors declare an eligibility ceiling;
+/// this function narrows frozen typed arguments to the authority required by
+/// this invocation. MCP calls use their config-owned trust-domain ceiling.
+fn project_call_access(
+    input: &ToolInput,
+    descriptor_max: tool_protocol::ToolAccess,
+    mcp_max: Option<tool_protocol::ToolAccess>,
+) -> tool_protocol::ToolAccess {
+    use tool_protocol::ToolAccess;
+    match input {
+        ToolInput::ReadFile(_)
+        | ToolInput::Grep(_)
+        | ToolInput::ListDir(_)
+        | ToolInput::Skill(_)
+        | ToolInput::TaskOutput(_)
+        | ToolInput::MemorySearch(_)
+        | ToolInput::MemoryGet(_)
+        | ToolInput::ContextRecall(_)
+        | ToolInput::Lsp(_)
+        | ToolInput::SchedulerList(_)
+        | ToolInput::GetGoal(_) => ToolAccess::Read,
+        ToolInput::SearchReplace(_) | ToolInput::HashlineEdit(_) => ToolAccess::ReadWrite,
+        ToolInput::Write(_) => ToolAccess::Write,
+        ToolInput::Bash(input) => shell_required_access(&input.command),
+        ToolInput::Monitor(input) => shell_required_access(&input.command),
+        // Delegation and owner-scoped cancellation are exact-identity
+        // framework controls. Reality-facing work performed by a child or a
+        // background command remains independently gated at its origin.
+        ToolInput::KillTask(_) | ToolInput::Task(_) => ToolAccess::None,
+        ToolInput::WebFetch(_) => ToolAccess::ReadWrite,
+        ToolInput::SchedulerCreate(_) | ToolInput::SchedulerDelete(_) => ToolAccess::WriteExecute,
+        ToolInput::CreateGoal(_) | ToolInput::UpdateGoal(_) => ToolAccess::WriteExecute,
+        ToolInput::Workflow(input) => {
+            use tools::implementations::grow_build::workflow::{
+                WorkflowDraftSource, WorkflowToolInput,
+            };
+            match input {
+                WorkflowToolInput::Search { .. } | WorkflowToolInput::Inspect { .. } => {
+                    ToolAccess::Read
+                }
+                WorkflowToolInput::Draft {
+                    source: WorkflowDraftSource::Inline { .. },
+                    ..
+                } => ToolAccess::Write,
+                WorkflowToolInput::Draft {
+                    source:
+                        WorkflowDraftSource::File { .. } | WorkflowDraftSource::Definition { .. },
+                    ..
+                } => ToolAccess::ReadWrite,
+                // Validation records the validated content hash; Run also
+                // materializes and starts a durable Run.
+                WorkflowToolInput::Validate { .. } | WorkflowToolInput::Run { .. } => {
+                    ToolAccess::All
+                }
+                WorkflowToolInput::Publish { .. } => ToolAccess::ReadWrite,
+                WorkflowToolInput::Discard { .. } => ToolAccess::Write,
+                WorkflowToolInput::ControlRun { .. } => ToolAccess::WriteExecute,
+            }
+        }
+        ToolInput::MCPTool(_) | ToolInput::UseTool(_) => mcp_max.unwrap_or(ToolAccess::All),
+        ToolInput::Dynamic(_) => mcp_max.unwrap_or(descriptor_max),
+        ToolInput::TodoWrite(_)
+        | ToolInput::SearchTool(_)
+        | ToolInput::PlanControl(_)
+        | ToolInput::AskUserQuestion(_) => ToolAccess::None,
+    }
+}
+
+pub(super) fn hash_canonical_json(value: &serde_json::Value) -> String {
+    fn write(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => out.push_str(
+                &serde_json::to_string(value).expect("scalar JSON serialization is infallible"),
+            ),
+            serde_json::Value::Array(values) => {
+                out.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write(value, out);
+                }
+                out.push(']');
+            }
+            serde_json::Value::Object(values) => {
+                out.push('{');
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(
+                        &serde_json::to_string(key)
+                            .expect("object key JSON serialization is infallible"),
+                    );
+                    out.push(':');
+                    write(&values[key], out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut canonical = String::new();
+    write(value, &mut canonical);
+    blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
+impl ToolCallPermit {
+    fn trajectory_meta(&self) -> serde_json::Value {
+        let mcp = self.mcp.as_ref().map(|binding| {
+            json!({
+                "server": binding.server,
+                "client_id": binding.client_id,
+                "generation": binding.generation,
+                "max_access": binding.max_access,
+            })
+        });
+        let identity = json!({
+            "call_id": self.call_id,
+            "tool_name": self.tool_name,
+            "dispatch_target_name": self.dispatch_target_name,
+            "canonical_args_hash": self.canonical_args_hash,
+            "cwd": self.cwd.to_string_lossy(),
+            "descriptor_max_access": self.descriptor_max,
+            "required_access": self.required_access,
+            "actor_source": self.actor_source,
+            "actor_epoch": self.actor_epoch,
+            "mcp": mcp,
+        });
+        json!({
+            "id": hash_canonical_json(&identity),
+            "args_hash": self.canonical_args_hash,
+            "actor_source": self.actor_source,
+            "actor_epoch": self.actor_epoch,
+            "mcp": identity["mcp"].clone(),
+        })
+    }
+}
+
+impl SessionActor {
+    async fn issue_tool_call_permit(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        dispatch_target_name: Option<String>,
+        parsed_args: &serde_json::Value,
+        access_kind: &AccessKind,
+        descriptor_max: tool_protocol::ToolAccess,
+        required_access: tool_protocol::ToolAccess,
+    ) -> Result<ToolCallPermit, String> {
+        let mcp = if let AccessKind::MCPTool { name, .. } = access_kind {
+            let Some((_, server, _)) = ::mcp::servers::parse_mcp_qualified_name(name) else {
+                return Err(format!(
+                    "MCP target `{name}` is not a canonical server-qualified tool name"
+                ));
+            };
+            let state = self.mcp_state.lock().await;
+            let Some(client) = state.get_client(server) else {
+                return Err(format!("MCP server `{server}` has no live transport"));
+            };
+            let max_access = state
+                .mcp_server_max_access
+                .get(server)
+                .copied()
+                .unwrap_or(tool_protocol::ToolAccess::All);
+            if max_access != required_access {
+                return Err(format!(
+                    "MCP trust-domain access changed while authorizing `{name}`"
+                ));
+            }
+            Some(McpPermitBinding {
+                server: server.to_owned(),
+                client_id: client.client_id(),
+                generation: state.generation(),
+                max_access,
+            })
+        } else {
+            None
+        };
+        Ok(ToolCallPermit {
+            call_id: call_id.to_owned(),
+            tool_name: tool_name.to_owned(),
+            dispatch_target_name,
+            canonical_args_hash: hash_canonical_json(parsed_args),
+            cwd: self.tool_context.cwd.as_path().to_path_buf(),
+            descriptor_max,
+            required_access,
+            actor_source: if self.startup_hints.is_subagent {
+                format!("child:{}", self.session_info.id.0)
+            } else {
+                format!("primary:{}", self.turn_behavior.lock().as_id())
+            },
+            actor_epoch: self
+                .subagent_capabilities
+                .as_ref()
+                .map(|state| state.authorization_epoch()),
+            mcp,
+            consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+}
+
 fn recognizable_shell_write_paths(command: &str, cwd: &std::path::Path) -> Vec<String> {
     workspace::permission::bash_command_splitting::try_parse_shell(command)
         .map(|tree| {
@@ -459,7 +711,7 @@ pub(super) enum PlanEditGate {
 ///
 /// Every potentially mutating access class is rejected before the normal
 /// permission flow. MCP calls are allowed only when the call's server is
-/// config-declared `tool_scope = "read"`;
+/// config-declared `max_access = "read_write"`;
 /// unknown MCP calls fail closed while drafting/amending. Plan artifact
 /// persistence is performed only by the shell control plane; Behavior
 /// never grants an edit capability and never bypasses session permissions.
@@ -475,7 +727,7 @@ pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::behavior::BehaviorCoordinator,
     tool_input: &ToolInput,
     access_kind: &AccessKind,
-    mcp_scope: Option<tool_protocol::ToolScope>,
+    mcp_max_access: Option<tool_protocol::ToolAccess>,
 ) -> PlanEditGate {
     if !tracker.is_plan() {
         return PlanEditGate::Allow;
@@ -489,7 +741,7 @@ pub(super) fn plan_mode_edit_gate(
     match access_kind {
         AccessKind::Edit(_) | AccessKind::Bash(_) => PlanEditGate::RejectEdit,
         AccessKind::MCPTool { .. } => {
-            if mcp_scope == Some(tool_protocol::ToolScope::Read) {
+            if mcp_max_access == Some(tool_protocol::ToolAccess::ReadWrite) {
                 PlanEditGate::Allow
             } else {
                 PlanEditGate::RejectEdit
@@ -498,7 +750,7 @@ pub(super) fn plan_mode_edit_gate(
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::WebFetch(_)
-        | AccessKind::CapabilityGrant { .. } => PlanEditGate::Allow,
+        | AccessKind::InternalControl { .. } => PlanEditGate::Allow,
     }
 }
 
@@ -511,10 +763,10 @@ pub(super) fn plan_mode_edit_gate(
 /// Async because the cached set lives in `McpState` (tokio Mutex). Callers
 /// must run this BEFORE acquiring the `behavior` lock so neither lock is held
 /// across an await of the other.
-async fn plan_gate_mcp_scope(
+async fn mcp_call_max_access(
     mcp_state: &TokioMutex<McpState>,
     access_kind: &AccessKind,
-) -> Option<tool_protocol::ToolScope> {
+) -> Option<tool_protocol::ToolAccess> {
     let AccessKind::MCPTool { name, .. } = access_kind else {
         return None;
     };
@@ -522,8 +774,8 @@ async fn plan_gate_mcp_scope(
     let mcp_state = mcp_state.lock().await;
     Some(
         server
-            .and_then(|name| mcp_state.mcp_server_scopes.get(name).copied())
-            .unwrap_or(tool_protocol::ToolScope::Write),
+            .and_then(|name| mcp_state.mcp_server_max_access.get(name).copied())
+            .unwrap_or(tool_protocol::ToolAccess::All),
     )
 }
 /// Typed view of a Plan approval decision. The wire type carries `outcome` as
@@ -641,6 +893,30 @@ impl SessionActor {
         )
         .and_then(|v| v.as_object().cloned())
     }
+
+    fn stamp_tool_call_authority_meta(
+        &self,
+        existing: Option<acp::Meta>,
+        wire_name: &str,
+        parsed: &ToolInput,
+        descriptor_max: tool_protocol::ToolAccess,
+        required_access: tool_protocol::ToolAccess,
+        permit: Option<&ToolCallPermit>,
+    ) -> Option<acp::Meta> {
+        let mut meta = self
+            .stamp_tool_meta(existing, wire_name, Some(parsed))
+            .unwrap_or_default();
+        let mut authority = json!({
+            "version": 1,
+            "descriptor_max_access": descriptor_max,
+            "required_access": required_access,
+        });
+        if let Some(permit) = permit {
+            authority["permit"] = permit.trajectory_meta();
+        }
+        meta.insert("grow/tool_call".to_owned(), authority);
+        Some(meta)
+    }
     #[tracing::instrument(
         name = "tools.execute",
         skip_all,
@@ -661,25 +937,7 @@ impl SessionActor {
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {
             let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            // Capability requests are authorization control calls, not
-            // ordinary parallel work. Resolve them sequentially before any
-            // sibling dispatch so an explicit user Cancel can prevent side
-            // effects that have not started yet. Child deny/timeout remains a
-            // nonterminal tool result and therefore does not block siblings.
-            let (capability_requests, remainder): (Vec<_>, Vec<_>) =
-                tool_calls.into_iter().partition(|call| {
-                    kind_of(&call.function.name)
-                        == Some(tools::types::tool::ToolKind::CapabilityRequest)
-                });
-            for request in capability_requests {
-                self.execute_tool_calls_batch(
-                    vec![request],
-                    &mut deferred_followups,
-                    &mut final_result,
-                )
-                .await?;
-            }
-            let (body, tail) = split_plan_control_tail(remainder, kind_of);
+            let (body, tail) = split_plan_control_tail(tool_calls, kind_of);
             if !body.is_empty() {
                 self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
                     .await?;
@@ -904,7 +1162,7 @@ impl SessionActor {
         }
         let write_paths: std::collections::HashSet<String> = approved
             .iter()
-            .filter(|prepared| prepared.tool_scope == tool_protocol::ToolScope::Write)
+            .filter(|prepared| prepared.required_access.requires_write())
             .filter_map(|prepared| lock_path_for_args(&prepared.parsed_args).map(str::to_owned))
             .collect();
         let file_locks = {
@@ -920,7 +1178,17 @@ impl SessionActor {
             }
             map
         };
-        let workspace_ops = self.workspace_ops.clone();
+        let dispatch_authority = ToolDispatchAuthority {
+            bridge: self.agent.borrow().tool_bridge().clone(),
+            subagent: self.subagent_capabilities.clone(),
+            mcp_state: Arc::clone(&self.mcp_state),
+            cwd: self.tool_context.cwd.as_path().to_path_buf(),
+            actor_source: if self.startup_hints.is_subagent {
+                format!("child:{}", self.session_info.id.0)
+            } else {
+                format!("primary:{}", self.turn_behavior.lock().as_id())
+            },
+        };
         let workflow_manager = self.workflow_manager.clone();
         let behavior = self.behavior.clone();
         let pending_interjections = self.pending_interjections.clone();
@@ -937,7 +1205,7 @@ impl SessionActor {
             .enumerate()
             .map(|(idx, prepared)| {
                 let prepared = Arc::new(prepared.clone());
-                let workspace_ops = workspace_ops.clone();
+                let dispatch_authority = dispatch_authority.clone();
                 let workflow_manager = workflow_manager.clone();
                 let behavior = behavior.clone();
                 let session_id = session_id.clone();
@@ -967,7 +1235,6 @@ impl SessionActor {
                     let tool_span_for_record = tool_span.clone();
                     let run_tool = || {
                         let prepared = Arc::clone(&prepared);
-                        let workspace_ops = workspace_ops.clone();
                         let session_id = session_id.clone();
                         let lock = lock.clone();
                         async move {
@@ -986,9 +1253,11 @@ impl SessionActor {
                                         "Workflow draft writes require live Workflow behavior. Use /workflow [prompt].",
                                     ));
                                 }
-                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                                dispatch_tool(&dispatch_authority, &prepared, &session_id)
+                                .await
                             } else {
-                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                                dispatch_tool(&dispatch_authority, &prepared, &session_id)
+                                .await
                             }
                         }
                     };
@@ -1115,32 +1384,7 @@ impl SessionActor {
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
-                    let capability_control = if self
-                        .agent
-                        .borrow()
-                        .tool_bridge()
-                        .tool_kind(&prepared.tool_name)
-                        == Some(tools::types::tool::ToolKind::CapabilityRequest)
-                    {
-                        let bridge = self.agent.borrow().tool_bridge().clone();
-                        let toolset = bridge.toolset();
-                        let resources = toolset.resources.lock().await;
-                        resources
-                            .get::<tools::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource>()
-                            .and_then(|backend| {
-                                if backend.0.take_cancelled(&prepared.call_id) {
-                                    Some(ToolLoop::Cancelled)
-                                } else {
-                                    backend
-                                        .0
-                                        .take_followup(&prepared.call_id)
-                                        .map(ToolLoop::FollowupMessage)
-                                }
-                            })
-                    } else {
-                        None
-                    };
-                    capability_control.unwrap_or(ToolLoop::Continue)
+                    ToolLoop::Continue
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
@@ -1426,30 +1670,51 @@ impl SessionActor {
                 return Ok(Err(ToolLoop::ToolParsingError));
             }
         };
-        let access_kind = AccessKind::from(&tool_input);
-        let tool_kind = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .tool_kind(&call.function.name);
-        if let Some(capabilities) = &self.subagent_capabilities {
-            let kind_allowed = tool_kind.is_some_and(|kind| capabilities.allows_kind(kind));
-            let mcp_allowed = match &tool_input {
-                ToolInput::UseTool(input) => capabilities.mcp_tool_granted(&input.tool_name),
-                ToolInput::MCPTool(input) => capabilities.mcp_tool_granted(&input.tool_name),
-                _ => true,
+        let access_kind = AccessKind::from_tool_call(&call.function.name, &tool_input);
+        let (tool_kind, descriptor_max) = {
+            let agent = self.agent.borrow();
+            let bridge = agent.tool_bridge();
+            (
+                bridge.tool_kind(&call.function.name),
+                bridge
+                    .max_access(&call.function.name)
+                    .unwrap_or(tool_protocol::ToolAccess::All),
+            )
+        };
+        let mcp_max_access = mcp_call_max_access(&self.mcp_state, &access_kind).await;
+        let required_access = project_call_access(&tool_input, descriptor_max, mcp_max_access);
+        if !descriptor_max.covers(required_access) {
+            let message = format!(
+                "Rejected: tool descriptor contract violation for `{}`: call requires {:?}, descriptor ceiling is {:?}.",
+                call.function.name, required_access, descriptor_max
+            );
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
+        let within_capability_fence = if let Some(capabilities) = &self.subagent_capabilities {
+            let mcp_target = match &tool_input {
+                ToolInput::UseTool(input) => Some(input.tool_name.as_str()),
+                ToolInput::MCPTool(input) => Some(input.tool_name.as_str()),
+                _ => None,
             };
-            if !kind_allowed || !mcp_allowed {
-                let message = if !mcp_allowed {
-                    "Rejected: this MCP server has not been granted to the subagent. Use request_tool_access with target type `mcp_server` first."
-                } else {
-                    "Rejected: this native capability has not been granted to the subagent. Use request_tool_access first."
-                };
+            let hard_eligible = mcp_target.map_or_else(
+                || capabilities.native_call_eligible(&call.function.name, required_access),
+                |target| capabilities.mcp_tool_eligible(target),
+            );
+            if !hard_eligible {
+                let message = "Rejected: this exact tool identity is outside the subagent's authored eligibility ceiling or its inherited MCP transport is no longer eligible.";
                 self.handle_tool_not_executed(&call.id, &tool_call_id, message.to_owned())
                     .await?;
                 return Ok(Err(ToolLoop::Continue));
             }
-        }
+            mcp_target.map_or_else(
+                || capabilities.native_call_available(&call.function.name, required_access),
+                |target| capabilities.mcp_tool_available(target, required_access),
+            )
+        } else {
+            false
+        };
         let admitted_behavior = *self.turn_behavior.lock();
         let session_dir = &self.session_dir;
         let cwd = self.tool_context.cwd.as_path();
@@ -1457,13 +1722,11 @@ impl SessionActor {
         let saved_workflow_write = saved_workflow_definition_write(&access_kind, cwd, display_cwd);
         let workflow_draft_write =
             session_workflow_definition_write(&access_kind, &session_dir, cwd, display_cwd);
-        let declared_scope = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .tool_scope(&call.function.name);
         if admitted_behavior == tool_types::BehaviorId::DeepResearch
-            && declared_scope != Some(tool_protocol::ToolScope::Read)
+            && required_access != tool_protocol::ToolAccess::Read
+            && tool_kind != Some(tools::types::tool::ToolKind::WebFetch)
+            && !(matches!(&access_kind, AccessKind::MCPTool { .. })
+                && mcp_max_access == Some(tool_protocol::ToolAccess::ReadWrite))
         {
             let message = "Rejected: Deep Research foreground turns are read-only.".to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
@@ -1510,9 +1773,13 @@ impl SessionActor {
         // Lock order: resolve the read-only MCP classification from the
         // (async) `mcp_state` BEFORE taking the `behavior` lock — never hold
         // one lock while awaiting the other.
-        let mcp_scope = plan_gate_mcp_scope(&self.mcp_state, &access_kind).await;
         let plan_gate = if admitted_behavior == tool_types::BehaviorId::Plan {
-            plan_mode_edit_gate(&self.behavior.lock(), &tool_input, &access_kind, mcp_scope)
+            plan_mode_edit_gate(
+                &self.behavior.lock(),
+                &tool_input,
+                &access_kind,
+                mcp_max_access,
+            )
         } else {
             PlanEditGate::Allow
         };
@@ -1536,7 +1803,13 @@ impl SessionActor {
             return Ok(Err(ToolLoop::Continue));
         }
         let tool_call_display = self
-            .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
+            .send_tool_call_start(
+                &tool_call_id,
+                &call.function.name,
+                tool_input.clone(),
+                descriptor_max,
+                required_access,
+            )
             .await;
         let _recovered_raw_input = if concatenated_json_count > 0 {
             Some(raw_input.clone())
@@ -1600,10 +1873,7 @@ impl SessionActor {
                 return Ok(Err(denied));
             }
         }
-        // request_tool_access owns its permission interaction in the grant
-        // backend. Running the generic preflight as well would emit a spurious
-        // Read/Allow event before the real capability-grant decision.
-        if tool_kind != Some(tools::types::tool::ToolKind::CapabilityRequest) {
+        {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
                 .map(|(t, k, r)| (Some(t.clone()), Some(*k), Some(r.clone())))
@@ -1615,7 +1885,14 @@ impl SessionActor {
                     .kind(perm_kind)
                     .raw_input(perm_raw_input),
             )
-            .meta(self.stamp_tool_meta(None, &call.function.name, Some(&tool_input)));
+            .meta(self.stamp_tool_call_authority_meta(
+                None,
+                &call.function.name,
+                &tool_input,
+                descriptor_max,
+                required_access,
+                None,
+            ));
             let (diagnostics_access_kind, _access_detail) = match &access_kind {
                 workspace::permission::AccessKind::Read(p) => (
                     ::diagnostics::events::AccessKind::Read,
@@ -1637,8 +1914,8 @@ impl SessionActor {
                 workspace::permission::AccessKind::WebFetch(u) => {
                     (::diagnostics::events::AccessKind::Web, u.clone())
                 }
-                workspace::permission::AccessKind::CapabilityGrant { target, .. } => {
-                    (::diagnostics::events::AccessKind::Mcp, target.clone())
+                workspace::permission::AccessKind::InternalControl { name } => {
+                    (::diagnostics::events::AccessKind::Control, name.clone())
                 }
             };
             let subagent_session_id = if self.startup_hints.is_subagent {
@@ -1647,7 +1924,6 @@ impl SessionActor {
                 None
             };
             let diagnostic_subagent_type = self.subagent_type_label();
-            let within_capability_fence = self.subagent_capabilities.is_some();
             let child_permission_mode = self.startup_hints.permission_request_mode();
             let effective_mode = self
                 .permissions
@@ -2164,12 +2440,40 @@ impl SessionActor {
                 }
             }
         }
-        let tool_scope = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .tool_scope(&call.function.name)
-            .unwrap_or(tool_protocol::ToolScope::Write);
+        let permit = match self
+            .issue_tool_call_permit(
+                &call.id,
+                &call.function.name,
+                dispatch_target_name.clone(),
+                &raw_input,
+                &access_kind,
+                descriptor_max,
+                required_access,
+            )
+            .await
+        {
+            Ok(permit) => permit,
+            Err(message) => {
+                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                    .await?;
+                return Ok(Err(ToolLoop::Continue));
+            }
+        };
+        self.send_update(
+            acp::SessionUpdate::ToolCallUpdate(
+                acp::ToolCallUpdate::new(tool_call_id.clone(), acp::ToolCallUpdateFields::new())
+                    .meta(self.stamp_tool_call_authority_meta(
+                        None,
+                        &call.function.name,
+                        &tool_input,
+                        descriptor_max,
+                        required_access,
+                        Some(&permit),
+                    )),
+            ),
+            None,
+        )
+        .await;
         let prepared = PreparedToolCall {
             call_id: call.id.clone(),
             tool_call_id,
@@ -2179,7 +2483,8 @@ impl SessionActor {
             model_id: model_id_str,
             concatenated_json_count,
             dispatch_target_name,
-            tool_scope,
+            required_access,
+            permit,
             workflow_draft_write,
         };
         Ok(Ok(prepared))
@@ -2377,7 +2682,6 @@ impl SessionActor {
             None,
             false,
             None,
-            None,
             respond_to,
             None,
         )
@@ -2397,10 +2701,19 @@ impl SessionActor {
         tool_call_id: &acp::ToolCallId,
         wire_name: &str,
         tool_call_input: ToolInput,
+        descriptor_max: tool_protocol::ToolAccess,
+        required_access: tool_protocol::ToolAccess,
     ) -> Result<(String, acp::ToolKind, serde_json::Value), acp::Error> {
         #[allow(unused_mut)]
         let mut raw_input = serde_json::to_value(&tool_call_input)?;
-        let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
+        let canonical_meta = self.stamp_tool_call_authority_meta(
+            None,
+            wire_name,
+            &tool_call_input,
+            descriptor_max,
+            required_access,
+            None,
+        );
         let (title, kind, locations, content) = match tool_call_input {
             ToolInput::ListDir(list_dir) => (
                 format!("List `{}`", list_dir.target_directory),
@@ -2709,30 +3022,12 @@ impl SessionActor {
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
-    /// Sweep `pending_inputs` and `pending_notifications` for entries
-    /// matching `consumed_ids`. Called after every successful tool result
-    /// so that queued auto-wake synthetic prompts for a task/subagent the
-    /// model already learned about are dropped before they get flushed to
-    /// canonical Surface (which would appear as a trailing
-    /// `<system-reminder>` with no assistant reply).
+    /// Remove queued inbox promotions for completion IDs that a successful
+    /// tool result is about to surface. The durable receipts themselves are
+    /// acknowledged only after that tool result reaches chat state.
     ///
-    /// The ID list comes from
-    /// `tools::reminders::task_completion::consumed_completion_ids`,
-    /// which is the same predicate used by `TaskCompletionReminder` —
-    /// they cannot drift because they share the function.
-    ///
-    /// Reservations are deliberately not released here because the tool result
-    /// that triggered this sweep is the canonical consumption surface, and
-    /// `TaskCompletionReminder` already suppresses the per-tool-call
-    /// reminder for these IDs via its own suppress list (also derived
-    /// from `consumed_completion_ids`). Un-marking here would risk a
-    /// duplicate reminder for an ID that was just consumed.
-    ///
-    /// Note on `MonitorEvent` interaction: any pending `MonitorEvent`
-    /// notification whose `task_id` matches a consumed completion is
-    /// also dropped. This is intentional — the model just learned via
-    /// the `get_task_output` / `kill_task` result that the task is
-    /// done, so any pending monitor stdout for it is stale.
+    /// The exhaustive ID classification is centralized in
+    /// `tools::reminders::task_completion::consumed_completion_ids`.
     pub(super) async fn drop_pending_items_for_consumed_completions(&self, consumed_ids: &[&str]) {
         if consumed_ids.is_empty() {
             return;
@@ -2744,35 +3039,66 @@ impl SessionActor {
                 .is_some_and(|id| consumed_ids.contains(&id))
         });
         let dropped_inputs = dropped.len();
-        let before_notifications = state.pending_notifications.len();
-        state
-            .pending_notifications
-            .retain(|n| !consumed_ids.contains(&n.source.task_id()));
-        let dropped_notifications = before_notifications - state.pending_notifications.len();
         drop(state);
-        if let Some(reservations) = &self.tool_context.task_completion_reservations {
-            for task_id in dropped
-                .iter()
-                .filter_map(|input| input.origin.completion_id())
-            {
-                reservations.release(task_id);
-            }
-        }
-        if dropped_inputs > 0 || dropped_notifications > 0 {
+        if dropped_inputs > 0 {
             tracing::info!(
                 dropped_inputs,
-                dropped_notifications,
                 consumed_ids = ?consumed_ids,
                 "auto-wake: dropped queued synthetic items for consumed completions"
             );
         }
     }
-    /// Drain all queued synthetic prompts (auto-wake task/subagent
-    /// completions, notification-drain batches, and Goal continuation turns —
-    /// every `PromptOrigin` variant where `is_synthetic()` returns
-    /// `true`) from `pending_inputs`, and clear ALL
-    /// `pending_notifications` unconditionally (every current
-    /// `NotificationSource` variant is sourced from a synthetic event).
+
+    /// Link durable completion receipts to the active turn after the tool
+    /// result that exposed them has been appended. `input: None` is not a
+    /// second model message; it records that this turn's tool result is the
+    /// consumption surface.
+    async fn acknowledge_consumed_notifications(&self, consumed_ids: &[&str]) {
+        if consumed_ids.is_empty() {
+            return;
+        }
+        let Some(turn) = self.events.current_turn() else {
+            tracing::error!(consumed_ids = ?consumed_ids, "cannot acknowledge notifications without an active turn");
+            return;
+        };
+        let notification_ids = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|notification| match &notification.source {
+                chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                    consumed_ids.contains(&task_id.as_str())
+                }
+                chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                    consumed_ids.contains(&subagent_id.as_str())
+                }
+                chat_state::NotificationSource::MonitorProgress { .. }
+                | chat_state::NotificationSource::TaskStillRunning { .. }
+                | chat_state::NotificationSource::WorkflowCompleted { .. } => false,
+            })
+            .map(|notification| notification.id)
+            .collect::<Vec<_>>();
+        if notification_ids.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    notification_ids,
+                    turn,
+                    input: None,
+                },
+            ))
+            .await
+        {
+            tracing::error!(%error, "failed to acknowledge tool-consumed notifications");
+        }
+    }
+    /// Drain queued synthetic prompts during shutdown. Durable notifications
+    /// remain in Timeline and are replayed on the next session load.
     ///
     /// Called from `SessionCommand::Shutdown` as a defensive backstop
     /// so a synthetic prompt that slipped past the per-tool-result
@@ -2781,25 +3107,13 @@ impl SessionActor {
     pub(super) async fn drop_pending_synthetic_items(&self) {
         let mut state = self.state.lock().await;
         let mut kept = VecDeque::with_capacity(state.pending_inputs.len());
-        let mut dropped = Vec::new();
         for input in std::mem::take(&mut state.pending_inputs) {
-            if input.origin.is_synthetic() {
-                dropped.push(input);
-            } else {
+            if !input.origin.is_synthetic() {
                 kept.push_back(input);
             }
         }
         state.pending_inputs = kept;
-        state.pending_notifications.clear();
         drop(state);
-        if let Some(reservations) = &self.tool_context.task_completion_reservations {
-            for task_id in dropped
-                .iter()
-                .filter_map(|input| input.origin.completion_id())
-            {
-                reservations.release(task_id);
-            }
-        }
     }
     /// Record git/PR ops from a successful tool result into session signals
     /// (`turn_result.json`) and diagnostics. Detection runs here at the shell's
@@ -3061,6 +3375,7 @@ impl SessionActor {
         } else {
             self.chat_state_handle.push_tool_result(tool_chat);
         }
+        self.acknowledge_consumed_notifications(&consumed_ids).await;
         let mut deferred_followups = Vec::new();
         if !extracted_images.is_empty() {
             let count = extracted_images.len();
@@ -3483,6 +3798,143 @@ mod tool_call_pipeline_tests {
     }
 }
 #[cfg(test)]
+mod rwx_projection_tests {
+    use super::{hash_canonical_json, project_call_access, shell_required_access};
+    use tool_protocol::ToolAccess;
+    use tool_types::{KillTaskToolInput, TaskToolInput};
+    use tools::implementations::BashToolInput;
+    use tools::implementations::grow_build::workflow::{
+        WorkflowDefinitionId, WorkflowDraftSource, WorkflowToolInput,
+    };
+    use tools::types::ToolInput;
+
+    #[test]
+    fn shell_projection_distinguishes_observation_mutation_and_opaque_syntax() {
+        assert_eq!(
+            shell_required_access("rg TODO src"),
+            ToolAccess::ReadExecute
+        );
+        assert_eq!(shell_required_access("echo x > out"), ToolAccess::All);
+        assert_eq!(
+            shell_required_access("curl https://example.com"),
+            ToolAccess::All
+        );
+        assert_eq!(shell_required_access("echo '"), ToolAccess::All);
+        assert_eq!(
+            shell_required_access("bash -c \"$COMMAND\""),
+            ToolAccess::All
+        );
+    }
+
+    #[test]
+    fn workflow_projection_narrows_the_all_descriptor_by_action() {
+        let id = WorkflowDefinitionId::new("project:review");
+        for (input, expected) in [
+            (
+                WorkflowToolInput::Search {
+                    query: "review".into(),
+                    limit: None,
+                },
+                ToolAccess::Read,
+            ),
+            (
+                WorkflowToolInput::Draft {
+                    name: None,
+                    source: WorkflowDraftSource::Inline {
+                        script: "complete(#{})".into(),
+                    },
+                },
+                ToolAccess::Write,
+            ),
+            (
+                WorkflowToolInput::Inspect {
+                    definition_id: id.clone(),
+                    include_source: true,
+                },
+                ToolAccess::Read,
+            ),
+            (
+                WorkflowToolInput::Validate {
+                    definition_id: id,
+                    args: None,
+                    agent_budget: None,
+                },
+                ToolAccess::All,
+            ),
+        ] {
+            let required = project_call_access(&ToolInput::Workflow(input), ToolAccess::All, None);
+            assert_eq!(required, expected);
+            assert!(ToolAccess::All.covers(required));
+        }
+    }
+
+    #[test]
+    fn dynamic_and_mcp_calls_never_fall_back_to_read() {
+        let dynamic = ToolInput::Dynamic(serde_json::json!({"query": "x"}));
+        assert_eq!(
+            project_call_access(&dynamic, ToolAccess::All, None),
+            ToolAccess::All
+        );
+        let mcp = ToolInput::MCPTool(tools::types::MCPToolInput {
+            tool_name: "docs__search".into(),
+            tool_input: serde_json::json!({"query": "x"}),
+        });
+        assert_eq!(
+            project_call_access(&mcp, ToolAccess::All, Some(ToolAccess::ReadWrite)),
+            ToolAccess::ReadWrite
+        );
+    }
+
+    #[test]
+    fn canonical_argument_hash_ignores_object_key_order_but_not_values() {
+        let left = serde_json::json!({"b": [2, 3], "a": 1});
+        let right = serde_json::json!({"a": 1, "b": [2, 3]});
+        let changed = serde_json::json!({"a": 1, "b": [3, 2]});
+        assert_eq!(hash_canonical_json(&left), hash_canonical_json(&right));
+        assert_ne!(hash_canonical_json(&left), hash_canonical_json(&changed));
+    }
+
+    #[test]
+    fn bash_descriptor_covers_every_projected_invocation() {
+        let input = ToolInput::Bash(BashToolInput {
+            command: "cat README.md".into(),
+            timeout: None,
+            description: "read".into(),
+            is_background: false,
+        });
+        let required = project_call_access(&input, ToolAccess::All, None);
+        assert_eq!(required, ToolAccess::ReadExecute);
+        assert!(ToolAccess::All.covers(required));
+    }
+
+    #[test]
+    fn delegation_and_owner_cleanup_are_framework_controls() {
+        let task = ToolInput::Task(TaskToolInput {
+            prompt: "inspect".into(),
+            description: "inspect".into(),
+            subagent_type: "explore".into(),
+            run_in_background: true,
+            capability_mode: None,
+            isolation: None,
+            resume_from: None,
+            cwd: None,
+            model: None,
+            task_id: None,
+        });
+        let kill = ToolInput::KillTask(KillTaskToolInput {
+            task_id: "owned-task".into(),
+        });
+        assert_eq!(
+            project_call_access(&task, ToolAccess::None, None),
+            ToolAccess::None
+        );
+        assert_eq!(
+            project_call_access(&kill, ToolAccess::None, None),
+            ToolAccess::None
+        );
+    }
+}
+#[cfg(test)]
 mod plan_control_tail_predicate_tests {
     use super::{is_plan_control_kind, split_plan_control_tail};
     use tools::types::ToolInput;
@@ -3535,7 +3987,7 @@ mod plan_control_tail_predicate_tests {
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
     use super::{
-        PlanEditGate, plan_gate_mcp_scope, plan_mode_edit_gate, public_workflow_conflict,
+        PlanEditGate, mcp_call_max_access, plan_mode_edit_gate, public_workflow_conflict,
         saved_workflow_definition_write, session_workflow_definition_write,
         workflow_definition_write, workflow_run_snapshot_write,
     };
@@ -3704,15 +4156,25 @@ mod plan_mode_edit_gate_tests {
     }
     /// Non-MCP inputs resolve no read-only classification (`None`).
     fn gate(tracker: &BehaviorCoordinator, input: &ToolInput) -> PlanEditGate {
-        plan_mode_edit_gate(tracker, input, &AccessKind::from(input), None)
+        plan_mode_edit_gate(
+            tracker,
+            input,
+            &AccessKind::from_tool_call("test", input),
+            None,
+        )
     }
-    /// MCP inputs carry the call-site-resolved side-effect scope.
+    /// MCP inputs carry the call-site-resolved trust-domain RWX ceiling.
     fn gate_mcp(
         tracker: &BehaviorCoordinator,
         input: &ToolInput,
-        scope: tool_protocol::ToolScope,
+        max_access: tool_protocol::ToolAccess,
     ) -> PlanEditGate {
-        plan_mode_edit_gate(tracker, input, &AccessKind::from(input), Some(scope))
+        plan_mode_edit_gate(
+            tracker,
+            input,
+            &AccessKind::from_tool_call("test", input),
+            Some(max_access),
+        )
     }
     fn mcp_tool(qualified_name: &str) -> ToolInput {
         use tools::implementations::use_tool::UseToolInput;
@@ -3789,7 +4251,7 @@ mod plan_mode_edit_gate_tests {
             gate_mcp(
                 &t,
                 &mcp_tool("docs__search_docs"),
-                tool_protocol::ToolScope::Read
+                tool_protocol::ToolAccess::ReadWrite
             ),
             PlanEditGate::Allow
         );
@@ -3797,7 +4259,7 @@ mod plan_mode_edit_gate_tests {
             gate_mcp(
                 &t,
                 &mcp_tool("unknown__search_docs"),
-                tool_protocol::ToolScope::Write
+                tool_protocol::ToolAccess::All
             ),
             PlanEditGate::RejectEdit
         );
@@ -3812,11 +4274,15 @@ mod plan_mode_edit_gate_tests {
         // MCP tools are unrestricted in Executing; the read-only classification
         // only narrows non-executing phases.
         assert_eq!(
-            gate_mcp(&t, &mcp_tool("any__tool"), tool_protocol::ToolScope::Write),
+            gate_mcp(&t, &mcp_tool("any__tool"), tool_protocol::ToolAccess::All),
             PlanEditGate::Allow
         );
         assert_eq!(
-            gate_mcp(&t, &mcp_tool("any__tool"), tool_protocol::ToolScope::Read),
+            gate_mcp(
+                &t,
+                &mcp_tool("any__tool"),
+                tool_protocol::ToolAccess::ReadWrite,
+            ),
             PlanEditGate::Allow
         );
         let workflow = ToolInput::Workflow(WorkflowToolInput::Search {
@@ -3833,12 +4299,12 @@ mod plan_mode_edit_gate_tests {
         mcp_state
             .lock()
             .await
-            .mcp_server_scopes
-            .insert("docs".to_string(), tool_protocol::ToolScope::Read);
+            .mcp_server_max_access
+            .insert("docs".to_string(), tool_protocol::ToolAccess::ReadWrite);
 
         // Non-MCP access kinds resolve to `None` (gate ignores it).
         assert_eq!(
-            plan_gate_mcp_scope(&mcp_state, &AccessKind::Read(None)).await,
+            mcp_call_max_access(&mcp_state, &AccessKind::Read(None)).await,
             None
         );
         let mcp = |name: &str| AccessKind::MCPTool {
@@ -3847,18 +4313,18 @@ mod plan_mode_edit_gate_tests {
         };
         // Configured read-only server.
         assert_eq!(
-            plan_gate_mcp_scope(&mcp_state, &mcp("docs__search_docs")).await,
-            Some(tool_protocol::ToolScope::Read)
+            mcp_call_max_access(&mcp_state, &mcp("docs__search_docs")).await,
+            Some(tool_protocol::ToolAccess::ReadWrite)
         );
         // Configured-but-not-read-only server fails closed.
         assert_eq!(
-            plan_gate_mcp_scope(&mcp_state, &mcp("linear__create_issue")).await,
-            Some(tool_protocol::ToolScope::Write)
+            mcp_call_max_access(&mcp_state, &mcp("linear__create_issue")).await,
+            Some(tool_protocol::ToolAccess::All)
         );
         // Unparseable qualified name (missing `__` delimiter) fails closed.
         assert_eq!(
-            plan_gate_mcp_scope(&mcp_state, &mcp("not_qualified")).await,
-            Some(tool_protocol::ToolScope::Write)
+            mcp_call_max_access(&mcp_state, &mcp("not_qualified")).await,
+            Some(tool_protocol::ToolAccess::All)
         );
     }
     /// Drafting: an MCP tool from a config-declared read-only server is
@@ -3869,16 +4335,16 @@ mod plan_mode_edit_gate_tests {
         mcp_state
             .lock()
             .await
-            .mcp_server_scopes
-            .insert("docs".to_string(), tool_protocol::ToolScope::Read);
+            .mcp_server_max_access
+            .insert("docs".to_string(), tool_protocol::ToolAccess::ReadWrite);
         let tracker = active_tracker();
         for (qualified, expected) in [
             ("docs__search_docs", PlanEditGate::Allow),
             ("other__search_docs", PlanEditGate::RejectEdit),
         ] {
             let input = mcp_tool(qualified);
-            let access_kind = AccessKind::from(&input);
-            let scope = plan_gate_mcp_scope(&mcp_state, &access_kind).await;
+            let access_kind = AccessKind::from_tool_call("workflow", &input);
+            let scope = mcp_call_max_access(&mcp_state, &access_kind).await;
             assert_eq!(
                 plan_mode_edit_gate(&tracker, &input, &access_kind, scope),
                 expected,

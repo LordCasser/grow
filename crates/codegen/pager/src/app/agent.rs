@@ -26,8 +26,6 @@ pub enum QueueEntryKind {
     Command,
     /// Direct bash command — bypasses agent loop, executed by shell directly.
     BashCommand,
-    /// Scheduled (cron) prompt -- injected by the scheduler via ACP notification.
-    Cron,
 }
 impl QueueEntryKind {
     /// Short, stable label for diagnostics / profiling logs.
@@ -36,7 +34,6 @@ impl QueueEntryKind {
             Self::Prompt => "prompt",
             Self::Command => "command",
             Self::BashCommand => "bash_command",
-            Self::Cron => "cron",
         }
     }
 }
@@ -67,11 +64,6 @@ pub struct QueuedPrompt {
     /// Recognized slash-token byte ranges into `text`, captured from the
     /// composer at submit time; empty = no token styling.
     pub skill_token_ranges: Vec<std::ops::Range<usize>>,
-    /// Scheduler task ID for cron prompts. Used for per-task dedup.
-    pub task_id: Option<String>,
-    /// Human-readable schedule (e.g. "every 5 minutes") for cron prompts.
-    /// Threaded into the system-reminder framing sent to the model.
-    pub human_schedule: Option<String>,
     /// All chip elements captured from the textarea at send time.
     /// Threaded into `InFlightPrompt` so rewind restores collapsed chips.
     pub chip_elements: Vec<ChipElement>,
@@ -92,8 +84,6 @@ impl QueuedPrompt {
             images: Vec::new(),
             display_as_skill: false,
             skill_token_ranges: Vec::new(),
-            task_id: None,
-            human_schedule: None,
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
         }
@@ -831,22 +821,6 @@ impl AgentSession {
     pub fn enqueue_bash_command(&mut self, text: String) -> u64 {
         self.enqueue_entry(text, QueueEntryKind::BashCommand)
     }
-    /// Push a scheduled (cron) prompt onto the back of the queue. Returns the assigned ID.
-    pub fn enqueue_cron_prompt(
-        &mut self,
-        text: String,
-        task_id: String,
-        human_schedule: String,
-    ) -> u64 {
-        let id = self.next_queue_id;
-        self.next_queue_id += 1;
-        self.pending_prompts.push_back(QueuedPrompt {
-            task_id: Some(task_id),
-            human_schedule: Some(human_schedule),
-            ..QueuedPrompt::plain(id, text, QueueEntryKind::Cron)
-        });
-        id
-    }
     /// Push an entry with the given kind onto the back of the queue.
     pub fn enqueue_entry(&mut self, text: String, kind: QueueEntryKind) -> u64 {
         self.enqueue_entry_at(text, kind, false, Vec::new())
@@ -930,8 +904,6 @@ impl AgentSession {
                 }));
             merged.wire_blocks = None;
             merged.display_as_skill = false;
-            merged.task_id = None;
-            merged.human_schedule = None;
         }
         merged.text = join_texts(segments.iter().map(String::as_str));
         merged.skill_token_ranges.clear();
@@ -1093,7 +1065,10 @@ mod tests {
     fn stopped_label_is_consistent_across_renderers() {
         assert_eq!(GoalDisplayStatus::Paused.stopped_label(), "Paused");
         assert_eq!(GoalDisplayStatus::Blocked.stopped_label(), "Blocked");
-        assert_eq!(GoalDisplayStatus::UsageLimited.stopped_label(), "Usage limited");
+        assert_eq!(
+            GoalDisplayStatus::UsageLimited.stopped_label(),
+            "Usage limited"
+        );
         assert_eq!(GoalDisplayStatus::Active.stopped_label(), "");
         assert_eq!(GoalDisplayStatus::BudgetLimited.stopped_label(), "");
         assert_eq!(GoalDisplayStatus::Complete.stopped_label(), "");
@@ -1180,21 +1155,6 @@ mod tests {
         s.dequeue_prompt();
         let id = s.enqueue_prompt("second".into());
         assert_eq!(id, 1);
-    }
-    #[test]
-    fn enqueue_cron_stores_cron_kind() {
-        let mut s = test_session();
-        s.enqueue_cron_prompt(
-            "check status".into(),
-            "task-1".into(),
-            "every 5 minutes".into(),
-        );
-        assert_eq!(s.queue_len(), 1);
-        let entry = s.dequeue_prompt().unwrap();
-        assert_eq!(entry.text, "check status");
-        assert_eq!(entry.kind, QueueEntryKind::Cron);
-        assert_eq!(entry.task_id.as_deref(), Some("task-1"));
-        assert_eq!(entry.human_schedule.as_deref(), Some("every 5 minutes"));
     }
     #[test]
     fn enqueue_bash_command_stores_bash_kind() {
@@ -1290,7 +1250,6 @@ mod tests {
         assert!(p.wire_blocks.is_none());
         assert!(p.images.is_empty());
         assert!(!p.display_as_skill);
-        assert!(p.task_id.is_none());
     }
     #[test]
     fn enqueue_in_flight_prompt_front_preserves_images_and_chips() {
@@ -1436,19 +1395,6 @@ mod tests {
         let remaining = s.dequeue_prompt().unwrap();
         assert_eq!(remaining.kind, QueueEntryKind::Command);
         assert_eq!(remaining.text, "/compact");
-    }
-    #[test]
-    fn dequeue_combined_prompt_stops_at_cron() {
-        let mut s = test_session();
-        s.enqueue_prompt("first".into());
-        s.enqueue_prompt("second".into());
-        s.enqueue_cron_prompt("check status".into(), "task-1".into(), "every 5m".into());
-        let merged = s.dequeue_combined_prompt(None).unwrap();
-        assert_eq!(merged.text, "first\n\nsecond");
-        assert_eq!(s.queue_len(), 1, "the cron entry must stay queued");
-        let remaining = s.dequeue_prompt().unwrap();
-        assert_eq!(remaining.kind, QueueEntryKind::Cron);
-        assert_eq!(remaining.text, "check status");
     }
     #[test]
     fn dequeue_combined_prompt_single_leading_prompt_returns_unchanged() {

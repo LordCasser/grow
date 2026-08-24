@@ -117,6 +117,17 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
+    /// Idempotently append one durable inbox receipt. Re-delivery of the same
+    /// source identity returns its original fact; a conflicting payload fails
+    /// closed instead of changing what the model will observe.
+    ReceiveNotificationDurably {
+        owner_session_id: String,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        payload_ref: crate::NotificationPayloadRef,
+        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
+    },
+
     /// Re-run deterministic local recovery after external entities have been
     /// reconciled, then durably append every newly admissible terminal fact.
     RecoverInterruptedDurably {
@@ -306,6 +317,10 @@ pub enum ChatStateCommand {
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
+    },
+
+    GetPendingNotifications {
+        reply: oneshot::Sender<Vec<crate::PendingNotification>>,
     },
 
     /// Atomically freeze a Timeline range and materialize its current Surface.

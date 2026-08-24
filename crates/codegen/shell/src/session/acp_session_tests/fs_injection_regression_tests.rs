@@ -46,9 +46,7 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        resources_persistence: std::sync::Arc::new(
-            tools::persistence::ResourcesPersistence::noop(),
-        ),
+        resources_persistence: std::sync::Arc::new(tools::persistence::ResourcesPersistence::noop()),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,

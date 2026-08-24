@@ -148,7 +148,11 @@ impl tool_runtime::Tool for KillTaskTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
+            // The injected terminal/backend handles are session-bound, and
+            // both backends re-check ownership before cancellation. This is
+            // the inverse lifecycle operation of spawning background work,
+            // not ambient command execution authority.
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }

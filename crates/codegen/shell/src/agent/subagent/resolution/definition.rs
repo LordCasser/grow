@@ -5,9 +5,7 @@ use agent::plugins::PluginRegistry;
 use std::collections::HashMap;
 use std::path::Path;
 use tool_types::SubagentIsolationMode;
-use tools::implementations::grow_build::task::types::{
-    SubagentRuntimeOverrides, prune_orphaned_background_task_tools,
-};
+use tools::implementations::grow_build::task::types::SubagentRuntimeOverrides;
 use tools::registry::types::ToolConfig;
 use tools::types::tool::ToolKind;
 /// Inputs that affect definition discovery and global enablement.
@@ -158,22 +156,33 @@ pub fn resolve_agent_definition(
     Ok(definition)
 }
 
-/// Apply capability filtering and recursion depth to the exact production
-/// definition toolset.
+fn authored_eligibility(
+    definition: &mut AgentDefinition,
+) -> &mut tools::registry::types::ToolServerConfig {
+    if definition.authored_capability_tools.is_none() {
+        definition.authored_capability_tools = Some(definition.tool_config.clone());
+    }
+    definition
+        .authored_capability_tools
+        .as_mut()
+        .expect("initialized above")
+}
+
+/// Apply recursion depth to the immutable authored eligibility snapshot while
+/// keeping the live schema stable. The dispatcher, not visibility filtering,
+/// enforces the resulting forbidden status.
 pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_subagents: bool) {
     if !allow_nested_subagents {
-        definition
-            .tool_config
+        authored_eligibility(definition)
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Task));
-        prune_orphaned_background_task_tools(&mut definition.tool_config);
     }
 }
 
 /// A delegated child may read its immutable Goal snapshot, but only the
 /// owning primary Session may mutate Goal lifecycle state.
 pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
-    definition.tool_config.tools.retain(|tool| {
+    authored_eligibility(definition).tools.retain(|tool| {
         tool.kind
             .is_some_and(|kind| kind != ToolKind::GoalLifecycleUpdate)
     });
@@ -218,7 +227,7 @@ mod tests {
         }
     }
     #[test]
-    fn builtin_explore_keeps_execute_latent_but_respects_depth() {
+    fn builtin_explore_keeps_execute_latent() {
         let cwd = tempfile::tempdir().unwrap();
         let toggles = HashMap::new();
         let mut definition =
@@ -238,6 +247,37 @@ mod tests {
             Some(ToolKind::Edit | ToolKind::Write | ToolKind::Delete | ToolKind::Move)
         )));
         assert!(!kinds.contains(&Some(ToolKind::Task)));
+    }
+    #[test]
+    fn max_depth_keeps_task_visible_but_removes_authored_eligibility() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let mut definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task))
+        );
+        apply_child_tool_policy(&mut definition, false);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task))
+        );
+        assert!(
+            !definition
+                .authored_capability_tools
+                .as_ref()
+                .unwrap()
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task))
+        );
     }
     #[test]
     fn gates_disabled_definitions() {
@@ -284,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_object_policy_keeps_read_and_rejects_every_mutation() {
+    fn goal_object_policy_keeps_lifecycle_visible_but_forbidden() {
         let cwd = tempfile::tempdir().unwrap();
         let toggles = HashMap::new();
         let mut definition =
@@ -297,7 +337,17 @@ mod tests {
             .map(|tool| tool.kind)
             .collect();
         assert!(kinds.contains(&Some(ToolKind::GoalRead)));
-        assert!(!kinds.contains(&Some(ToolKind::GoalLifecycleUpdate)));
+        assert!(kinds.contains(&Some(ToolKind::GoalLifecycleUpdate)));
+        let eligible_kinds: Vec<_> = definition
+            .authored_capability_tools
+            .as_ref()
+            .unwrap()
+            .tools
+            .iter()
+            .filter_map(|tool| tool.kind)
+            .collect();
+        assert!(eligible_kinds.contains(&ToolKind::GoalRead));
+        assert!(!eligible_kinds.contains(&ToolKind::GoalLifecycleUpdate));
 
         definition
             .tool_config
@@ -309,8 +359,7 @@ mod tests {
                 .tool_config
                 .tools
                 .iter()
-                .all(|tool| tool.kind.is_some())
+                .any(|tool| tool.id == "custom:opaque")
         );
     }
-
 }

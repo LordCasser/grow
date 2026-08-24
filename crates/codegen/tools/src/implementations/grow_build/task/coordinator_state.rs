@@ -134,24 +134,12 @@ pub trait ChildRunner: 'static {
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
     pub foreground_budget: std::time::Duration,
-    /// Whether the host drains completion summaries between turns.
-    pub buffer_completions: bool,
-    /// Extra cap applied to BUFFERED summary outputs only (the request's own
-    /// `completion_output_cap` still applies first). Buffered entries pin the
-    /// child's output `Arc` until drained; hosts whose reminder rendering
-    /// never inlines the output (a polling tool exists, e.g. the callback
-    /// tools-server) should bound it. `None` keeps outputs verbatim — the
-    /// shell needs this for toolsets with no polling tool, where the inline
-    /// reminder is the model's only chance to see the output.
-    pub buffered_completion_output_cap: Option<usize>,
 }
 
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             foreground_budget: std::time::Duration::from_secs(45),
-            buffer_completions: false,
-            buffered_completion_output_cap: None,
         }
     }
 }
@@ -261,11 +249,6 @@ pub(super) struct CompletedChild {
 pub(super) struct BlockingWaiter {
     pub(super) deadline: tokio::time::Instant,
     pub(super) respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
-}
-
-pub(super) struct BufferedCompletion {
-    pub(super) parent_session_id: String,
-    pub(super) summary: SubagentCompletionSummary,
 }
 
 pub(super) struct TaggedFuture<F> {
@@ -690,8 +673,8 @@ pub fn cap_completion_output(output: &Arc<str>, cap: usize) -> Arc<str> {
 }
 
 /// Model-facing summary for a finished child, honoring the request's
-/// `completion_output_cap`. Shared by the coordinator's buffered reminder
-/// path and the shell's auto-wake synthetic prompt.
+/// `completion_output_cap`. The shell renders this into the payload referenced
+/// by the durable completion notification.
 pub fn completion_summary(
     request: &SubagentRequest,
     result: &SubagentResult,

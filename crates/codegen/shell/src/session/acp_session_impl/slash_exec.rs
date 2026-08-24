@@ -42,7 +42,7 @@ impl SessionActor {
             verbatim: true,
             json_schema: None,
             origin: crate::session::PromptOrigin::HostCommand,
-            task_wake_fallback: None,
+            notification_ids: Vec::new(),
             respond_to,
             persist_ack: None,
             queue_meta: None,
@@ -179,9 +179,7 @@ impl SessionActor {
             return format!("Goal budget was not changed: {error}");
         }
         if was_budget_limited {
-            format!(
-                "User set current Goal budget to {budget} tokens. Restart it to continue."
-            )
+            format!("User set current Goal budget to {budget} tokens. Restart it to continue.")
         } else {
             format!("User set current goal budget to {budget} tokens.")
         }
@@ -1183,7 +1181,6 @@ impl SessionActor {
                     return ok_end_turn(0, None);
                 }
                 self.goal_tracker.lock().clear();
-                self.goal_turn_task_ids.lock().clear();
                 self.subagent_token_records.lock().clear();
                 self.behavior
                     .lock()
@@ -1212,11 +1209,7 @@ mod out_of_band_goal_control_tests {
     use super::*;
     use crate::session::goal_tracker::GoalStatus;
 
-    fn goal(
-        id: &str,
-        revision: u64,
-        status: GoalStatus,
-    ) -> Option<(String, String, GoalStatus)> {
+    fn goal(id: &str, revision: u64, status: GoalStatus) -> Option<(String, String, GoalStatus)> {
         Some((id.to_string(), revision.to_string(), status))
     }
 

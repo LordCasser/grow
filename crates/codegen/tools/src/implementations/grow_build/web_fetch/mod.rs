@@ -148,7 +148,7 @@ impl tool_runtime::Tool for WebFetchTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::ReadWrite,
             ..Default::default()
         }
     }

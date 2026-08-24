@@ -200,7 +200,7 @@ fn lock_path_for_args_matches_grow_build_file_path() {
 
 #[test]
 fn lock_path_for_args_matches_path_arg() {
-    // StrReplace / Write / Read / Delete all serialize under `path`.
+    // Tools whose canonical schema uses `path` share the same file bucket.
     let args = serde_json::json!({
         "path": "/repo/src/main.rs",
         "old_string": "foo",
@@ -243,12 +243,9 @@ fn lock_path_for_args_ignores_non_string_path_values() {
 }
 
 #[test]
-fn lock_path_for_args_buckets_parallel_compat_strreplace_to_same_lock() {
-    // The exact symptom of the bug: two compat StrReplace calls in one
-    // batch targeting the same file. Before the fix, both returned None
-    // here and ran fully concurrently, racing on the underlying file.
-    // After the fix, both must hash to the same bucket so the dispatcher
-    // serializes them via a per-file Mutex.
+fn lock_path_for_args_buckets_parallel_path_calls_to_same_lock() {
+    // Two calls in one batch targeting the same file through `path` must hash
+    // to one bucket so the dispatcher serializes them via a per-file Mutex.
     let call_a = serde_json::json!({
         "path": "/repo/src/main.rs",
         "old_string": "foo",
@@ -274,24 +271,24 @@ fn lock_path_for_args_buckets_parallel_compat_strreplace_to_same_lock() {
 }
 
 #[test]
-fn lock_path_for_args_buckets_grow_build_and_compat_to_same_lock_for_same_file() {
-    // A mixed batch (e.g. grow_build search_replace + StrReplace
-    // in the same turn — possible if the harness ever exposes both, or
-    // during toolset migration) must still serialize on the shared file
-    // path. file_path takes precedence over path when both are present,
-    // but neither tool emits both keys today, so this asserts the
-    // cross-toolset key normalization works in practice.
-    let grow = serde_json::json!({
+fn lock_path_for_args_normalizes_canonical_file_argument_names() {
+    // Current tool schemas use either `file_path` or `path`. Both spellings
+    // identify the same filesystem authority and therefore the same lock.
+    // `file_path` takes precedence if a malformed call contains both.
+    let file_path_call = serde_json::json!({
         "file_path": "/repo/src/main.rs",
         "old_string": "a",
         "new_string": "b",
     });
-    let compat = serde_json::json!({
+    let path_call = serde_json::json!({
         "path": "/repo/src/main.rs",
         "old_string": "c",
         "new_string": "d",
     });
-    assert_eq!(lock_path_for_args(&grow), lock_path_for_args(&compat));
+    assert_eq!(
+        lock_path_for_args(&file_path_call),
+        lock_path_for_args(&path_call)
+    );
 }
 
 /// Regression: skill-discovery reminders must land after all tool results, not mid-batch.

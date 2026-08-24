@@ -1,12 +1,12 @@
 use super::support::create_test_actor;
 use super::{
-    date_rollover_reminder, laziness_injection_active, resolve_reminder_policy, todo_gate_active,
+    DEFAULT_TODO_GATE_MAX_FIRES, TodoGateConfig, date_rollover_reminder, laziness_injection_active,
+    resolve_todo_gate_config, todo_gate_active,
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::util::config::RemoteSettings;
 use agent::AgentDefinition;
 use agent::prompt::context::PromptAudience;
-use agent::system_reminder::{DEFAULT_TODO_GATE_MAX_FIRES, ReminderPolicy, TodoGateConfig};
 /// Helper: a `RemoteSettings` whose only non-default fields are the
 /// TodoGate knobs we want to vary. Mirrors `Default::default()` for
 /// everything else so the test stays robust to unrelated additions.
@@ -19,23 +19,21 @@ fn remote_with_todo_gate(enabled: Option<bool>, cap: Option<u32>) -> RemoteSetti
 }
 #[test]
 fn remote_none_preserves_built_in_defaults() {
-    let policy = resolve_reminder_policy(None, false);
+    let config = resolve_todo_gate_config(None, false);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: false,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
         },
     );
-    assert!(policy.enabled);
-    assert!(policy.todo_nudge.enabled);
 }
 #[test]
 fn remote_disable_matches_default_path() {
     let remote = remote_with_todo_gate(Some(false), None);
-    let policy = resolve_reminder_policy(Some(&remote), false);
+    let config = resolve_todo_gate_config(Some(&remote), false);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: false,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
@@ -45,9 +43,9 @@ fn remote_disable_matches_default_path() {
 #[test]
 fn remote_enable_true_overrides_default() {
     let remote = remote_with_todo_gate(Some(true), None);
-    let policy = resolve_reminder_policy(Some(&remote), false);
+    let config = resolve_todo_gate_config(Some(&remote), false);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
@@ -57,9 +55,9 @@ fn remote_enable_true_overrides_default() {
 #[test]
 fn remote_cap_override_applies_without_enabling_gate() {
     let remote = remote_with_todo_gate(None, Some(5));
-    let policy = resolve_reminder_policy(Some(&remote), false);
+    let config = resolve_todo_gate_config(Some(&remote), false);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: false,
             max_fires_per_prompt: 5,
@@ -69,9 +67,9 @@ fn remote_cap_override_applies_without_enabling_gate() {
 #[test]
 fn cli_todo_gate_overrides_remote_enable_false() {
     let remote = remote_with_todo_gate(Some(false), Some(7));
-    let policy = resolve_reminder_policy(Some(&remote), true);
+    let config = resolve_todo_gate_config(Some(&remote), true);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: true,
             // Cap stays whatever remote said; CLI only flips `enabled`.
@@ -80,14 +78,13 @@ fn cli_todo_gate_overrides_remote_enable_false() {
     );
 }
 #[test]
-fn remote_settings_deserializes_without_todo_gate_fields() {
-    let legacy_json = "{}";
-    let settings: RemoteSettings = serde_json::from_str(legacy_json).unwrap();
+fn remote_settings_without_todo_gate_fields_use_defaults() {
+    let settings: RemoteSettings = serde_json::from_str("{}").unwrap();
     assert_eq!(settings.todo_gate_enabled, None);
     assert_eq!(settings.todo_gate_max_fires_per_prompt, None);
-    let policy = resolve_reminder_policy(Some(&settings), false);
+    let config = resolve_todo_gate_config(Some(&settings), false);
     assert_eq!(
-        policy.todo_gate,
+        config,
         TodoGateConfig {
             enabled: false,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
@@ -114,16 +111,17 @@ fn remote_settings_preserves_false_and_zero_todo_gate_fields() {
     assert_eq!(settings.todo_gate_enabled, Some(false));
     assert_eq!(settings.todo_gate_max_fires_per_prompt, Some(0));
 }
-fn policy_with_gate(enabled: bool) -> ReminderPolicy {
-    let mut p = ReminderPolicy::default();
-    p.todo_gate.enabled = enabled;
-    p
+fn todo_gate_config(enabled: bool) -> TodoGateConfig {
+    TodoGateConfig {
+        enabled,
+        ..TodoGateConfig::default()
+    }
 }
 use crate::session::goal_tracker::GoalStatus;
 #[test]
 fn laziness_injection_active_predicate_matrix() {
     let def = AgentDefinition::default_grow_build();
-    let policy_on = policy_with_gate(true);
+    let config_on = todo_gate_config(true);
     for (goal_runtime_available, goal_status, expect) in [
         (false, None, false),
         (false, Some(GoalStatus::Active), false),
@@ -139,7 +137,7 @@ fn laziness_injection_active_predicate_matrix() {
         );
         assert!(
             !todo_gate_active(
-                &policy_on,
+                config_on,
                 PromptAudience::Primary,
                 &def,
                 goal_runtime_available,
@@ -152,47 +150,47 @@ fn laziness_injection_active_predicate_matrix() {
 #[test]
 fn todo_gate_active_predicate_matrix() {
     let def = AgentDefinition::default_grow_build();
-    let policy_off = policy_with_gate(false);
-    let policy_on = policy_with_gate(true);
-    for (policy, audience, goal_runtime_available, goal_status, expect) in [
-        (&policy_off, PromptAudience::Primary, true, None, false),
-        (&policy_off, PromptAudience::Subagent, true, None, false),
+    let config_off = todo_gate_config(false);
+    let config_on = todo_gate_config(true);
+    for (config, audience, goal_runtime_available, goal_status, expect) in [
+        (config_off, PromptAudience::Primary, true, None, false),
+        (config_off, PromptAudience::Subagent, true, None, false),
         (
-            &policy_off,
+            config_off,
             PromptAudience::Primary,
             true,
             Some(GoalStatus::Active),
             false,
         ),
         (
-            &policy_on,
+            config_on,
             PromptAudience::Primary,
             true,
             Some(GoalStatus::Active),
             false,
         ),
         (
-            &policy_on,
+            config_on,
             PromptAudience::Subagent,
             true,
             Some(GoalStatus::Active),
             false,
         ),
-        (&policy_on, PromptAudience::Primary, false, None, false),
+        (config_on, PromptAudience::Primary, false, None, false),
         (
-            &policy_on,
+            config_on,
             PromptAudience::Primary,
             false,
             Some(GoalStatus::Active),
             false,
         ),
-        (&policy_on, PromptAudience::Primary, true, None, false),
+        (config_on, PromptAudience::Primary, true, None, false),
     ] {
         assert_eq!(
-            todo_gate_active(policy, audience, &def, goal_runtime_available, goal_status),
+            todo_gate_active(config, audience, &def, goal_runtime_available, goal_status),
             expect,
             "gate.enabled={} audience={audience:?} goal_runtime_available={goal_runtime_available} status={goal_status:?}",
-            policy.todo_gate.enabled
+            config.enabled
         );
     }
     for status in [
@@ -202,20 +200,14 @@ fn todo_gate_active_predicate_matrix() {
         GoalStatus::BudgetLimited,
     ] {
         assert!(
-            !todo_gate_active(
-                &policy_on,
-                PromptAudience::Primary,
-                &def,
-                true,
-                Some(status)
-            ),
+            !todo_gate_active(config_on, PromptAudience::Primary, &def, true, Some(status)),
             "non-active status {status:?} must not enable gate"
         );
     }
     let def = AgentDefinition::default_grow_build();
     for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
         assert!(
-            !todo_gate_active(&policy_on, audience, &def, true, None),
+            !todo_gate_active(config_on, audience, &def, true, None),
             "built-in template without active goal must not enable gate"
         );
     }

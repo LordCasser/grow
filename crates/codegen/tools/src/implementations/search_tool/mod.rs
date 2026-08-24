@@ -239,7 +239,7 @@ impl tool_runtime::Tool for SearchTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }
@@ -252,15 +252,7 @@ impl tool_runtime::Tool for SearchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (tool_index, grant_backend) = {
-            let guard = resources.lock().await;
-            (
-                guard.get::<ToolIndex>().cloned(),
-                guard
-                    .get::<crate::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource>()
-                    .cloned(),
-            )
-        };
+        let tool_index = resources.lock().await.get::<ToolIndex>().cloned();
         let Some(tool_index) = tool_index else {
             return Ok(ToolOutput::Text(
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -295,12 +287,6 @@ impl tool_runtime::Tool for SearchTool {
         // tool per server is the highest-scoring — used as the group score.
         let mut groups: Vec<(String, f32, Vec<serde_json::Value>)> = Vec::new();
         for r in &snapshot.results {
-            if grant_backend.as_ref().is_some_and(|backend| {
-                !backend.0.is_mcp_server_eligible(&r.server_name)
-                    || !backend.0.is_mcp_tool_eligible(&r.tool_name)
-            }) {
-                continue;
-            }
             let tool_json = serde_json::json!({
                 "tool_name": r.tool_name,
                 "description": truncate_description(&r.description),
@@ -321,16 +307,9 @@ impl tool_runtime::Tool for SearchTool {
         let result_groups: Vec<serde_json::Value> = groups
             .into_iter()
             .map(|(server, _, tools)| {
-                let access = grant_backend.as_ref().map(|backend| {
-                    if backend.0.is_mcp_server_granted(&server) {
-                        "granted"
-                    } else {
-                        "requires_grant"
-                    }
-                });
                 serde_json::json!({
                     "server": server,
-                    "access": access,
+                    "access": "call_bound",
                     "tools": tools,
                 })
             })
@@ -392,28 +371,6 @@ mod tests {
         }
     }
 
-    struct StaticGrantBackend;
-
-    #[async_trait::async_trait]
-    impl crate::implementations::grow_build::request_tool_access::ToolAccessGrantBackend
-        for StaticGrantBackend
-    {
-        async fn request(
-            &self,
-            _input: crate::implementations::grow_build::request_tool_access::RequestToolAccessInput,
-            _tool_call_id: &str,
-        ) -> Result<
-            crate::implementations::grow_build::request_tool_access::RequestToolAccessOutput,
-            tool_runtime::ToolError,
-        > {
-            unreachable!("search_tool only reads grant state")
-        }
-
-        fn is_mcp_server_granted(&self, server: &str) -> bool {
-            server == "Grafana"
-        }
-    }
-
     #[tokio::test]
     async fn search_tool_groups_gateway_result_by_connector_name() {
         let resources = crate::types::resources::Resources::default().into_shared();
@@ -449,11 +406,6 @@ mod tests {
                     is_ready: true,
                 },
             })));
-        resources.lock().await.insert(
-            crate::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource(
-                std::sync::Arc::new(StaticGrantBackend),
-            ),
-        );
         let mut ctx = tool_runtime::ToolCallContext::new(tool_protocol::ToolCallId::new_v7());
         ctx.extensions.insert(resources);
 
@@ -472,9 +424,9 @@ mod tests {
         };
         let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(json["results"][0]["server"], "Grafana");
-        assert_eq!(json["results"][0]["access"], "granted");
+        assert_eq!(json["results"][0]["access"], "call_bound");
         assert_eq!(json["results"][1]["server"], "Slack");
-        assert_eq!(json["results"][1]["access"], "requires_grant");
+        assert_eq!(json["results"][1]["access"], "call_bound");
         assert_eq!(
             json["results"][0]["tools"][0]["tool_name"],
             "grafana__search_dashboards"

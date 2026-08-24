@@ -1,5 +1,4 @@
 //! Workspace and session configuration types.
-use crate::capability::CapabilityMode;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,7 +81,7 @@ pub trait SessionContextFactory: Send + Sync {
         backend: Arc<dyn tools::computer::types::TerminalBackend>,
     ) -> SessionContext;
     /// Build the session-lifetime terminal backend for a new session.
-    /// Called once per session create/fork; toolset re-resolves reuse the
+    /// Called once per session creation; toolset re-resolves reuse the
     /// session's stored backend instead of building another.
     fn build_terminal_backend(&self) -> SessionTerminalBackend;
     /// Build a fresh [`ToolRegistryBuilder`] with the workspace's
@@ -134,66 +133,6 @@ pub struct WorkspaceConfig {
     /// folder-trust decision pass `true`.
     pub project_lsp_trusted: bool,
 }
-/// Configuration for spawning a subagent session within a workspace.
-#[derive(Clone)]
-#[non_exhaustive]
-pub struct AgentSessionConfig {
-    /// Unique agent session id. Must be non-empty.
-    pub agent_id: String,
-    /// Filesystem isolation strategy.
-    pub isolation: IsolationMode,
-    /// Capability mode applied to this session's toolset.
-    pub capability_mode: CapabilityMode,
-    /// Per-fork tool override. `None` inherits from parent.
-    pub tool_config: Option<ToolServerConfig>,
-    /// Maximum recursion depth for subagent nesting.
-    pub max_depth: u32,
-    /// Working directory override. `None` inherits the parent's `cwd`.
-    pub cwd_override: Option<PathBuf>,
-    /// Extra env vars to layer on top of the parent's `session_env`.
-    pub extra_env: HashMap<String, String>,
-    /// Parent session to inherit from. Required.
-    pub parent_session_id: Option<String>,
-}
-impl AgentSessionConfig {
-    /// Construct a config with the supplied `agent_id` and otherwise
-    /// minimal/permissive defaults.
-    pub fn new(agent_id: impl Into<String>) -> Self {
-        Self {
-            agent_id: agent_id.into(),
-            isolation: IsolationMode::None,
-            capability_mode: CapabilityMode::ReadWrite,
-            tool_config: None,
-            max_depth: u32::MAX,
-            cwd_override: None,
-            extra_env: HashMap::new(),
-            parent_session_id: None,
-        }
-    }
-}
-/// WARNING: `tool_config` is intentionally redacted from `Debug` output
-/// because `ToolServerConfig.tools[*].params` may contain credentials.
-impl std::fmt::Debug for AgentSessionConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentSessionConfig")
-            .field("agent_id", &self.agent_id)
-            .field("isolation", &self.isolation)
-            .field("capability_mode", &self.capability_mode)
-            .field(
-                "tool_config",
-                if self.tool_config.is_some() {
-                    &"Some(<redacted>)"
-                } else {
-                    &"None"
-                },
-            )
-            .field("max_depth", &self.max_depth)
-            .field("cwd_override", &self.cwd_override)
-            .field("extra_env", &self.extra_env)
-            .field("parent_session_id", &self.parent_session_id)
-            .finish()
-    }
-}
 /// A single hook source: either one canonical JSON hook file or a directory of
 /// such files. Maps 1:1 to [`hooks::discovery::HookSource`]
 /// but uses owned `PathBuf` so the config struct is `'static`.
@@ -203,15 +142,4 @@ pub enum HookSourceConfig {
     HookFile(PathBuf),
     /// A directory of `*.json` hook files (e.g. `~/.grow/hooks/`).
     Directory(PathBuf),
-}
-/// Filesystem isolation strategy for a forked session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IsolationMode {
-    /// No isolation: subagent shares the parent's working tree.
-    #[default]
-    None,
-    /// Run the subagent in a copy-on-write git worktree.
-    Worktree,
-    /// Run the subagent inside a sandbox/container.
-    Sandbox,
 }

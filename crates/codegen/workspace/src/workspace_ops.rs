@@ -6,9 +6,7 @@ use crate::worktree::{ApplyWorktreeRequest, CreateWorktreeRequest, RemoveWorktre
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::sync::Arc;
-use tools::types::output::ToolRunResult;
 pub use workspace_types::rpc::WorkspaceRpc;
 pub use workspace_types::rpc::agents_md::DiscoverAgentsMdReq;
 pub use workspace_types::rpc::code_nav::{
@@ -1226,7 +1224,6 @@ impl WorkspaceOps {
                 cwd,
                 hunk_tracker,
                 None,
-                crate::capability::CapabilityMode::All,
                 viewer_ctx,
                 false,
             )?;
@@ -1294,38 +1291,10 @@ impl WorkspaceOps {
     pub async fn get_files(&self, req: GetFilesReq) -> WorkspaceResult<GetFilesRes> {
         self.dispatch(&req, None).await
     }
-
-    pub async fn call_tool(
-        &self,
-        name: &str,
-        args: Value,
-        call_id: &str,
-        session_id: Option<&str>,
-    ) -> Result<ToolRunResult, tool_runtime::ToolError> {
-        let session_id = session_id.ok_or_else(|| {
-            tool_runtime::ToolError::custom(
-                "missing_session",
-                "session_id required for local tool dispatch",
-            )
-        })?;
-        let session = self.handle.session(session_id).ok_or_else(|| {
-            tool_runtime::ToolError::custom(
-                "session_not_found",
-                format!(
-                    "workspace session not found: {session_id} — call bind_local_session() first"
-                ),
-            )
-        })?;
-        session.toolset().call(name, args, call_id, None).await
-    }
 }
 #[cfg(any(test, feature = "test-support"))]
 impl WorkspaceOps {
     /// Test variant backed by a temp dir.
-    ///
-    /// Supports extension dispatch (`dispatch()`). Tool calls via
-    /// `call_tool()` require a workspace session — call
-    /// `bind_local_session()` with a test toolset first.
     pub fn for_test() -> Self {
         Self::local(WorkspaceHandle::for_test())
     }
@@ -1385,7 +1354,7 @@ mod tests {
         assert_eq!(git_op_cwd(handle, &None).unwrap(), workspace_root);
     }
     /// Regression: a long-lived (leader) workspace must reclaim the per-session
-    /// `FinalizedToolset` — and the MCP tools / `McpState` it transitively pins
+    /// `FinalizedToolset` — and every tool resource it transitively pins
     /// — when a session ends.
     /// `bind_local_session` installs the toolset on a leader-level workspace
     /// session; without `end_local_session` that session (and everything it

@@ -303,9 +303,7 @@ impl SessionActor {
         {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
-                return format!(
-                    "Workflow '{name}' failed preflight and was not started: {error}"
-                );
+                return format!("Workflow '{name}' failed preflight and was not started: {error}");
             }
             Err(error) => {
                 return format!(

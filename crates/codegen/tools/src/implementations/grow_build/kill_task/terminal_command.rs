@@ -53,7 +53,10 @@ impl tool_runtime::Tool for KillTerminalCommandTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
+            // Cancels only a task reachable through this session's injected
+            // terminal backend; it cannot start a command or name a resource
+            // outside that backend.
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }

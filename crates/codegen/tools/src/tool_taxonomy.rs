@@ -9,7 +9,7 @@
 use crate::types::tool::{ToolKind, ToolNamespace};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use tool_protocol::ToolScope;
+use tool_protocol::ToolAccess;
 /// Canonical input field names — the one vocabulary every harness normalizes
 /// onto. Emit canonical keys through these so the wire contract has one source.
 pub mod field {
@@ -28,7 +28,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 4;
+pub const TOOL_META_VERSION: u32 = 5;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -65,46 +65,7 @@ impl ToolKind {
             ToolKind::GoalRead => "Read Goal",
             ToolKind::GoalLifecycleUpdate => "Update Goal Lifecycle",
             ToolKind::Workflow => "Workflow",
-            ToolKind::CapabilityRequest => "Request Tool Access",
             ToolKind::Other => "Tool",
-        }
-    }
-    /// Whether this kind only reads (no workspace or external mutation) by
-    /// default. The kind-level default for `ToolMetadata::tool_scope`, which
-    /// individual tools may override. Exhaustive (no `_`) so a new kind must
-    /// classify itself rather than silently defaulting to "mutating".
-    pub fn default_scope(self) -> ToolScope {
-        match self {
-            ToolKind::Read
-            | ToolKind::Search
-            | ToolKind::Lsp
-            | ToolKind::ListDir
-            | ToolKind::List
-            | ToolKind::MemorySearch
-            | ToolKind::MemoryGet
-            | ToolKind::ContextRecall
-            | ToolKind::GoalRead
-            | ToolKind::WebFetch
-            | ToolKind::PlanControl
-            | ToolKind::CapabilityRequest
-            | ToolKind::AskUser => ToolScope::Read,
-            ToolKind::Edit
-            | ToolKind::Delete
-            | ToolKind::Write
-            | ToolKind::Move
-            | ToolKind::Execute
-            | ToolKind::Plan
-            | ToolKind::BackgroundTaskAction
-            | ToolKind::KillTaskAction
-            | ToolKind::Skill
-            | ToolKind::Task
-            | ToolKind::DeployApp
-            | ToolKind::SearchTool
-            | ToolKind::UseTool
-            | ToolKind::Monitor
-            | ToolKind::GoalLifecycleUpdate
-            | ToolKind::Workflow
-            | ToolKind::Other => ToolScope::Write,
         }
     }
 }
@@ -117,7 +78,7 @@ pub struct ToolIdentity {
     pub tool_kind: ToolKind,
     pub namespace: ToolNamespace,
     pub presentation_name: &'static str,
-    pub scope: ToolScope,
+    pub max_access: ToolAccess,
 }
 /// The canonical tool-identity envelope, attached to a tool-call event `_meta`
 /// as one nested object under [`TOOL_META_KEY`].
@@ -129,7 +90,7 @@ pub struct ToolIdentity {
 ///   "kind": "read",
 ///   "namespace": "grow",
 ///   "label": "Read",
-///   "scope": "read",
+///   "max_access": "read",
 ///   "input": { "path": "..." }
 /// }
 /// ```
@@ -165,7 +126,7 @@ pub struct CanonicalToolMeta {
     pub kind: ToolKind,
     pub namespace: ToolNamespace,
     pub label: Cow<'static, str>,
-    pub scope: ToolScope,
+    pub max_access: ToolAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
 }
@@ -183,7 +144,7 @@ impl CanonicalToolMeta {
             kind: identity.tool_kind,
             namespace: identity.namespace,
             label: Cow::Borrowed(identity.presentation_name),
-            scope: identity.scope,
+            max_access: identity.max_access,
             input,
         }
     }
@@ -213,22 +174,13 @@ pub fn tool_meta_json_schema_str() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn identity(kind: ToolKind) -> ToolIdentity {
+    fn identity(kind: ToolKind, max_access: ToolAccess) -> ToolIdentity {
         ToolIdentity {
             tool_kind: kind,
             namespace: ToolNamespace::Grow,
             presentation_name: kind.presentation_name(),
-            scope: kind.default_scope(),
+            max_access,
         }
-    }
-    #[test]
-    fn default_scope_classifies_kinds() {
-        assert_eq!(ToolKind::Read.default_scope(), ToolScope::Read);
-        assert_eq!(ToolKind::Search.default_scope(), ToolScope::Read);
-        assert_eq!(ToolKind::List.default_scope(), ToolScope::Read);
-        assert_eq!(ToolKind::Edit.default_scope(), ToolScope::Write);
-        assert_eq!(ToolKind::Execute.default_scope(), ToolScope::Write);
-        assert_eq!(ToolKind::Delete.default_scope(), ToolScope::Write);
     }
     #[test]
     fn namespace_round_trips_canonical_wire_values() {
@@ -266,7 +218,7 @@ mod tests {
     fn canonical_meta_wire_shape_round_trips() {
         let meta = CanonicalToolMeta::new(
             "read_file",
-            &identity(ToolKind::Read),
+            &identity(ToolKind::Read, ToolAccess::Read),
             Some(serde_json::json!({ "path": "/a" })),
         );
         let t = serde_json::to_value(&meta).unwrap();
@@ -275,7 +227,7 @@ mod tests {
         assert_eq!(t["kind"], "read");
         assert_eq!(t["namespace"], "grow");
         assert_eq!(t["label"], "Read");
-        assert_eq!(t["scope"], "read");
+        assert_eq!(t["max_access"], "read");
         assert_eq!(t["input"]["path"], "/a");
         assert_eq!(
             serde_json::from_value::<CanonicalToolMeta>(t).unwrap(),
@@ -320,7 +272,11 @@ mod tests {
     }
     #[test]
     fn merge_into_nests_under_one_key_and_preserves_existing() {
-        let meta = CanonicalToolMeta::new("run_terminal_cmd", &identity(ToolKind::Execute), None);
+        let meta = CanonicalToolMeta::new(
+            "run_terminal_cmd",
+            &identity(ToolKind::Execute, ToolAccess::Execute),
+            None,
+        );
         let merged = meta.merge_into(Some(serde_json::json!({"bash_mode": true})));
         let o = merged.as_object().unwrap();
         assert_eq!(o["bash_mode"], true, "existing meta must be preserved");

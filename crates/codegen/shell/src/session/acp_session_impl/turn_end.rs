@@ -241,7 +241,7 @@ impl SessionActor {
                 tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource::default(),
             )
             .await;
-        self.set_goal_loop_active_resource(false).await;
+        self.set_goal_loop_active(false);
         self.flush_pending_system_reminders().await;
 
         let emit_terminal = !matches!(

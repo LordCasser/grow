@@ -135,9 +135,7 @@ fn project_image_shadows(
     runtime: &sampling_types::ModelImageInputKey,
     items: &mut [ConversationItem],
 ) -> usize {
-    use sampling_types::conversation::{
-        conversation_image_groups, replace_item_images_with_text,
-    };
+    use sampling_types::conversation::{conversation_image_groups, replace_item_images_with_text};
 
     let active = timeline.active_image_projections();
     let Some(shadows) = active.get(runtime) else {

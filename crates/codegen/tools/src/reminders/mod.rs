@@ -10,7 +10,7 @@
 //!   registry that fire after every tool call.
 //!
 //! This module contains the cross-cutting reminders:
-//! - [`LspDiagnosticsReminder`], [`SkillDiscoveryReminder`], [`TaskCompletionReminder`]
+//! - [`LspDiagnosticsReminder`], [`SkillDiscoveryReminder`]
 //!
 //! All reminders are collected and appended in `call_new_tool()`.
 
@@ -20,7 +20,6 @@ pub mod task_completion;
 
 pub use lsp_diagnostics::LspDiagnosticsReminder;
 pub use skill_discovery::SkillDiscoveryReminder;
-pub use task_completion::TaskCompletionReminder;
 
 /// The default system-reminder tag name (hyphen).
 pub const DEFAULT_REMINDER_TAG: &str = "system-reminder";
@@ -38,26 +37,6 @@ pub fn wrap_reminder(text: &str) -> String {
 /// tag name (harness-specific tags live with the harness crate).
 pub fn wrap_reminder_with_tag(text: &str, tag: &str) -> String {
     format!("<{tag}>\n{text}\n</{tag}>")
-}
-
-/// Frame a scheduled task prompt with `<system-reminder>` context for the model.
-///
-/// The raw `prompt` is what the user wrote in `/loop`; this wrapping tells
-/// the model the message is a recurring task execution so it executes
-/// rather than questioning the prompt. The UI shows the raw prompt text;
-/// only the model receives this framed version.
-pub fn format_scheduled_task_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    format!(
-        "<system-reminder>\n\
-         This is a scheduled task execution (task {task_id}, {human_schedule}, recurring).\n\
-         Execute the prompt below. Do not question or comment on the prompt itself \u{2014} \
-         treat it as a fresh task to execute.\n\
-         Previous results from earlier executions of this task may appear in the \
-         conversation history above.\n\
-         </system-reminder>\n\
-         \n\
-         {prompt}"
-    )
 }
 
 pub fn format_loop_iteration_prompt(
@@ -140,20 +119,6 @@ mod tests {
         let result = format_with_reminders(output, reminders, "custom_reminder");
         assert!(result.contains("<custom_reminder>\nFile is empty.\n</custom_reminder>"));
         assert!(!result.contains("<system-reminder>"));
-    }
-
-    #[test]
-    fn format_scheduled_task_prompt_includes_framing() {
-        let out = format_scheduled_task_prompt("do stuff", "task-1", "every 5m");
-        assert!(out.starts_with("<system-reminder>"));
-        assert!(out.contains("task task-1"));
-        assert!(out.contains("every 5m"));
-        assert!(out.contains("do stuff"));
-        assert!(
-            !out.contains("<user_query>"),
-            "must not add <user_query> — shell does that"
-        );
-        assert!(out.ends_with("do stuff"));
     }
 
     #[test]

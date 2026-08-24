@@ -6,5 +6,5 @@ mod capabilities;
 mod ids;
 pub mod turn_hook;
 
-pub use capabilities::{HookKind, StreamingSpec, ToolCapabilities, ToolScope};
+pub use capabilities::{HookKind, StreamingSpec, ToolAccess, ToolCapabilities};
 pub use ids::{IdError, ToolCallId, ToolId};

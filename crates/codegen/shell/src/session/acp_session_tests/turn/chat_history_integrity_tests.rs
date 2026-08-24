@@ -198,6 +198,7 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                         actor.handle_prompt(
                             "chat-history-integrity",
                             crate::session::PromptOrigin::User,
+                            Vec::new(),
                             crate::session::TurnKind::User,
                             prompt_blocks,
                             tool_types::BehaviorId::Normal,

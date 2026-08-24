@@ -162,17 +162,7 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
     entry.images = images;
 }
 
-/// Prepend `<system-reminder>` framing to a cron prompt for the model.
-///
-/// Delegates to the shared implementation in `tools::reminders`.
-/// The UI shows the raw `prompt` text via `RenderBlock::cron_prompt`; this
-/// wrapped version is only sent to the model via `Effect::SendPrompt` so
-/// the model knows the message is a scheduled task execution, not a human.
-fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    tools::reminders::format_scheduled_task_prompt(prompt, task_id, human_schedule)
-}
-
-/// Try to send the next queued entry (prompt, command, bash, or cron) if the agent is idle.
+/// Try to send the next queued entry (prompt, command, or bash) if the agent is idle.
 ///
 /// Called after enqueue operations and task completions to advance the queue.
 ///
@@ -324,11 +314,6 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     // Track whether this turn is a bash-mode command for post-turn focus.
     agent.bash_turn = queued.kind == QueueEntryKind::BashCommand;
-    agent.cron_task_id = if queued.kind == QueueEntryKind::Cron {
-        queued.task_id.clone()
-    } else {
-        None
-    };
     // Generate a fresh prompt_id for every outgoing prompt/command. This is
     // threaded through PromptRequest._meta to the agent and echoed on every
     // SessionNotification + the PromptResponse, letting us correlate
@@ -337,11 +322,8 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     // Record it as self-originated so the ACP gate treats this turn's deltas as
     // ours (drive it; drop a stale post-rewind chunk on a mismatch) rather than
-    // adopting them as another client's turn. The `Cron` arm overrides
-    // `prompt_id` with a `scheduler-fired-` prefix and records that id itself.
-    if queued.kind != QueueEntryKind::Cron {
-        agent.note_self_originated_prompt(&prompt_id);
-    }
+    // adopting them as another client's turn.
+    agent.note_self_originated_prompt(&prompt_id);
 
     match queued.kind {
         QueueEntryKind::Prompt => {
@@ -521,49 +503,6 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: None,
             }
         }
-        QueueEntryKind::Cron => {
-            let prompt_id = format!("scheduler-fired-{prompt_id}");
-            agent.note_self_originated_prompt(&prompt_id);
-            agent.start_turn_boundary(Some(&prompt_id));
-            agent.session.current_prompt_id = Some(prompt_id.clone());
-            let prompt_entry_id = agent
-                .scrollback
-                .push_block(RenderBlock::cron_prompt(&queued.text));
-            agent.turn_started_at = Some(Instant::now());
-
-            let prompt_idx = agent.scrollback.len().saturating_sub(1);
-            let flip = page_flip_on_send();
-            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
-
-            let framed_text = format_cron_prompt(
-                &queued.text,
-                queued.task_id.as_deref().unwrap_or("unknown"),
-                queued.human_schedule.as_deref().unwrap_or("unknown"),
-            );
-
-            let mut meta_map = serde_json::Map::new();
-            meta_map.insert(
-                user_prompt_meta::DISPLAY_TEXT.into(),
-                serde_json::Value::String(queued.text),
-            );
-            meta_map.insert(
-                user_prompt_meta::DISPLAY_AS_CRON.into(),
-                serde_json::Value::Bool(true),
-            );
-            let blocks = vec![acp::ContentBlock::Text(
-                acp::TextContent::new(framed_text).meta(Some(meta_map)),
-            )];
-
-            QueueDrain {
-                effects: vec![Effect::SendPromptBlocks {
-                    agent_id,
-                    session_id,
-                    blocks,
-                    prompt_id,
-                }],
-                page_flip_entry: flip.then_some(prompt_entry_id),
-            }
-        }
     }
 }
 
@@ -706,7 +645,6 @@ pub(crate) fn apply_turn_start_shim(
             (None, false)
         }
         "internal" => (None, false),
-        "cron" => (text.as_deref().map(RenderBlock::cron_prompt), false),
         _ if multi_segments.is_some() => (None, true),
         _ => (text.as_deref().map(RenderBlock::user_prompt), true),
     };

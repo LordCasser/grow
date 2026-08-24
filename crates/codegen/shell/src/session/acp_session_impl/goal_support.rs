@@ -241,10 +241,7 @@ impl SessionActor {
             .map(str::to_owned)
             .unwrap_or_else(|| self.agent.borrow().name().to_owned());
         let state = crate::session::control::SessionControlSnapshot::new(
-            revision,
-            agent_name,
-            behavior,
-            goal,
+            revision, agent_name, behavior, goal,
         );
         let kind = match model_context {
             Some((layer, activation, context)) => {
@@ -366,19 +363,15 @@ impl SessionActor {
 
     pub(super) async fn inject_stopped_goal_interaction_directive(&self) {
         if self.behavior.lock().behavior() == tool_types::BehaviorId::Goal
-            && self
-                .goal_tracker
-                .lock()
-                .status()
-                .is_some_and(|status| {
-                    matches!(
-                        status,
-                        crate::session::goal_tracker::GoalStatus::Paused
-                            | crate::session::goal_tracker::GoalStatus::Blocked
-                            | crate::session::goal_tracker::GoalStatus::UsageLimited
-                            | crate::session::goal_tracker::GoalStatus::BudgetLimited
-                    )
-                })
+            && self.goal_tracker.lock().status().is_some_and(|status| {
+                matches!(
+                    status,
+                    crate::session::goal_tracker::GoalStatus::Paused
+                        | crate::session::goal_tracker::GoalStatus::Blocked
+                        | crate::session::goal_tracker::GoalStatus::UsageLimited
+                        | crate::session::goal_tracker::GoalStatus::BudgetLimited
+                )
+            })
         {
             self.chat_state_handle
                 .push_user_message(ConversationItem::system_reminder(
@@ -396,16 +389,9 @@ impl SessionActor {
         self.goal_tracker.lock().tokens_used()
     }
 
-    pub(super) async fn set_goal_loop_active_resource(&self, active: bool) {
+    pub(super) fn set_goal_loop_active(&self, active: bool) {
         self.tool_context
             .goal_loop_active_gate
             .store(active, std::sync::atomic::Ordering::Relaxed);
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(
-                tools::implementations::grow_build::task::types::GoalLoopActive(active),
-            )
-            .await;
     }
 }

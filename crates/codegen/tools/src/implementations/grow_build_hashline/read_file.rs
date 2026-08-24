@@ -157,7 +157,7 @@ impl tool_runtime::Tool for HashlineReadTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::Read,
             ..Default::default()
         }
     }
@@ -371,8 +371,8 @@ mod tests {
         assert_eq!(tool_runtime::Tool::id(&tool).as_str(), "hashline_read");
         assert_eq!(ToolMetadata::kind(&tool), ToolKind::Read);
         assert_eq!(
-            tool_runtime::Tool::capabilities(&tool).tool_scope,
-            tool_protocol::ToolScope::Read
+            tool_runtime::Tool::capabilities(&tool).max_access,
+            tool_protocol::ToolAccess::Read
         );
         assert!(matches!(
             ToolMetadata::tool_namespace(&tool),

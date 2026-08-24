@@ -147,7 +147,7 @@ pub use prompter::{
 };
 pub use shell_access::{
     ProtectedEditPermission, ProtectedEditReason, command_write_paths_in_tree,
-    command_write_paths_with_cwd_in_tree,
+    command_write_paths_with_cwd_in_tree, tree_has_opaque_shell,
 };
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;

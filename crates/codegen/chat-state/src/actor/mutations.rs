@@ -390,12 +390,9 @@ impl ChatStateActor {
     pub(super) fn record_provider_context_anchor(&mut self, provider_total_tokens: u64) {
         let surface_tokens =
             super::state::estimate_conversation_tokens(self.state.timeline.surface());
-        let heuristic_minimum = self
-            .state
-            .projected_request_input_tokens
-            .saturating_add(
-                surface_tokens.saturating_sub(self.state.projected_request_surface_tokens),
-            );
+        let heuristic_minimum = self.state.projected_request_input_tokens.saturating_add(
+            surface_tokens.saturating_sub(self.state.projected_request_surface_tokens),
+        );
         if provider_total_tokens < heuristic_minimum {
             tracing::warn!(
                 provider_total_tokens,
@@ -627,9 +624,7 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.timeline.surface_len(),
         });
-        self.send_event(ChatStateEvent::ContextPressureUpdated {
-            projected_tokens,
-        });
+        self.send_event(ChatStateEvent::ContextPressureUpdated { projected_tokens });
     }
 
     /// Commit target-model ImageShadows as one log-only Timeline fact. Source
@@ -664,5 +659,4 @@ impl ChatStateActor {
         }
         Ok(report)
     }
-
 }

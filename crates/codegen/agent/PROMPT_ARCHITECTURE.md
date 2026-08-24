@@ -42,7 +42,7 @@ write it, and execute verification; the picker and `/doctor` consume the same
 eligibility result. The Agents settings UI only enables or disables definitions
 and does not rewrite this architectural purpose.
 
-`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, Agent denies and subagent policy, session clamps, depth/ownership/plugin/MCP eligibility, and ToolBridge finalization. Requestable native Execute/ReadWrite eligibility requires both an authored matching kind from `toolPreset`/`additionalTools` and a surviving implementation in the finalized bridge; runtime injection cannot silently expand that ceiling. For a subagent, `capabilityMode` no longer deletes eligible tools: it seeds the child-local current grant set. Model tool definitions and call dispatch both filter the finalized bridge through that grant set. `ToolKind`, `ToolMetadata`, registry finalization, and template name resolution retain their existing responsibilities.
+`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, Agent denies and subagent policy, session clamps, depth/ownership/plugin/MCP eligibility, and ToolBridge finalization. Native Execute/ReadWrite hard eligibility requires both an authored exact identity from `toolPreset`/`additionalTools` and a surviving implementation in the finalized bridge; runtime injection cannot silently expand that ceiling. For a subagent, `capabilityMode` establishes immutable initial RWX rather than deleting latent tools or creating mutable session authority. A projected call inside initial RWX follows the ordinary permission path; a hard-eligible call outside it enters Ask/Auto for one exact frozen call. `ToolKind` remains presentation/discovery metadata; the finalized descriptor, projected RWX, exact identity, and call-bound permit own authorization.
 
 The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 
@@ -63,14 +63,16 @@ The effective call rule is:
 registered by Tool Preset / Registry
   ∩ Agent tool and subagent policy
   ∩ session clamp, depth, ownership, plugin trust, and MCP inheritance
-  ∩ subagent current capability grants
   ∩ active Behavior gate
-  ∩ session permission decision
+  ∩ projected call RWX
+  → inside initial RWX: ordinary permission path
+  → outside initial RWX but hard-eligible: Ask/Auto exact-call decision
+  → call-bound permit + dispatch-time identity/argument/transport revalidation
 ```
 
-The first three lines form the subagent's hard eligibility ceiling. A child sees only an eligible capability catalog, but the catalog is not authorization. `request_tool_access` may add exactly one native capability (`execute` or `read-write`) or one eligible MCP server to the current live child. A successful grant affects the next model sample and cannot restore anything removed by the hard ceiling. The dispatch gate repeats the same check so a forged tool call cannot bypass model-definition filtering. The resulting Shell, edit, or MCP invocation then passes through the ordinary permission manager as a second, independent decision.
+The first three lines form the subagent's immutable hard eligibility ceiling. The capability catalog truthfully distinguishes identities whose entire descriptor ceiling is covered, identities whose exact arguments still require call projection, and forbidden identities; it is not an authorization API. A projected locked call goes directly through the ordinary permission manager. Allowing one does not mutate child authority, expose a server for the rest of the session, or change the next sample. The permit binds call id, exact tool/dispatch target, canonical arguments, cwd, projected RWX, actor epoch, and MCP transport generation; dispatch consumes it once and repeats hard-eligibility and transport checks.
 
-The capability catalog is an audience/runtime layer, not role prose. The subagent audience explains the request protocol; a native system reminder lists eligible native groups and current status; MCP reminders list inherited eligible servers and their grant status. `search_tool` searches only the finalized child MCP index and annotates results that still require a server grant. The parent's model-visible MCP allowset is a live, depth-preserving authority: search and dispatch recheck it, while catalog changes reconcile registrations in the existing ToolBridge and continue through system reminders.
+The capability catalog is an audience/runtime layer, not role prose. The subagent audience explains exact-call authority; a native system reminder lists fully covered, call-projected, and forbidden identities; MCP reminders list inherited eligible servers. `search_tool` searches only the finalized child MCP index and labels results `call_bound`. The parent's model-visible MCP allowset is a live, depth-preserving authority: search and dispatch recheck it, while catalog changes reconcile registrations in the existing ToolBridge and continue through system reminders.
 
 Clarify keeps decision authority with the user for material unknowns: the primary Agent asks until the goal is sufficiently specified, then completes it without a mandatory plan or approval step.
 

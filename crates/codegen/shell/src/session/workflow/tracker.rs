@@ -234,8 +234,6 @@ impl WorkflowRunState {
 #[derive(Debug, Default)]
 pub struct WorkflowTracker {
     runs: Vec<TrackedRun>,
-    reported_terminal_run_ids: std::collections::HashSet<String>,
-    terminal_at_restore_run_ids: std::collections::HashSet<String>,
     status_reported_revisions: std::collections::HashMap<String, u64>,
 }
 
@@ -374,8 +372,6 @@ impl WorkflowTracker {
         run.active_since = Some(Instant::now());
         run.state.execution_epoch = run.state.execution_epoch.saturating_add(1);
         let state = run.state.clone();
-        self.reported_terminal_run_ids.remove(run_id);
-        self.terminal_at_restore_run_ids.remove(run_id);
         Some(state)
     }
 
@@ -684,55 +680,10 @@ impl WorkflowTracker {
                 }
             })
             .collect::<Vec<TrackedRun>>();
-        let terminal_at_restore_run_ids = runs
-            .iter()
-            .filter(|r| r.state.status.is_completion_reportable())
-            .map(|r| r.state.run_id.clone())
-            .collect();
         Ok(Self {
             runs,
-            reported_terminal_run_ids: std::collections::HashSet::new(),
-            terminal_at_restore_run_ids,
             status_reported_revisions: std::collections::HashMap::new(),
         })
-    }
-
-    pub(crate) fn is_unreported_completion(&self, run_id: &str, revision: u64) -> bool {
-        self.runs.iter().any(|run| {
-            run.state.run_id == run_id
-                && run.state.revision == revision
-                && !run.state.private
-                && run.state.status.is_completion_reportable()
-                && !self.reported_terminal_run_ids.contains(run_id)
-        })
-    }
-
-    pub fn take_unreported_terminal_runs(
-        &mut self,
-    ) -> (Vec<WorkflowRunState>, Vec<WorkflowRunState>) {
-        let mut restored = Vec::new();
-        let mut fresh = Vec::new();
-        for run in &self.runs {
-            if !run.state.status.is_completion_reportable()
-                || self.reported_terminal_run_ids.contains(&run.state.run_id)
-            {
-                continue;
-            }
-            if run.state.private {
-                self.reported_terminal_run_ids
-                    .insert(run.state.run_id.clone());
-                continue;
-            }
-            if self.terminal_at_restore_run_ids.contains(&run.state.run_id) {
-                restored.push(run.state.clone());
-            } else {
-                fresh.push(run.state.clone());
-            }
-        }
-        for state in restored.iter().chain(fresh.iter()) {
-            self.reported_terminal_run_ids.insert(state.run_id.clone());
-        }
-        (restored, fresh)
     }
 
     pub fn snapshot(&self) -> Vec<WorkflowRunState> {
@@ -954,16 +905,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(!private_tracker.is_unreported_completion(
-            &private_run_id,
-            private_tracker.get(&private_run_id).unwrap().revision,
-        ));
-        let (restored, fresh) = private_tracker.take_unreported_terminal_runs();
-        assert!(restored.is_empty() && fresh.is_empty());
-        assert!(!private_tracker.is_unreported_completion(
-            &private_run_id,
-            private_tracker.get(&private_run_id).unwrap().revision,
-        ));
+        assert!(private_tracker.take_status_report().is_empty());
     }
 
     #[test]
@@ -1240,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_limited_resume_with_raised_cap_reactivates_and_rereports() {
+    fn budget_limited_resume_with_raised_cap_reactivates() {
         let (mut t, id) = tracker_with_run();
         assert_eq!(t.take_status_report().len(), 1);
         t.reserve_agents(&id, 1000).ok();
@@ -1250,9 +1192,6 @@ mod tests {
                 message: "spent".into(),
             },
         );
-        let (_, fresh) = t.take_unreported_terminal_runs();
-        assert_eq!(fresh.len(), 1);
-        assert!(t.take_unreported_terminal_runs().1.is_empty());
         assert!(t.take_status_report().is_empty());
         assert!(t.resume_run(&id, Some(500)).is_none());
         let state = t.resume_run(&id, Some(1024)).unwrap();
@@ -1261,17 +1200,17 @@ mod tests {
         let resumed_status = t.take_status_report();
         assert_eq!(resumed_status.len(), 1);
         assert_eq!(resumed_status[0].revision, state.revision);
-        t.apply_outcome(
+        let completed = t.apply_outcome(
             &id,
             &WorkflowOutcome::Completed {
                 result: serde_json::json!("ok"),
             },
         );
-        assert_eq!(t.take_unreported_terminal_runs().1.len(), 1);
+        assert_eq!(completed.unwrap().status, WorkflowRunStatus::Complete);
     }
 
     #[test]
-    fn restored_budget_limited_run_is_reported_as_pre_resume_not_status() {
+    fn restored_budget_limited_run_stays_out_of_live_status_reports() {
         let (mut t, id) = tracker_with_run();
         t.reserve_agents(&id, 1000).ok();
         t.apply_outcome(
@@ -1282,23 +1221,18 @@ mod tests {
         );
 
         let mut restored = WorkflowTracker::from_snapshot(t.snapshot()).unwrap();
-        let (pre_resume, fresh) = restored.take_unreported_terminal_runs();
-        assert_eq!(pre_resume.len(), 1);
-        assert_eq!(pre_resume[0].run_id, id);
-        assert!(fresh.is_empty());
         assert!(restored.take_status_report().is_empty());
 
         let resumed = restored.resume_run(&id, Some(1_024)).unwrap();
         assert_eq!(resumed.status, WorkflowRunStatus::Active);
-        restored.apply_outcome(
+        let completed = restored.apply_outcome(
             &id,
             &WorkflowOutcome::Completed {
                 result: serde_json::json!("done later"),
             },
         );
-        let (pre_resume, fresh) = restored.take_unreported_terminal_runs();
-        assert!(pre_resume.is_empty());
-        assert_eq!(fresh.len(), 1);
+        assert_eq!(completed.unwrap().status, WorkflowRunStatus::Complete);
+        assert!(restored.take_status_report().is_empty());
     }
 
     #[test]

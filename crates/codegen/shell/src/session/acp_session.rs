@@ -9,8 +9,7 @@
 //! - Session → Client: `session_notification` via a shared gateway handle
 //!
 use super::commands::{
-    PromptCompletionKind, PromptTurnOk, PromptTurnResult, SessionCommand, TaskWakeAdmission,
-    TaskWakeFallback, ok_end_turn,
+    PromptCompletionKind, PromptTurnOk, PromptTurnResult, SessionCommand, ok_end_turn,
 };
 use super::handle::SessionHandle;
 use super::notifications::NotificationSender;
@@ -34,9 +33,7 @@ use crate::session::mcp_servers::mcp_server_name;
 use crate::session::mcp_servers::mcp_target_str;
 use crate::session::mcp_servers::mcp_transport_str;
 use crate::session::mcp_servers::parse_mcp_tool_name;
-use crate::session::persistence::{
-    PersistenceHandle, PersistenceMsg, get_prompt_blob_ref,
-};
+use crate::session::persistence::{PersistenceHandle, PersistenceMsg, get_prompt_blob_ref};
 use crate::session::prompt_parser::parse_prompt_with_skills;
 use crate::session::replay_events::{SessionEvent, SessionNotification};
 use crate::session::result::ExtMethodResult;
@@ -192,9 +189,9 @@ pub(crate) struct InputItem {
     pub(crate) json_schema: Option<serde_json::Value>,
     /// Who originated this prompt — user or auto-wake system.
     pub(crate) origin: super::PromptOrigin,
-    /// Typed deferred completion retained while an admitted task wake is queued.
-    /// Consumed by Ctrl+C if it removes the wake before the turn starts.
-    pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
+    /// Durable notification receipts atomically consumed by this synthetic
+    /// turn's model-visible input. Empty for ordinary prompts.
+    pub(crate) notification_ids: Vec<String>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
     /// Fired after the user message is committed to Timeline and a persistence flush
     /// barrier has completed (see `SessionCommand::QueuePrompt::persist_ack`).
@@ -204,7 +201,6 @@ pub(crate) struct InputItem {
     /// synthetic / system inputs (auto-wake, nudges, notification drains).
     pub(crate) queue_meta: Option<crate::session::prompt_queue::QueueEntryMeta>,
 }
-use crate::session::commands::{NotificationPriority, NotificationSource};
 /// Task scheduling state — the only fields that remain behind `TokioMutex`.
 ///
 /// All chat state (conversation, tokens, timing, prompt coordinates,
@@ -219,7 +215,6 @@ pub(crate) struct State {
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
     pub(crate) pending_inputs: VecDeque<InputItem>,
-    pub(crate) pending_notifications: Vec<PendingNotification>,
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
     pub(crate) combine_edit_holds: std::collections::HashSet<String>,
     /// When true, notifications are buffered but not drained until genuine
@@ -279,9 +274,6 @@ impl ForegroundState {
 }
 
 impl State {
-    pub(crate) fn clear_pending_notifications(&mut self) {
-        self.pending_notifications.clear();
-    }
     /// Prompt id of the in-flight regular turn, if any. Foreground ownership
     /// and the FIFO share this lock, so completion and queue mutations compare
     /// against one race-free identity.
@@ -379,12 +371,46 @@ pub(crate) struct PreparedToolCall {
     /// Resolved target for meta-dispatch tools (`use_tool`, `CallMcpTool`);
     /// `None` for ordinary tools. See [`ToolInput::dispatch_target_name`].
     dispatch_target_name: Option<String>,
-    /// Authoritative side-effect scope; decides whether the call takes the
-    /// per-file write lock.
-    tool_scope: tool_protocol::ToolScope,
+    /// Authority projected from the frozen typed arguments. This, never the
+    /// descriptor ceiling, decides call authorization and write coordination.
+    required_access: tool_protocol::ToolAccess,
+    /// One-shot authorization proof bound to this exact frozen invocation.
+    permit: ToolCallPermit,
     /// True when this native call writes a session Workflow draft. Dispatch
     /// rechecks live Behavior while holding Workflow admission.
     workflow_draft_write: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpPermitBinding {
+    server: String,
+    client_id: u64,
+    generation: u64,
+    max_access: tool_protocol::ToolAccess,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolCallPermit {
+    call_id: String,
+    tool_name: String,
+    dispatch_target_name: Option<String>,
+    canonical_args_hash: String,
+    cwd: PathBuf,
+    descriptor_max: tool_protocol::ToolAccess,
+    required_access: tool_protocol::ToolAccess,
+    actor_source: String,
+    actor_epoch: Option<u64>,
+    mcp: Option<McpPermitBinding>,
+    consumed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ToolDispatchAuthority {
+    bridge: Arc<tools::bridge::ToolBridge>,
+    subagent: Option<crate::session::subagent_capability::SubagentCapabilityState>,
+    mcp_state: Arc<TokioMutex<McpState>>,
+    cwd: PathBuf,
+    actor_source: String,
 }
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.
@@ -477,6 +503,9 @@ pub(crate) struct SessionActor {
         Option<crate::session::subagent_capability::SubagentCapabilityState>,
     /// Compaction configuration and runtime state.
     pub(crate) compaction: super::compaction_config::CompactionConfig,
+    /// Session-owned turn-end continuation gate. Agent switches cannot alter
+    /// this runtime policy.
+    pub(crate) todo_gate: reminders::TodoGateConfig,
     /// Memory subsystem: storage, flush config, injection state, diagnostics.
     pub(crate) memory: super::memory_state::SessionMemory,
     /// Diagnostic counters for session summary.
@@ -524,8 +553,9 @@ pub(crate) struct SessionActor {
     pub(crate) origin_client: Option<crate::http::OriginClientInfo>,
     /// Session-local usage and lifecycle signals.
     pub(crate) signals_handle: SessionSignalsHandle,
-    /// The fully-built Agent: owns the ToolBridge, system prompt, policies,
-    /// and the AgentDefinition. Replaces the old `tool_bridge` + `agent_definition` fields.
+    /// The fully-built Agent: owns the ToolBridge, stable prompt head, typed
+    /// role projection, and AgentDefinition. Session lifecycle policy remains
+    /// on this actor.
     /// Wrapped in `RefCell` for mid-session mutation (skill refresh, prompt regen).
     /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
     pub(crate) agent: std::cell::RefCell<agent::Agent>,
@@ -584,8 +614,8 @@ pub(crate) struct SessionActor {
     /// auto-wake completions are dropped by [`Self::maybe_drain_notifications`]
     /// regardless of the goal's current status, so a leftover dev/verification
     /// server that completes after the run ended (Blocked / paused / cleared)
-    /// cannot wake the idle parent. Reset when a new goal starts or the goal
-    /// is cleared.
+    /// cannot wake the idle parent. Reset only when a new Goal starts; clearing
+    /// the old Goal must not erase ownership of work that is still running.
     pub(crate) goal_turn_task_ids: parking_lot::Mutex<std::collections::HashSet<String>>,
     pub(crate) goal_command_rx: std::cell::RefCell<
         Option<
@@ -712,9 +742,9 @@ pub(crate) struct SessionActor {
     /// Populated once at session spawn and then reused by
     /// `handle_rebuild_agent_for_definition` to build a fresh `Agent`
     /// (system prompt, [`tools::bridge::ToolBridge`], tool
-    /// registry, tool name aliases, compaction policy, and reminder
-    /// policy) when the user picks a model with a different
-    /// `agent_type` before sending any user message.
+    /// registry, and tool name aliases) when the user selects another Agent.
+    /// Session lifecycle policy is deliberately absent: an Agent switch must
+    /// not alter TodoGate, compaction, permission, or provider state.
     ///
     /// See [`crate::session::agent_rebuild`] for the canonical-construction
     /// invariant.
@@ -985,7 +1015,7 @@ mod subagent_bash_permission_tests;
 mod subagent_usage_fold_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/support.rs"]
-mod support;
+pub(crate) mod support;
 #[cfg(test)]
 #[path = "acp_session_tests/usage_categories_tests.rs"]
 mod usage_categories_tests;
@@ -1018,8 +1048,6 @@ impl Drop for TurnMetrics {
     }
 }
 #[cfg(test)]
-#[path = "acp_session_tests/between_turn_completion_tests.rs"]
-mod between_turn_completion_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;

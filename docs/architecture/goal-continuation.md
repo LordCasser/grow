@@ -50,10 +50,10 @@ The idle arbiter admits work in this order:
 
 1. settle and durably record the current foreground terminal;
 2. promote the oldest user input;
-3. process higher-priority notification work;
-4. if foreground and FIFO are still empty, allow an Active Goal continuation.
+3. consume pending durable notification receipts that are allowed to start a turn;
+4. if foreground and FIFO are still empty and no autostart notification remains, allow an Active Goal continuation; active-turn-only checkpoint receipts join that Goal turn before its first sample.
 
-The Goal continuation is an internal regular turn with structured `PromptOrigin::GoalContinuation { goal_id }`. It is never inferred from prompt text or a prompt-id prefix. Admission rechecks foreground and pending input under the same state lock, so user input always wins a race with continuation.
+The Goal continuation is an internal regular turn with structured `PromptOrigin::GoalContinuation { goal_id }`. It is never inferred from prompt text or a prompt-id prefix, and it is not an auto-wake substitute for background completion. The idle arbiter drains receipts before calling the Goal driver; the driver then rechecks foreground and user FIFO under the same state lock, so user input and receipts always win a race with continuation.
 
 Every continuation directive requires this order:
 
@@ -73,7 +73,7 @@ A child spawned during Goal work receives an immutable `GoalView` and `SubagentO
 
 The effective child tool surface remains the intersection of registered tools, Agent definition, Behavior policy, delegated capability, and user permission. Goal ownership adds an object-level restriction; it never expands capability.
 
-Background task ids created by Goal work are remembered only to suppress late auto-wake notifications after the Goal stops. A Goal-owned child's acknowledged usage-ledger fold settles its uncached input plus output exactly once into the durable Goal budget before terminal presentation. Live progress remains a context-pressure diagnostic and is never treated as cumulative consumption or persisted as a Goal update.
+Background shell and monitor task ids created by Goal work are retained in the runtime ownership set across `/goal clear`, so late terminal receipts cannot start an idle turn after the Goal has stopped. They are cleared only when a new Goal is created, which establishes a new ownership epoch. A Goal-owned shell/monitor receipt is still visible when consumed during an active turn, but is `Dismissed` while idle with an explicit durable reason rather than being silently dropped. `SubagentCompleted` and `WorkflowCompleted` receipts are not suppressed by this rule and remain eligible to advance the session. A Goal-owned child's acknowledged usage-ledger fold settles its uncached input plus output exactly once into the durable Goal budget before terminal presentation. Live progress remains a context-pressure diagnostic and is never treated as cumulative consumption or persisted as a Goal update.
 
 ## Observability
 

@@ -30,15 +30,16 @@ command = "/path/to/server"           # Server executable
 args = ["--flag", "value"]            # Command arguments
 env = { API_KEY = "sk-..." }          # Environment variables
 enabled = true                        # Enable or disable the server (default: true)
-tool_scope = "write"                  # "read" only when every tool is side-effect free
+max_access = "all"                    # trust-domain RWX ceiling; defaults to all
 startup_timeout_sec = 30              # Server startup timeout, seconds (default: 30)
 tool_timeout_sec = 6000               # Per-tool-call timeout fallback, seconds (default: 6000)
 tool_timeouts = { slow_op = 120 }     # Per-tool timeout overrides, seconds
 ```
 
-`tool_scope` is server-wide and defaults conservatively to `"write"`. Set it
-to `"read"` only when every tool exposed by that server is side-effect free;
-Plan mode uses this same classification before execution approval.
+`max_access` is server-wide and defaults conservatively to `"all"`. A remote
+query normally uses `"read_write"`: it emits a request and observes a response.
+Use that narrower mask only when every exposed tool is query-only; split mixed
+query/mutation servers. Plan mode uses the same trust-domain declaration.
 
 > **Global startup-timeout override:** instead of setting `startup_timeout_sec`
 > per server, you can change the default for all servers via the `MCP_TIMEOUT`
@@ -288,14 +289,14 @@ See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) f
 
 ## Subagents and MCP
 
-Subagents inherit the parent session’s enabled, connected MCP server catalog by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that hard-eligible set (`all`, `none`, `named`, or `except`). Inheritance is not a runtime grant: `search_tool` marks eligible servers as `granted` or `requires_grant`, and `request_tool_access` grants one server for the live child before `use_tool`. The concrete MCP call still passes through permissions. Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
+Subagents inherit the parent session’s enabled, connected MCP server catalog by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that hard-eligible set (`all`, `none`, `named`, or `except`). `search_tool` labels inherited results `call_bound`; invoke `use_tool` with the exact returned schema. A call covered by initial RWX follows the normal path, while a locked hard-eligible call enters Ask/Auto and can receive only a one-shot permit. Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
 
 If a child lists `search_tool` / `use_tool` but returns an empty catalog, check that:
 
 1. The parent session actually connected the server (see Extensions / `grow inspect`)
 2. The agent’s `mcpInheritance` is not `none` or a filter that excludes the server
 3. Plugin agents cannot declare their own `mcpServers` in frontmatter — they only see parent-connected servers
-4. The `search_tool` result's `access` field is `granted`; otherwise request that `mcp_server` first
+4. The `search_tool` result's `access` field is `call_bound`; a missing result is outside the live inherited catalog
 
 ---
 

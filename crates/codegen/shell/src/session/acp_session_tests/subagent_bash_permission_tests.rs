@@ -6,7 +6,8 @@
 //!
 //! These tests drive the **shell side** of that chain on the real session
 //! seam: a `SessionActor` configured as a subagent
-//! (`startup_hints.is_subagent = true`) runs one `ToolInput::Bash` tool call
+//! (`startup_hints.is_subagent = true`) with immutable read-only initial RWX
+//! and runs one locked `ToolInput::Bash` tool call
 //! through `execute_tool_calls` against a **real** permission manager whose
 //! `AcpPrompter` talks to a fake gateway that answers `request_permission`
 //! with `Selected("allow-once")`.
@@ -24,11 +25,19 @@
 //! let the child continue sampling.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use acp_transport::{AcpAgentGatewaySender, AcpClientMessage};
 use agent_client_protocol as acp;
 use paths::AbsPathBuf;
 use tools::implementations::grow_build::bash::BashTool;
+use tools::implementations::grow_build::task::TaskTool;
+use tools::implementations::grow_build::task::backend::{SubagentBackend, SubagentBackendResource};
+use tools::implementations::grow_build::task::types::{
+    MaxSubagentDepth, SessionIdResource, SubagentCancelOutcome, SubagentDepthCounter,
+    SubagentRequest, SubagentResult, SubagentSnapshot, SubagentValidateTypeOutcome,
+};
+use tools::implementations::grow_build::{KillTaskTool, TaskOutputTool};
 use tools::registry::types::ToolConfig;
 use workspace::permission::{ClientType, PermissionEvent, spawn_permission_manager};
 
@@ -44,6 +53,49 @@ const PARENT_SID: &str = "parent-bash-perm-repro";
 /// manager cannot auto-allow it via the safe-command list.
 const BASH_ARGS: &str = r#"{"command":"sh -c 'echo repro-ok'","description":"repro bash permission test","is_background":false}"#;
 const TOOL_CALL_ID: &str = "call_bash_repro";
+
+#[derive(Default)]
+struct ImmediateSubagentBackend {
+    spawn_count: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SubagentBackend for ImmediateSubagentBackend {
+    async fn spawn(
+        &self,
+        request: SubagentRequest,
+    ) -> Result<SubagentResult, tool_runtime::ToolError> {
+        self.spawn_count.fetch_add(1, Ordering::SeqCst);
+        Ok(SubagentResult {
+            success: true,
+            output: Arc::from("delegated-ok"),
+            subagent_id: request.id.clone(),
+            child_session_id: request.id,
+            ..Default::default()
+        })
+    }
+
+    async fn query(
+        &self,
+        _id: &str,
+        _block: bool,
+        _timeout_ms: Option<u64>,
+    ) -> Option<SubagentSnapshot> {
+        None
+    }
+
+    async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
+        SubagentCancelOutcome::NotFound
+    }
+
+    async fn validate_type(
+        &self,
+        _subagent_type: &str,
+        _parent_session_id: &str,
+    ) -> SubagentValidateTypeOutcome {
+        SubagentValidateTypeOutcome::Ok
+    }
+}
 
 /// Everything the fake gateway observed, for assertions.
 #[derive(Debug, Default)]
@@ -154,6 +206,8 @@ async fn make_subagent_fixture_with_replies(
     let (mut actor, event_rx) =
         create_test_actor_ex(0, 256_000, 85, gateway_tx.clone(), persistence_tx).await;
     actor.startup_hints.is_subagent = true;
+    actor.startup_hints.subagent_permission_mode =
+        Some(workspace::permission::types::RequestPermissionMode::Ask);
     actor.session_info.id = acp::SessionId::new(SUBAGENT_SID);
 
     // Real permission manager (ask mode) wired to the same gateway the actor
@@ -190,7 +244,28 @@ async fn make_subagent_fixture_with_replies(
     // permission gate is unaffected: the opaque-shell bash floor is decided
     // by the command shape alone (`sh -c …`), not by `enabled_background`.
     let bash_config = ToolConfig::for_tool::<BashTool>().with_param("enabled_background", false);
+    let authored_tools = tools::registry::types::ToolServerConfig {
+        tools: vec![bash_config.clone()],
+    };
     *actor.agent.borrow_mut() = test_agent_with_tools(vec![bash_config]).await;
+    let bridge = actor.agent.borrow().tool_bridge().clone();
+    let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+        &bridge,
+        &authored_tools,
+        tool_types::SubagentCapabilityMode::ReadOnly,
+        None,
+        Default::default(),
+    )
+    .await;
+    assert!(
+        capabilities
+            .native_call_eligible("run_terminal_cmd", tool_protocol::ToolAccess::ReadExecute,)
+    );
+    assert!(
+        !capabilities
+            .native_call_available("run_terminal_cmd", tool_protocol::ToolAccess::ReadExecute,)
+    );
+    actor.subagent_capabilities = Some(capabilities);
     actor
         .workspace_ops
         .bind_local_session(
@@ -265,6 +340,17 @@ fn bash_call_with(id: &str, args: &str) -> crate::sampling::types::ToolCallRespo
     }
 }
 
+fn task_call(id: &str) -> crate::sampling::types::ToolCallResponse {
+    crate::sampling::types::ToolCallResponse {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "spawn_subagent",
+            r#"{"prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false}"#,
+        ),
+    }
+}
+
 fn drain_permission_events(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
 ) -> Vec<PermissionEvent> {
@@ -327,6 +413,17 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
                 conv.iter().any(|c| c.text_content().contains("repro-ok")),
                 "the bash output must land in the conversation as a tool result"
             );
+            assert!(
+                !actor
+                    .subagent_capabilities
+                    .as_ref()
+                    .expect("child capability state")
+                    .native_call_available(
+                        "run_terminal_cmd",
+                        tool_protocol::ToolAccess::ReadExecute,
+                    ),
+                "allow-once must not widen the child session after dispatch"
+            );
 
             let events = drain_permission_events(&mut permission_events);
             let event = events
@@ -340,6 +437,228 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
                 Some(SUBAGENT_SID),
                 "diagnostics must attribute the request to the requesting child"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_in_fence_bash_keeps_fast_path_without_prompt() {
+    const CALL_ID: &str = "call_bash_in_fence";
+    const ARGS: &str = r#"{"command":"echo in-fence-ok","description":"verify the in-fence fast path","is_background":false}"#;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _event_rx, log, mut permission_events) =
+                make_subagent_fixture(None, std::time::Duration::from_secs(60)).await;
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            let authored = tools::registry::types::ToolServerConfig {
+                tools: vec![
+                    ToolConfig::for_tool::<BashTool>().with_param("enabled_background", false),
+                ],
+            };
+            actor.subagent_capabilities = Some(
+                crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+                    &bridge,
+                    &authored,
+                    tool_types::SubagentCapabilityMode::All,
+                    None,
+                    Default::default(),
+                )
+                .await,
+            );
+
+            let result = actor
+                .execute_tool_calls(vec![bash_call_with(CALL_ID, ARGS)])
+                .await
+                .expect("in-fence call must not error");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .iter()
+                    .any(|item| item.text_content().contains("in-fence-ok")),
+                "an in-fence call must preserve normal execution behavior"
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .is_empty(),
+                "initial RWX must not create a redundant approval prompt"
+            );
+            assert!(
+                drain_permission_events(&mut permission_events).is_empty(),
+                "the in-fence fast path must not create permission audit noise"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_hard_forbidden_bash_rejects_before_permission() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _event_rx, log, mut permission_events) =
+                make_subagent_fixture(Some("allow-once"), std::time::Duration::from_secs(60)).await;
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            actor.subagent_capabilities = Some(
+                crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+                    &bridge,
+                    &tools::registry::types::ToolServerConfig { tools: vec![] },
+                    tool_types::SubagentCapabilityMode::All,
+                    None,
+                    Default::default(),
+                )
+                .await,
+            );
+
+            let result = actor
+                .execute_tool_calls(vec![bash_call()])
+                .await
+                .expect("hard rejection is a tool result, not a session error");
+            assert!(matches!(result, ToolLoop::Continue));
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conversation.iter().any(|item| item
+                    .text_content()
+                    .contains("outside the subagent's authored eligibility ceiling")),
+                "the child must receive the hard-eligibility reason"
+            );
+            assert!(
+                !conversation
+                    .iter()
+                    .any(|item| item.text_content().contains("repro-ok")),
+                "a forbidden call must never dispatch"
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .is_empty(),
+                "hard-ineligible calls must not open an approval flow"
+            );
+            assert!(drain_permission_events(&mut permission_events).is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_task_preserves_delegation_fast_path_and_depth_hard_stop() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _event_rx, log, mut permission_events) =
+                make_subagent_fixture(None, std::time::Duration::from_secs(60)).await;
+            let task_config = ToolConfig::for_tool::<TaskTool>()
+                .with_name("spawn_subagent")
+                .with_param_rename("run_in_background", "background");
+            let output_config = ToolConfig::for_tool::<TaskOutputTool>()
+                .with_name("get_command_or_subagent_output");
+            let kill_config =
+                ToolConfig::for_tool::<KillTaskTool>().with_name("kill_command_or_subagent");
+            let authored = tools::registry::types::ToolServerConfig {
+                tools: vec![
+                    task_config.clone(),
+                    output_config.clone(),
+                    kill_config.clone(),
+                ],
+            };
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![task_config, output_config, kill_config]).await;
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            let backend = Arc::new(ImmediateSubagentBackend::default());
+            bridge
+                .update_resource(SubagentBackendResource(backend.clone()))
+                .await;
+            bridge.update_resource(SubagentDepthCounter(0)).await;
+            bridge.update_resource(MaxSubagentDepth(1)).await;
+            bridge
+                .update_resource(SessionIdResource(SUBAGENT_SID.to_owned()))
+                .await;
+
+            let capabilities =
+                crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+                    &bridge,
+                    &authored,
+                    tool_types::SubagentCapabilityMode::ReadOnly,
+                    None,
+                    Default::default(),
+                )
+                .await;
+            assert!(
+                capabilities
+                    .native_call_available("spawn_subagent", tool_protocol::ToolAccess::None,)
+            );
+            actor.subagent_capabilities = Some(capabilities);
+
+            let result = actor
+                .execute_tool_calls(vec![task_call("call_task_in_fence")])
+                .await
+                .expect("authored Task must execute without a permission detour");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert_eq!(backend.spawn_count.load(Ordering::SeqCst), 1);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .iter()
+                    .any(|item| item.text_content().contains("delegated-ok")),
+                "the real Task result must reach the child conversation"
+            );
+
+            // Mirrors apply_child_tool_policy at max depth: schema remains
+            // visible, but Task is removed from the authored exact ceiling.
+            let authored_without_task = tools::registry::types::ToolServerConfig {
+                tools: authored
+                    .tools
+                    .iter()
+                    .filter(|tool| tool.kind != Some(tools::types::tool::ToolKind::Task))
+                    .cloned()
+                    .collect(),
+            };
+            actor.subagent_capabilities = Some(
+                crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+                    &bridge,
+                    &authored_without_task,
+                    tool_types::SubagentCapabilityMode::ReadOnly,
+                    None,
+                    Default::default(),
+                )
+                .await,
+            );
+            let result = actor
+                .execute_tool_calls(vec![task_call("call_task_max_depth")])
+                .await
+                .expect("hard eligibility failure is a tool result");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert_eq!(
+                backend.spawn_count.load(Ordering::SeqCst),
+                1,
+                "a max-depth Task must fail before backend dispatch"
+            );
+            assert!(
+                actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .iter()
+                    .any(|item| item
+                        .text_content()
+                        .contains("outside the subagent's authored eligibility ceiling")),
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .is_empty(),
+                "neither authored delegation nor max-depth rejection should prompt the user"
+            );
+            assert!(drain_permission_events(&mut permission_events).is_empty());
         })
         .await;
 }

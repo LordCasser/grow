@@ -7,6 +7,7 @@ pub mod control;
 pub mod handle;
 pub mod listing;
 pub mod memory_state;
+pub(crate) mod notification_inbox;
 pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
@@ -71,8 +72,6 @@ pub enum PromptOrigin {
     GoalContinuation {
         goal_id: String,
     },
-    /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
-    SchedulerFired,
     /// Turn injected after a resumed plan-approval decision: the
     /// shell re-parked Plan approval on resume, the user approved/revised,
     /// and the shell injects the follow-up turn. Synthetic so the user never
@@ -85,7 +84,6 @@ pub enum PromptOrigin {
 pub enum TurnKind {
     User,
     Internal,
-    Scheduled,
 }
 impl PromptOrigin {
     pub fn turn_identity(&self, turn_kind: TurnKind) -> chat_state::TurnIdentity {
@@ -110,7 +108,6 @@ impl PromptOrigin {
             Self::NotificationDrain => "notification_drain",
             Self::HostCommand => "host_command",
             Self::GoalContinuation { .. } => "goal_continuation",
-            Self::SchedulerFired => "scheduler_fired",
             Self::PlanResume => "plan_resume",
         }
     }
@@ -137,11 +134,10 @@ impl PromptOrigin {
     /// client scrollback (live and on resume). Model-only / side-channel
     /// content — UI already surfaces it via task pane, monitor gutter, etc.
     ///
-    /// Cron (`SchedulerFired`) and plan-resume follow-ups still render;
-    /// real user turns always render.
+    /// Plan-resume follow-ups and real user turns still render.
     pub fn hide_user_echo_from_scrollback(&self) -> bool {
         match self {
-            Self::User | Self::SchedulerFired | Self::PlanResume => false,
+            Self::User | Self::PlanResume => false,
             Self::TaskCompleted { .. }
             | Self::SubagentCompleted { .. }
             | Self::WorkflowCompleted { .. }
@@ -159,7 +155,6 @@ impl PromptOrigin {
             | Self::NotificationDrain
             | Self::HostCommand
             | Self::GoalContinuation { .. }
-            | Self::SchedulerFired
             | Self::PlanResume => None,
         }
     }
@@ -170,7 +165,6 @@ impl TurnKind {
         match self {
             Self::User => "user",
             Self::Internal => "internal",
-            Self::Scheduled => "scheduled",
         }
     }
 }
@@ -198,7 +192,6 @@ mod turn_identity_tests {
             }
             .is_preemptible_wake()
         );
-        assert!(!PromptOrigin::SchedulerFired.is_preemptible_wake());
     }
 }
 

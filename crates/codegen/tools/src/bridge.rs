@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use crate::computer::types::KillOutcome;
-use crate::computer::types::TaskKind;
 use crate::computer::types::TerminalBackend;
 use crate::registry::types::{
     FinalizedToolset, SessionContext, ToolRegistryBuilder, ToolServerConfig,
@@ -19,7 +18,7 @@ use crate::types::ToolInput;
 use crate::types::agents_md_tracker::AgentsMdTracker;
 use crate::types::definition::ToolDefinition;
 use crate::types::output::{ToolOutput, ToolRunResult};
-use crate::types::resources::{OwnerSessionId, State, Terminal};
+use crate::types::resources::Terminal;
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::ToolKind;
 
@@ -123,11 +122,22 @@ impl ToolBridge {
         self.registry.get_tool_metadata(tool_name).map(|m| m.kind())
     }
 
-    /// Side-effect scope for a registered tool by client-facing name.
-    pub fn tool_scope(&self, tool_name: &str) -> Option<tool_protocol::ToolScope> {
+    /// Descriptor-owned RWX requirement for a registered tool.
+    pub fn max_access(&self, tool_name: &str) -> Option<tool_protocol::ToolAccess> {
         self.registry
-            .get_tool_metadata(tool_name)
-            .map(|metadata| metadata.tool_scope())
+            .tool_identity(tool_name)
+            .map(|identity| identity.max_access)
+    }
+
+    pub fn native_tool_descriptors(&self) -> Vec<(String, ToolKind, tool_protocol::ToolAccess)> {
+        self.registry.native_tool_descriptors()
+    }
+
+    pub fn authored_native_tool_names(
+        &self,
+        config: &crate::registry::types::ToolServerConfig,
+    ) -> std::collections::HashSet<String> {
+        self.registry.authored_native_tool_names(config)
     }
 
     /// Get only built-in tool definitions (exclude MCP tools).
@@ -625,52 +635,6 @@ impl ToolBridge {
         }
     }
 
-    /// Drain newly-completed bash background tasks not yet reported.
-    /// Marks returned tasks in [`ReportedTaskCompletions`] to prevent
-    /// duplicate reminders from [`TaskCompletionReminder`]. Reserved IDs stay
-    /// unreported for a later genuine user turn.
-    pub async fn drain_between_turn_bash_completions(
-        &self,
-        reserved_ids: &[String],
-    ) -> Vec<TaskSnapshot> {
-        let tasks = match self.list_tasks().await {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        let completed: Vec<TaskSnapshot> = tasks
-            .into_iter()
-            .filter(|t| t.completed && t.kind != TaskKind::Monitor)
-            .collect();
-        if completed.is_empty() {
-            return Vec::new();
-        }
-
-        use crate::reminders::task_completion::{ReportedTaskCompletions, task_owned_by_session};
-
-        let mut res = self.registry.resources.lock().await;
-        // Subagents share the parent's terminal backend, so `list_tasks()`
-        // returns tasks owned by other sessions. Scope the between-turn
-        // "While you were idle, … background task completed" drain to tasks
-        // this session owns, mirroring the per-tool-call
-        // `TaskCompletionReminder` filter — otherwise a parent (or sibling)
-        // bash task that finished mid-subagent-turn leaks its completion
-        // `<system-reminder>` into the subagent's conversation. The owner
-        // filter runs before `mark_reported` so the owning session still
-        // reports the task on its own next turn.
-        let my_owner = res.get::<OwnerSessionId>().map(|o| o.0.clone());
-        let state = res.get_or_default::<State<ReportedTaskCompletions>>();
-        completed
-            .into_iter()
-            .filter(|task| {
-                my_owner
-                    .as_deref()
-                    .is_some_and(|owner| task_owned_by_session(task, owner))
-            })
-            .filter(|t| !reserved_ids.contains(&t.task_id))
-            .filter(|t| state.mark_reported(&t.task_id))
-            .collect()
-    }
-
     /// Construct a minimal bridge for tests. Has no tools registered.
     ///
     /// Bypasses `ToolRegistryBuilder::finalize()` entirely so this can
@@ -688,9 +652,6 @@ impl ToolBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::computer::types::{BackgroundHandle, TerminalRunRequest, TerminalRunResult};
-    use crate::reminders::task_completion::ReportedTaskCompletions;
-    use std::time::Duration;
 
     #[derive(Debug)]
     struct KindFixture {
@@ -776,135 +737,5 @@ mod tests {
         assert_eq!(bridge.tool_kind("not_a_registered_tool"), None);
         // Exact client-name lookup is case-sensitive.
         assert_eq!(bridge.tool_kind("write"), None);
-    }
-
-    // ── drain_between_turn_bash_completions owner scoping (the "While you
-    //    were idle, … background task completed" path) ──
-
-    #[derive(Debug)]
-    struct MockTerminal {
-        tasks: Vec<TaskSnapshot>,
-    }
-
-    #[async_trait::async_trait]
-    impl TerminalBackend for MockTerminal {
-        async fn run(
-            &self,
-            _: TerminalRunRequest,
-        ) -> Result<TerminalRunResult, crate::computer::types::ComputerError> {
-            unimplemented!()
-        }
-        async fn run_background(
-            &self,
-            _: TerminalRunRequest,
-        ) -> Result<BackgroundHandle, crate::computer::types::ComputerError> {
-            unimplemented!()
-        }
-        async fn kill_task(&self, _: &str) -> KillOutcome {
-            KillOutcome::NotFound
-        }
-        async fn get_task(&self, _: &str) -> Option<TaskSnapshot> {
-            None
-        }
-        async fn wait_for_completion(&self, _: &str, _: Option<Duration>) -> Option<TaskSnapshot> {
-            None
-        }
-        async fn list_tasks(&self) -> Vec<TaskSnapshot> {
-            self.tasks.clone()
-        }
-    }
-
-    fn completed_task(id: &str, owner: Option<&str>) -> TaskSnapshot {
-        TaskSnapshot {
-            task_id: id.into(),
-            command: "echo test".into(),
-            display_command: None,
-            cwd: String::new(),
-            start_time: std::time::SystemTime::now(),
-            end_time: Some(std::time::SystemTime::now()),
-            output: String::new(),
-            output_file: std::path::PathBuf::new(),
-            truncated: false,
-            exit_code: Some(0),
-            signal: None,
-            completed: true,
-            kind: Default::default(),
-            block_waited: false,
-            explicitly_killed: false,
-            owner_session_id: owner.map(|s| s.to_string()),
-            description: None,
-            is_backgrounded: false,
-        }
-    }
-
-    /// Regression: subagents share the parent's terminal backend, so the
-    /// between-turn drain must not surface another session's completed bash
-    /// task (which leaked as a "While you were idle, 1 background task
-    /// completed" `<system-reminder>` into the subagent's conversation).
-    #[tokio::test]
-    async fn between_turn_bash_completions_scoped_to_owning_session() {
-        let toolset = FinalizedToolset::empty_for_test();
-        {
-            let mut res = toolset.resources.lock().await;
-            res.insert(OwnerSessionId("subagent-1".into()));
-            res.register_state::<ReportedTaskCompletions>();
-        }
-        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
-            tasks: vec![
-                completed_task("mine-task", Some("subagent-1")),
-                completed_task("parent-task", Some("parent-0")),
-                completed_task("unowned-task", None),
-            ],
-        });
-        let bridge = ToolBridge {
-            registry: Arc::new(toolset),
-            terminal: Some(backend),
-        };
-
-        let drained = bridge.drain_between_turn_bash_completions(&[]).await;
-        let ids: Vec<&str> = drained.iter().map(|t| t.task_id.as_str()).collect();
-
-        assert!(ids.contains(&"mine-task"), "own task must drain: {ids:?}");
-        assert!(
-            !ids.contains(&"unowned-task"),
-            "ownerless task must not enter a session transcript: {ids:?}"
-        );
-        assert!(
-            !ids.contains(&"parent-task"),
-            "another session's task must NOT leak into this session: {ids:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn between_turn_bash_completions_skip_reserved_ids_without_reporting_them() {
-        let toolset = FinalizedToolset::empty_for_test();
-        {
-            let mut res = toolset.resources.lock().await;
-            res.register_state::<ReportedTaskCompletions>();
-            res.insert(OwnerSessionId("session-1".into()));
-        }
-        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
-            tasks: vec![completed_task("reserved", Some("session-1"))],
-        });
-        let bridge = ToolBridge {
-            registry: Arc::new(toolset),
-            terminal: Some(backend),
-        };
-
-        assert!(
-            bridge
-                .drain_between_turn_bash_completions(&["reserved".to_string()])
-                .await
-                .is_empty()
-        );
-        assert_eq!(
-            bridge
-                .drain_between_turn_bash_completions(&[])
-                .await
-                .into_iter()
-                .map(|task| task.task_id)
-                .collect::<Vec<_>>(),
-            vec!["reserved".to_string()]
-        );
     }
 }

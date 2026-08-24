@@ -287,7 +287,7 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_xxx" }
 enabled = true                        # enable/disable (default: true)
-tool_scope = "write"                 # use "read" only for an entirely read-only server
+max_access = "all"                   # use "read_write" only for a query-only server
 startup_timeout_sec = 30              # init timeout in seconds (default: 30)
 tool_timeout_sec = 6000              # tool call timeout in seconds (default: 6000)
 tool_timeouts = { create_issue = 120 }  # per-tool timeout overrides
@@ -349,9 +349,9 @@ plan = false
 explore = "deepseek/deepseek-chat"   # route to a configured provider/model
 ```
 
-To pin the model a subagent uses, set its entry under `[subagents.models]`. `permission_mode` independently controls both dynamic capability grants and actual child tool calls; it defaults to `auto` and never follows the primary session's live mode.
+To pin the model a subagent uses, set its entry under `[subagents.models]`. `permission_mode` independently controls locked exact child calls and secondary risk escalations; it defaults to `auto` and never follows the primary session's live mode.
 
-`classifier_input` selects the input scope for the rare child Auto request that explicitly crosses its capability fence. `context` (the default) judges the request against an ephemeral, read-only snapshot of the primary task context. `request_only` sends only the structured proposed action and classifier policy, reducing token use when the deployment intentionally does not need task intent. Neither mode writes the judgment prompt or result into the primary conversation.
+`classifier_input` selects the input scope for a child Auto judgment on a locked exact call. `context` (the default) judges the call against an ephemeral, read-only snapshot of the primary task context. `request_only` sends only the structured proposed action and classifier policy, reducing token use when the deployment intentionally does not need task intent. Neither mode writes the judgment prompt or result into the primary conversation.
 
 ### Goal Behavior and workflow engine
 

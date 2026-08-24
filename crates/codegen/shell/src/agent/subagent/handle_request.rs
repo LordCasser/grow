@@ -69,8 +69,9 @@ pub(super) fn task_model_override_error(
 fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
     use tools::implementations::grow_build::task::types::SubagentOwner;
     match (&request.owner, &request.goal_context) {
-        (SubagentOwner::Goal { goal_id }, Some(context))
-            if context.view.goal_id == *goal_id => Ok(()),
+        (SubagentOwner::Goal { goal_id }, Some(context)) if context.view.goal_id == *goal_id => {
+            Ok(())
+        }
         (SubagentOwner::Goal { .. }, _) => Err(
             "Goal-owned subagent request has a missing or mismatched immutable context snapshot"
                 .to_string(),
@@ -141,7 +142,7 @@ pub(crate) async fn run_shell_child(
         &definition,
     );
     let prompt = request.prompt.clone();
-    // Resolve the initial grant before any worktree, MCP, or session side
+    // Resolve initial RWX before any worktree, MCP, or session side
     // effect. The Agent definition supplies the default, the Task call may
     // narrow or widen that request, and the immediate security parent's
     // immutable ceiling is the final upper bound. Incomparable read/write and
@@ -303,14 +304,13 @@ pub(crate) async fn run_shell_child(
         capability_mode = ?effective_runtime.capability_mode,
         "Resolved subagent runtime configuration"
     );
-    // Preserve the normalized, confinement-checked initial grant on the
+    // Preserve the normalized, confinement-checked initial RWX on the
     // definition for session-state construction.
     definition.capability_mode = Some(effective_runtime.capability_mode);
     let child_depth = request
         .runtime_overrides
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
-    let tools_before_policy = definition.tool_config.tools.len();
     let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
     crate::agent::subagent::resolution::apply_child_tool_policy(
         &mut definition,
@@ -322,14 +322,14 @@ pub(crate) async fn run_shell_child(
     tracing::info!(
         subagent_id = %request.id,
         capability_mode = ?effective_runtime.capability_mode,
-        eligible_tools = definition.tool_config.tools.len(),
-        "Configured subagent initial capability grant"
+        visible_tools = definition.tool_config.tools.len(),
+        "Configured subagent immutable initial RWX"
     );
-    if !allow_nested_subagents && definition.tool_config.tools.len() < tools_before_policy {
+    if !allow_nested_subagents {
         tracing::info!(
             subagent_id = %request.id,
             child_depth,
-            "Stripped task tool from child at max depth"
+            "Marked task tool forbidden for child at max depth"
         );
     }
     if request.owner.is_workflow() {
@@ -673,39 +673,40 @@ pub(crate) async fn run_shell_child(
         ctx.parent_cmd_tx.as_ref(),
     );
     completion_data.spawned_notification_emitted = true;
-    let (persistence, child_timeline_events, child_session_directory) = match session::persistence::new_child(
-        &child_session_info,
-        effective_model_id.clone(),
-        session::persistence::SessionLineage {
-            session_kind: match &context_source {
-                InitialContextSource::New => "subagent",
-                InitialContextSource::Forked => "subagent_fork",
-                InitialContextSource::Resumed => "subagent_resume",
+    let (persistence, child_timeline_events, child_session_directory) =
+        match session::persistence::new_child(
+            &child_session_info,
+            effective_model_id.clone(),
+            session::persistence::SessionLineage {
+                session_kind: match &context_source {
+                    InitialContextSource::New => "subagent",
+                    InitialContextSource::Forked => "subagent_fork",
+                    InitialContextSource::Resumed => "subagent_resume",
+                }
+                .to_string(),
+                context_source: effective_source_str.to_string(),
+                parent_session_id: ctx.parent_session_id.clone(),
+                parent_prompt_id: request.parent_prompt_id.clone(),
+                subagent_seed,
+            },
+            forked_conversation.clone(),
+            inherited_prompt_blobs,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("Persistence error: {e}");
+                let result = failure_result(&request, &msg);
+                if record_parent_subagent_end(parent_chat_state, &result, None, None)
+                    .await
+                    .is_ok()
+                {
+                    completion_data.mark_terminal_committed();
+                }
+                return child_run_output(result, completion_data);
             }
-            .to_string(),
-            context_source: effective_source_str.to_string(),
-            parent_session_id: ctx.parent_session_id.clone(),
-            parent_prompt_id: request.parent_prompt_id.clone(),
-            subagent_seed,
-        },
-        forked_conversation.clone(),
-        inherited_prompt_blobs,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("Persistence error: {e}");
-            let result = failure_result(&request, &msg);
-            if record_parent_subagent_end(parent_chat_state, &result, None, None)
-                .await
-                .is_ok()
-            {
-                completion_data.mark_terminal_committed();
-            }
-            return child_run_output(result, completion_data);
-        }
-    };
+        };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
     let cwd_outside_parent = match (
         dunce::canonicalize(&child_cwd),
@@ -739,7 +740,6 @@ pub(crate) async fn run_shell_child(
         .map(crate::tools::tool_context::TaskOutputTokenBudget::limited);
     tool_ctx.task_output_token_budget = task_output_budget.clone();
     tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
-    tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();
@@ -766,7 +766,9 @@ pub(crate) async fn run_shell_child(
     );
     // Freeze the author/policy-derived capability ceiling before agent memory
     // or any other session convenience injects concrete tools.
-    definition.authored_capability_tools = Some(definition.tool_config.clone());
+    if definition.authored_capability_tools.is_none() {
+        definition.authored_capability_tools = Some(definition.tool_config.clone());
+    }
     let agent_memory_scope = definition.memory;
     let agent_name_for_memory = definition.name.clone();
     if let Some(scope) = agent_memory_scope {
@@ -1147,7 +1149,6 @@ pub(crate) async fn run_shell_child(
         screen_mode: None,
         verbatim: true,
         json_schema: request.runtime_overrides.output_schema.clone(),
-        admission: None,
         respond_to: prompt_tx,
         persist_ack: None,
     });
@@ -1612,8 +1613,10 @@ pub(crate) async fn run_shell_child(
             Some(error) => format!(
                 "subagent finished but its canonical child→parent terminal chain did not commit: {error}"
             ),
-            None => "subagent finished but its canonical child→parent terminal chain did not commit"
-                .to_owned(),
+            None => {
+                "subagent finished but its canonical child→parent terminal chain did not commit"
+                    .to_owned()
+            }
         };
         // The immutable artifact remains available for diagnosis/recovery, but
         // no waiter may consume a successful result that the parent Timeline

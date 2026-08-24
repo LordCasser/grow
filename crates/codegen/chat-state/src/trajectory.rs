@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompactionEvent, ControlContextLayer, ControlEvent, MessageEvent, ObservationEvent,
-    RecoveryEvent, RequestEvent, SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent,
-    StepEvent, SubagentEvent, SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp,
-    Timeline, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, WorkflowEvent,
+    CompactionEvent, ControlContextLayer, ControlEvent, MessageEvent, NotificationEvent,
+    NotificationSource, ObservationEvent, RecoveryEvent, RequestEvent, SessionTitleEvent,
+    SessionTitleSource, SidebandSpawnEvent, StepEvent, SubagentEvent, SubagentResultEvent,
+    SubagentSeedEvent, SurfaceId, SurfaceOp, Timeline, TimelineEvent, TimelineEventKind, ToolEvent,
+    TurnEvent, WorkflowEvent,
 };
 
 /// Wire schema for the read-only Trajectory projection.
@@ -160,6 +161,22 @@ impl TrajectoryProjector {
                 }
                 messages.items.len()
             }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                input: Some(_), ..
+            }) => {
+                self.surface_rows.insert(
+                    SurfaceId {
+                        event: event.seq,
+                        item: 0,
+                    },
+                    row_index,
+                );
+                1
+            }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                input: None, ..
+            }) => 0,
+            TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(_),
                 ..
@@ -353,6 +370,9 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
         }
         TimelineEventKind::SubagentResult(_) => {
             coordinates("meta", "lifecycle", "core", "subagent.result", state)
+        }
+        TimelineEventKind::Notification(_) => {
+            coordinates("meta", "governance", "core", "notification", state)
         }
     }
 }
@@ -761,6 +781,62 @@ fn describe(
             Some(*duration_ms),
             error.clone().unwrap_or_else(|| "subagent completed".into()),
         ),
+        TimelineEventKind::Notification(NotificationEvent::Received {
+            id,
+            source,
+            payload_ref,
+            ..
+        }) => tuple(
+            "notification",
+            "received",
+            "pending",
+            None,
+            None,
+            Some(id.clone()),
+            None,
+            format!(
+                "{} · {} bytes",
+                notification_source_label(source),
+                payload_ref.bytes
+            ),
+        ),
+        TimelineEventKind::Notification(NotificationEvent::Consumed {
+            notification_ids,
+            turn,
+            ..
+        }) => tuple(
+            "notification",
+            "consumed",
+            "admitted",
+            Some(turn.0.to_string()),
+            None,
+            notification_ids.first().cloned(),
+            None,
+            format!("{} notification(s)", notification_ids.len()),
+        ),
+        TimelineEventKind::Notification(NotificationEvent::Dismissed {
+            notification_ids,
+            reason,
+        }) => tuple(
+            "notification",
+            "dismissed",
+            "resolved",
+            None,
+            None,
+            notification_ids.first().cloned(),
+            None,
+            format!("{} notification(s) · {reason:?}", notification_ids.len()),
+        ),
+    }
+}
+
+fn notification_source_label(source: &NotificationSource) -> &'static str {
+    match source {
+        NotificationSource::MonitorProgress { .. } => "monitor progress",
+        NotificationSource::TaskStillRunning { .. } => "task still running",
+        NotificationSource::TaskCompleted { .. } => "task completed",
+        NotificationSource::SubagentCompleted { .. } => "subagent completed",
+        NotificationSource::WorkflowCompleted { .. } => "workflow completed",
     }
 }
 

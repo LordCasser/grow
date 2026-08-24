@@ -66,7 +66,7 @@ impl tool_runtime::Tool for LspTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::Read,
             ..Default::default()
         }
     }

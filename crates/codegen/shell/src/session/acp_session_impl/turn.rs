@@ -240,6 +240,7 @@ impl SessionActor {
         self: &Arc<Self>,
         prompt_id: &str,
         origin: super::super::PromptOrigin,
+        notification_ids: Vec<String>,
         turn_kind: super::super::TurnKind,
         mut prompt_blocks: Vec<acp::ContentBlock>,
         admitted_behavior: tool_types::BehaviorId,
@@ -267,17 +268,26 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
-        if let Some(completion_id) = origin.completion_id() {
-            // A deferred Goal task may finish after Goal already returned to
-            // Normal, in which case the existing auto-wake path owns delivery.
-            // Atomically retire any stale deferred entry before this prompt is
-            // exposed so a later Goal-stage wake cannot duplicate it.
-            self.completion_delivery.consume(&[completion_id]);
-            self.mark_completions_reported(&[completion_id]).await;
-            if let Some(reservations) = &self.tool_context.task_completion_reservations {
-                reservations.release(completion_id);
-            }
-        }
+        let admitted_notification_task_ids = if notification_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.chat_state_handle
+                .pending_notifications()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|notification| notification_ids.contains(&notification.id))
+                .filter_map(|notification| match notification.source {
+                    chat_state::NotificationSource::MonitorProgress { .. }
+                    | chat_state::NotificationSource::TaskStillRunning { .. }
+                    | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
+                    chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
+                    chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                        Some(subagent_id)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
         }
@@ -663,19 +673,15 @@ impl SessionActor {
         if matches!(&origin, super::super::PromptOrigin::User) {
             self.inject_stopped_goal_interaction_directive().await;
         }
-        self.inject_resumed_tasks_reminder();
+        self.drain_active_notifications_excluding(&notification_ids)
+            .await;
         if matches!(&origin, super::super::PromptOrigin::User) {
-            if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                gate.set(false);
-            }
             ::diagnostics::unified_log::info(
                 "shell.task_wake.gate_cleared",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
             );
-            self.consume_deferred_completions_for_user_turn().await;
         }
-        self.drain_between_turn_completions().await;
         self.inject_workflow_status_reminder().await;
         let user_message = if user_images.is_empty() {
             user_message
@@ -715,9 +721,6 @@ impl SessionActor {
                     user_message,
                     sampling_types::SyntheticReason::SystemReminder,
                 ),
-                super::super::PromptOrigin::SchedulerFired => {
-                    ConversationItem::scheduler_fired(user_message)
-                }
                 super::super::PromptOrigin::PlanResume => {
                     ConversationItem::system_reminder(user_message)
                 }
@@ -741,11 +744,32 @@ impl SessionActor {
             for image in &extra_images {
                 user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
             }
-            if let Err(error) = self
-                .chat_state_handle
-                .push_user_message_durably(user_chat)
-                .await
-            {
+            let input_commit = if notification_ids.is_empty() {
+                self.chat_state_handle
+                    .push_user_message_durably(user_chat)
+                    .await
+            } else {
+                let turn = self.events.current_turn().ok_or_else(|| {
+                    chat_state::TimelineWriteError::Invalid(
+                        chat_state::TimelineError::InvalidNotification,
+                    )
+                });
+                match turn {
+                    Ok(turn) => self
+                        .chat_state_handle
+                        .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Consumed {
+                                notification_ids: notification_ids.clone(),
+                                turn,
+                                input: Some(user_chat),
+                            },
+                        ))
+                        .await
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                }
+            };
+            if let Err(error) = input_commit {
                 tracing::error!(
                     session_id = %self.session_info.id.0,
                     prompt_id = %prompt_id,
@@ -767,6 +791,13 @@ impl SessionActor {
                 .await?;
                 return Err(acp::Error::internal_error()
                     .data(format!("user message was not durably recorded: {error}")));
+            }
+            if !admitted_notification_task_ids.is_empty() {
+                let ids = admitted_notification_task_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                self.completion_delivery.consume(&ids);
             }
             if let Some(ack) = persist_ack {
                 let _ = ack.send(());
@@ -799,7 +830,7 @@ impl SessionActor {
                 if self.goal_runtime_available() {
                     let goal_loop_active = self.goal_tracker.lock().status()
                         == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    self.set_goal_loop_active_resource(goal_loop_active).await;
+                    self.set_goal_loop_active(goal_loop_active);
                 }
                 let round = self
                     .process_conversation_turn_with_recovery(
@@ -1336,40 +1367,6 @@ impl SessionActor {
             return false;
         }
         ack.await.is_ok()
-    }
-    /// Drain this session's buffered mid-turn monitor events
-    /// (`drain_owned` — leader mode shares the buffer) into ONE hidden
-    /// synthetic user message, tagged `SyntheticReason::SystemReminder` so
-    /// compaction/fork/pruning skip it. Deliberately a bare
-    /// `push_user_message`, NOT `inject_synthetic_user_message`: the latter
-    /// persists a `UserMessageChunk` to `updates.jsonl`, which resume
-    /// replays — the raw XML would render as a user prompt. Clients see
-    /// monitor events only via the structured `grow/monitor_event` channel.
-    pub(crate) async fn inject_pending_monitor_events(&self) {
-        let Some(buffer) = &self.tool_context.monitor_event_buffer else {
-            return;
-        };
-        let mine = tools::implementations::grow_build::monitor::types::drain_owned(
-            buffer,
-            self.session_info.id.0.as_ref(),
-        );
-        if mine.is_empty() {
-            return;
-        }
-        let Some(body) = tools::reminders::task_completion::format_monitor_events(
-            &mine,
-            Some(&self.tool_context.task_output_tool_name),
-        ) else {
-            return;
-        };
-        let wrapped = tools::reminders::wrap_reminder(&body);
-        self.chat_state_handle
-            .push_user_message(ConversationItem::system_reminder(wrapped));
-        tracing::info!(
-            session_id = %self.session_info.id.0,
-            count = mine.len(),
-            "injected mid-turn monitor events as hidden synthetic user message"
-        );
     }
     /// Account Goal state at the regular turn boundary and wake the single
     /// idle arbiter. Stage scheduling never happens inline with completion.
@@ -1915,7 +1912,7 @@ impl SessionActor {
             self.drain_pending_interjections().await;
             self.drain_deferred_completions().await;
             self.flush_pending_system_reminders().await;
-            self.inject_pending_monitor_events().await;
+            self.drain_active_notifications().await;
             let memory_reminder = self.first_turn_memory_reminder().await;
             if memory_reminder.is_some() {
                 self.memory
@@ -2222,11 +2219,7 @@ impl SessionActor {
             // The response Surface facts must precede the provider anchor.
             // With usage, the anchor replaces their local estimates; without
             // usage, the estimates remain as fail-safe context pressure.
-            self.record_response_token_usage(
-                &response,
-                Some(model_duration_ms),
-                response_model_id,
-            );
+            self.record_response_token_usage(&response, Some(model_duration_ms), response_model_id);
             if response.usage.is_some() {
                 self.send_available_commands_update().await;
             }
@@ -2347,8 +2340,7 @@ impl SessionActor {
                         // behavior looped forever). Fail the turn with a
                         // diagnostic message instead.
                         Err(e) if compaction::is_compact_converged_over_window(&e) => {
-                            let post_tokens =
-                                self.chat_state_handle.get_projected_tokens().await;
+                            let post_tokens = self.chat_state_handle.get_projected_tokens().await;
                             let message = format!(
                                 "Compaction could not shrink the conversation \
                                  enough: it still exceeds the model's \
@@ -2788,15 +2780,11 @@ mod user_echo_broadcast_tests {
             UserEchoMode::PersistOnly
         );
     }
-    /// Real user prompts, cron (`/loop`) fires, and other turns still broadcast
-    /// live so multi-client / dashboard viewers stay in sync.
+    /// Real user prompts and other turns still broadcast live so multi-client
+    /// and dashboard viewers stay in sync.
     #[test]
-    fn user_and_cron_turns_broadcast_live() {
+    fn user_and_completion_turns_broadcast_live() {
         assert_eq!(user_echo_mode(&PromptOrigin::User), UserEchoMode::Broadcast);
-        assert_eq!(
-            user_echo_mode(&PromptOrigin::SchedulerFired),
-            UserEchoMode::Broadcast
-        );
         assert_eq!(
             user_echo_mode(&PromptOrigin::TaskCompleted {
                 task_id: "bg-1".to_string(),

@@ -29,7 +29,7 @@ use config::shell::AmpersandSemantics;
 use regex::Regex;
 
 use crate::DEFAULT_TOOL_OUTPUT_CHARS;
-use crate::computer::types::{ComputerError, TerminalRunRequest};
+use crate::computer::types::{ComputerError, TaskSnapshot, TerminalBackend, TerminalRunRequest};
 use crate::notification::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashNotificationBase, BashOutputChunk, PerCallNotificationSink, ToolNotification,
@@ -75,7 +75,7 @@ const MAX_PROGRESS_DELTA_BYTES: usize = 16 * 1024;
 /// capped per frame at [`MAX_PROGRESS_DELTA_BYTES`].
 static BASH_CAPABILITIES: LazyLock<tool_protocol::ToolCapabilities> =
     LazyLock::new(|| tool_protocol::ToolCapabilities {
-        tool_scope: tool_protocol::ToolScope::Write,
+        max_access: tool_protocol::ToolAccess::All,
         streaming: Some(tool_protocol::StreamingSpec {
             subkind: "bash_output_chunk".to_owned(),
             max_delta_bytes: Some(MAX_PROGRESS_DELTA_BYTES as u32),
@@ -119,6 +119,41 @@ fn terminal_notification_base(notif: &ToolNotification) -> Option<&BashNotificat
         ToolNotification::BashExecutionBackgrounded(b) => Some(&b.base),
         _ => None,
     }
+}
+
+/// Append the still-running task diagnostic to the synchronous background
+/// launch result. This is launch context, not an asynchronous completion, so
+/// it deliberately does not enter the durable notification inbox.
+fn append_running_tasks_notice(
+    output: &mut String,
+    running: &[&TaskSnapshot],
+    kill_task_name: &str,
+) {
+    use std::fmt::Write as _;
+
+    if running.is_empty() {
+        return;
+    }
+    let count = running.len();
+    let label = if count == 1 { "task is" } else { "tasks are" };
+    let _ = write!(
+        output,
+        "\nNote: {count} other background {label} still running:"
+    );
+    for task in running {
+        let command = task.display_command.as_deref().unwrap_or(&task.command);
+        let _ = write!(
+            output,
+            "\n- \"{}\" (running for {:.0}s): {}",
+            task.task_id,
+            task.duration_secs(),
+            command,
+        );
+    }
+    let _ = write!(
+        output,
+        "\nUse {kill_task_name} for tasks that are no longer needed."
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1312,24 +1347,46 @@ impl BashTool {
     /// param. Kind-wide resolution is correct here: this names *another*
     /// tool's param (the get-output tool), not this bash tool's own schema
     /// key — do not switch it to invoking-tool param names.
-    async fn background_retrieval_hint(
+    async fn background_management_hint(
         resources: &SharedResources,
+        backend: &dyn TerminalBackend,
         task_id: &str,
+        owner_session_id: Option<&str>,
     ) -> Result<String, tool_runtime::ToolError> {
-        let res = resources.lock().await;
-        let renderer = res.require::<TemplateRenderer>()?;
-        // Presence-aware lookup (not a template render): a missing kind
-        // renders as empty-`Ok`, so a `Result` fallback never fires.
-        let get_task_name = renderer
-            .tool_for_kind(ToolKind::BackgroundTaskAction)
-            .unwrap_or("get_task_output")
-            .to_string();
-        let task_ids_param = renderer
-            .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
-            .unwrap_or("task_ids");
-        Ok(format!(
+        let (get_task_name, task_ids_param, kill_task_name) = {
+            let res = resources.lock().await;
+            let renderer = res.require::<TemplateRenderer>()?;
+            // Presence-aware lookup (not a template render): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
+            (
+                renderer
+                    .tool_for_kind(ToolKind::BackgroundTaskAction)
+                    .unwrap_or("get_task_output")
+                    .to_string(),
+                renderer
+                    .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
+                    .unwrap_or("task_ids")
+                    .to_string(),
+                renderer
+                    .tool_for_kind(ToolKind::KillTaskAction)
+                    .unwrap_or("kill_command_or_subagent")
+                    .to_string(),
+            )
+        };
+        let mut hint = format!(
             "Use {get_task_name} tool with {task_ids_param}=[\"{task_id}\"] to retrieve the output."
-        ))
+        );
+        let tasks = backend.list_tasks().await;
+        let running: Vec<_> = tasks
+            .iter()
+            .filter(|task| {
+                !task.completed
+                    && task.task_id != task_id
+                    && task.owner_session_id.as_deref() == owner_session_id
+            })
+            .collect();
+        append_running_tasks_notice(&mut hint, &running, &kill_task_name);
+        Ok(hint)
     }
 
     /// Model-facing input schema. `timeout_param_name` is the client-facing
@@ -1985,7 +2042,13 @@ impl tool_runtime::Tool for BashTool {
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             });
 
-            let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
+            let retrieval_hint = Self::background_management_hint(
+                &resources,
+                backend.as_ref(),
+                &task_id,
+                owner_session_id.as_deref(),
+            )
+            .await?;
 
             Ok(BashToolOutput::Background(BackgroundTaskStarted {
                 task_id: task_id.clone(),
@@ -2078,8 +2141,13 @@ impl tool_runtime::Tool for BashTool {
                     description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
                 });
 
-                let retrieval_hint =
-                    Self::background_retrieval_hint(&resources, tool_call_id.as_str()).await?;
+                let retrieval_hint = Self::background_management_hint(
+                    &resources,
+                    backend.as_ref(),
+                    tool_call_id.as_str(),
+                    owner_session_id.as_deref(),
+                )
+                .await?;
 
                 let summary = if auto_backgrounded {
                     format!(
@@ -2231,6 +2299,39 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    #[test]
+    fn background_launch_notice_reports_other_running_tasks_inline() {
+        let task = TaskSnapshot {
+            task_id: "old-task".into(),
+            command: "cargo check".into(),
+            display_command: None,
+            cwd: "/tmp".into(),
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/old-task.log".into(),
+            truncated: false,
+            exit_code: None,
+            signal: None,
+            completed: false,
+            kind: crate::computer::types::TaskKind::Bash,
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: Some("session".into()),
+            description: None,
+            is_backgrounded: true,
+        };
+        let mut output = "Use get_task_output.".to_owned();
+        append_running_tasks_notice(&mut output, &[&task], "kill_task");
+        assert!(output.contains("old-task"));
+        assert!(output.contains("cargo check"));
+        assert!(output.contains("Use kill_task"));
+
+        let mut empty = "unchanged".to_owned();
+        append_running_tasks_notice(&mut empty, &[], "kill_task");
+        assert_eq!(empty, "unchanged");
+    }
 
     /// Models occasionally serialize numeric tool args as JSON strings. The
     /// `timeout` field must accept both `120000` and `"120000"`, stay `None`

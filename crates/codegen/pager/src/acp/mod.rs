@@ -74,7 +74,7 @@ pub struct ConnectFlags {
     pub experimental_memory: bool,
     pub no_memory: bool,
     /// Session-scoped `--todo-gate` override. Forces
-    /// `ReminderPolicy.todo_gate.enabled = true` for this session.
+    /// Enables the session-owned TodoGate for this session.
     pub todo_gate: bool,
     /// Session-scoped `--laziness-debug-log <path>` override. When set,
     /// the Layer-3 classifier fires after every turn regardless of the

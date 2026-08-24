@@ -148,7 +148,7 @@ impl SessionActor {
             verbatim: auto.verbatim,
             json_schema: auto.json_schema,
             origin: auto.origin,
-            task_wake_fallback: None,
+            notification_ids: Vec::new(),
             respond_to,
             persist_ack: None,
             queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {

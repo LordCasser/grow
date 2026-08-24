@@ -40,8 +40,9 @@ pub enum ToolNamespace {
 ///
 /// Serializes as snake_case strings (e.g. `"read"`, `"list_dir"`, `"web_fetch"`).
 /// `Other` is an explicit category for tools that do not fit elsewhere. The
-/// wire vocabulary is closed: unknown values are rejected instead of silently
-/// changing capability and permission classification.
+/// wire vocabulary is closed so templates, UI grouping, and discovery cannot
+/// silently drift. Runtime authorization is descriptor-owned and does not
+/// derive from this taxonomy.
 #[derive(
     Debug,
     Clone,
@@ -52,7 +53,6 @@ pub enum ToolNamespace {
     serde::Serialize,
     serde::Deserialize,
     schemars::JsonSchema,
-    strum::EnumCount,
     strum::EnumIter,
     strum::IntoStaticStr,
 )]
@@ -87,15 +87,9 @@ pub enum ToolKind {
     GoalRead,
     GoalLifecycleUpdate,
     Workflow,
-    CapabilityRequest,
     Other,
 }
 impl ToolKind {
-    /// Total number of `ToolKind` variants (powered by `strum::EnumCount`).
-    ///
-    /// Used by downstream compile-time assertions (e.g. `ALL_TOOL_KINDS` in
-    /// `capability.rs`) to catch missing variants when the enum grows.
-    pub const VARIANT_COUNT: usize = <Self as strum::EnumCount>::COUNT;
     /// Stable snake_case key for this kind (the `tools.by_kind.<key>` template key).
     pub fn as_key(self) -> &'static str {
         self.into()

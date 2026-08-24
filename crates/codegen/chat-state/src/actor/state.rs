@@ -4,8 +4,7 @@ use std::collections::BTreeSet;
 
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
-    SamplingConfig, TokenUsage,
-    dedup_duplicate_tool_results, repair_dangling_tool_calls,
+    SamplingConfig, TokenUsage, dedup_duplicate_tool_results, repair_dangling_tool_calls,
 };
 
 use crate::types::Credentials;

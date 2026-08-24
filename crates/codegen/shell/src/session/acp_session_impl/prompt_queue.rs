@@ -22,7 +22,6 @@ impl SessionActor {
         screen_mode: Option<String>,
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
-        task_wake_fallback: Option<TaskWakeFallback>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         persist_ack: Option<oneshot::Sender<()>>,
     ) {
@@ -41,10 +40,6 @@ impl SessionActor {
         // this Prompt was accepted but before handle_prompt runs.
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
-        }
-
-        if let crate::session::PromptOrigin::SubagentCompleted { subagent_id } = &origin {
-            self.mark_completions_reported(&[subagent_id]).await;
         }
 
         // Follow-up admission policy, resolved outside the state lock (same
@@ -72,7 +67,7 @@ impl SessionActor {
             follow_up_behavior,
             state.foreground.regular().is_some(),
             origin.is_synthetic(),
-            task_wake_fallback.is_some(),
+            false,
             &prompt_blocks,
         ) {
             self.auto_promote_follow_up(
@@ -102,14 +97,6 @@ impl SessionActor {
             });
             if preempt_armed {
                 let dropped = state.sweep_pending_inputs(|i| i.origin.is_preemptible_wake());
-                if let Some(reservations) = &self.tool_context.task_completion_reservations {
-                    for task_id in dropped
-                        .iter()
-                        .filter_map(|item| item.origin.completion_id())
-                    {
-                        reservations.release(task_id);
-                    }
-                }
                 tracing::info!(
                     dropped_count = dropped.len(),
                     "auto-wake: dropping pending synthetic prompts (user prompt has priority)"
@@ -159,7 +146,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
-            task_wake_fallback,
+            notification_ids: Vec::new(),
             respond_to,
             persist_ack,
             queue_meta,

@@ -79,6 +79,26 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    pub async fn receive_notification_durably(
+        &self,
+        owner_session_id: String,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        payload_ref: crate::NotificationPayloadRef,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.query("ReceiveNotificationDurably", |reply| {
+            ChatStateCommand::ReceiveNotificationDurably {
+                owner_session_id,
+                source,
+                source_version,
+                payload_ref,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     pub async fn recover_interrupted_durably(
         &self,
     ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
@@ -148,9 +168,11 @@ impl ChatStateHandle {
 
     /// Record the provider's canonical current-context total.
     pub fn record_provider_context_anchor(&self, provider_total_tokens: u64) {
-        let _ = self.cmd_tx.send(ChatStateCommand::RecordProviderContextAnchor {
-            provider_total_tokens,
-        });
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::RecordProviderContextAnchor {
+                provider_total_tokens,
+            });
     }
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.
@@ -306,10 +328,7 @@ impl ChatStateHandle {
         projection: crate::ImageProjectionEvent,
     ) -> Result<ImageProjectionReport, TimelineWriteError> {
         self.query("RecordImageProjectionAndAck", |reply| {
-            ChatStateCommand::RecordImageProjectionAndAck {
-                projection,
-                reply,
-            }
+            ChatStateCommand::RecordImageProjectionAndAck { projection, reply }
         })
         .await
         .ok_or(TimelineWriteError::AcknowledgementLost)?
@@ -452,6 +471,13 @@ impl ChatStateHandle {
     pub async fn timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
             ChatStateCommand::GetTimelineEvents { reply }
+        })
+        .await
+    }
+
+    pub async fn pending_notifications(&self) -> Option<Vec<crate::PendingNotification>> {
+        self.query("GetPendingNotifications", |reply| {
+            ChatStateCommand::GetPendingNotifications { reply }
         })
         .await
     }

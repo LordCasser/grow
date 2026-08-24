@@ -221,7 +221,7 @@ impl tool_runtime::Tool for AskUserQuestionTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }
@@ -458,10 +458,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_scope_is_read() {
+    fn tool_access_is_internal_control() {
         assert_eq!(
-            tool_runtime::Tool::capabilities(&AskUserQuestionTool).tool_scope,
-            tool_protocol::ToolScope::Read
+            tool_runtime::Tool::capabilities(&AskUserQuestionTool).max_access,
+            tool_protocol::ToolAccess::None
         );
     }
 

@@ -108,7 +108,6 @@ impl AgentView {
             vim_mode: crate::appearance::cache::load_vim_mode(),
             input_mode: InputMode::Vim,
             bash_turn: false,
-            cron_task_id: None,
             stashed_prompt: None,
             active_modal: None,
             modal_buttons: Vec::new(),

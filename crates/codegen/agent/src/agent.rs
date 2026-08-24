@@ -5,15 +5,13 @@ use std::sync::Arc;
 use tools::bridge::ToolBridge;
 use tools::types::definition::ToolDefinition;
 
-use crate::compaction::CompactionPolicy;
 use crate::config::{AgentDefinition, CompletionRequirement};
 use crate::prompt::context::PromptContext;
-use crate::system_reminder::ReminderPolicy;
 
 /// A fully built agent: definition + session context.
 ///
-/// NOT portable — tied to a specific session via its ToolBridge,
-/// rendered system prompt, and session-level policies.
+/// NOT portable — tied to a specific session via its ToolBridge and rendered
+/// prompt layers. Runtime lifecycle policy remains owned by the host session.
 ///
 /// Created by AgentBuilder from an AgentDefinition + session context.
 ///
@@ -38,10 +36,6 @@ pub struct Agent {
 
     /// The tool bridge — owns ToolRegistry + ToolState + SessionContext.
     tool_bridge: Arc<ToolBridge>,
-
-    /// Session-level policies.
-    reminder_policy: ReminderPolicy,
-    compaction_policy: CompactionPolicy,
 }
 
 impl Agent {
@@ -55,8 +49,6 @@ impl Agent {
         system_prompt: String,
         role_prompt: Option<String>,
         tool_bridge: Arc<ToolBridge>,
-        reminder_policy: ReminderPolicy,
-        compaction_policy: CompactionPolicy,
     ) -> Self {
         Self {
             definition,
@@ -64,8 +56,6 @@ impl Agent {
             system_prompt,
             role_prompt,
             tool_bridge,
-            reminder_policy,
-            compaction_policy,
         }
     }
 
@@ -108,16 +98,6 @@ impl Agent {
         &self.tool_bridge
     }
 
-    /// Compaction policy.
-    pub fn compaction_policy(&self) -> &CompactionPolicy {
-        &self.compaction_policy
-    }
-
-    /// Reminder policy.
-    pub fn reminder_policy(&self) -> &ReminderPolicy {
-        &self.reminder_policy
-    }
-
     /// Cached AGENTS.md section (derived from prompt_context).
     pub fn agents_md_section(&self) -> Option<String> {
         self.prompt_context.format_agents_md_section()
@@ -149,75 +129,5 @@ impl Agent {
     /// Built-in tool definitions only (excludes MCP tools).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tool_bridge.tool_definitions_builtins_only().await
-    }
-
-    /// Whether auto-compact should trigger given current token usage.
-    ///
-    /// `context_window` comes from the session's SamplingConfig (model-provided).
-    pub fn should_auto_compact(
-        &self,
-        total_tokens: u64,
-        context_window: std::num::NonZeroU64,
-    ) -> bool {
-        let cw = context_window.get();
-        token_estimation::exceeds_threshold(
-            total_tokens,
-            cw,
-            self.compaction_policy.auto_compact_threshold_percent as u8,
-        )
-    }
-
-    /// Update completion and retry policies from a new definition.
-    ///
-    /// Does NOT rebuild the tool registry or re-render prompts.
-    /// Used for mid-session mode switching.
-    pub async fn update_policies_from_definition(&self, _def: &AgentDefinition) {
-        // TODO: completion requirements and retry configs are now part of
-        // ToolServerConfig and handled at registry finalization time.
-        // Mid-session policy updates are not yet supported in the new architecture.
-    }
-
-}
-
-#[cfg(test)]
-mod tests {
-    use std::num::NonZeroU64;
-
-    /// Standalone function testing the same logic as Agent::should_auto_compact
-    fn should_auto_compact_check(total_tokens: u64, context_window: u64, threshold: u32) -> bool {
-        let cw = NonZeroU64::new(context_window).expect("test context_window must be non-zero");
-        let usage_percent = (total_tokens * 100) / cw.get();
-        usage_percent >= threshold as u64
-    }
-
-    #[test]
-    fn test_should_auto_compact_below_threshold() {
-        // 80% of 100K window with 85% threshold → false
-        assert!(!should_auto_compact_check(80_000, 100_000, 85));
-    }
-
-    #[test]
-    fn test_should_auto_compact_above_threshold() {
-        // 90% of 100K window with 85% threshold → true
-        assert!(should_auto_compact_check(90_000, 100_000, 85));
-    }
-
-    #[test]
-    fn test_should_auto_compact_at_threshold() {
-        // Exactly 85% of 100K window with 85% threshold → true
-        assert!(should_auto_compact_check(85_000, 100_000, 85));
-    }
-
-    #[test]
-    fn test_should_auto_compact_empty_usage() {
-        // 0 tokens used → false
-        assert!(!should_auto_compact_check(0, 100_000, 85));
-    }
-
-    #[test]
-    fn test_should_auto_compact_100_percent_threshold() {
-        // 100% threshold → only triggers when fully used
-        assert!(!should_auto_compact_check(99_999, 100_000, 100));
-        assert!(should_auto_compact_check(100_000, 100_000, 100));
     }
 }

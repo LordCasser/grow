@@ -37,10 +37,6 @@ Usage notes:
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         terminal_command_output_requires_expr()
     }
-
-    fn tool_scope(&self) -> tool_protocol::ToolScope {
-        tool_protocol::ToolScope::Read
-    }
 }
 
 impl tool_runtime::Tool for GetTerminalCommandOutputTool {
@@ -60,7 +56,7 @@ impl tool_runtime::Tool for GetTerminalCommandOutputTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::Read,
             ..Default::default()
         }
     }
@@ -104,11 +100,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_scope_is_read() {
+    fn output_wait_is_observation_only() {
         let tool = GetTerminalCommandOutputTool;
         assert_eq!(
-            ToolMetadata::tool_scope(&tool),
-            tool_protocol::ToolScope::Read
+            tool_runtime::Tool::capabilities(&tool).max_access,
+            tool_protocol::ToolAccess::Read
         );
     }
 

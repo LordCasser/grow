@@ -249,8 +249,6 @@ pub(super) fn build_permission_display(
     bash_highlights: Option<&BashCommandHighlights>,
 ) -> (String, Vec<String>, Option<String>) {
     let is_bash = bash_highlights.is_some();
-    let capability_grant = capability_grant_meta(req);
-
     let bash_input = req.tool_call.fields.raw_input.as_ref().and_then(|v| {
         serde_json::from_value::<tools::implementations::BashToolInput>(v.clone()).ok()
     });
@@ -271,9 +269,7 @@ pub(super) fn build_permission_display(
         || req.tool_call.fields.kind == Some(acp::ToolKind::Execute)
         || raw_command.is_some();
 
-    let title = if let Some((target, _)) = capability_grant.as_ref() {
-        format!("Grant subagent access to `{target}`?")
-    } else if is_execute {
+    let title = if is_execute {
         bash_description
             .as_deref()
             .map(str::trim)
@@ -326,23 +322,12 @@ pub(super) fn build_permission_display(
 /// MCP planned-argument lines (empty for bash/edit).
 fn permission_description_lines(req: &acp::RequestPermissionRequest) -> Vec<String> {
     let mut lines = mcp_args_lines(req);
-    if let Some((_, purpose)) = capability_grant_meta(req) {
-        lines.insert(0, format!("Purpose: {purpose}"));
-    }
     if is_edit_permission(req)
         && let Some(desc) = protected_edit_description(req)
     {
         lines.insert(0, desc);
     }
     lines
-}
-
-fn capability_grant_meta(req: &acp::RequestPermissionRequest) -> Option<(String, String)> {
-    let grant = req.meta.as_ref()?.get("subagentCapabilityGrant")?;
-    Some((
-        grant.get("target")?.as_str()?.to_owned(),
-        grant.get("purpose")?.as_str()?.to_owned(),
-    ))
 }
 
 fn protected_edit_description(req: &acp::RequestPermissionRequest) -> Option<String> {

@@ -364,12 +364,11 @@ pub struct McpState {
     /// Per-server set of unqualified tool names that the user has disabled.
     /// Persisted to `~/.grow/config.toml` under `[mcp_servers.<name>].disabled_tools`.
     pub disabled_tools: HashMap<McpServerName, std::collections::HashSet<ToolName>>,
-    /// Config-declared scope for every MCP server's tools. This is the single
-    /// source of truth for the plan-mode MCP classification. Mirrors
+    /// Config-declared RWX ceiling for every MCP server trust domain. Mirrors
     /// `disabled_tools` lifecycle: NOT cleared by
     /// `update_configs`/`update_configs_diff`; the shell refreshes the whole
     /// set at init and on config re-reads.
-    pub mcp_server_scopes: std::collections::HashMap<String, tool_protocol::ToolScope>,
+    pub mcp_server_max_access: std::collections::HashMap<String, tool_protocol::ToolAccess>,
     /// Stashed registrations for disabled tools so they can be re-enabled
     /// without a full MCP re-init (no need to call `list_tools` again).
     pub disabled_tool_registrations: HashMap<String, McpToolRegistration>,
@@ -638,7 +637,7 @@ impl McpState {
             mcp_tool_meta: HashMap::new(),
             init_failed: HashMap::new(),
             disabled_tools: HashMap::new(),
-            mcp_server_scopes: std::collections::HashMap::new(),
+            mcp_server_max_access: std::collections::HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             client_event_tx: None,
             eligibility: McpEligibilityAuthority::default(),
@@ -1543,7 +1542,7 @@ impl tool_runtime::Tool for McpErasedTool {
 
     async fn run(
         &self,
-        ctx: tool_runtime::ToolCallContext,
+        _ctx: tool_runtime::ToolCallContext,
         raw: serde_json::Value,
     ) -> Result<ToolOutput, tool_runtime::ToolError> {
         let mcp_call_start = std::time::Instant::now();
@@ -1560,12 +1559,6 @@ impl tool_runtime::Tool for McpErasedTool {
             })?);
             c
         };
-        tools::implementations::grow_build::request_tool_access::ensure_mcp_tool_granted(
-            &ctx,
-            &qualified_name,
-        )
-        .await?;
-
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
         let dispatch_result = self

@@ -70,6 +70,10 @@ impl EventTracker {
         }
     }
 
+    pub fn current_turn(&self) -> Option<TurnId> {
+        self.current_turn.get()
+    }
+
     /// Convert the shell producer vocabulary into either a typed causal fact
     /// or a log-only Timeline observation. Tool and request lifecycle facts
     /// use their dedicated methods instead of passing through this vocabulary.

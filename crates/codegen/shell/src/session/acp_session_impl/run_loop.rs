@@ -52,48 +52,71 @@ async fn maybe_start_pending_manual_compaction(
     true
 }
 
-async fn maybe_wake_for_deferred_completion(
+/// Apply the complete idle-admission order for an external idle permit.
+/// Restored receipts may predate the permit, so the Goal driver must never be
+/// called directly from the select branch.
+async fn arbitrate_idle_wake(
     session: std::sync::Arc<SessionActor>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
-    promote: bool,
 ) {
-    if !session.completion_delivery.has_ready()
-        || session.state.lock().await.foreground.regular().is_some()
-    {
-        return;
+    if !maybe_start_pending_manual_compaction(session.clone(), completion_tx.clone()).await {
+        SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
     }
-    if !session.drain_deferred_completions().await {
-        return;
-    }
-    // `handle_prompt` reconstructs origin from this id rather than trusting
-    // the queued field. Use the existing hidden notification namespace so the
-    // wake cannot be mistaken for user input or request a Behavior change.
-    let wake_id = format!("notifications-deferred-{}", uuid::Uuid::now_v7());
-    let (respond_to, _) = tokio::sync::oneshot::channel();
-    let item = InputItem {
-        prompt_id: wake_id.clone(),
-        turn_kind: crate::session::TurnKind::Internal,
-        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-            "A deferred background result is now available. Process the system reminder and respond or continue as appropriate.",
-        ))],
-        client_identifier: None,
-        screen_mode: None,
-        verbatim: true,
-        json_schema: None,
-        origin: super::PromptOrigin::NotificationDrain,
-        task_wake_fallback: None,
-        respond_to,
-        persist_ack: None,
-        queue_meta: None,
-    };
-    let mut state = session.state.lock().await;
-    let insert_at = state.pending_inputs.len();
-    state.pending_inputs.insert(insert_at, item);
-    drop(state);
-    if promote {
-        SessionActor::maybe_start_running_task(session, completion_tx).await;
+    SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
+    if session.state.lock().await.foreground.is_idle() {
+        session.drive_goal_on_idle(completion_tx).await;
     }
 }
+
+#[cfg(test)]
+mod idle_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restored_notification_wins_an_idle_permit_before_goal_continuation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the architecture migration".into(),
+                        None,
+                        "2026-08-24T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "outside-goal".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "independent task completed".into(),
+                    )
+                    .await
+                    .unwrap();
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                arbitrate_idle_wake(actor.clone(), completion_tx).await;
+
+                let state = actor.state.lock().await;
+                assert!(matches!(
+                    state.foreground.regular().map(|task| &task.origin),
+                    Some(crate::session::PromptOrigin::TaskCompleted { task_id })
+                        if task_id == "outside-goal"
+                ));
+            })
+            .await;
+    }
+}
+
 /// Returns the authoritative mode only when the manager accepted a real
 /// transition. Callers pass the post-clamp read-back, never the request.
 pub(super) fn permission_mode_change(
@@ -127,61 +150,6 @@ mod permission_mode_change_tests {
 /// teardown. A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
 impl SessionActor {
-    /// Serialize terminal task-wake admission with interactive cancellation.
-    pub(super) async fn admit_task_completion_wake(
-        &self,
-        origin: &super::PromptOrigin,
-        admission: TaskWakeAdmission,
-    ) -> Option<TaskWakeFallback> {
-        let TaskWakeAdmission {
-            respond_to,
-            fallback,
-        } = admission;
-        let super::PromptOrigin::TaskCompleted { task_id } = origin else {
-            return respond_to.send(true).is_ok().then_some(fallback);
-        };
-        let gate_suppressed = self
-            .tool_context
-            .task_wake_suppressed
-            .as_ref()
-            .is_some_and(|gate| gate.get());
-        let mut state = self.state.lock().await;
-        let state_suppressed = state.notifications_suppressed;
-        let admitted = !gate_suppressed && !state_suppressed;
-        if !admitted {
-            Self::push_task_wake_fallback(&mut state, fallback);
-            drop(state);
-            ::diagnostics::unified_log::info(
-                "shell.task_wake.actor_admission",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "task_id": task_id,
-                    "gate": gate_suppressed,
-                    "state": state_suppressed,
-                    "admitted": false,
-                })),
-            );
-            let _ = respond_to.send(false);
-            return None;
-        }
-        if respond_to.send(true).is_err() {
-            Self::push_task_wake_fallback(&mut state, fallback);
-            return None;
-        }
-        drop(state);
-        ::diagnostics::unified_log::info(
-            "shell.task_wake.actor_admission",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({
-                "task_id": task_id,
-                "gate": gate_suppressed,
-                "state": state_suppressed,
-                "admitted": true,
-            })),
-        );
-        Some(fallback)
-    }
-
     /// `CompactSession` admission on the mailbox: decide the immediate
     /// status and either queue a pending compact behind the running turn or
     /// spawn the foreground compaction. Extracted from the command arm so
@@ -418,8 +386,12 @@ pub(super) async fn run_session(
     let completion_tx_for_mcp = completion_tx.clone();
     tokio::task::spawn_local(async move {
         session_for_mcp.ensure_mcp_tools_initialized().await;
-        SessionActor::maybe_start_running_task(session_for_mcp.clone(), completion_tx_for_mcp)
-            .await;
+        SessionActor::maybe_start_running_task(
+            session_for_mcp.clone(),
+            completion_tx_for_mcp.clone(),
+        )
+        .await;
+        SessionActor::maybe_drain_notifications(session_for_mcp, completion_tx_for_mcp).await;
     });
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
@@ -557,12 +529,15 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionEvent::ForegroundWake => {
-                            maybe_wake_for_deferred_completion(
-                                session.clone(),
-                                completion_tx.clone(),
-                                true,
-                            )
-                            .await;
+                            if session.state.lock().await.foreground.regular().is_some() {
+                                session.drain_deferred_completions().await;
+                            } else {
+                                SessionActor::maybe_drain_notifications(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                         }
                         SessionEvent::FlushReplay { respond_to } => {
                             if let Some(notification) = replay_buffer.flush() {
@@ -582,6 +557,9 @@ pub(super) async fn run_session(
                     // Channel closed.
                     stop_permission_manager_and_drain_audit(&session).await;
                     shutdown_workflows(&session).await;
+                    if !session.startup_hints.is_subagent {
+                        session.checkpoint_running_task_notifications().await;
+                    }
                     final_session_persistence_flush(&session).await;
                     cleanup_session_scratch(&session);
                     return;
@@ -613,18 +591,9 @@ pub(super) async fn run_session(
                         completed_origin.as_ref(),
                     );
                 session.handle_completion(prompt_id, result).await;
-                // Drain any monitor events that were routed to the mid-turn buffer
-                // but arrived after the turn ended (race between is_turn_active and buffer push).
-                session.drain_monitor_buffer_to_pending().await;
                 if let Some(message) = infra_pause_message {
                     session.apply_infra_pause_after_turn_err(message).await;
                 }
-                maybe_wake_for_deferred_completion(
-                    session.clone(),
-                    completion_tx.clone(),
-                    false,
-                )
-                .await;
                 if !maybe_start_pending_manual_compaction(
                     session.clone(),
                     completion_tx.clone(),
@@ -637,16 +606,18 @@ pub(super) async fn run_session(
                     )
                     .await;
                 }
-                // Goal is an idle consumer, never a competitor with the
-                // user FIFO or manual compaction. Its hook runs only after
-                // foreground promotion had the first chance to claim Idle.
+                // Fixed idle ordering: real user FIFO/manual compaction first,
+                // then durable terminal/scheduler/progress receipts, then Goal.
+                SessionActor::maybe_drain_notifications(
+                    session.clone(),
+                    completion_tx.clone(),
+                )
+                .await;
                 if session.state.lock().await.foreground.is_idle() {
                     session
                         .handle_turn_end(suppress_goal_continuation)
                         .await;
                 }
-                // If no user prompt started, check for pending notifications
-                SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
                 session.emit_session_idle_if_idle().await;
                 // Layer-3 LazinessDetector: spawn an idle-triggered
                 // classifier dispatch. The method is a no-op when the
@@ -757,11 +728,11 @@ pub(super) async fn run_session(
                         }
                     }
                     shutdown_workflows(&session).await;
+                    if !session.startup_hints.is_subagent {
+                        session.checkpoint_running_task_notifications().await;
+                    }
                     final_session_persistence_flush(&session).await;
                     session.signals_handle.shutdown();
-                    if !session.startup_hints.is_subagent {
-                        session.persist_background_task_manifest().await;
-                    }
                     cleanup_session_scratch(&session);
                     return;
                 };
@@ -805,20 +776,7 @@ pub(super) async fn run_session(
                             s.resume_plan_approval(completion_tx).await;
                         });
                     }
-                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, admission, respond_to, persist_ack } => {
-                        let (actor_admitted, task_wake_fallback) = match admission {
-                            Some(admission) => {
-                                let fallback = session
-                                    .admit_task_completion_wake(&origin, admission)
-                                    .await;
-                                (fallback.is_some(), fallback)
-                            }
-                            None => (true, None),
-                        };
-                        if !actor_admitted {
-                            SessionActor::respond_removed_prompt(respond_to);
-                            continue;
-                        }
+                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, respond_to, persist_ack } => {
                         if let Err(error) = session.ensure_prefix_ready().await {
                             let _ = respond_to.send(Err(acp::Error::internal_error().data(
                                 format!("session context was not durably published: {error}"),
@@ -829,9 +787,6 @@ pub(super) async fn run_session(
                         // (skip for synthetic auto-wake prompts; the user hasn't
                         // actually re-engaged, so post-cancel suppression must hold)
                         if !origin.is_synthetic() {
-                            if let Some(gate) = &session.tool_context.task_wake_suppressed {
-                                gate.set(false);
-                            }
                             let mut state = session.state.lock().await;
                             state.notifications_suppressed = false;
                             ::diagnostics::unified_log::info(
@@ -871,7 +826,7 @@ pub(super) async fn run_session(
                             );
                         }
                         session
-                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, task_wake_fallback, respond_to, persist_ack)
+                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, respond_to, persist_ack)
                             .await;
                         if !maybe_start_pending_manual_compaction(
                             session.clone(),
@@ -963,38 +918,41 @@ pub(super) async fn run_session(
                         let state = session.state.lock().await;
                         let _ = respond_to.send(state.foreground.snapshot());
                     }
-                    SessionCommand::DeferredCompletionAvailable { source, body } => {
-                        let task_id = source.task_id().to_string();
-                        if session.completion_delivery.complete(task_id.clone(), body.clone()) {
-                            tracing::info!(
-                                task_id,
-                                "steering-deferred completion is ready for foreground delivery"
-                            );
-                            maybe_wake_for_deferred_completion(
-                                session.clone(),
-                                completion_tx.clone(),
-                                true,
-                            )
-                            .await;
-                        } else {
-                            let mut state = session.state.lock().await;
-                            SessionActor::push_pending_notification(
-                                &mut state,
-                                PendingNotification {
-                                    prompt_id: format!("deferred-completion-{task_id}"),
-                                    prompt_blocks: vec![acp::ContentBlock::Text(
-                                        acp::TextContent::new(body),
-                                    )],
-                                    priority: NotificationPriority::Later,
-                                    source,
-                                },
-                            );
-                            drop(state);
-                            SessionActor::maybe_drain_notifications(
-                                session.clone(),
-                                completion_tx.clone(),
-                            )
-                            .await;
+                    SessionCommand::ReceiveNotification { source, source_version, body } => {
+                        let deferred_subject = match &source {
+                            chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                                Some(task_id.clone())
+                            }
+                            chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                                Some(subagent_id.clone())
+                            }
+                            chat_state::NotificationSource::MonitorProgress { .. }
+                            | chat_state::NotificationSource::TaskStillRunning { .. }
+                            | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
+                        };
+                        match session
+                            .receive_notification(source, source_version, body.clone())
+                            .await
+                        {
+                            Ok(notification_id) => {
+                                if let Some(subject) = deferred_subject
+                                    && session.completion_delivery.complete(subject.clone())
+                                {
+                                    tracing::info!(
+                                        task_id = subject,
+                                        notification_id,
+                                        "deferred completion is durably ready"
+                                    );
+                                }
+                                SessionActor::maybe_drain_notifications(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "notification admission failed");
+                            }
                         }
                     }
                     SessionCommand::BehaviorChange { session_mode, responds_to } => {
@@ -1175,104 +1133,6 @@ pub(super) async fn run_session(
                                 level,
                             )
                             .await;
-                    }
-                    SessionCommand::DropMonitorNotifications { task_id } => {
-                        // Discard pending + mid-turn-buffered monitor events
-                        // for this task so a TaskCompleted auto-wake is the
-                        // sole model-facing signal for natural exit.
-                        {
-                            let mut state = session.state.lock().await;
-                            state.pending_notifications.retain(|n| {
-                                !matches!(
-                                    &n.source,
-                                    NotificationSource::MonitorEvent { task_id: tid }
-                                        if tid == &task_id
-                                )
-                            });
-                        }
-                        if let Some(buffer) = &session.tool_context.monitor_event_buffer {
-                            let dropped = buffer.drain_matching(|e| e.task_id == task_id);
-                            if !dropped.is_empty() {
-                                tracing::debug!(
-                                    task_id = %task_id,
-                                    dropped = dropped.len(),
-                                    "dropped buffered monitor events after TaskCompleted auto-wake"
-                                );
-                            }
-                        }
-                    }
-                    SessionCommand::InjectNotification { prompt_id, prompt_blocks, priority, source } => {
-                        let is_turn_active = session
-                            .tool_context
-                            .is_turn_active
-                            .as_ref()
-                            .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                            .unwrap_or(false);
-
-                        if is_turn_active && priority == NotificationPriority::Next {
-                            // Mid-turn + Next: push to the shared buffer for
-                            // the turn loop's `inject_pending_monitor_events`.
-                            if let Some(buffer) = &session.tool_context.monitor_event_buffer {
-                                let non_text_count = prompt_blocks.iter().filter(|b| !matches!(b, acp::ContentBlock::Text(_))).count();
-                                if non_text_count > 0 {
-                                    tracing::debug!(
-                                        non_text_count,
-                                        "Non-text content blocks dropped in mid-turn monitor event routing"
-                                    );
-                                }
-
-                                let event_text = prompt_blocks
-                                    .iter()
-                                    .filter_map(|b| {
-                                        if let acp::ContentBlock::Text(t) = b {
-                                            Some(t.text.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-
-                                let task_id = source.task_id().to_owned();
-
-                                // Cap to prevent unbounded growth during long tool calls.
-                                const MAX_BUFFER_EVENTS: usize = 50;
-                                buffer.push_capped(
-                                    tools::implementations::grow_build::monitor::types::MonitorEventNotification {
-                                        task_id: task_id.clone(),
-                                        event_text,
-                                        // Tag with this session's id so the
-                                        // shared (leader-mode) buffer drain
-                                        // sites only surface it here. The
-                                        // bridge guard guarantees this
-                                        // event is owned by this session.
-                                        owner_session_id: Some(
-                                            session.session_info.id.0.to_string(),
-                                        ),
-                                    },
-                                    MAX_BUFFER_EVENTS,
-                                );
-
-                                tracing::debug!(
-                                    task_id = %task_id,
-                                    "Routed monitor event to mid-turn buffer"
-                                );
-                            }
-                        } else {
-                            {
-                                let mut state = session.state.lock().await;
-                                SessionActor::push_pending_notification(
-                                    &mut state,
-                                    PendingNotification {
-                                        prompt_id,
-                                        prompt_blocks,
-                                        priority,
-                                        source,
-                                    },
-                                );
-                            }
-                            SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
-                        }
                     }
                     SessionCommand::RecordGoalTurnTaskIds { task_ids } => {
                         session.record_reparented_goal_turn_task_ids(task_ids);
@@ -2075,58 +1935,35 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(Ok(()));
                         tracing::info!(expected_turn_id, "Queued same-turn steering input");
                     }
-                    SessionCommand::WorkflowCompletionTurn { run_id, revision, outcome } => {
+                    SessionCommand::WorkflowCompleted { state, outcome } => {
+                        let run_id = state.run_id.clone();
                         if session.behavior.lock().deep_research_run_id() == Some(&run_id) {
                             session.finish_deep_research_run(&run_id, outcome).await;
                             continue;
                         }
                         session.send_available_commands_update().await;
-                        let state_suppressed = session.state.lock().await.notifications_suppressed;
-                        let wake_suppressed = state_suppressed
-                            || session.goal_loop_active()
-                            || session
-                                .tool_context
-                                .task_wake_suppressed
-                                .as_ref()
-                                .is_some_and(|gate| gate.get());
-                        let should_wake = if wake_suppressed {
-                            false
-                        } else {
-                            let tracker = session.workflow_tracker().await;
-                            tracker.lock().is_unreported_completion(&run_id, revision)
-                        };
-                        if !should_wake {
+                        let revision = state.revision;
+                        let prompt_text = session
+                            .workflow_completion_notification(&state)
+                            .await;
+                        if let Err(error) = session
+                            .receive_notification(
+                                chat_state::NotificationSource::WorkflowCompleted {
+                                    run_id: run_id.clone(),
+                                },
+                                chat_state::NotificationSourceVersion::Ordinal { value: revision },
+                                prompt_text.to_owned(),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id, revision, %error, "workflow notification admission failed");
                             continue;
                         }
-                        let prompt_id = format!("workflow-completed-{run_id}-{revision}");
-                        let prompt_text = "A background workflow stopped. Review the workflow completion reminder, report the result to the user, and take any appropriate next action.";
-                        let (respond_to, _) = tokio::sync::oneshot::channel();
-                        {
-                            let mut state = session.state.lock().await;
-                            let workflow_wake_queued = state.pending_inputs.iter().any(|item| {
-                                matches!(item.origin, super::PromptOrigin::WorkflowCompleted { .. })
-                            });
-                            if workflow_wake_queued {
-                                continue;
-                            }
-                            state.pending_inputs.push_back(InputItem {
-                                prompt_id,
-                                turn_kind: crate::session::TurnKind::Internal,
-                                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-                                client_identifier: None,
-                                screen_mode: None,
-                                verbatim: true,
-                                json_schema: None,
-                                origin: super::PromptOrigin::WorkflowCompleted {
-                                    completion_id: format!("{run_id}-{revision}"),
-                                },
-                                task_wake_fallback: None,
-                                respond_to,
-                                persist_ack: None,
-                                queue_meta: None,
-                            });
-                        }
-                        SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                        SessionActor::maybe_drain_notifications(
+                            session.clone(),
+                            completion_tx.clone(),
+                        )
+                        .await;
                     }
                     SessionCommand::TakeTurnMessages { respond_to } => {
                         let result = session.chat_state_handle.take_turn_messages().await;
@@ -2273,11 +2110,11 @@ pub(super) async fn run_session(
                         // Structured diagnostics after dream so counters are populated
                         let telem = session.memory.diagnostics_snapshot();
                         session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+                        if !session.startup_hints.is_subagent {
+                            session.checkpoint_running_task_notifications().await;
+                        }
                         final_session_persistence_flush(&session).await;
                         session.signals_handle.shutdown();
-                        if !session.startup_hints.is_subagent {
-                            session.persist_background_task_manifest().await;
-                        }
                         // Clean up scratch directory (pre-edit file copies).
                         cleanup_session_scratch(&session);
                         return;
@@ -2285,10 +2122,7 @@ pub(super) async fn run_session(
                 }
             }
             _ = session.idle_arbiter.notified() => {
-                session
-                    .clone()
-                    .drive_goal_on_idle(completion_tx.clone())
-                    .await;
+                arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
             }
         }
     }

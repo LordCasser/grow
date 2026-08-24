@@ -273,14 +273,14 @@ pub fn grow_build_hashline_toolset(
 }
 /// Tool eligibility ceiling for the **explore** subagent.
 ///
-/// Its initial capability mode is read-only, so execution and MCP dispatch stay
-/// hidden until the child obtains a session-local grant. Keeping them authored
-/// here makes those requests possible without weakening the initial grant.
+/// Its initial capability mode is read-only, so execution and mutating MCP
+/// dispatch are locked behind a per-call Ask/Auto decision. Keeping them
+/// authored here establishes hard eligibility without weakening initial RWX.
 fn explore_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
-            // Execution and MCP dispatch are latent capabilities. The child
-            // capability state hides them until explicitly granted.
+            // Execution and MCP dispatch remain visible latent capabilities;
+            // exact calls outside initial RWX enter the call-bound Gate.
             bash_tool_config(),
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
@@ -420,9 +420,9 @@ impl BuiltinAgentName {
 /// Portable agent identity — parsed from .grow/agents/*.md.
 /// Usable as both a top-level agent and a subagent definition.
 ///
-/// This is the stable, version-controllable contract. It does NOT
-/// contain session-level policies (compaction, system reminders).
-/// Those are provided by the AgentBuilder at build time.
+/// This is the stable, version-controllable contract. It does NOT contain
+/// session lifecycle policy (compaction, reminders, permissions, provider);
+/// the host session owns those independently from Agent construction.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDefinition {
@@ -448,11 +448,11 @@ pub struct AgentDefinition {
     #[serde(skip, default = "default_grow_build_toolset")]
     pub tool_config: ToolServerConfig,
     /// Immutable authored/policy-filtered source used to derive a subagent's
-    /// dynamic native capability ceiling. Runtime memory/default injections
+    /// immutable native capability ceiling. Runtime memory/default injections
     /// must not enlarge it.
     #[serde(skip)]
     pub authored_capability_tools: Option<ToolServerConfig>,
-    /// Initial runtime capability grant for a subagent session.
+    /// Immutable initial RWX for a subagent session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<tool_types::SubagentCapabilityMode>,
     #[serde(default)]
@@ -473,10 +473,9 @@ pub struct AgentDefinition {
     /// tools on top of the agent's declared `tool_config`: memory_search/get,
     /// web_fetch, lsp, the Grow write fallback, and the plan-mode tools.
     ///
-    /// Set this to `false` for harnesses that need an exact, minimal toolset
-    /// (e.g. the compat harness, where every advertised tool must match the
-    /// model's trained schema). The agent's `tool_config` is then used
-    /// verbatim with only the subagent strip applied.
+    /// Set this to `false` for Agents that deliberately author an exact,
+    /// minimal toolset. The Agent's `tool_config` is then used verbatim with
+    /// only audience/delegation confinement applied.
     #[serde(default = "default_true")]
     pub inject_default_tools: bool,
     /// Optional ordinary-tool allowlist. It never authorizes subagents.
@@ -599,15 +598,7 @@ pub enum AgentScope {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Deserialize,
-    serde::Serialize,
-    EnumString,
-    strum::EnumCount,
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, EnumString, strum::EnumCount,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase", ascii_case_insensitive)]

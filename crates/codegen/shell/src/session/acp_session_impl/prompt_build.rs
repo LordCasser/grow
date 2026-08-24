@@ -299,18 +299,13 @@ impl SessionActor {
             strip_offload_notice(&bounded, &build_offload_notice(full_len, &blob_ref));
         let session = self.session_directory.clone();
         let offload = tokio::task::spawn_blocking(move || {
-            write_offload_and_build(
-                &full_message,
-                bounded,
-                &blob_ref,
-                |bytes| {
-                    crate::session::persistence::write_immutable_blob_to_directory(
-                        &session,
-                        &std::path::Path::new("prompts").join(format!("{hash}.txt")),
-                        bytes,
-                    )
-                },
-            )
+            write_offload_and_build(&full_message, bounded, &blob_ref, |bytes| {
+                crate::session::persistence::write_immutable_blob_to_directory(
+                    &session,
+                    &std::path::Path::new("prompts").join(format!("{hash}.txt")),
+                    bytes,
+                )
+            })
         })
         .await;
         match offload {

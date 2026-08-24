@@ -512,11 +512,6 @@ pub struct MvpAgent {
     >,
     /// Shell-only presentation state; lifecycle lives in the channel actor.
     subagent_presentation: RefCell<crate::agent::subagent::SubagentPresentation>,
-    /// Shared buffer for mid-turn monitor event notifications.
-    /// Pushed by the `InjectNotification` handler when a turn is active and the
-    /// notification has `Next` priority. Drained by the session turn loop
-    /// (`inject_pending_monitor_events`) into a hidden synthetic user message.
-    monitor_event_buffer: tools::implementations::grow_build::monitor::types::MonitorEventBuffer,
     /// The process launch directory, captured once at construction so the
     /// deferred launch-dir init paths share one source of truth instead of each
     /// re-calling `std::env::current_dir()` (which could drift if the process

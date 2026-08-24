@@ -52,12 +52,6 @@ pub struct PermissionEvent {
     /// Request-local child route: "ask" | "auto" | "always-approve".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_permission_mode: Option<RequestPermissionMode>,
-    /// Structured capability target for capability-grant events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability_target: Option<String>,
-    /// Child-provided task purpose for capability-grant events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability_purpose: Option<String>,
     /// The trigger that produced this decision, distinct from `prompt_outcome`
     /// (which records the user's choice when prompted). Lets a trace show *why*
     /// a request reached a prompt even when `user_prompted=true`. Values:
@@ -183,11 +177,11 @@ pub enum AccessKind {
         input: serde_json::Value,
     },
     WebFetch(String),
-    /// A subagent request to expose a capability that is already inside its
-    /// hard eligibility ceiling. The eventual tool call is authorized again.
-    CapabilityGrant {
-        target: String,
-        purpose: String,
+    /// Trusted Grow control-plane operation. Its RWX authorization is handled
+    /// by the call permit pipeline; it must never be mislabeled as a file read
+    /// merely to satisfy this reality-permission vocabulary.
+    InternalControl {
+        name: String,
     },
 }
 
@@ -364,8 +358,11 @@ pub enum PermissionCommand {
     /// dropping its event sender then lets the audit bridge reach EOF.
     Shutdown { respond_to: oneshot::Sender<()> },
 }
-impl From<&tools::types::ToolInput> for AccessKind {
-    fn from(input: &tools::types::ToolInput) -> Self {
+impl AccessKind {
+    /// Normalize a frozen typed call into the reality-permission vocabulary.
+    /// Exhaustive by construction: a new native input cannot silently become
+    /// a harmless read, and opaque dynamic calls retain their concrete target.
+    pub fn from_tool_call(tool_name: &str, input: &tools::types::ToolInput) -> Self {
         use tools::types::ToolInput;
         match input {
             ToolInput::ReadFile(r) => AccessKind::Read(Some(r.path.clone())),
@@ -374,11 +371,14 @@ impl From<&tools::types::ToolInput> for AccessKind {
                 path: g.path.clone(),
                 glob: g.glob.clone(),
             },
-            ToolInput::TodoWrite(_)
-            | ToolInput::TaskOutput(_)
-            | ToolInput::KillTask(_)
+            ToolInput::TaskOutput(_)
             | ToolInput::Skill(_)
-            | ToolInput::ContextRecall(_) => AccessKind::Read(None),
+            | ToolInput::Lsp(_)
+            | ToolInput::MemorySearch(_)
+            | ToolInput::MemoryGet(_)
+            | ToolInput::ContextRecall(_)
+            | ToolInput::GetGoal(_)
+            | ToolInput::SchedulerList(_) => AccessKind::Read(None),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
@@ -395,9 +395,23 @@ impl From<&tools::types::ToolInput> for AccessKind {
                 input: u.tool_input.clone(),
             },
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
-            ToolInput::Dynamic(_) => AccessKind::Read(None),
-            #[allow(unreachable_patterns)]
-            _ => AccessKind::Read(None),
+            ToolInput::Dynamic(input) => AccessKind::MCPTool {
+                name: tool_name.to_owned(),
+                input: input.clone(),
+            },
+            ToolInput::TodoWrite(_)
+            | ToolInput::KillTask(_)
+            | ToolInput::Task(_)
+            | ToolInput::SearchTool(_)
+            | ToolInput::PlanControl(_)
+            | ToolInput::AskUserQuestion(_)
+            | ToolInput::SchedulerCreate(_)
+            | ToolInput::SchedulerDelete(_)
+            | ToolInput::CreateGoal(_)
+            | ToolInput::UpdateGoal(_)
+            | ToolInput::Workflow(_) => AccessKind::InternalControl {
+                name: tool_name.to_owned(),
+            },
         }
     }
 }
@@ -533,8 +547,6 @@ mod tests {
         assert!(event.subagent_description.is_none());
         assert!(event.permission_mode.is_none());
         assert!(event.requested_permission_mode.is_none());
-        assert!(event.capability_target.is_none());
-        assert!(event.capability_purpose.is_none());
         assert!(event.decision_reason.is_none());
         assert!(event.classifier_source.is_none());
         assert!(event.classifier_latency_ms.is_none());
@@ -562,8 +574,6 @@ mod tests {
             subagent_description: Some("Find endpoints".into()),
             permission_mode: Some("ask".into()),
             requested_permission_mode: Some(RequestPermissionMode::Auto),
-            capability_target: None,
-            capability_purpose: None,
             decision_reason: Some("needs_user".into()),
             classifier_source: Some("llm".into()),
             classifier_verdict: Some("allow".into()),
@@ -614,8 +624,6 @@ mod tests {
             subagent_description: None,
             permission_mode: None,
             requested_permission_mode: None,
-            capability_target: None,
-            capability_purpose: None,
             decision_reason: None,
             classifier_source: None,
             classifier_verdict: None,
@@ -646,7 +654,7 @@ mod tests {
             file_path: "src/main.rs".into(),
             edits: vec![],
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::Edit(ref p) if p == "src/main.rs"),
             "HashlineEdit should produce AccessKind::Edit with the file path, got {access:?}"
@@ -662,7 +670,7 @@ mod tests {
             description: "run tests".into(),
             is_background: false,
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::Bash(ref cmd) if cmd == "cargo test"),
             "Bash should produce AccessKind::Bash with the command, got {access:?}"
@@ -676,7 +684,7 @@ mod tests {
             tool_name: "linear__save_issue".into(),
             tool_input: serde_json::json!({ "title" : "test" }),
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(
                 access,
@@ -696,7 +704,7 @@ mod tests {
             timeout_ms: None,
             persistent: false,
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::Bash(ref cmd) if cmd == "tail -f /var/log/syslog"),
             "Monitor runs shell and must map to AccessKind::Bash (not Read), got {access:?}"
@@ -712,7 +720,7 @@ mod tests {
             new_string: "new".into(),
             replace_all: false,
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::Edit(ref p) if p == "lib.rs"),
             "SearchReplace should produce AccessKind::Edit, got {access:?}"
@@ -725,7 +733,7 @@ mod tests {
         let input = ToolInput::WebFetch(WebFetchInput {
             url: "https://custom.example.com/api".into(),
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::WebFetch(ref u) if u == "https://custom.example.com/api"),
             "WebFetch should produce AccessKind::WebFetch with the URL, got {access:?}"
@@ -739,7 +747,7 @@ mod tests {
             file_path: "/tmp/secret.txt".into(),
             content: "overwritten".into(),
         });
-        let access = AccessKind::from(&input);
+        let access = AccessKind::from_tool_call("test", &input);
         assert!(
             matches!(access, AccessKind::Edit(ref p) if p == "/tmp/secret.txt"),
             "Write should produce AccessKind::Edit with the file path, got {access:?}"

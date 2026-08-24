@@ -560,8 +560,8 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             PatternMode::Domain => domain_matches(pattern, url),
             PatternMode::Glob => glob_matches(url, MatchContext::Freeform, cr.matcher),
         },
-        AccessKind::CapabilityGrant { target, .. } => {
-            glob_matches(target, MatchContext::Freeform, cr.matcher)
+        AccessKind::InternalControl { name } => {
+            glob_matches(name, MatchContext::Freeform, cr.matcher)
         }
     }
 }

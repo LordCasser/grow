@@ -32,7 +32,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tools::implementations::grow_build::monitor::types::MonitorEventBuffer;
 use tools::implementations::grow_build::task::coordinator::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, LocalBoxFuture, StartedChild,
     SubagentProgress,
@@ -216,7 +215,7 @@ pub(crate) struct SubagentSpawnContext {
     /// `--todo-gate`. Inherited from the parent session.
     pub todo_gate: bool,
     /// Remote settings snapshot from the parent session. Used to resolve
-    /// `ReminderPolicy.todo_gate` (CLI > remote > default) for the subagent.
+    /// Session TodoGate setting (CLI > remote > default) for the subagent.
     pub remote_settings: Option<crate::util::config::RemoteSettings>,
     /// Inherited `--laziness-debug-log <path>` from the parent session.
     /// Subagent classifier fires append to the same log file. `None`
@@ -251,17 +250,10 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     /// Parent's skills config for the child's SkillManager.
     pub parent_skills_config: agent::prompt::skills::SkillsConfig,
-    /// Shared completion reservations held by auto-wake prompts.
-    pub task_completion_reservations:
-        Option<tools::reminders::task_completion::TaskCompletionReservations>,
     /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
     pub task_output_tool_name: String,
-    /// Whether auto-wake is enabled. When `false`, subagent completions
-    /// are not injected as synthetic prompts.
-    pub auto_wake_enabled: bool,
-    /// Parent's live goal-loop gate (shared `Arc`). When set, the subagent
-    /// auto-wake synthetic prompt is suppressed so an async completion wake
-    /// doesn't derail the parent mid-`/goal`; surfaces 2/3 still drain it.
+    /// Parent's live Goal wait-race marker. The completion producer uses it
+    /// only to preserve results displaced by steering; Timeline owns delivery.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
 }
 impl SubagentSpawnContext {
@@ -429,9 +421,6 @@ impl ChildControl for ShellChildRuntime {
 }
 #[derive(Default)]
 pub(crate) struct ShellCompletionData {
-    auto_wake_enabled: bool,
-    task_completion_reservations:
-        Option<tools::reminders::task_completion::TaskCompletionReservations>,
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: String,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -443,8 +432,6 @@ pub(crate) struct ShellCompletionData {
 impl ShellCompletionData {
     fn from_context(ctx: &SubagentSpawnContext) -> Self {
         Self {
-            auto_wake_enabled: ctx.auto_wake_enabled,
-            task_completion_reservations: ctx.task_completion_reservations.clone(),
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
             task_output_tool_name: ctx.task_output_tool_name.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
@@ -506,14 +493,18 @@ pub(crate) fn present_child_completion(
     let goal_loop_active = completion_data
         .goal_loop_active
         .load(std::sync::atomic::Ordering::Relaxed);
-    if goal_loop_active && parent_channel_open {
-        // Goal's broad auto-wake gate must not discard a child that the main
-        // agent was explicitly waiting for before user steering displaced
-        // that wait. Do not gate this handoff on `should_surface`: completion
-        // can win the coordinator send just before steering drops the old
-        // receiver, making `waiter_delivered` true even though the model never
-        // observes that wait result. The actor tracker ignores unrelated ids
-        // and owns exactly-once delivery versus the racing foreground wait.
+    let steering_wait_may_own_completion = goal_loop_active
+        && disposition.backgrounded
+        && disposition.waiter_delivered
+        && request.surface_completion
+        && !result.cancelled
+        && !disposition.explicitly_killed;
+    if parent_channel_open && (disposition.should_surface || steering_wait_may_own_completion) {
+        // A Goal wait can be displaced after the coordinator successfully
+        // sends its result but before the wait future observes it. The actor's
+        // completion tracker resolves that race against this single durable
+        // receipt; ordinary background completions enter the same rail via
+        // `should_surface`.
         let summary =
             tools::implementations::grow_build::task::completion_summary(&request, &result);
         let body = tools::reminders::task_completion::format_subagent_completion(
@@ -521,23 +512,15 @@ pub(crate) fn present_child_completion(
             Some(&completion_data.task_output_tool_name),
         );
         if let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() {
-            let _ = cmd_tx.send(SessionCommand::DeferredCompletionAvailable {
-                source: crate::session::commands::NotificationSource::SubagentCompleted {
-                    task_id: request.id.clone(),
+            let _ = cmd_tx.send(SessionCommand::ReceiveNotification {
+                source: chat_state::NotificationSource::SubagentCompleted {
+                    subagent_id: request.id.clone(),
                 },
+                source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                 body,
             });
         }
     }
-    let should_wake = should_auto_wake_subagent(
-        disposition.backgrounded,
-        result.cancelled,
-        completion_data.auto_wake_enabled,
-        disposition.waiter_delivered,
-        disposition.explicitly_killed,
-        goal_loop_active,
-        parent_channel_open,
-    ) && disposition.should_surface;
     if completion_data.spawned_notification_emitted || request.run_in_background {
         emit_subagent_notification(
             gateway,
@@ -554,16 +537,6 @@ pub(crate) fn present_child_completion(
                 output: result.success.then(|| result.output.to_string()),
             },
             completion_data.parent_cmd_tx.as_ref(),
-        );
-    }
-    if should_wake {
-        inject_subagent_completed_prompt(
-            &request.id,
-            &result,
-            &request,
-            &completion_data.task_completion_reservations,
-            completion_data.parent_cmd_tx.as_ref(),
-            &completion_data.task_output_tool_name,
         );
     }
 }
@@ -858,8 +831,7 @@ fn seed_child_system_head(
     if verbatim_fork && !matches!(source, InitialContextSource::Forked) {
         return Err("verbatim child context is not a fork".to_string());
     }
-    let preserves_source_head =
-        matches!(source, InitialContextSource::Resumed) || verbatim_fork;
+    let preserves_source_head = matches!(source, InitialContextSource::Resumed) || verbatim_fork;
     if preserves_source_head {
         return matches!(conversation.first(), Some(ConversationItem::System(_)))
             .then_some(())
@@ -1194,8 +1166,7 @@ async fn bootstrap_initial_context(
         return match forked_initial_context_with_ref(materialized.surface, materialized.input_ref)
             .and_then(|context| {
                 freeze_initial_prompt_blobs(context, Some(parent_session.directory()))
-            })
-        {
+            }) {
             Ok(context) => BootstrapInitialContext::Ready(context),
             Err(error) => BootstrapInitialContext::Abort(error),
         };
@@ -1672,92 +1643,6 @@ fn cancellation_error_message(
         _ => "Subagent turn was cancelled".to_string(),
     }
 }
-/// Whether a completed subagent should trigger an auto-wake synthetic prompt.
-///
-/// Returns `true` only for background subagents with auto-wake enabled whose
-/// result has not already been consumed (via block-wait or explicit kill).
-/// Also suppressed while the parent's goal loop is active (mirrors the bash
-/// gate in `notification_bridge`); skipping the inject also skips the
-/// the completion reservation, leaving surfaces 2/3 free to drain it.
-/// `parent_channel_open` folds `inject_subagent_completed_prompt`'s own
-/// no-channel bail into the decision.
-///
-/// `cancelled` results never wake: a child dies cancelled because the user
-/// (or parent teardown) killed it — most acutely the Ctrl+C race where the
-/// shared coordinator's caller-gone reap (`background_if_caller_gone`)
-/// detaches a foreground child to background moments before the in-flight
-/// `SubagentEvent::Cancel` lands its token, which would otherwise wake the
-/// model right after the user stopped everything. The completion is still
-/// recorded, so reminder/drain surfaces can report it later.
-fn should_auto_wake_subagent(
-    run_in_background: bool,
-    cancelled: bool,
-    auto_wake_enabled: bool,
-    block_waited: bool,
-    explicitly_killed: bool,
-    goal_loop_active: bool,
-    parent_channel_open: bool,
-) -> bool {
-    run_in_background
-        && !cancelled
-        && auto_wake_enabled
-        && !block_waited
-        && !explicitly_killed
-        && !goal_loop_active
-        && parent_channel_open
-}
-/// Inject a synthetic prompt into the parent session for a completed background
-/// subagent, enabling auto-wake when the agent is idle.
-///
-/// Only called for background subagents when auto-wake is enabled
-/// and the result has not been consumed (via block-wait or explicit kill).
-fn inject_subagent_completed_prompt(
-    subagent_id: &str,
-    result: &SubagentResult,
-    request: &SubagentRequest,
-    task_completion_reservations: &Option<
-        tools::reminders::task_completion::TaskCompletionReservations,
-    >,
-    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-    task_output_tool_name: &str,
-) {
-    let Some(cmd_tx) = parent_cmd_tx else {
-        return;
-    };
-    if let Some(reservations) = task_completion_reservations {
-        reservations.reserve(subagent_id.to_string());
-    }
-    let summary = tools::implementations::grow_build::task::completion_summary(request, result);
-    let message = tools::reminders::task_completion::format_subagent_completion(
-        &summary,
-        Some(task_output_tool_name),
-    );
-    let wrapped = tools::reminders::wrap_reminder(&message);
-    let prompt_id = format!("subagent-completed-{subagent_id}");
-    let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
-    let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(wrapped))];
-    if cmd_tx
-        .send(SessionCommand::QueuePrompt {
-            prompt_id: prompt_id.clone(),
-            prompt_blocks,
-            origin: crate::session::PromptOrigin::SubagentCompleted {
-                subagent_id: subagent_id.to_string(),
-            },
-            turn_kind: crate::session::TurnKind::Internal,
-            client_identifier: None,
-            screen_mode: None,
-            verbatim: true,
-            json_schema: None,
-            admission: None,
-            respond_to,
-            persist_ack: None,
-        })
-        .is_err()
-        && let Some(reservations) = task_completion_reservations
-    {
-        reservations.release(subagent_id);
-    }
-}
 fn failure_result(request: &SubagentRequest, error: &str) -> SubagentResult {
     SubagentResult {
         success: false,
@@ -2125,8 +2010,7 @@ fn write_subagent_output(
         session,
         &relative,
         json.as_bytes(),
-    )
-    {
+    ) {
         tracing::warn!(error = %e, "failed to write subagent output");
         return Err(format!("failed to write subagent output: {e}"));
     }
@@ -2261,9 +2145,7 @@ fn finish_from_durable_facts(
     let output = result
         .output_ref
         .as_deref()
-        .map(|output_ref| {
-            load_subagent_output_ref_from_directory(opened.directory(), output_ref)
-        })
+        .map(|output_ref| load_subagent_output_ref_from_directory(opened.directory(), output_ref))
         .transpose()?;
     Ok(finish_from_terminal(terminal, output))
 }
@@ -2285,24 +2167,30 @@ pub(crate) async fn durable_child_operation(
         .ok_or_else(|| "cannot query parent Timeline".to_string())?;
     let timeline = chat_state::Timeline::from_events(events)
         .map_err(|error| format!("invalid parent Timeline: {error}"))?;
-    let Some((spawn_seq, spawn)) = timeline.events().iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
-            if spawn.subagent_id == subagent_id =>
-        {
-            Some((event.seq, spawn))
-        }
-        _ => None,
-    }) else {
+    let Some((spawn_seq, spawn)) =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) if spawn.subagent_id == subagent_id => Some((event.seq, spawn)),
+                _ => None,
+            })
+    else {
         return Ok(DurableChildOperation::Missing);
     };
-    let Some(terminal) = timeline.events().iter().find_map(|event| match &event.kind {
-        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal))
-            if terminal.subagent_id == subagent_id =>
-        {
-            Some(terminal)
-        }
-        _ => None,
-    }) else {
+    let Some(terminal) =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                    terminal,
+                )) if terminal.subagent_id == subagent_id => Some(terminal),
+                _ => None,
+            })
+    else {
         return Ok(DurableChildOperation::Open);
     };
 
@@ -2329,7 +2217,11 @@ pub(crate) async fn durable_child_operation(
                 load_subagent_output_ref_from_directory(child.directory(), output_ref)
             })
             .transpose()?;
-        (output.unwrap_or_default(), result.outcome, result.error.clone())
+        (
+            output.unwrap_or_default(),
+            result.outcome,
+            result.error.clone(),
+        )
     } else {
         if terminal.outcome == chat_state::SubagentOutcome::Completed {
             return Err("completed child terminal has no canonical result reference".into());
@@ -2375,9 +2267,7 @@ fn finish_from_durable_facts_in_directory(
     let output = result
         .output_ref
         .as_deref()
-        .map(|output_ref| {
-            load_subagent_output_ref_from_directory(child_directory, output_ref)
-        })
+        .map(|output_ref| load_subagent_output_ref_from_directory(child_directory, output_ref))
         .transpose()?;
     Ok(finish_from_terminal(terminal, output))
 }
@@ -2593,11 +2483,9 @@ async fn ensure_recovered_child_result_with_opened(
 > {
     validate_child_session_identity(opened, parent_timeline_id, spawn)
         .map_err(ChildResultRecoveryError::Invalid)?;
-    let events = opened
-        .timeline_events()
-        .map_err(|error| {
-            ChildResultRecoveryError::Invalid(format!("cannot read child Timeline: {error}"))
-        })?;
+    let events = opened.timeline_events().map_err(|error| {
+        ChildResultRecoveryError::Invalid(format!("cannot read child Timeline: {error}"))
+    })?;
     let mut timeline = chat_state::Timeline::from_events(events).map_err(|error| {
         ChildResultRecoveryError::Invalid(format!("invalid child Timeline: {error}"))
     })?;

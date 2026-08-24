@@ -26,10 +26,7 @@ pub(super) fn goal_view_from_snapshot(
 }
 
 impl SessionActor {
-    fn restore_goal_snapshot(
-        &self,
-        previous: Option<crate::session::goal_tracker::GoalState>,
-    ) {
+    fn restore_goal_snapshot(&self, previous: Option<crate::session::goal_tracker::GoalState>) {
         let mut tracker = self.goal_tracker.lock();
         match previous {
             Some(previous) => tracker.restore_runtime_snapshot(previous),
@@ -130,11 +127,8 @@ impl SessionActor {
         &self,
         reason: crate::session::goal_tracker::GoalPauseReason,
     ) {
-        self.auto_pause_goal_if_active_with_message(
-            reason,
-            reason.default_message().to_string(),
-        )
-        .await;
+        self.auto_pause_goal_if_active_with_message(reason, reason.default_message().to_string())
+            .await;
     }
 
     pub(crate) async fn auto_pause_goal_if_active_with_message(
@@ -144,11 +138,7 @@ impl SessionActor {
     ) -> bool {
         let used = self.goal_tokens_used();
         let previous = self.goal_tracker.lock().snapshot().cloned();
-        if !self
-            .goal_tracker
-            .lock()
-            .pause_with_message(reason, message)
-        {
+        if !self.goal_tracker.lock().pause_with_message(reason, message) {
             return false;
         }
         if let Some(previous) = previous
@@ -253,7 +243,8 @@ impl SessionActor {
         let Some(directive) = self.render_goal_continuation(tokens_used) else {
             return;
         };
-        self.start_goal_internal_turn(directive, completion_tx).await;
+        self.start_goal_internal_turn(directive, completion_tx)
+            .await;
     }
 
     async fn start_goal_internal_turn(
@@ -289,6 +280,7 @@ impl SessionActor {
             self.clone(),
             prompt_id.clone(),
             origin.clone(),
+            Vec::new(),
             crate::session::TurnKind::Internal,
             vec![acp::ContentBlock::Text(acp::TextContent::new(directive))],
             tool_types::BehaviorId::Goal,
@@ -310,9 +302,7 @@ impl SessionActor {
         self: &std::sync::Arc<Self>,
         command: tools::implementations::grow_build::update_goal::GoalCommand,
     ) {
-        use tools::implementations::grow_build::update_goal::{
-            GoalCommand, GoalUpdateStatus,
-        };
+        use tools::implementations::grow_build::update_goal::{GoalCommand, GoalUpdateStatus};
 
         match command {
             GoalCommand::Get { respond_to } => {
@@ -376,9 +366,8 @@ impl SessionActor {
                     if let Some(previous) = previous {
                         self.goal_tracker.lock().restore_runtime_snapshot(previous);
                     }
-                    let _ = respond_to.send(Err(format!(
-                        "Goal transition was not persisted: {error}"
-                    )));
+                    let _ =
+                        respond_to.send(Err(format!("Goal transition was not persisted: {error}")));
                     return;
                 }
                 if select_normal {

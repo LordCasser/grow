@@ -564,7 +564,6 @@ impl MvpAgent {
             subagent_presentation: RefCell::new(
                 crate::agent::subagent::SubagentPresentation::new(),
             ),
-            monitor_event_buffer: tools::implementations::grow_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace_ops: RefCell::new(None),
             session_live_state: RefCell::new(HashMap::new()),
@@ -1457,9 +1456,7 @@ impl MvpAgent {
         tool_ctx.is_turn_active = Some(
             self.subagent_presentation.borrow().turn_active_flag(),
         );
-        tool_ctx.monitor_event_buffer = Some(self.monitor_event_buffer.clone());
         tool_ctx.subagent_depth = 0;
-        tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
         let support_permission = self.cfg.borrow().features.support_permission;
         let diagnostics_enabled = true;
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());

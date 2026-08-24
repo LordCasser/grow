@@ -3,18 +3,16 @@ pub mod git;
 pub mod jj;
 pub(crate) mod swap_policy;
 pub mod tool_config;
-use crate::capability::CapabilityMode;
 use crate::config::{MemoryConfig, SessionContextFactory};
 use crate::file_system::{AsyncFsWrapper, LocalFs};
 use hunk_tracker::HunkTrackerHandle;
-use mcp::servers::McpState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tool_runtime::WorkspaceViewerContext;
 use tools::notification::types::{ToolNotification, ToolNotificationHandle};
-use tools::registry::types::{FinalizedToolset, ToolConfig, ToolServerConfig};
+use tools::registry::types::{FinalizedToolset, ToolServerConfig};
 /// Minimal result types for git error reporting (duplicated from shell session/result).
 pub mod result {
     use serde::Serialize;
@@ -47,9 +45,6 @@ pub struct WorkspaceSession {
     pub(crate) session_id: String,
     pub(crate) cwd: PathBuf,
     pub(crate) session_env: Arc<HashMap<String, String>>,
-    pub(crate) capability_mode: CapabilityMode,
-    pub(crate) depth: u32,
-    pub(crate) fork_budget: u32,
     pub(crate) hunk_tracker: HunkTrackerHandle,
     /// Cancel token for the workspace-spawned [`HunkTrackerActor`] backing
     /// [`Self::hunk_tracker`], fired on session teardown by
@@ -62,8 +57,6 @@ pub struct WorkspaceSession {
     inner: RwLock<WorkspaceSessionInner>,
     /// Per-session lock that serialises `update_tool_config` calls.
     pub(crate) update_lock: tokio::sync::Mutex<()>,
-    /// Per-session MCP state (owned clients, etc.).
-    pub(crate) mcp_state: Arc<tokio::sync::Mutex<McpState>>,
     /// Per-session feature-flag bag resolved at creation time, frozen for
     /// the session lifetime. `None` → tools use their safe defaults.
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
@@ -112,9 +105,6 @@ impl std::fmt::Debug for WorkspaceSession {
         f.debug_struct("WorkspaceSession")
             .field("session_id", &self.session_id)
             .field("cwd", &self.cwd)
-            .field("capability_mode", &self.capability_mode)
-            .field("depth", &self.depth)
-            .field("fork_budget", &self.fork_budget)
             .finish_non_exhaustive()
     }
 }
@@ -123,9 +113,6 @@ impl WorkspaceSession {
         session_id: String,
         cwd: PathBuf,
         session_env: Arc<HashMap<String, String>>,
-        capability_mode: CapabilityMode,
-        depth: u32,
-        fork_budget: u32,
         effective_tool_config: Arc<ToolServerConfig>,
         toolset: Arc<FinalizedToolset>,
         terminal_backend: crate::config::SessionTerminalBackend,
@@ -147,9 +134,6 @@ impl WorkspaceSession {
             session_id,
             cwd,
             session_env,
-            capability_mode,
-            depth,
-            fork_budget,
             hunk_tracker,
             hunk_tracker_cancel,
             async_fs,
@@ -161,7 +145,6 @@ impl WorkspaceSession {
             update_lock: tokio::sync::Mutex::new(()),
             tool_config_fingerprint: std::sync::Mutex::new(None),
             stale_resolve: std::sync::atomic::AtomicBool::new(false),
-            mcp_state: Arc::new(tokio::sync::Mutex::new(McpState::new(vec![]))),
             viewer_ctx,
             system_notifications,
             system_notify_handle,
@@ -219,15 +202,6 @@ impl WorkspaceSession {
     }
     pub fn session_env(&self) -> &Arc<HashMap<String, String>> {
         &self.session_env
-    }
-    pub fn capability_mode(&self) -> CapabilityMode {
-        self.capability_mode
-    }
-    pub fn depth(&self) -> u32 {
-        self.depth
-    }
-    pub fn fork_budget(&self) -> u32 {
-        self.fork_budget
     }
     pub fn hunk_tracker(&self) -> &HunkTrackerHandle {
         &self.hunk_tracker
@@ -401,7 +375,6 @@ pub struct WorkspaceShared {
     pub(crate) root_cwd: std::path::PathBuf,
     pub(crate) sessions: RwLock<HashMap<String, Arc<WorkspaceSession>>>,
     pub(crate) session_factory: Arc<dyn SessionContextFactory>,
-    pub(crate) mcp_tools_snapshot: arc_swap::ArcSwap<Vec<ToolConfig>>,
     pub(crate) events: tokio::sync::broadcast::Sender<workspace_types::WorkspaceEvent>,
     pub(crate) respect_gitignore: bool,
     pub(crate) memory_config: Option<MemoryConfig>,
@@ -460,9 +433,6 @@ impl WorkspaceShared {
     pub fn memory_config(&self) -> Option<&MemoryConfig> {
         self.memory_config.as_ref()
     }
-    pub fn mcp_tools_snapshot(&self) -> Arc<Vec<ToolConfig>> {
-        self.mcp_tools_snapshot.load_full()
-    }
     pub fn activity_tracker(&self) -> &std::sync::Arc<crate::activity::ActivityTracker> {
         &self.activity_tracker
     }
@@ -492,136 +462,5 @@ impl WorkspaceShared {
     /// the channel's `discover_plugins` method is called.
     pub fn plugin_discovery_config(&self) -> &crate::discovery::PluginDiscoveryConfig {
         &self.plugin_discovery_config
-    }
-    /// Re-resolve every session's toolset and emit `ToolsChanged` events.
-    ///
-    /// Shared implementation used by `on_mcp_snapshot_changed`,
-    /// `on_mcp_snapshot_changed`.
-    ///
-    /// When `use_async_lock` is true, uses `.lock().await` on each
-    /// session's `update_lock` (appropriate for spawned async tasks
-    /// where notifications must not be silently lost). When false,
-    /// uses `try_lock()` and skips sessions whose lock is held.
-    pub(crate) async fn re_resolve_all_sessions(
-        self: &Arc<Self>,
-        source: &str,
-        use_async_lock: bool,
-    ) -> usize {
-        use crate::session::swap_policy::{
-            SessionSnapshot, SwapAction, SwapDecision, SwapPolicy, SwapTrigger,
-            record_swap_decision,
-        };
-        let trigger = SwapTrigger::from_rebuild_source(source);
-        let mcp_snap = self.mcp_tools_snapshot.load_full();
-        let sessions: Vec<(String, Arc<WorkspaceSession>)> = {
-            let guard = self.sessions.read();
-            guard
-                .iter()
-                .map(|(id, s)| (id.clone(), s.clone()))
-                .collect()
-        };
-        let mut rebuilt = 0usize;
-        for (sid, session) in sessions {
-            let guard = if use_async_lock {
-                session.update_lock.lock().await
-            } else {
-                match session.update_lock.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        tracing::trace!(
-                            session = %sid,
-                            source = %source,
-                            "skipping rebuild: session update_lock held"
-                        );
-                        continue;
-                    }
-                }
-            };
-            let snapshot =
-                SessionSnapshot::capture_for_rebuild(&session, &self.activity_tracker).await;
-            match SwapPolicy::evaluate(&snapshot, trigger) {
-                SwapDecision::Apply => {}
-                SwapDecision::Skip(reason) => {
-                    record_swap_decision(
-                        &self.activity_tracker,
-                        trigger,
-                        &sid,
-                        SwapAction::Skipped(reason),
-                    );
-                    tracing::warn!(
-                        session = %sid,
-                        source = %source,
-                        "skipping rebuild: toolset terminal backend is externally \
-                         owned (local bind)"
-                    );
-                    drop(guard);
-                    continue;
-                }
-                decision @ (SwapDecision::Reuse | SwapDecision::Defer(_)) => {
-                    debug_assert!(
-                        false,
-                        "snapshot rebuild produced a non-rebuild decision: {decision:?}"
-                    );
-                    tracing::error!(
-                        session = %sid,
-                        source = %source,
-                        ?decision,
-                        "skipping rebuild: snapshot rebuild policy returned a \
-                         non-rebuild decision (policy regression)"
-                    );
-                    drop(guard);
-                    continue;
-                }
-            }
-            let baseline = (*session.effective_tool_config()).clone();
-            match crate::session::tool_config::resolve_session_toolset_rebuild(
-                baseline,
-                session.capability_mode(),
-                &mcp_snap,
-                session.cwd().to_path_buf(),
-                session.session_env().clone(),
-                &sid,
-                self.session_factory.as_ref(),
-                Some(self.local_registry.clone()),
-                self.lsp.clone(),
-                session.viewer_ctx().cloned(),
-                session.system_notify_handle(),
-                session.terminal_backend().clone(),
-            ) {
-                Ok((effective, toolset)) => {
-                    session
-                        .replace_carrying_browser_service(Arc::new(effective), toolset)
-                        .await;
-                    session.clear_stale_resolve();
-                    record_swap_decision(
-                        &self.activity_tracker,
-                        trigger,
-                        &sid,
-                        SwapAction::Applied,
-                    );
-                    let _ = self
-                        .events
-                        .send(workspace_types::WorkspaceEvent::ToolsChanged { session_id: sid });
-                    rebuilt += 1;
-                }
-                Err(e) => {
-                    session.mark_stale_resolve();
-                    record_swap_decision(
-                        &self.activity_tracker,
-                        trigger,
-                        &sid,
-                        SwapAction::ApplyFailed,
-                    );
-                    tracing::warn!(
-                        session = %sid,
-                        source = %source,
-                        error = %e,
-                        "snapshot rebuild failed for session"
-                    );
-                }
-            }
-            drop(guard);
-        }
-        rebuilt
     }
 }

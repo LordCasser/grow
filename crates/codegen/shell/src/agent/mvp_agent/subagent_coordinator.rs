@@ -157,8 +157,6 @@ impl MvpAgent {
                 "GROW_SUBAGENT_AWAIT_BUDGET_MS",
                 std::time::Duration::from_secs(600),
             ),
-            buffer_completions: true,
-            buffered_completion_output_cap: None,
         };
         tokio::task::spawn_local(
             tools::implementations::grow_build::task::coordinator::SubagentCoordinator::new(
@@ -427,12 +425,6 @@ impl MvpAgent {
             parent_mcp_pool: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
-            task_completion_reservations: {
-                let sessions = self.sessions.borrow();
-                sessions
-                    .get(&parent_sid)
-                    .and_then(|h| h.tool_context.task_completion_reservations.clone())
-            },
             task_output_tool_name: {
                 let sessions = self.sessions.borrow();
                 sessions
@@ -442,7 +434,6 @@ impl MvpAgent {
                         tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
                     })
             },
-            auto_wake_enabled: self.cfg.borrow().auto_wake_enabled,
             goal_loop_active: {
                 let sessions = self.sessions.borrow();
                 sessions

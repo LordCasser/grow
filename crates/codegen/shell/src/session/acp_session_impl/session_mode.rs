@@ -330,17 +330,17 @@ impl SessionActor {
         };
         let admitted = *self.turn_behavior.lock();
         if admitted == tool_types::BehaviorId::Workflow {
-            let workspace = crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
-                &self.session_directory,
-                std::path::Path::new(self.session_info.cwd.as_str()),
-            )
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "active Workflow workspace is unavailable: {error}"
-                ))
-            })
-            ?;
-            let context = workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()));
+            let workspace =
+                crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+                    &self.session_directory,
+                    std::path::Path::new(self.session_info.cwd.as_str()),
+                )
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("active Workflow workspace is unavailable: {error}"))
+                })?;
+            let context =
+                workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()));
             self.push_system_reminder_with_tag(&context, self.reminder_wrapper_tag());
             return Ok(());
         }

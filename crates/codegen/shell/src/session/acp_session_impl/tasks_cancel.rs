@@ -66,6 +66,7 @@ impl AgentTask {
         session: Arc<SessionActor>,
         prompt_id: String,
         origin: PromptOrigin,
+        notification_ids: Vec<String>,
         turn_kind: crate::session::TurnKind,
         input: Vec<ContentBlock>,
         admitted_behavior: tool_types::BehaviorId,
@@ -105,6 +106,7 @@ impl AgentTask {
                     json_schema,
                     pid,
                     origin,
+                    notification_ids,
                     turn_kind,
                     completion_tx,
                     persist_ack,
@@ -172,6 +174,7 @@ async fn run_task(
     json_schema: Option<serde_json::Value>,
     prompt_id: String,
     origin: PromptOrigin,
+    notification_ids: Vec<String>,
     turn_kind: crate::session::TurnKind,
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     persist_ack: Option<oneshot::Sender<()>>,
@@ -180,6 +183,7 @@ async fn run_task(
         .handle_prompt(
             &prompt_id,
             origin,
+            notification_ids,
             turn_kind,
             input,
             admitted_behavior,
@@ -282,9 +286,6 @@ impl SessionActor {
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();
         if suppress_task_wakes {
-            if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                gate.set(true);
-            }
             let mut state = self.state.try_lock().expect("session state is actor-owned");
             state.notifications_suppressed = true;
             ::diagnostics::unified_log::info(
@@ -292,11 +293,6 @@ impl SessionActor {
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
                     "ctrl_c": true,
-                    "gate": self
-                        .tool_context
-                        .task_wake_suppressed
-                        .as_ref()
-                        .is_some_and(|gate| gate.get()),
                     "state": state.notifications_suppressed,
                 })),
             );
@@ -405,26 +401,9 @@ impl SessionActor {
                 "current_prompt_id pin disagrees with running_task identity"
             );
 
-            // Drain MonitorEventBuffer into pending_notifications.
-            // Closes the race between abort() and TurnActiveGuard drop:
-            // is_turn_active may still be true, causing InjectNotification
-            // to route Next-priority events to the buffer instead of
-            // pending_notifications. Moving them here ensures they survive in
-            // the queue; Ctrl+C defers their drain, while other cancels do not.
-            self.sweep_monitor_buffer_into_pending(&mut state, "monitor-cancel-drain");
-
-            // When killing all background tasks, also clear their pending
-            // notifications — the monitors that produced them are now dead.
-            if kill_background_tasks {
-                state.clear_pending_notifications();
-            }
-
             let rewound_input = if rewind_if_pristine && state.rewindable {
                 if let Some(task) = state.foreground.take_regular() {
                     task.abort();
-                }
-                if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                    gate.set(false);
                 }
                 state.notifications_suppressed = false;
                 ::diagnostics::unified_log::info(
@@ -494,9 +473,6 @@ impl SessionActor {
                                 | super::PromptOrigin::WorkflowCompleted { .. }
                         )
                     {
-                        if let Some(fallback) = item.task_wake_fallback {
-                            Self::push_task_wake_fallback(&mut state, fallback);
-                        }
                         Self::respond_removed_prompt(item.respond_to);
                     } else {
                         kept.push_back(item);
@@ -582,7 +558,7 @@ impl SessionActor {
             .await;
         // Cancellation aborts the in-turn goal loop before its post-loop
         // cleanup runs, so clear the goal-loop flag here too.
-        self.set_goal_loop_active_resource(false).await;
+        self.set_goal_loop_active(false);
 
         self.events.cancel_active_tool();
         // A cancel is not complete until its turn terminal is durable. Pristine
@@ -743,11 +719,6 @@ impl SessionActor {
         for (idx, input) in pending_inputs.into_iter().enumerate() {
             // Running turn is idx 0; queued prompts never spent tokens.
             let is_running_turn = idx == 0;
-            if let Some(task_id) = input.origin.completion_id()
-                && let Some(reservations) = &self.tool_context.task_completion_reservations
-            {
-                reservations.release(task_id);
-            }
             let _ = input
                 .respond_to
                 .send(Ok(PromptTurnOk {

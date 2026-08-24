@@ -7,7 +7,6 @@
 )]
 //! Core workspace library: FS, VCS, permissions, tool config, and subsystem wiring.
 pub mod activity;
-pub mod capability;
 pub mod config;
 pub mod discovery;
 pub mod envrc;
@@ -28,10 +27,9 @@ pub mod trust;
 pub mod util;
 pub mod workspace_ops;
 pub mod worktree;
-pub use capability::CapabilityMode;
 pub use config::{
-    AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, IsolationMode,
-    MemoryConfig, SessionContextFactory, SessionTerminalBackend, WorkspaceConfig,
+    DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, MemoryConfig, SessionContextFactory,
+    SessionTerminalBackend, WorkspaceConfig,
 };
 pub use error::{WorkspaceError, WorkspaceResult};
 pub use file_system::*;

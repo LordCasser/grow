@@ -427,36 +427,6 @@
     }
 
     #[test]
-    fn capability_permission_displays_target_and_purpose() {
-        let request = acp::RequestPermissionRequest::new(
-            acp::SessionId::new("sess-child"),
-            acp::ToolCallUpdate::new(
-                acp::ToolCallId::new("call-capability"),
-                acp::ToolCallUpdateFields::new().kind(Some(acp::ToolKind::Other)),
-            ),
-            vec![],
-        )
-        .meta(
-            serde_json::json!({
-                "subagentCapabilityGrant": {
-                    "target": "native:execute",
-                    "purpose": "Run the focused parser regression tests"
-                }
-            })
-            .as_object()
-            .cloned(),
-        );
-
-        let (title, description, command) = build_permission_display(&request, None);
-        assert_eq!(title, "Grant subagent access to `native:execute`?");
-        assert_eq!(
-            description,
-            vec!["Purpose: Run the focused parser regression tests"]
-        );
-        assert!(command.is_none());
-    }
-
-    #[test]
     fn permission_for_unknown_session_id_is_cancelled() {
         // No agent owns the session and the active agent already has a
         // session_id (so the race-window fallback does not fire). The

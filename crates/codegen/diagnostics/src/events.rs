@@ -86,6 +86,7 @@ pub enum AccessKind {
     Grep,
     Mcp,
     Web,
+    Control,
 }
 
 #[derive(Serialize, Clone, Copy)]

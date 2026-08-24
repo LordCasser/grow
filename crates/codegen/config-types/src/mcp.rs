@@ -71,7 +71,7 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "env",
     "expose_image_base64",
     "headers",
-    "tool_scope",
+    "max_access",
     "setup",
     "startup_timeout_sec",
     "tool_timeout_sec",
@@ -170,11 +170,12 @@ pub struct McpServerConfig {
     pub transport: McpServerTransportConfig,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Declares the side-effect scope shared by every tool from this server.
-    /// The plan-mode gate permits only `read`; unknown/default is `write` so
-    /// unclassified MCP tools fail closed. MCP annotations are not consulted.
+    /// Declares the RWX ceiling shared by every tool from this trust domain.
+    /// Unknown/default is `all`; MCP annotations cannot weaken this ceiling.
+    /// A concrete call uses this mask as its required access until a trusted
+    /// server-specific projector exists.
     #[serde(default)]
-    pub tool_scope: tool_protocol::ToolScope,
+    pub max_access: tool_protocol::ToolAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<McpSetupConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -523,7 +524,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
             },
             enabled: true,
-            tool_scope: tool_protocol::ToolScope::Write,
+            max_access: tool_protocol::ToolAccess::All,
             setup: None,
             startup_timeout_sec: Some(10),
             tool_timeout_sec: Some(20),
@@ -538,7 +539,7 @@ mod tests {
                 headers: Some(HashMap::from([("H".into(), "v".into())])),
             },
             enabled: true,
-            tool_scope: tool_protocol::ToolScope::Write,
+            max_access: tool_protocol::ToolAccess::All,
             setup: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -581,20 +582,25 @@ mod tests {
     }
 
     #[test]
-    fn tool_scope_defaults_to_write_and_parses_explicit_values() {
+    fn max_access_defaults_to_all_and_parses_explicit_masks() {
         let plain: McpServerConfig =
             serde_json::from_value(serde_json::json!({ "command": "npx" })).unwrap();
-        assert_eq!(plain.tool_scope, tool_protocol::ToolScope::Write);
+        assert_eq!(plain.max_access, tool_protocol::ToolAccess::All);
 
-        let flagged: McpServerConfig =
-            serde_json::from_value(serde_json::json!({ "command": "npx", "tool_scope": "read" }))
-                .unwrap();
-        assert_eq!(flagged.tool_scope, tool_protocol::ToolScope::Read);
+        let flagged: McpServerConfig = serde_json::from_value(
+            serde_json::json!({ "command": "npx", "max_access": "read_write" }),
+        )
+        .unwrap();
+        assert_eq!(flagged.max_access, tool_protocol::ToolAccess::ReadWrite);
 
-        let explicit_false: McpServerConfig =
-            serde_json::from_value(serde_json::json!({ "command": "npx", "tool_scope": "write" }))
-                .unwrap();
-        assert_eq!(explicit_false.tool_scope, tool_protocol::ToolScope::Write);
+        let explicit_false: McpServerConfig = serde_json::from_value(
+            serde_json::json!({ "command": "npx", "max_access": "write_execute" }),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_false.max_access,
+            tool_protocol::ToolAccess::WriteExecute
+        );
     }
 
     #[test]
@@ -659,7 +665,7 @@ mod tests {
                 headers: None,
             },
             enabled: true,
-            tool_scope: tool_protocol::ToolScope::Write,
+            max_access: tool_protocol::ToolAccess::All,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -714,7 +720,7 @@ mod tests {
                 headers: None,
             },
             enabled: true,
-            tool_scope: tool_protocol::ToolScope::Write,
+            max_access: tool_protocol::ToolAccess::All,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,

@@ -101,7 +101,10 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
             };
             assert_eq!(result.tool_call_id, "read-image-1");
             assert_eq!(result.images.len(), 1);
-            assert_eq!(result.content.as_ref(), "Read image file: /workspace/image.png");
+            assert_eq!(
+                result.content.as_ref(),
+                "Read image file: /workspace/image.png"
+            );
 
             let request = actor
                 .chat_state_handle

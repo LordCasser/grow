@@ -1,13 +1,12 @@
 # `agent`
 
-Agent builder, definition parsing, and system prompt assembly.
+Agent definition parsing, typed role projection, and session-scoped tool assembly.
 
-This crate extracts a first-class `Agent` type from `shell`.
-An `Agent` bundles a prompt profile, tool policy, system-reminder policy,
-and compaction policy into a portable object that any host can consume.
-Model and permission selection are session concerns and are deliberately
-independent from Agent selection — whether that host is
-`shell`, another in-process host, or a headless batch runner.
+An `Agent` binds an `AgentDefinition` to its rendered role context and the
+current session's tool bridge. It is session-bound, not a portable runtime
+policy container. The session owns model/provider selection, permissions,
+reminder scheduling, compaction policy, and their lifecycle state; switching
+Agent changes only the role context and authored tool policy.
 
 ## Quick Start
 
@@ -19,13 +18,16 @@ load from `~/.grow/agents/`.
 
 ```rust
 use agent::{AgentDefinition, AgentBuilder};
+use std::sync::Arc;
+use tools::computer::local::{LocalTerminalBackend, SearchShadowConfig};
 use tools::notification::ToolNotificationHandle;
 
 // 1. Parse the definition file
 let def = AgentDefinition::from_file(".grow/agents/code-reviewer.md")?;
 
 // 2. Build the agent
-let agent = AgentBuilder::new(cwd, None, ToolNotificationHandle::noop())
+let terminal = Arc::new(LocalTerminalBackend::new_local(SearchShadowConfig::default()));
+let agent = AgentBuilder::new(cwd, terminal, ToolNotificationHandle::noop())
     .from_definition(def)
     .build()
     .await?;
@@ -39,7 +41,8 @@ let tool_defs = agent.tool_definitions().await;
 ### Programmatic (no file)
 
 ```rust
-let agent = AgentBuilder::new(cwd, None, ToolNotificationHandle::noop())
+let terminal = Arc::new(LocalTerminalBackend::new_local(SearchShadowConfig::default()));
+let agent = AgentBuilder::new(cwd, terminal, ToolNotificationHandle::noop())
     .with_name("my-agent")
     .with_description("A custom agent")
     .with_tools(vec!["read_file".into(), "grep".into()])

@@ -171,27 +171,14 @@ pub struct ToolContext {
     /// LSP server names snapshot from session creation (not updated mid-session).
     pub lsp_server_names: Vec<String>,
     /// Shared turn-active flag — set `true` at turn start, `false` at turn end.
-    /// Used by the between-turn completion drain in `handle_prompt`.
+    /// Used when durable monitor notifications are rendered into model input.
     pub is_turn_active: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) unattributed_background_usage: Arc<std::sync::atomic::AtomicBool>,
-    /// Shared buffer for mid-turn monitor event notifications.
-    /// Events pushed here are drained by the session turn loop
-    /// (`inject_pending_monitor_events`) and surfaced as ONE hidden
-    /// synthetic user message before the next sampling step.
-    pub monitor_event_buffer:
-        Option<tools::implementations::grow_build::monitor::types::MonitorEventBuffer>,
-    pub task_completion_reservations:
-        Option<tools::reminders::task_completion::TaskCompletionReservations>,
-    pub task_wake_suppressed: Option<tools::reminders::task_completion::TaskWakeSuppressed>,
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
-    /// Used by auto-wake to format completion messages with the correct tool name.
+    /// Used to format durable completion notifications with the correct tool name.
     pub task_output_tool_name: String,
-    /// Whether auto-wake is enabled. When `false`, background task and subagent
-    /// completions fall back to the idle-gated notification drain.
-    pub auto_wake_enabled: bool,
-    /// When set, bash + subagent auto-wake synthetic prompts are suppressed.
-    /// Shared `Arc` written at one chokepoint — see
-    /// `SessionActor::set_goal_loop_active_resource` for the rationale.
+    /// Shared Goal wait-race marker inherited by subagents. It does not own
+    /// notification admission; the session actor's durable inbox does.
     pub goal_loop_active_gate: Arc<std::sync::atomic::AtomicBool>,
     /// Count of interruptible blocking waits the running turn is parked in (via
     /// [`BlockingWaitGuard`]). `queue_input` reads it: a prompt arriving while
@@ -256,12 +243,8 @@ impl ToolContext {
             lsp_server_names: Vec::new(),
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            monitor_event_buffer: None,
-            task_completion_reservations: None,
-            task_wake_suppressed: None,
             task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
                 .to_string(),
-            auto_wake_enabled: true,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
@@ -295,12 +278,8 @@ impl ToolContext {
             lsp_server_names: Vec::new(),
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            monitor_event_buffer: None,
-            task_completion_reservations: None,
-            task_wake_suppressed: None,
             task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
                 .to_string(),
-            auto_wake_enabled: true,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
@@ -387,12 +366,8 @@ mod tests {
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                monitor_event_buffer: None,
-                task_completion_reservations: None,
-                task_wake_suppressed: None,
                 task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
                     .to_string(),
-                auto_wake_enabled: true,
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),
                 task_output_token_budget: None,

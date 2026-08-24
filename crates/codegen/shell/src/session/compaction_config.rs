@@ -134,6 +134,10 @@ pub struct CompactionConfig {
     /// holding `&mut self` on the actor. `SessionActor` is `!Send`, so
     /// `Cell` is sufficient (no atomic ordering needed).
     pub threshold_percent: Cell<u8>,
+    /// Whether a memory flush is launched before each eligible compaction.
+    pub memory_flush_enabled: bool,
+    /// Maximum wall-clock duration for one compaction generation.
+    pub wall_clock_budget_secs: u64,
     /// Debug: when set, next auto-compact check triggers unconditionally.
     pub force_compact: Arc<AtomicBool>,
     /// Auto-compaction suppression state (`SUPPRESS_*`) after a deterministic

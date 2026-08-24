@@ -8,12 +8,6 @@
 
 use super::*;
 
-#[derive(Debug, Clone)]
-pub(crate) struct DeferredCompletion {
-    pub(crate) task_id: String,
-    pub(crate) body: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryState {
     Awaiting,
@@ -24,7 +18,7 @@ enum DeliveryState {
 struct DeliveryEntry {
     owner_turn: Option<String>,
     state: DeliveryState,
-    ready: Option<(u64, String)>,
+    ready_sequence: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -36,9 +30,9 @@ struct DeliveryInner {
 
 /// Session-local, race-safe handoff between wait tools and completion sources.
 ///
-/// Completion sources may win the race with the wait wrapper.  Keeping the
-/// payload beside the wait state lets `defer_wait` expose an already-ready
-/// result, while `finish_wait` discards it when the original tool result won.
+/// Completion sources may win the race with the wait wrapper. Payloads stay
+/// solely in the durable notification inbox; this tracker owns only the
+/// ephemeral wait handoff.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct CompletionDeliveryTracker {
     inner: std::sync::Arc<parking_lot::Mutex<DeliveryInner>>,
@@ -52,7 +46,7 @@ impl CompletionDeliveryTracker {
             inner.entries.entry(id.clone()).or_insert(DeliveryEntry {
                 owner_turn: owner_turn.map(str::to_owned),
                 state: DeliveryState::Awaiting,
-                ready: None,
+                ready_sequence: None,
             });
         }
     }
@@ -86,10 +80,10 @@ impl CompletionDeliveryTracker {
             let entry = inner.entries.entry(id.clone()).or_insert(DeliveryEntry {
                 owner_turn: None,
                 state: DeliveryState::Awaiting,
-                ready: None,
+                ready_sequence: None,
             });
             entry.state = DeliveryState::DeferredBySteering;
-            newly_ready |= entry.ready.is_some();
+            newly_ready |= entry.ready_sequence.is_some();
         }
         if newly_ready {
             inner.generation = inner.generation.wrapping_add(1);
@@ -112,7 +106,7 @@ impl CompletionDeliveryTracker {
                 && entry.state == DeliveryState::Awaiting
         }) {
             entry.state = DeliveryState::DeferredBySteering;
-            newly_ready |= entry.ready.is_some();
+            newly_ready |= entry.ready_sequence.is_some();
         }
         if newly_ready {
             inner.generation = inner.generation.wrapping_add(1);
@@ -134,12 +128,12 @@ impl CompletionDeliveryTracker {
 
     /// Record a completion. Returns true only when it belongs to a wait that
     /// was explicitly deferred by steering and should wake the active turn.
-    pub(crate) fn complete(&self, task_id: String, body: String) -> bool {
+    pub(crate) fn complete(&self, task_id: String) -> bool {
         let mut inner = self.inner.lock();
         let Some(entry) = inner.entries.get(&task_id) else {
             return false;
         };
-        if entry.ready.is_some() {
+        if entry.ready_sequence.is_some() {
             return false;
         }
         let state = entry.state;
@@ -149,7 +143,7 @@ impl CompletionDeliveryTracker {
             .entries
             .get_mut(&task_id)
             .expect("entry was resolved above");
-        entry.ready = Some((sequence, body));
+        entry.ready_sequence = Some(sequence);
         if state == DeliveryState::DeferredBySteering {
             inner.generation = inner.generation.wrapping_add(1);
             drop(inner);
@@ -158,26 +152,6 @@ impl CompletionDeliveryTracker {
         } else {
             false
         }
-    }
-
-    /// Queue an internal Goal-stage completion that already owns asynchronous
-    /// delivery (there is no model tool call to pair). This shares ordering
-    /// and evaluator invalidation with steering-deferred task completions.
-    pub(crate) fn queue_ready(&self, task_id: String, body: String) {
-        let mut inner = self.inner.lock();
-        let sequence = inner.next_sequence;
-        inner.next_sequence = inner.next_sequence.wrapping_add(1);
-        inner.entries.insert(
-            task_id,
-            DeliveryEntry {
-                owner_turn: None,
-                state: DeliveryState::DeferredBySteering,
-                ready: Some((sequence, body)),
-            },
-        );
-        inner.generation = inner.generation.wrapping_add(1);
-        drop(inner);
-        self.changed.notify_waiters();
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -199,37 +173,26 @@ impl CompletionDeliveryTracker {
     }
 
     pub(crate) fn has_ready(&self) -> bool {
-        self.inner
-            .lock()
-            .entries
-            .values()
-            .any(|entry| entry.state == DeliveryState::DeferredBySteering && entry.ready.is_some())
+        self.inner.lock().entries.values().any(|entry| {
+            entry.state == DeliveryState::DeferredBySteering && entry.ready_sequence.is_some()
+        })
     }
 
-    /// Drain ready deferred results in completion order. Draining is the
-    /// delivery commit, so later output polling cannot surface them twice.
-    pub(crate) fn drain_ready(&self) -> Vec<DeferredCompletion> {
-        let mut inner = self.inner.lock();
-        let mut ready = Vec::new();
-        let ids = inner
+    /// Snapshot ready ids in completion order. The caller removes them only
+    /// after the Timeline consumption event commits.
+    pub(crate) fn ready_ids(&self) -> Vec<String> {
+        let inner = self.inner.lock();
+        let mut ids = inner
             .entries
             .iter()
             .filter_map(|(id, entry)| {
                 (entry.state == DeliveryState::DeferredBySteering)
-                    .then(|| entry.ready.as_ref().map(|(seq, _)| (*seq, id.clone())))
+                    .then(|| entry.ready_sequence.map(|sequence| (sequence, id.clone())))
                     .flatten()
             })
             .collect::<Vec<_>>();
-        let mut ids = ids;
         ids.sort_by_key(|(sequence, _)| *sequence);
-        for (_, id) in ids {
-            if let Some(entry) = inner.entries.remove(&id)
-                && let Some((_, body)) = entry.ready
-            {
-                ready.push(DeferredCompletion { task_id: id, body });
-            }
-        }
-        ready
+        ids.into_iter().map(|(_, id)| id).collect()
     }
 
     #[cfg(test)]
@@ -259,22 +222,107 @@ pub(super) fn wait_task_ids(args: &serde_json::Value) -> Vec<String> {
 }
 
 impl SessionActor {
-    /// Inject deferred completions as hidden system reminders. Returns true so
-    /// callers can force another model iteration before Goal evaluation.
+    /// Consume steering-deferred completion receipts into the current turn.
+    /// The Timeline fact both acknowledges the inbox and materializes the
+    /// exact synthetic input, so a crash cannot split those operations.
     pub(super) async fn drain_deferred_completions(&self) -> bool {
-        let completions = self.completion_delivery.drain_ready();
-        if completions.is_empty() {
+        let ids = self.completion_delivery.ready_ids();
+        if ids.is_empty() {
             return false;
         }
-        let ids = completions
-            .iter()
-            .map(|completion| completion.task_id.clone())
+        let Some(turn) = self.events.current_turn() else {
+            tracing::error!(task_ids = ?ids, "deferred completions became ready outside a turn");
+            return false;
+        };
+        let pending = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|notification| match &notification.source {
+                chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                    ids.contains(&task_id)
+                }
+                chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                    ids.contains(&subagent_id)
+                }
+                chat_state::NotificationSource::MonitorProgress { .. }
+                | chat_state::NotificationSource::TaskStillRunning { .. }
+                | chat_state::NotificationSource::WorkflowCompleted { .. } => false,
+            })
             .collect::<Vec<_>>();
-        for completion in completions {
-            self.push_system_reminder(&completion.body);
+        if pending.len() != ids.len() {
+            tracing::warn!(task_ids = ?ids, "deferred completion receipt is not yet visible");
+            return false;
         }
-        self.mark_completions_reported(&ids.iter().map(String::as_str).collect::<Vec<_>>())
-            .await;
+        let directory = match self.session_directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::error!(task_ids = ?ids, %error, "cannot open deferred completion inbox");
+                return false;
+            }
+        };
+        let payload_refs = ids
+            .iter()
+            .filter_map(|id| {
+                pending
+                    .iter()
+                    .find(|notification| match &notification.source {
+                        chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                            task_id == id
+                        }
+                        chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                            subagent_id == id
+                        }
+                        _ => false,
+                    })
+                    .map(|notification| notification.payload_ref.clone())
+            })
+            .collect::<Vec<_>>();
+        let bodies = match tokio::task::spawn_blocking(move || {
+            payload_refs
+                .iter()
+                .map(|payload| {
+                    crate::session::notification_inbox::read_payload(&directory, payload)
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .await
+        {
+            Ok(Ok(bodies)) => bodies,
+            Ok(Err(error)) => {
+                tracing::error!(task_ids = ?ids, %error, "deferred completion payload is missing or corrupt");
+                return false;
+            }
+            Err(error) => {
+                tracing::error!(task_ids = ?ids, %error, "deferred completion payload reader failed");
+                return false;
+            }
+        };
+        let notification_ids = pending
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<Vec<_>>();
+        let body = bodies.join("\n\n---\n\n");
+        let mut input = sampling_types::ConversationItem::notification_drain(body);
+        input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
+        if let Err(error) = self
+            .chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    notification_ids,
+                    turn,
+                    input: Some(input),
+                },
+            ))
+            .await
+        {
+            tracing::error!(task_ids = ?ids, %error, "failed to consume deferred completion receipts");
+            return false;
+        }
+        let consumed_ids = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.completion_delivery.consume(&consumed_ids);
         tracing::info!(task_ids = ?ids, "delivered steering-deferred completion(s) to main agent");
         true
     }
@@ -288,10 +336,11 @@ mod tests {
     fn ready_before_defer_is_not_lost() {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
-        assert!(!tracker.complete("a".into(), "done".into()));
+        assert!(!tracker.complete("a".into()));
         tracker.defer_wait(&["a".into()]);
         assert!(tracker.has_ready());
-        assert_eq!(tracker.drain_ready()[0].body, "done");
+        assert_eq!(tracker.ready_ids(), vec!["a"]);
+        tracker.consume(&["a"]);
         assert!(!tracker.contains("a"));
     }
 
@@ -299,9 +348,9 @@ mod tests {
     fn normal_wait_completion_is_not_delivered_twice() {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
-        assert!(!tracker.complete("a".into(), "done".into()));
+        assert!(!tracker.complete("a".into()));
         tracker.finish_wait(&["a".into()]);
-        assert!(tracker.drain_ready().is_empty());
+        assert!(tracker.ready_ids().is_empty());
     }
 
     #[test]
@@ -309,11 +358,9 @@ mod tests {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into(), "b".into()]);
         tracker.defer_wait(&["a".into(), "b".into()]);
-        assert!(tracker.complete("b".into(), "second task first".into()));
-        assert!(tracker.complete("a".into(), "first task second".into()));
-        let drained = tracker.drain_ready();
-        assert_eq!(drained[0].task_id, "b");
-        assert_eq!(drained[1].task_id, "a");
+        assert!(tracker.complete("b".into()));
+        assert!(tracker.complete("a".into()));
+        assert_eq!(tracker.ready_ids(), vec!["b", "a"]);
     }
 
     #[test]
@@ -321,9 +368,9 @@ mod tests {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.defer_wait(&["a".into()]);
-        assert!(tracker.complete("a".into(), "done".into()));
+        assert!(tracker.complete("a".into()));
         tracker.consume(&["a"]);
-        assert!(tracker.drain_ready().is_empty());
+        assert!(tracker.ready_ids().is_empty());
     }
 
     #[test]
@@ -331,11 +378,11 @@ mod tests {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.defer_wait(&["a".into()]);
-        assert!(tracker.complete("a".into(), "first".into()));
+        assert!(tracker.complete("a".into()));
         let generation = tracker.generation();
-        assert!(!tracker.complete("a".into(), "duplicate".into()));
+        assert!(!tracker.complete("a".into()));
         assert_eq!(tracker.generation(), generation);
-        assert_eq!(tracker.drain_ready()[0].body, "first");
+        assert_eq!(tracker.ready_ids(), vec!["a"]);
     }
 
     #[tokio::test]
@@ -347,7 +394,9 @@ mod tests {
             observer.wait_generation_change(generation).await;
         });
         tokio::task::yield_now().await;
-        tracker.queue_ready("goal-stage".into(), "done".into());
+        tracker.begin_wait(None, &["goal-stage".into()]);
+        tracker.defer_wait(&["goal-stage".into()]);
+        tracker.complete("goal-stage".into());
         waiter.await.unwrap();
     }
 
@@ -357,13 +406,11 @@ mod tests {
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.begin_wait(Some("turn-b"), &["b".into()]);
 
-        assert!(!tracker.complete("a".into(), "done-a".into()));
-        assert!(!tracker.complete("b".into(), "done-b".into()));
+        assert!(!tracker.complete("a".into()));
+        assert!(!tracker.complete("b".into()));
         tracker.defer_turn_waits("turn-a");
 
-        let drained = tracker.drain_ready();
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].task_id, "a");
+        assert_eq!(tracker.ready_ids(), vec!["a"]);
         assert!(tracker.contains("b"));
     }
 
@@ -372,7 +419,7 @@ mod tests {
         let tracker = CompletionDeliveryTracker::default();
         tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.consume_turn_waits("turn-a");
-        assert!(!tracker.complete("a".into(), "late".into()));
+        assert!(!tracker.complete("a".into()));
         assert!(!tracker.contains("a"));
     }
 }

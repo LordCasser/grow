@@ -173,6 +173,7 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
                 actor.handle_prompt(
                     "image-400-recovery",
                     crate::session::PromptOrigin::User,
+                    Vec::new(),
                     crate::session::TurnKind::User,
                     vec![
                         acp::ContentBlock::Text(acp::TextContent::new("describe this image")),
@@ -276,6 +277,7 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                 .handle_prompt(
                     "image-400-aux-recovery",
                     crate::session::PromptOrigin::User,
+                    Vec::new(),
                     crate::session::TurnKind::User,
                     vec![
                         acp::ContentBlock::Text(acp::TextContent::new("diagnose this screenshot")),
@@ -373,6 +375,7 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_while_original_images_remain() 
                 .handle_prompt(
                     "image-400-aux-400",
                     crate::session::PromptOrigin::User,
+                    Vec::new(),
                     crate::session::TurnKind::User,
                     vec![
                         acp::ContentBlock::Text(acp::TextContent::new("inspect")),

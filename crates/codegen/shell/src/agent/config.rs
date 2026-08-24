@@ -905,11 +905,6 @@ pub struct Config {
     /// session configuration for diagnostics.
     #[serde(default)]
     pub path_not_found_hints: bool,
-    /// Whether auto-wake is enabled: when a background task or subagent
-    /// completes, immediately inject a synthetic prompt instead of waiting
-    /// for the idle-gated notification drain.
-    #[serde(skip)]
-    pub auto_wake_enabled: bool,
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
@@ -1175,7 +1170,6 @@ impl Default for Config {
             cli_no_memory: false,
             cli_subagents: None,
             memory_config: None,
-            auto_wake_enabled: true,
             requirements: Requirements::default(),
             session_title_model: None,
             image_description_model: None,
@@ -1506,12 +1500,6 @@ impl Config {
         if let Some(v) = ctx.remote_settings.and_then(|s| s.path_not_found_hints) {
             self.path_not_found_hints = v;
         }
-        self.auto_wake_enabled = BoolFlag::env("GROW_AUTO_WAKE")
-            .config(self.features.auto_wake)
-            .feature_flag(ctx.remote_settings.and_then(|r| r.auto_wake_enabled))
-            .default(true)
-            .resolve()
-            .value;
     }
     /// Re-resolve eagerly-resolved runtime fields using the current `Config`
     /// state and fresh `raw_config`. Builds a [`RuntimeResolutionContext`] from
@@ -1551,7 +1539,7 @@ impl Config {
     /// Tunables have no env layer (TOML > remote > default) and are clamped
     /// to their documented ranges. Returns the composite runtime policy
     /// rather than `Resolved` because each knob resolves from its own
-    /// source (the `resolve_reminder_policy` pattern).
+    /// source (the `resolve_todo_gate_config` pattern).
     pub(crate) fn resolve_doom_loop_recovery(
         &self,
     ) -> Option<sampling_types::DoomLoopRecoveryPolicy> {
@@ -2468,11 +2456,6 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_rewind: Option<bool>,
-    /// Auto-wake: immediately inject a synthetic prompt when a background
-    /// task or subagent completes, instead of waiting for the idle drain.
-    /// `None` = defer to remote settings / env / default (true).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_wake: Option<bool>,
     /// Feed the summarizer the verbatim conversation instead of the lossy rewrite; `None` = defer to env/remote settings/default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_verbatim_input: Option<bool>,

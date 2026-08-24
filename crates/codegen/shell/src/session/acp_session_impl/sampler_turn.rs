@@ -292,10 +292,12 @@ impl SessionActor {
                 let Some(source) = materialized.surface_ids.get(group.item_index) else {
                     return true;
                 };
-                !active.and_then(|shadows| shadows.get(source)).is_some_and(|shadow| {
-                    shadow.fingerprint == group.fingerprint
-                        && shadow.image_count == group.image_count()
-                })
+                !active
+                    .and_then(|shadows| shadows.get(source))
+                    .is_some_and(|shadow| {
+                        shadow.fingerprint == group.fingerprint
+                            && shadow.image_count == group.image_count()
+                    })
             })
             .collect::<Vec<_>>();
         if groups.is_empty() {
@@ -408,7 +410,8 @@ impl SessionActor {
                     (String, chat_state::TimelineRangeRef),
                     crate::session::image_describe::DescribeError,
                 > = async {
-                    match tokio::time::timeout(timeout, client.conversation_collect(request)).await {
+                    match tokio::time::timeout(timeout, client.conversation_collect(request)).await
+                    {
                         Ok(Ok(response)) => {
                             let raw = response.assistant_text();
                             let description = raw.trim().to_owned();
@@ -454,7 +457,9 @@ impl SessionActor {
                                         record_error.to_string(),
                                     )
                                 })?;
-                            Err(crate::session::image_describe::DescribeError::Sampling(info))
+                            Err(crate::session::image_describe::DescribeError::Sampling(
+                                info,
+                            ))
                         }
                         Err(_) => {
                             sideband
@@ -471,7 +476,9 @@ impl SessionActor {
                                         error.to_string(),
                                     )
                                 })?;
-                            Err(crate::session::image_describe::DescribeError::Timeout(timeout))
+                            Err(crate::session::image_describe::DescribeError::Timeout(
+                                timeout,
+                            ))
                         }
                     }
                 }
@@ -610,22 +617,11 @@ impl SessionActor {
             self.register_shared_client_tools().await;
         }
         let bridge = self.agent.borrow().tool_bridge().clone();
-        if let Some(capabilities) = &self.subagent_capabilities {
-            if capabilities.activate_pending() {
-                self.push_system_reminder_with_tag(
-                    &capabilities.native_catalog_prompt(),
-                    crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
-                );
-            }
-        }
         let mut defs = bridge.tool_definitions_builtins_only().await;
-        if let Some(capabilities) = &self.subagent_capabilities {
-            defs.retain(|definition| {
-                bridge
-                    .tool_kind(&definition.function.name)
-                    .is_some_and(|kind| capabilities.allows_kind(kind))
-            });
-        }
+        // Child schemas remain stable. Eligibility and
+        // locked/forbidden status are enforced by exact identity at dispatch;
+        // hiding tools here would make visibility itself an authorization
+        // side-channel and invalidate provider KV caches after every grant.
         let delegated_goal_context = bridge
             .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
             .await
@@ -650,11 +646,15 @@ impl SessionActor {
             self.behavior.lock().behavior()
         };
         if tool_behavior == tool_types::BehaviorId::DeepResearch {
-            // Deep Research foreground turns answer follow-up questions while
-            // its private workflow runs, but they are as read-only as the
-            // workflow workers. Unknown/unclassified tools fail closed.
+            // Deep Research foreground keeps local observation tools plus the
+            // explicitly trusted web egress adapter. Remote requests carry W
+            // under Solaris emission semantics; treating WebFetch as a file
+            // mutation here would regress the behavior's actual purpose.
             defs.retain(|definition| {
-                bridge.tool_scope(&definition.function.name) == Some(tool_protocol::ToolScope::Read)
+                bridge.max_access(&definition.function.name)
+                    == Some(tool_protocol::ToolAccess::Read)
+                    || bridge.tool_kind(&definition.function.name)
+                        == Some(tools::types::tool::ToolKind::WebFetch)
             });
         }
         let live_behavior = self.behavior.lock().behavior();
@@ -895,7 +895,7 @@ impl SessionActor {
     /// Build the provider-valid, read-only authorization view used for a child
     /// permission judgment. Only genuine user-origin task turns cross the
     /// trust boundary; assistant/tool/synthetic content cannot authorize a
-    /// fence widening. The source chat state is never mutated or compacted.
+    /// exact locked-call judgment. The source chat state is never mutated or compacted.
     pub(super) async fn child_permission_judgment_items(
         &self,
         judgment: &workspace::permission::PermissionJudgmentRequest,
@@ -1162,17 +1162,23 @@ impl SessionActor {
                             .await
                             .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
                     let mut maximum_attempt_items = items.clone();
-                    maximum_attempt_items.push(ConversationItem::user(
-                        PERMISSION_JUDGMENT_RETRY_MESSAGE,
-                    ));
-                    let budget_policy = chat_state::SidebandBudgetPolicy {
-                        max_attempts: PERMISSION_JUDGMENT_MAX_ATTEMPTS as u32,
-                        max_input_tokens_per_attempt:
-                            chat_state::estimate_conversation_tokens(&maximum_attempt_items),
-                        max_output_tokens_per_attempt: Some(u64::from(
-                            PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS,
-                        )),
+                    maximum_attempt_items
+                        .push(ConversationItem::user(PERMISSION_JUDGMENT_RETRY_MESSAGE));
+                    let maximum_attempt_request = ConversationRequest {
+                        items: maximum_attempt_items,
+                        tools: vec![],
+                        tool_choice: None,
+                        model: Some(model.clone()),
+                        temperature: None,
+                        max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
+                        json_output: Some(json_output.clone()),
+                        reasoning_effort,
+                        ..ConversationRequest::default()
                     };
+                    let budget_policy = chat_state::SidebandBudgetPolicy::for_request(
+                        &maximum_attempt_request,
+                        PERMISSION_JUDGMENT_MAX_ATTEMPTS as u32,
+                    );
                     let mut sideband = session
                         .begin_sideband(
                             chat_state::SidebandPurpose::PermissionJudgment,
@@ -1436,9 +1442,7 @@ impl SessionActor {
     /// refreshed BYOK credentials. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(
-        &self,
-    ) -> sampling_types::ModelImageInputKey {
+    pub(crate) async fn prepare_sampler_for_turn(&self) -> sampling_types::ModelImageInputKey {
         self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1744,12 +1748,13 @@ impl SessionActor {
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         let _prompt_blob_export =
             crate::session::persistence::materialize_prompt_blob_refs_from_directory(
-            &mut request.items,
-            &self.session_directory,
-        )
-        .map_err(|error| {
-            acp::Error::internal_error().data(format!("failed to resolve prompt artifact: {error}"))
-        })?;
+                &mut request.items,
+                &self.session_directory,
+            )
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("failed to resolve prompt artifact: {error}"))
+            })?;
         let request_image_input_key = self.prepare_sampler_for_turn().await;
         let request_image_count = request.image_count();
         let stream_drained_rx = {

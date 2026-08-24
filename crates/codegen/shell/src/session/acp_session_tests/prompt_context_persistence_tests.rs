@@ -324,12 +324,9 @@ fn write_offload_and_build_wires_offload_and_fallback() {
     let bounded = build_truncated_prompt_message("", &query, "", fake_prompt_ref(), full.len());
 
     // Success path: real secure writer.
-    let message = write_offload_and_build(
-        &full,
-        bounded.clone(),
-        fake_prompt_ref(),
-        |bytes| crate::util::secure_file::write_secure_file(&file_path, bytes),
-    );
+    let message = write_offload_and_build(&full, bounded.clone(), fake_prompt_ref(), |bytes| {
+        crate::util::secure_file::write_secure_file(&file_path, bytes)
+    });
     assert_eq!(
         std::fs::read_to_string(&file_path).unwrap(),
         full,
@@ -349,12 +346,10 @@ fn write_offload_and_build_wires_offload_and_fallback() {
     // Failure path: erroring writer → bounded excerpt (NOT the oversized
     // original), no path, AND the file-referencing notice stripped so the model
     // is never told to read a file that was never written.
-    let fallback_msg = write_offload_and_build(
-        &full,
-        bounded.clone(),
-        fake_prompt_ref(),
-        |_bytes| Err(std::io::Error::other("simulated disk full")),
-    );
+    let fallback_msg =
+        write_offload_and_build(&full, bounded.clone(), fake_prompt_ref(), |_bytes| {
+            Err(std::io::Error::other("simulated disk full"))
+        });
     assert_ne!(
         fallback_msg, bounded,
         "write failure must rewrite the notice, not return it verbatim"

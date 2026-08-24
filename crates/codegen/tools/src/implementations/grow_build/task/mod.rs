@@ -101,7 +101,10 @@ impl tool_runtime::Tool for TaskTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
+            // Task delegates to a separately-authorized child actor. The
+            // exact Task identity and depth policy authorize delegation; the
+            // child's own Gate authorizes every reality-facing operation.
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }
@@ -482,8 +485,8 @@ impl tool_runtime::Tool for TaskTool {
         if result.success {
             Ok(ToolOutput::SubagentCompleted(SubagentCompletedOutput {
                 // SubagentCompletedOutput.output is `String` (serde-visible
-                // boundary). One allocation per completion; cheaper paths
-                // (pending_completions / snapshot) keep the Arc<str>.
+                // boundary). One allocation per foreground completion;
+                // snapshots and durable-notification rendering keep Arc<str>.
                 output: result.output.to_string(),
                 subagent_id: result.subagent_id,
                 subagent_type: input.subagent_type,
@@ -728,7 +731,9 @@ mod tests {
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
-        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal("goal-123")));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
+            "goal-123",
+        )));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
                 goal_view(),
@@ -805,7 +810,9 @@ mod tests {
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
-        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal("other-goal")));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
+            "other-goal",
+        )));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
                 goal_view(),
@@ -1487,108 +1494,6 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(mode).unwrap(), expected, "{mode:?}");
         }
-    }
-
-    // -- Capability mode enforcement tests --
-
-    fn tc(id: &str, kind: crate::types::tool::ToolKind) -> crate::registry::types::ToolConfig {
-        let mut c = crate::registry::types::ToolConfig::from_id(id);
-        c.kind = Some(kind);
-        c
-    }
-
-    #[test]
-    fn filter_read_only_removes_edit_and_execute() {
-        use crate::registry::types::ToolServerConfig;
-        use crate::types::tool::ToolKind;
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("read_file", ToolKind::Read),
-                tc("grep", ToolKind::Search),
-                tc("list_dir", ToolKind::List),
-                tc("search_replace", ToolKind::Edit),
-                tc("bash", ToolKind::Execute),
-                tc("task", ToolKind::Task),
-            ],
-        };
-        SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
-        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"read_file"));
-        assert!(ids.contains(&"grep"));
-        assert!(ids.contains(&"list_dir"));
-        assert!(ids.contains(&"task"));
-        assert!(!ids.contains(&"search_replace"), "edit should be removed");
-        assert!(!ids.contains(&"bash"), "execute should be removed");
-    }
-
-    #[test]
-    fn filter_read_write_keeps_edit_removes_execute() {
-        use crate::registry::types::ToolServerConfig;
-        use crate::types::tool::ToolKind;
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("read_file", ToolKind::Read),
-                tc("search_replace", ToolKind::Edit),
-                tc("bash", ToolKind::Execute),
-            ],
-        };
-        SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
-        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"read_file"));
-        assert!(ids.contains(&"search_replace"), "edit should be kept");
-        assert!(!ids.contains(&"bash"), "execute should be removed");
-    }
-
-    #[test]
-    fn filter_execute_keeps_bash_removes_edit() {
-        use crate::registry::types::ToolServerConfig;
-        use crate::types::tool::ToolKind;
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("read_file", ToolKind::Read),
-                tc("search_replace", ToolKind::Edit),
-                tc("bash", ToolKind::Execute),
-            ],
-        };
-        SubagentCapabilityMode::Execute.filter_tool_config(&mut config);
-        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"read_file"));
-        assert!(ids.contains(&"bash"), "execute should be kept");
-        assert!(!ids.contains(&"search_replace"), "edit should be removed");
-    }
-
-    #[test]
-    fn filter_all_keeps_everything() {
-        use crate::registry::types::ToolServerConfig;
-        use crate::types::tool::ToolKind;
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("read_file", ToolKind::Read),
-                tc("search_replace", ToolKind::Edit),
-                tc("bash", ToolKind::Execute),
-            ],
-        };
-        SubagentCapabilityMode::All.filter_tool_config(&mut config);
-        assert_eq!(config.tools.len(), 3);
-    }
-
-    #[test]
-    fn restricted_filter_rejects_tools_without_a_capability_kind() {
-        use crate::registry::types::ToolServerConfig;
-        use crate::types::tool::ToolKind;
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("read_file", ToolKind::Read),
-                crate::registry::types::ToolConfig::from_id("mcp_custom_tool"),
-            ],
-        };
-        SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
-        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"read_file"));
-        assert!(
-            !ids.contains(&"mcp_custom_tool"),
-            "restricted Agents must fail closed for unclassified tools"
-        );
     }
 
     // ── resume_from tests ────────────────────────────────────────────

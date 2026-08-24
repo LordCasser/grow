@@ -1,116 +1,39 @@
-//! Idle-gated pending-notification buffering and drain for `SessionActor`,
-//! plus auto-start of queued prompts (`maybe_start_running_task`).
+//! Timeline-backed notification admission and queued-prompt promotion.
 
 use super::*;
 
-/// Maximum number of pending notifications before oldest are dropped.
-pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
-
-/// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
-pub(crate) struct PendingNotification {
-    #[expect(
-        dead_code,
-        reason = "Retained for debugging / future per-notification tracing."
-    )]
-    pub(crate) prompt_id: String,
-    pub(crate) prompt_blocks: Vec<acp::ContentBlock>,
-    pub(crate) priority: NotificationPriority,
-    pub(crate) source: NotificationSource,
-}
-
 impl SessionActor {
-    pub(super) fn push_pending_notification(state: &mut State, notification: PendingNotification) {
-        state.pending_notifications.push(notification);
-        let excess = state
-            .pending_notifications
-            .len()
-            .saturating_sub(MAX_PENDING_NOTIFICATIONS);
-        if excess > 0 {
-            state.pending_notifications.drain(..excess);
-            tracing::warn!(
-                dropped = excess,
-                "Dropped oldest pending notifications (exceeded cap of {})",
-                MAX_PENDING_NOTIFICATIONS,
-            );
-        }
-    }
-
-    pub(super) fn push_task_wake_fallback(state: &mut State, fallback: TaskWakeFallback) {
-        Self::push_pending_notification(
-            state,
-            PendingNotification {
-                prompt_id: fallback.prompt_id,
-                prompt_blocks: fallback.prompt_blocks,
-                priority: NotificationPriority::Later,
-                source: fallback.source,
-            },
-        );
-    }
-
-    pub(super) async fn consume_deferred_completions(&self) -> Vec<String> {
-        let mut state = self.state.lock().await;
-        self.sweep_monitor_buffer_into_pending(&mut state, "monitor-user-start-drain");
-        let mut completion_ids: Vec<String> = state
-            .pending_notifications
-            .iter()
-            .filter_map(|notification| match &notification.source {
-                NotificationSource::BashTaskCompleted { task_id }
-                | NotificationSource::MonitorCompleted { task_id }
-                | NotificationSource::SubagentCompleted { task_id } => Some(task_id.clone()),
-                NotificationSource::MonitorEvent { .. } => None,
-            })
-            .collect();
-        completion_ids.sort();
-        completion_ids.dedup();
-        let deferred_ids: std::collections::HashSet<&str> =
-            completion_ids.iter().map(String::as_str).collect();
-
-        let notifications = std::mem::take(&mut state.pending_notifications);
-        let mut deferred = Vec::new();
-        let mut retained = Vec::new();
-        for notification in notifications {
-            let consume = match &notification.source {
-                NotificationSource::BashTaskCompleted { .. }
-                | NotificationSource::MonitorCompleted { .. }
-                | NotificationSource::SubagentCompleted { .. } => true,
-                NotificationSource::MonitorEvent { task_id } => {
-                    deferred_ids.contains(task_id.as_str())
-                }
-            };
-            if consume {
-                deferred.push(notification);
-            } else {
-                retained.push(notification);
-            }
-        }
-        state.pending_notifications = retained;
-
-        let completion_blocks =
-            Self::notification_blocks(&deferred, &self.tool_context.task_output_tool_name);
-        drop(state);
-
-        let completion_text = completion_blocks
-            .into_iter()
-            .filter_map(|block| match block {
-                acp::ContentBlock::Text(text) => Some(text.text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !completion_text.is_empty() {
-            self.push_system_reminder(&completion_text);
-        }
-        let completion_id_refs: Vec<&str> = completion_ids.iter().map(String::as_str).collect();
-        self.mark_completions_reported(&completion_id_refs).await;
-        completion_ids
-    }
-
-    pub(super) async fn consume_deferred_completions_for_user_turn(&self) {
-        let consumed = self.consume_deferred_completions().await;
-        if let Some(reservations) = &self.tool_context.task_completion_reservations {
-            for task_id in consumed {
-                reservations.release(&task_id);
-            }
+    pub(super) async fn receive_notification(
+        &self,
+        source: chat_state::NotificationSource,
+        source_version: chat_state::NotificationSourceVersion,
+        body: String,
+    ) -> Result<String, String> {
+        let directory = self
+            .session_directory
+            .try_clone()
+            .map_err(|error| error.to_string())?;
+        let payload_ref = tokio::task::spawn_blocking(move || {
+            crate::session::notification_inbox::write_payload(&directory, &body)
+        })
+        .await
+        .map_err(|error| format!("notification payload writer failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let event = self
+            .chat_state_handle
+            .receive_notification_durably(
+                self.session_info.id.0.to_string(),
+                source,
+                source_version,
+                payload_ref,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        match event.kind {
+            chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Received { id, .. },
+            ) => Ok(id),
+            _ => Err("notification receipt returned an unrelated Timeline fact".into()),
         }
     }
 
@@ -166,11 +89,6 @@ impl SessionActor {
                 .combine_queued_prompts
                 .unwrap_or(false);
 
-        // Resolve the workflow tracker before taking the foreground lock. A
-        // stale workflow-completion item may need this projection, but turn
-        // admission must never hold `state` across an async dependency lookup.
-        let workflow_tracker = self.workflow_tracker().await;
-
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if !state.foreground.is_idle() || state.pending_inputs.is_empty() {
@@ -179,34 +97,6 @@ impl SessionActor {
 
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to check for queued auto-compact here.
-
-        // Drop stale workflow-completion synthetic fronts (already reported).
-        loop {
-            let stale = match state.pending_inputs.front().map(|item| &item.origin) {
-                Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
-                    match completion_id
-                        .rsplit_once('-')
-                        .and_then(|(run_id, revision)| {
-                            revision
-                                .parse::<u64>()
-                                .ok()
-                                .map(|revision| (run_id, revision))
-                        }) {
-                        Some((run_id, revision)) => !workflow_tracker
-                            .lock()
-                            .is_unreported_completion(run_id, revision),
-                        None => true,
-                    }
-                }
-                _ => false,
-            };
-            if !stale {
-                break;
-            }
-            if let Some(item) = state.pending_inputs.pop_front() {
-                Self::respond_removed_prompt(item.respond_to);
-            }
-        }
 
         // GC stale edit-holds: an id that is no longer queued (promoted,
         // removed, or whose fire-and-forget `release_edit` was dropped) can
@@ -238,6 +128,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
+            notification_ids,
             turn_kind,
             running_display,
         ) = {
@@ -254,14 +145,12 @@ impl SessionActor {
                 front.verbatim,
                 front.json_schema.clone(),
                 front.origin.clone(),
+                front.notification_ids.clone(),
                 front.turn_kind,
                 running_display,
             )
         };
         if matches!(origin, super::PromptOrigin::User) {
-            if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                gate.set(false);
-            }
             state.notifications_suppressed = false;
             ::diagnostics::unified_log::info(
                 "shell.task_wake.gate_cleared",
@@ -299,6 +188,7 @@ impl SessionActor {
             self.clone(),
             prompt_id.clone(),
             origin.clone(),
+            notification_ids,
             turn_kind,
             prompt_blocks,
             admitted_behavior,
@@ -319,76 +209,197 @@ impl SessionActor {
         let _ = start_tx.send(());
     }
 
-    /// Drain pending notifications into a single batched turn, if idle and not suppressed.
-    ///
-    /// Guards:
-    /// - No turn is running (`running_task` is `None`)
-    /// - No user prompts are pending (user prompts always take priority)
-    /// - Notifications are NOT suppressed (cleared on next user prompt)
-    ///
-    /// All notifications are taken and merged into a single `InputItem` with
-    /// `---` separators between content blocks. The take+push happens in a
-    /// single lock acquisition to avoid interleaving.
+    /// Consume pending receipts into the active turn at the next safe sampling
+    /// boundary. A completion that arrives while
+    /// the Agent is already working augments that turn instead of scheduling a
+    /// redundant follow-up turn.
+    pub(super) async fn drain_active_notifications(&self) -> bool {
+        self.drain_active_notifications_excluding(&[]).await
+    }
+
+    /// Consume pending receipts except those already admitted as the primary
+    /// input of this turn. This lets resume context keep its historical
+    /// position before the user's first input without double-consuming the
+    /// completion receipt that opened an autonomous turn.
+    pub(super) async fn drain_active_notifications_excluding(
+        &self,
+        excluded_notification_ids: &[String],
+    ) -> bool {
+        let Some(turn) = self.events.current_turn() else {
+            return false;
+        };
+        let notifications = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|notification| !excluded_notification_ids.contains(&notification.id))
+            .collect::<Vec<_>>();
+        if notifications.is_empty() {
+            return false;
+        }
+        let notification_ids = notifications
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<Vec<_>>();
+        let displayed_notifications = Self::coalesce_running_task_checkpoints(&notifications);
+        let Some(payloads) = self
+            .read_notification_payloads(&displayed_notifications, "active turn")
+            .await
+        else {
+            return false;
+        };
+        let blocks = Self::notification_blocks(
+            &displayed_notifications,
+            &payloads,
+            Some(&self.tool_context.task_output_tool_name),
+        );
+        let body = blocks
+            .into_iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if body.is_empty() {
+            return false;
+        }
+        let mut input = sampling_types::ConversationItem::notification_drain(body);
+        input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
+        if let Err(error) = self
+            .chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    notification_ids,
+                    turn,
+                    input: Some(input),
+                },
+            ))
+            .await
+        {
+            tracing::error!(%error, "failed to consume active notifications");
+            return false;
+        }
+        tracing::info!(
+            count = notifications.len(),
+            "delivered durable notifications to the active turn"
+        );
+        true
+    }
+
+    /// Promote the durable inbox into one model turn. User FIFO admission is
+    /// checked both before and after artifact I/O; losing either race leaves
+    /// the Timeline receipts pending for the next idle edge.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        let drained_task_ids: Vec<String>;
-
-        let drained = {
-            let mut state = self.state.lock().await;
-
-            // Shared idle predicate — same conditions Layer 3 uses via
-            // `is_session_idle_for_injection`. Inlined here so the
-            // `mut state` borrow can survive into the take/push below.
+        {
+            let state = self.state.lock().await;
             if !is_session_idle_for_injection(&state) {
                 return;
             }
+        }
 
-            // Backstop sweep for events that hit the buffer after the
-            // turn-end drain (the is_turn_active flag can lag the actual
-            // turn teardown). Normally a no-op.
-            self.sweep_monitor_buffer_into_pending(&mut state, "monitor-idle-drain");
+        let mut notifications = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default();
+        if notifications.is_empty() {
+            return;
+        }
+        notifications.sort_by_key(|notification| {
+            let priority = match notification.source {
+                chat_state::NotificationSource::MonitorProgress { .. } => 1u8,
+                chat_state::NotificationSource::TaskStillRunning { .. } => 2u8,
+                chat_state::NotificationSource::TaskCompleted { .. }
+                | chat_state::NotificationSource::SubagentCompleted { .. }
+                | chat_state::NotificationSource::WorkflowCompleted { .. } => 0u8,
+            };
+            (priority, notification.received_seq)
+        });
 
-            // Nothing to drain
-            if state.pending_notifications.is_empty() {
+        let goal_task_ids = self.goal_turn_task_ids.lock().clone();
+        let (dismissed, surfaceable): (Vec<_>, Vec<_>) = notifications
+            .into_iter()
+            .partition(|notification| Self::goal_owned_autostart(&goal_task_ids, notification));
+        if !dismissed.is_empty() {
+            let notification_ids = dismissed
+                .iter()
+                .map(|notification| notification.id.clone())
+                .collect::<Vec<_>>();
+            if let Err(error) = self
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                    chat_state::NotificationEvent::Dismissed {
+                        notification_ids,
+                        reason: chat_state::NotificationDismissReason::GoalOwnedAutostart,
+                    },
+                ))
+                .await
+            {
+                tracing::error!(%error, "failed to dismiss Goal-owned notification autostart");
                 return;
             }
-
-            // Take all notifications and build merged blocks inside the lock
-            let notifications = std::mem::take(&mut state.pending_notifications);
-
-            drained_task_ids = notifications
-                .iter()
-                .map(|n| n.source.task_id().to_string())
-                .collect();
-
-            let (to_surface, dropped) = {
-                let goal_turn_task_ids = self.goal_turn_task_ids.lock();
-                Self::split_goal_suppressed(&goal_turn_task_ids, notifications)
-            };
-            if dropped > 0 {
-                tracing::info!(dropped, "dropping notifications owned by Goal turns");
-            }
-
-            if to_surface.is_empty() {
-                false
-            } else {
-                Self::drain_notifications_into_turn(
-                    &mut state,
-                    to_surface,
-                    &self.tool_context.task_output_tool_name,
-                )
-            }
-        };
-        // Mark reported whether dropped or surfaced, so the per-tool-call
-        // `TaskCompletionReminder` won't resurface the same completions.
-        let ids: Vec<&str> = drained_task_ids.iter().map(String::as_str).collect();
-        self.mark_completions_reported(&ids).await;
-
-        if drained {
-            SessionActor::maybe_start_running_task(self, completion_tx).await;
+            tracing::info!(
+                count = dismissed.len(),
+                "dismissed autonomous wake for Goal-owned background work"
+            );
         }
+        notifications = surfaceable;
+        if notifications.is_empty() {
+            return;
+        }
+        // Resume checkpoints are context for the next real turn, not a reason
+        // to spend a model turn. If a terminal receipt is also present, fold
+        // the checkpoint context into that already-necessary turn.
+        if !notifications.iter().any(Self::notification_autostarts) {
+            return;
+        }
+
+        let notification_ids = notifications
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<Vec<_>>();
+        let displayed_notifications = Self::coalesce_running_task_checkpoints(&notifications);
+        let Some(payloads) = self
+            .read_notification_payloads(&displayed_notifications, "idle drain")
+            .await
+        else {
+            return;
+        };
+
+        let prompt_blocks = Self::notification_blocks(&displayed_notifications, &payloads, None);
+        if prompt_blocks.is_empty() {
+            return;
+        }
+        let (origin, turn_kind) = Self::notification_turn_identity(&notifications);
+        let (respond_to, _) = tokio::sync::oneshot::channel();
+        {
+            let mut state = self.state.lock().await;
+            if !is_session_idle_for_injection(&state) {
+                return;
+            }
+            state.pending_inputs.push_back(InputItem {
+                prompt_id: format!("notifications-{}", uuid::Uuid::now_v7()),
+                turn_kind,
+                prompt_blocks,
+                client_identifier: None,
+                screen_mode: None,
+                verbatim: true,
+                json_schema: None,
+                origin,
+                notification_ids,
+                respond_to,
+                persist_ack: None,
+                queue_meta: None,
+            });
+        }
+
+        SessionActor::maybe_start_running_task(self, completion_tx).await;
     }
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
@@ -405,109 +416,122 @@ impl SessionActor {
         }
     }
 
-    /// Sweep this session's buffered monitor events (`drain_owned`) into
-    /// `pending_notifications`. Used where the turn loop can no longer
-    /// drain the buffer: turn end (`drain_monitor_buffer_to_pending`),
-    /// turn cancel, and the idle drain (all three race the
-    /// `is_turn_active`-gated buffer push in `InjectNotification`).
-    pub(super) fn sweep_monitor_buffer_into_pending(
+    async fn read_notification_payloads(
         &self,
-        state: &mut State,
-        prompt_id_prefix: &str,
-    ) {
-        let Some(buffer) = &self.tool_context.monitor_event_buffer else {
-            return;
+        notifications: &[chat_state::PendingNotification],
+        operation: &'static str,
+    ) -> Option<Vec<String>> {
+        let directory = match self.session_directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::error!(%error, operation, "cannot open durable notification inbox");
+                return None;
+            }
         };
-        for event in tools::implementations::grow_build::monitor::types::drain_owned(
-            buffer,
-            self.session_info.id.0.as_ref(),
-        ) {
-            Self::push_pending_notification(
-                state,
-                PendingNotification {
-                    prompt_id: format!("{prompt_id_prefix}-{}", uuid::Uuid::now_v7()),
-                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                        event.event_text,
-                    ))],
-                    priority: NotificationPriority::Next,
-                    source: NotificationSource::MonitorEvent {
-                        task_id: event.task_id,
-                    },
-                },
-            );
+        let payload_refs = notifications
+            .iter()
+            .map(|notification| notification.payload_ref.clone())
+            .collect::<Vec<_>>();
+        match tokio::task::spawn_blocking(move || {
+            payload_refs
+                .iter()
+                .map(|payload| {
+                    crate::session::notification_inbox::read_payload(&directory, payload)
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .await
+        {
+            Ok(Ok(payloads)) => Some(payloads),
+            Ok(Err(error)) => {
+                tracing::error!(%error, operation, "notification payload is missing or corrupt");
+                None
+            }
+            Err(error) => {
+                tracing::error!(%error, operation, "notification payload reader failed");
+                None
+            }
         }
     }
 
-    /// Partition drained notifications into `(to_surface, dropped_count)`.
-    ///
-    /// Only notifications whose source task is owned by a Goal turn are
-    /// suppressed. Goal state itself is not notification ownership: user or
-    /// watcher work may complete while a Goal stage runs in the background.
-    pub(super) fn split_goal_suppressed(
-        goal_turn_task_ids: &std::collections::HashSet<String>,
-        notifications: Vec<PendingNotification>,
-    ) -> (Vec<PendingNotification>, usize) {
-        let mut dropped = 0usize;
-        let to_surface = notifications
-            .into_iter()
-            .filter(|n| {
-                let keep = !goal_turn_task_ids.contains(n.source.task_id());
-                if !keep {
-                    dropped += 1;
+    fn goal_owned_autostart(
+        goal_task_ids: &std::collections::HashSet<String>,
+        notification: &chat_state::PendingNotification,
+    ) -> bool {
+        match &notification.source {
+            chat_state::NotificationSource::MonitorProgress { task_id }
+            | chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                goal_task_ids.contains(task_id)
+            }
+            chat_state::NotificationSource::TaskStillRunning { .. }
+            | chat_state::NotificationSource::SubagentCompleted { .. }
+            | chat_state::NotificationSource::WorkflowCompleted { .. } => false,
+        }
+    }
+
+    fn notification_autostarts(notification: &chat_state::PendingNotification) -> bool {
+        !matches!(
+            notification.source,
+            chat_state::NotificationSource::TaskStillRunning { .. }
+        )
+    }
+
+    /// Repeated graceful exits can checkpoint the same still-running task
+    /// before any real turn has consumed the previous checkpoint. Preserve
+    /// every receipt for audit and consume them together, but show only the
+    /// newest snapshot for each task so resume context does not duplicate.
+    fn coalesce_running_task_checkpoints(
+        notifications: &[chat_state::PendingNotification],
+    ) -> Vec<chat_state::PendingNotification> {
+        let mut latest = std::collections::HashMap::new();
+        for notification in notifications {
+            if let chat_state::NotificationSource::TaskStillRunning { task_id, .. } =
+                &notification.source
+            {
+                latest.insert(task_id.clone(), notification.received_seq);
+            }
+        }
+        notifications
+            .iter()
+            .filter(|notification| match &notification.source {
+                chat_state::NotificationSource::TaskStillRunning { task_id, .. } => {
+                    latest.get(task_id) == Some(&notification.received_seq)
                 }
-                keep
+                _ => true,
             })
-            .collect();
-        (to_surface, dropped)
+            .cloned()
+            .collect()
     }
 
     fn notification_blocks(
-        notifications: &[PendingNotification],
-        task_output_tool_name: &str,
+        notifications: &[chat_state::PendingNotification],
+        payloads: &[String],
+        monitor_task_output_name: Option<&str>,
     ) -> Vec<acp::ContentBlock> {
         use tools::implementations::grow_build::monitor::types::MonitorEventNotification;
 
-        let completion_task_ids: std::collections::HashSet<&str> = notifications
-            .iter()
-            .filter_map(|notification| match &notification.source {
-                NotificationSource::MonitorCompleted { task_id } => Some(task_id.as_str()),
-                NotificationSource::MonitorEvent { .. }
-                | NotificationSource::BashTaskCompleted { .. }
-                | NotificationSource::SubagentCompleted { .. } => None,
-            })
-            .collect();
         let mut monitor_events: Vec<MonitorEventNotification> = Vec::new();
         let mut sections: Vec<Vec<acp::ContentBlock>> = Vec::new();
         let mut monitor_section_idx: Option<usize> = None;
-        for notification in notifications {
+        for (notification, payload) in notifications.iter().zip(payloads) {
             match &notification.source {
-                NotificationSource::MonitorEvent { task_id } => {
-                    if completion_task_ids.contains(task_id.as_str()) {
-                        continue;
-                    }
-                    let event_text = notification
-                        .prompt_blocks
-                        .iter()
-                        .filter_map(|block| match block {
-                            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                chat_state::NotificationSource::MonitorProgress { task_id } => {
                     monitor_events.push(MonitorEventNotification {
                         task_id: task_id.clone(),
-                        event_text,
-                        owner_session_id: None,
+                        event_text: payload.clone(),
                     });
                     if monitor_section_idx.is_none() {
                         monitor_section_idx = Some(sections.len());
                         sections.push(Vec::new());
                     }
                 }
-                NotificationSource::MonitorCompleted { .. }
-                | NotificationSource::BashTaskCompleted { .. }
-                | NotificationSource::SubagentCompleted { .. } => {
-                    sections.push(notification.prompt_blocks.clone());
+                chat_state::NotificationSource::TaskCompleted { .. }
+                | chat_state::NotificationSource::TaskStillRunning { .. }
+                | chat_state::NotificationSource::SubagentCompleted { .. }
+                | chat_state::NotificationSource::WorkflowCompleted { .. } => {
+                    sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        payload.clone(),
+                    ))]);
                 }
             }
         }
@@ -515,7 +539,7 @@ impl SessionActor {
             monitor_section_idx,
             tools::reminders::task_completion::format_monitor_events(
                 &monitor_events,
-                Some(task_output_tool_name),
+                monitor_task_output_name,
             ),
         ) {
             sections[index] = vec![acp::ContentBlock::Text(acp::TextContent::new(batch))];
@@ -531,59 +555,340 @@ impl SessionActor {
         blocks
     }
 
-    /// Merge notifications into one queued `NotificationDrain` turn.
-    pub(super) fn drain_notifications_into_turn(
-        state: &mut State,
-        notifications: Vec<PendingNotification>,
-        task_output_tool_name: &str,
-    ) -> bool {
-        let merged_blocks = Self::notification_blocks(&notifications, task_output_tool_name);
+    fn notification_turn_identity(
+        notifications: &[chat_state::PendingNotification],
+    ) -> (super::PromptOrigin, crate::session::TurnKind) {
+        if let [notification] = notifications {
+            match &notification.source {
+                chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
+                    return (
+                        super::PromptOrigin::TaskCompleted {
+                            task_id: task_id.clone(),
+                        },
+                        crate::session::TurnKind::Internal,
+                    );
+                }
+                chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                    return (
+                        super::PromptOrigin::SubagentCompleted {
+                            subagent_id: subagent_id.clone(),
+                        },
+                        crate::session::TurnKind::Internal,
+                    );
+                }
+                chat_state::NotificationSource::WorkflowCompleted { run_id } => {
+                    let revision = match notification.source_version {
+                        chat_state::NotificationSourceVersion::Ordinal { value } => value,
+                        _ => 0,
+                    };
+                    return (
+                        super::PromptOrigin::WorkflowCompleted {
+                            completion_id: format!("{run_id}-{revision}"),
+                        },
+                        crate::session::TurnKind::Internal,
+                    );
+                }
+                chat_state::NotificationSource::MonitorProgress { .. } => {}
+                chat_state::NotificationSource::TaskStillRunning { .. } => {}
+            }
+        }
+        (
+            super::PromptOrigin::NotificationDrain,
+            crate::session::TurnKind::Internal,
+        )
+    }
+}
 
-        let merged_prompt_id = format!("notifications-{}", uuid::Uuid::now_v7());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // Receiver intentionally dropped — notification turns have no caller
-        // awaiting the result. The send() in handle_completion returns Err,
-        // which is harmless.
-        let (respond_to, _) = tokio::sync::oneshot::channel();
+    #[tokio::test]
+    async fn active_monitor_progress_is_durably_consumed_into_current_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::MonitorProgress {
+                            task_id: "monitor-1".into(),
+                        },
+                        chat_state::NotificationSourceVersion::Opaque {
+                            value: "event-1".into(),
+                        },
+                        "<monitor-event description=\"deploy\" task_id=\"monitor-1\">\nhealthy\n</monitor-event>".into(),
+                    )
+                    .await
+                    .expect("receive monitor notification");
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .len(),
+                    1
+                );
 
-        state.pending_inputs.push_back(InputItem {
-            prompt_id: merged_prompt_id,
-            turn_kind: crate::session::TurnKind::Internal,
-            prompt_blocks: merged_blocks,
-            client_identifier: None,
-            screen_mode: None,
-            verbatim: true,
-            json_schema: None,
-            origin: super::PromptOrigin::NotificationDrain,
-            task_wake_fallback: None,
-            respond_to,
-            persist_ack: None,
-            queue_meta: None,
-        });
-
-        tracing::info!(
-            count = notifications.len(),
-            next_count = notifications.iter().filter(|n| n.priority == NotificationPriority::Next).count(),
-            later_count = notifications.iter().filter(|n| n.priority == NotificationPriority::Later).count(),
-            sources = %notifications.iter().map(|n| match &n.source {
-                NotificationSource::MonitorEvent { task_id } => format!("monitor:{task_id}"),
-                NotificationSource::MonitorCompleted { task_id } => format!("monitor-completed:{task_id}"),
-                NotificationSource::BashTaskCompleted { task_id } => format!("bash:{task_id}"),
-                NotificationSource::SubagentCompleted { task_id } => format!("subagent:{task_id}"),
-            }).collect::<Vec<_>>().join(","),
-            "Drained pending notifications into single batched turn"
-        );
-
-        true
+                assert!(actor.drain_active_notifications().await);
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .is_empty()
+                );
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                let delivered = conversation.last().expect("monitor input materialized");
+                assert!(delivered.text_content().contains("healthy"));
+                let sampling_types::ConversationItem::User(delivered) = delivered else {
+                    panic!("notification input must use the user role");
+                };
+                assert_eq!(
+                    delivered.synthetic_reason.as_ref(),
+                    Some(&sampling_types::SyntheticReason::NotificationDrain)
+                );
+            })
+            .await;
     }
 
-    /// Turn-end straggler sweep: monitor events buffered during the turn's
-    /// final sampling step (after the loop's last `inject_pending_monitor_events`
-    /// pass) move to `pending_notifications`. Runs in the completion handler
-    /// before `maybe_drain_notifications`, so it — not the idle sweep — is
-    /// what normally catches them.
-    pub(super) async fn drain_monitor_buffer_to_pending(&self) {
-        let mut state = self.state.lock().await;
-        self.sweep_monitor_buffer_into_pending(&mut state, "monitor-turn-end-drain");
+    #[tokio::test]
+    async fn active_task_completion_joins_the_current_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "build-1".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "build completed successfully".into(),
+                    )
+                    .await
+                    .expect("receive task completion");
+
+                assert!(actor.drain_active_notifications().await);
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                let delivered = conversation.last().expect("completion input materialized");
+                assert!(
+                    delivered
+                        .text_content()
+                        .contains("build completed successfully")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn idle_goal_owned_task_is_dismissed_without_starting_a_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                actor.goal_turn_task_ids.lock().insert("goal-build".into());
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "goal-build".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "goal build completed".into(),
+                    )
+                    .await
+                    .expect("receive Goal task completion");
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                actor.clone().maybe_drain_notifications(completion_tx).await;
+
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .is_empty()
+                );
+                let state = actor.state.lock().await;
+                assert!(state.foreground.is_idle());
+                assert!(state.pending_inputs.is_empty());
+                drop(state);
+                assert!(actor.chat_state_handle.get_conversation().await.is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn running_task_checkpoint_waits_for_a_real_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskStillRunning {
+                            task_id: "build-1".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Opaque {
+                            value: "checkpoint-1".into(),
+                        },
+                        "build was still running at shutdown".into(),
+                    )
+                    .await
+                    .expect("receive running-task checkpoint");
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                actor.clone().maybe_drain_notifications(completion_tx).await;
+
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .len(),
+                    1
+                );
+                assert!(actor.state.lock().await.foreground.is_idle());
+                assert!(actor.chat_state_handle.get_conversation().await.is_empty());
+
+                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                assert!(actor.drain_active_notifications().await);
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .is_empty()
+                );
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .last()
+                        .expect("checkpoint input materialized")
+                        .text_content()
+                        .contains("still running at shutdown")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn pre_input_checkpoint_drain_does_not_consume_the_admitted_completion() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                let completion_id = actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "completed-1".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "completed result".into(),
+                    )
+                    .await
+                    .expect("receive completion");
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskStillRunning {
+                            task_id: "running-1".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Opaque {
+                            value: "checkpoint-1".into(),
+                        },
+                        "resume context".into(),
+                    )
+                    .await
+                    .expect("receive checkpoint");
+
+                assert!(
+                    actor
+                        .drain_active_notifications_excluding(std::slice::from_ref(&completion_id))
+                        .await
+                );
+
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .expect("pending notifications");
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].id, completion_id);
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .last()
+                        .expect("checkpoint input materialized")
+                        .text_content()
+                        .contains("resume context")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn repeated_running_task_checkpoints_surface_only_the_latest_snapshot() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                for (epoch, body) in [
+                    ("checkpoint-1", "stale checkpoint body"),
+                    ("checkpoint-2", "latest checkpoint body"),
+                ] {
+                    actor
+                        .receive_notification(
+                            chat_state::NotificationSource::TaskStillRunning {
+                                task_id: "build-1".into(),
+                                task_kind: chat_state::NotificationTaskKind::Task,
+                            },
+                            chat_state::NotificationSourceVersion::Opaque {
+                                value: epoch.into(),
+                            },
+                            body.into(),
+                        )
+                        .await
+                        .expect("receive checkpoint");
+                }
+
+                assert!(actor.drain_active_notifications().await);
+
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .is_empty()
+                );
+                let delivered = actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .last()
+                    .expect("checkpoint input materialized")
+                    .text_content();
+                assert!(delivered.contains("latest checkpoint body"));
+                assert!(!delivered.contains("stale checkpoint body"));
+            })
+            .await;
     }
 }

@@ -23,7 +23,6 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SharedResources;
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
-use tool_protocol::ToolScope;
 
 /// Grow-tools-specific metadata trait.
 ///
@@ -36,8 +35,8 @@ use tool_protocol::ToolScope;
 /// after dispatch.
 pub trait ToolMetadata: Send + Sync {
     /// High-level category (Read, Edit, Search, Execute, ...).
-    /// Drives template rendering (`${{ tools.by_kind.search }}`) and the
-    /// default `tool_scope()` derivation.
+    /// Drives template rendering (`${{ tools.by_kind.search }}`). Permission
+    /// authority is declared separately by `Tool::capabilities()`.
     fn kind(&self) -> ToolKind;
 
     /// Namespace grouping (Grow, Cursor, BrowserUse, ...).
@@ -53,12 +52,6 @@ pub trait ToolMetadata: Send + Sync {
     // -----------------------------------------------------------------------
     // Defaults — override only when needed
     // -----------------------------------------------------------------------
-
-    /// Side-effect scope. Default: derived from `kind()`; action-like tools
-    /// that only observe state override this to `Read`.
-    fn tool_scope(&self) -> ToolScope {
-        self.kind().default_scope()
-    }
 
     /// Notification variant tags this tool may emit during execution.
     /// Default: none. Tags match `ToolNotification`'s serde `type` discriminator

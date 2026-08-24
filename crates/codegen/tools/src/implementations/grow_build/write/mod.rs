@@ -78,7 +78,7 @@ impl tool_runtime::Tool for WriteTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
+            max_access: tool_protocol::ToolAccess::Write,
             ..Default::default()
         }
     }

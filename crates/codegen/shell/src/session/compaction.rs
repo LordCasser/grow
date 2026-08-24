@@ -146,7 +146,7 @@ impl SessionActor {
             .count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if !self.agent.borrow().compaction_policy().memory_flush_enabled {
+        if !self.compaction.memory_flush_enabled {
             return;
         }
         let last_flush = self
@@ -722,11 +722,7 @@ impl SessionActor {
         };
         let estimated_input_tokens = chat_state::estimate_conversation_tokens(&simplified_messages);
         let auto_trigger = matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
-        let wall_clock_budget_secs = self
-            .agent
-            .borrow()
-            .compaction_policy()
-            .wall_clock_budget_secs;
+        let wall_clock_budget_secs = self.compaction.wall_clock_budget_secs;
         let sampler = crate::session::helpers::summary_compaction::ShellCompactionSampler::new(
             user_context.clone(),
             sampling_client,

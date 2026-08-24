@@ -103,10 +103,8 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_mcp_pool: None,
         parent_skills: None,
         parent_skills_config: agent::prompt::skills::SkillsConfig::default(),
-        task_completion_reservations: None,
         task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
             .to_string(),
-        auto_wake_enabled: true,
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         parent_terminal_backend: None,
         parent_notification_handle: None,

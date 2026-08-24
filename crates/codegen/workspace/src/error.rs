@@ -1,5 +1,4 @@
 //! Workspace error types.
-use crate::capability::CapabilityMode;
 /// Errors surfaced by the workspace public API.
 ///
 /// `#[non_exhaustive]` so adding new variants is a non-breaking change.
@@ -7,8 +6,6 @@ use crate::capability::CapabilityMode;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WorkspaceError {
-    #[error("parent session not found: {0}")]
-    ParentSessionNotFound(String),
     #[error("session not found: {0}")]
     SessionNotFound(String),
     #[error("session already exists: {0}")]
@@ -19,19 +16,12 @@ pub enum WorkspaceError {
     CannotDropMainSession,
     #[error("toolset finalization failed: {0}")]
     Finalize(String),
-    #[error("capability widening rejected: child {child:?} is not a subset of parent {parent:?}")]
-    CapabilityWidening {
-        parent: CapabilityMode,
-        child: CapabilityMode,
-    },
     #[error("session {caller:?} is not authorised to operate on session {target:?}")]
     Unauthorized { caller: String, target: String },
     /// A toolset mutation was rejected because the target session has an
     /// active turn. Retryable at the turn boundary (`after_turn`).
     #[error("turn active for session {0}; retry the tool-config update at the turn boundary")]
     TurnActive(String),
-    #[error("maximum fork depth exceeded for parent session {parent:?}")]
-    MaxDepthExceeded { parent: String },
     #[error("internal task failure: {0}")]
     JoinError(String),
     #[error("invalid hunk action: {0}")]
@@ -59,16 +49,13 @@ impl WorkspaceError {
     /// snake_case; `DeployError` reports its per-kind `wire_code()`.
     pub fn metric_kind(&self) -> &'static str {
         match self {
-            Self::ParentSessionNotFound(_) => "parent_session_not_found",
             Self::SessionNotFound(_) => "session_not_found",
             Self::SessionAlreadyExists(_) => "session_already_exists",
             Self::EmptyAgentId => "empty_agent_id",
             Self::CannotDropMainSession => "cannot_drop_main_session",
             Self::Finalize(_) => "finalize",
-            Self::CapabilityWidening { .. } => "capability_widening",
             Self::Unauthorized { .. } => "unauthorized",
             Self::TurnActive(_) => "turn_active",
-            Self::MaxDepthExceeded { .. } => "max_depth_exceeded",
             Self::JoinError(_) => "join_error",
             Self::InvalidHunkAction(_) => "invalid_hunk_action",
             Self::HunkActionFailed(_) => "hunk_action_failed",

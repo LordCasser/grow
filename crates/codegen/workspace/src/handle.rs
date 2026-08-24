@@ -22,14 +22,11 @@ pub(crate) static WORKSPACE_TERMINAL_BACKEND_ORPHANED_TOTAL: std::sync::LazyLock
         )
         .unwrap()
     });
-use crate::capability::CapabilityMode;
-use crate::config::{
-    AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, WorkspaceConfig,
-};
+use crate::config::{DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, WorkspaceConfig};
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::session::swap_policy::{
-    DeferReason, SessionSnapshot, SwapAction, SwapDecision, SwapPolicy, SwapTrigger,
-    record_swap_decision, record_toolset_swap,
+    DeferReason, SessionSnapshot, SwapAction, SwapDecision, SwapPolicy, record_swap_decision,
+    record_toolset_swap,
 };
 use crate::session::tool_config::resolve_session_toolset;
 use crate::session::{WorkspaceSession, WorkspaceShared};
@@ -68,7 +65,7 @@ impl WorkspaceHandle {
     /// Construct a handle with zero sessions.
     ///
     /// Sessions are created explicitly via [`Self::create_session`] or
-    /// [`Self::fork_session`]. There is no implicit "main" session —
+    /// session creation. There is no implicit "main" session —
     /// callers create their first
     /// session after construction.
     ///
@@ -156,7 +153,6 @@ impl WorkspaceHandle {
             root_cwd: config.root_cwd.clone(),
             sessions: parking_lot::RwLock::new(sessions),
             session_factory: config.session_factory,
-            mcp_tools_snapshot: arc_swap::ArcSwap::new(Arc::new(vec![])),
             events,
             respect_gitignore: config.respect_gitignore,
             memory_config: config.memory_config,
@@ -197,10 +193,9 @@ impl WorkspaceHandle {
     }
     /// Create a new top-level session from the workspace's default config.
     ///
-    /// Unlike [`fork_session`](Self::fork_session), this does not inherit
-    /// from a parent — it creates a fresh session with
-    /// `CapabilityMode::All` and the workspace's `root_cwd`. Both the
-    /// TUI and server use this as the primary session creation path.
+    /// This creates a fresh session with the workspace's `root_cwd`. Both the
+    /// TUI and server use this as the
+    /// primary session creation path.
     ///
     /// Returns the newly created session, or an error if a session with
     /// the given ID already exists.
@@ -211,22 +206,21 @@ impl WorkspaceHandle {
         self.create_session_with_cwd(session_id, None)
     }
     /// Create a session with an optional CWD override, using the workspace
-    /// default toolset and `CapabilityMode::All`.
+    /// default toolset.
     pub fn create_session_with_cwd(
         &self,
         session_id: impl Into<String>,
         cwd: Option<std::path::PathBuf>,
     ) -> WorkspaceResult<Arc<WorkspaceSession>> {
-        self.create_session_with_config(session_id, cwd, None, CapabilityMode::All, None, false)
+        self.create_session_with_config(session_id, cwd, None, None, false)
     }
     /// Create a session with an optional CWD override, per-session toolset, and
-    /// capability mode. `tool_config: None` uses the default.
+    /// `tool_config: None` uses the default.
     pub fn create_session_with_config(
         &self,
         session_id: impl Into<String>,
         cwd: Option<std::path::PathBuf>,
         tool_config: Option<tools::registry::types::ToolServerConfig>,
-        capability: CapabilityMode,
         viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
         system_notifications: bool,
     ) -> WorkspaceResult<Arc<WorkspaceSession>> {
@@ -247,7 +241,6 @@ impl WorkspaceHandle {
             hunk_tracker,
             Some(hunk_cancel.clone()),
             tool_config,
-            capability,
             viewer_ctx,
             system_notifications,
         );
@@ -265,14 +258,12 @@ impl WorkspaceHandle {
         cwd: std::path::PathBuf,
         hunk_tracker: HunkTrackerHandle,
         tool_config: Option<tools::registry::types::ToolServerConfig>,
-        capability: CapabilityMode,
     ) -> WorkspaceResult<Arc<WorkspaceSession>> {
         self.create_session_with_tracker_and_viewer_ctx(
             session_id,
             cwd,
             hunk_tracker,
             tool_config,
-            capability,
             None,
             false,
         )
@@ -286,7 +277,6 @@ impl WorkspaceHandle {
         cwd: std::path::PathBuf,
         hunk_tracker: HunkTrackerHandle,
         tool_config: Option<tools::registry::types::ToolServerConfig>,
-        capability: CapabilityMode,
         viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
         system_notifications: bool,
     ) -> WorkspaceResult<Arc<WorkspaceSession>> {
@@ -296,7 +286,6 @@ impl WorkspaceHandle {
             hunk_tracker,
             None,
             tool_config,
-            capability,
             viewer_ctx,
             system_notifications,
         )
@@ -312,7 +301,6 @@ impl WorkspaceHandle {
         hunk_tracker: HunkTrackerHandle,
         hunk_tracker_cancel: Option<tokio_util::sync::CancellationToken>,
         tool_config: Option<tools::registry::types::ToolServerConfig>,
-        capability: CapabilityMode,
         viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
         system_notifications: bool,
     ) -> WorkspaceResult<Arc<WorkspaceSession>> {
@@ -326,7 +314,6 @@ impl WorkspaceHandle {
         }
         let session_env = Arc::new(std::collections::HashMap::new());
         let config = tool_config.unwrap_or_else(|| self.shared.default_tool_config.clone());
-        let mcp_snapshot = self.shared.mcp_tools_snapshot.load_full();
         let system_notify_channel =
             system_notifications.then(tools::notification::types::ToolNotificationHandle::channel);
         let system_notify_handle = system_notify_channel.as_ref().map(|(h, _)| h.clone());
@@ -335,8 +322,6 @@ impl WorkspaceHandle {
                 .with_property(|| ("session_id", session_id.clone()));
             resolve_session_toolset(
                 config,
-                capability,
-                &mcp_snapshot,
                 cwd.clone(),
                 session_env.clone(),
                 &session_id,
@@ -351,9 +336,6 @@ impl WorkspaceHandle {
             session_id.clone(),
             cwd,
             session_env,
-            capability,
-            0,
-            u32::MAX,
             Arc::new(effective),
             toolset,
             terminal_backend,
@@ -390,7 +372,7 @@ impl WorkspaceHandle {
             });
         }
         match self
-            .resolve_and_swap_session_toolset(&session, new_config, SwapTrigger::UpdateRpc)
+            .resolve_and_swap_session_toolset(&session, new_config)
             .await?
         {
             SwapOutcome::Swapped | SwapOutcome::Reused => Ok(()),
@@ -406,7 +388,6 @@ impl WorkspaceHandle {
         &self,
         session: &Arc<crate::session::WorkspaceSession>,
         new_config: tools::registry::types::ToolServerConfig,
-        trigger: SwapTrigger,
     ) -> crate::error::WorkspaceResult<SwapOutcome> {
         let _update_guard = session.update_lock.lock().await;
         let session_id = session.session_id();
@@ -417,11 +398,10 @@ impl WorkspaceHandle {
             new_fingerprint.as_ref(),
         )
         .await;
-        match SwapPolicy::evaluate(&snapshot, trigger) {
+        match SwapPolicy::evaluate(&snapshot) {
             SwapDecision::Reuse => {
                 tracing::debug!(
                     session_id = %session_id,
-                    trigger = trigger.metric_label(),
                     "toolset config identical to the stored bind fingerprint — \
                      reused untouched"
                 );
@@ -430,13 +410,11 @@ impl WorkspaceHandle {
             SwapDecision::Skip(reason) => {
                 record_swap_decision(
                     &self.shared.activity_tracker,
-                    trigger,
                     session_id,
                     SwapAction::Skipped(reason),
                 );
                 tracing::warn!(
                     session_id = %session_id,
-                    trigger = trigger.metric_label(),
                     "toolset swap skipped: toolset terminal backend is externally \
                      owned (local bind)"
                 );
@@ -445,13 +423,11 @@ impl WorkspaceHandle {
             SwapDecision::Defer(reason) => {
                 record_swap_decision(
                     &self.shared.activity_tracker,
-                    trigger,
                     session_id,
                     SwapAction::Deferred(reason),
                 );
                 tracing::info!(
                     session_id = %session_id,
-                    trigger = trigger.metric_label(),
                     "toolset mutation rejected: turn active — retry at the turn boundary"
                 );
                 Err(crate::error::WorkspaceError::TurnActive(
@@ -459,13 +435,8 @@ impl WorkspaceHandle {
                 ))
             }
             SwapDecision::Apply => {
-                self.resolve_and_swap_session_toolset_locked(
-                    session,
-                    new_config,
-                    new_fingerprint,
-                    trigger,
-                )
-                .await
+                self.resolve_and_swap_session_toolset_locked(session, new_config, new_fingerprint)
+                    .await
             }
         }
     }
@@ -477,13 +448,10 @@ impl WorkspaceHandle {
         session: &Arc<crate::session::WorkspaceSession>,
         new_config: tools::registry::types::ToolServerConfig,
         new_fingerprint: Option<serde_json::Value>,
-        trigger: SwapTrigger,
     ) -> crate::error::WorkspaceResult<SwapOutcome> {
         let session_id = session.session_id().to_owned();
-        let mcp_snapshot = self.shared.mcp_tools_snapshot.load_full();
         let cwd = session.cwd().to_path_buf();
         let session_env = session.session_env().clone();
-        let cap = session.capability_mode();
         let factory = self.shared.session_factory.clone();
         let lr = self.shared.local_registry.clone();
         let lsp = self.shared.lsp.clone();
@@ -494,8 +462,6 @@ impl WorkspaceHandle {
         let resolve_result = tokio::task::spawn_blocking(move || {
             crate::session::tool_config::resolve_session_toolset_rebuild(
                 new_config,
-                cap,
-                &mcp_snapshot,
                 cwd,
                 session_env,
                 &sid,
@@ -514,60 +480,53 @@ impl WorkspaceHandle {
         if let Some(hook) = self.shared.post_resolve_test_hook.lock().as_ref() {
             hook();
         }
-        if trigger.rechecks_after_resolve() {
-            let snapshot = SessionSnapshot::capture(
-                session,
-                &self.shared.activity_tracker,
-                new_fingerprint.as_ref(),
-            )
-            .await;
-            match SwapPolicy::evaluate(&snapshot, trigger) {
-                SwapDecision::Apply => {}
-                SwapDecision::Reuse => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        trigger = trigger.metric_label(),
-                        "resolved toolset discarded post-resolve: a concurrent \
-                         bind installed the identical fingerprint during the \
-                         re-resolve"
-                    );
-                    return Ok(SwapOutcome::Reused);
-                }
-                SwapDecision::Skip(reason) => {
-                    record_swap_decision(
-                        &self.shared.activity_tracker,
-                        trigger,
-                        &session_id,
-                        SwapAction::Skipped(reason),
-                    );
-                    tracing::warn!(
-                        session_id = %session_id,
-                        trigger = trigger.metric_label(),
-                        "toolset swap skipped: toolset terminal backend is externally \
-                         owned (local bind)"
-                    );
-                    return Ok(SwapOutcome::SkippedExternallyOwned);
-                }
-                SwapDecision::Defer(reason) => {
-                    let reason = match reason {
-                        DeferReason::TurnActive => DeferReason::TurnActiveLate,
-                        other => other,
-                    };
-                    record_swap_decision(
-                        &self.shared.activity_tracker,
-                        trigger,
-                        &session_id,
-                        SwapAction::Deferred(reason),
-                    );
-                    tracing::info!(
-                        session_id = %session_id,
-                        trigger = trigger.metric_label(),
-                        "toolset mutation rejected post-resolve: a turn started during \
-                         the re-resolve — resolved toolset discarded; retry at the \
-                         turn boundary"
-                    );
-                    return Err(crate::error::WorkspaceError::TurnActive(session_id));
-                }
+        let snapshot = SessionSnapshot::capture(
+            session,
+            &self.shared.activity_tracker,
+            new_fingerprint.as_ref(),
+        )
+        .await;
+        match SwapPolicy::evaluate(&snapshot) {
+            SwapDecision::Apply => {}
+            SwapDecision::Reuse => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "resolved toolset discarded post-resolve: a concurrent \
+                     bind installed the identical fingerprint during the \
+                     re-resolve"
+                );
+                return Ok(SwapOutcome::Reused);
+            }
+            SwapDecision::Skip(reason) => {
+                record_swap_decision(
+                    &self.shared.activity_tracker,
+                    &session_id,
+                    SwapAction::Skipped(reason),
+                );
+                tracing::warn!(
+                    session_id = %session_id,
+                    "toolset swap skipped: toolset terminal backend is externally \
+                     owned (local bind)"
+                );
+                return Ok(SwapOutcome::SkippedExternallyOwned);
+            }
+            SwapDecision::Defer(reason) => {
+                let reason = match reason {
+                    DeferReason::TurnActive => DeferReason::TurnActiveLate,
+                    other => other,
+                };
+                record_swap_decision(
+                    &self.shared.activity_tracker,
+                    &session_id,
+                    SwapAction::Deferred(reason),
+                );
+                tracing::info!(
+                    session_id = %session_id,
+                    "toolset mutation rejected post-resolve: a turn started during \
+                     the re-resolve — resolved toolset discarded; retry at the \
+                     turn boundary"
+                );
+                return Err(crate::error::WorkspaceError::TurnActive(session_id));
             }
         }
         session
@@ -577,7 +536,6 @@ impl WorkspaceHandle {
         session.clear_stale_resolve();
         record_swap_decision(
             &self.shared.activity_tracker,
-            trigger,
             &session_id,
             SwapAction::Applied,
         );
@@ -1352,104 +1310,6 @@ impl WorkspaceHandle {
     pub fn session_count(&self) -> usize {
         self.shared.sessions.read().len()
     }
-    /// Fork a new subagent session. Clones (not references) the parent's
-    /// tool config and env. Enforces capability subset and fork budget.
-    ///
-    /// Forks go through [`Self::finalize_session_setup`], so each fork gets its
-    /// own browser service rather than sharing the parent's tabs.
-    pub async fn fork_session(
-        &self,
-        config: AgentSessionConfig,
-    ) -> WorkspaceResult<Arc<WorkspaceSession>> {
-        if config.agent_id.is_empty() {
-            return Err(WorkspaceError::EmptyAgentId);
-        }
-        let parent_id = config.parent_session_id.clone().ok_or_else(|| {
-            WorkspaceError::ParentSessionNotFound(
-                "fork_session requires an explicit parent_session_id".into(),
-            )
-        })?;
-        let parent = self
-            .shared
-            .sessions
-            .read()
-            .get(&parent_id)
-            .cloned()
-            .ok_or_else(|| WorkspaceError::ParentSessionNotFound(parent_id.clone()))?;
-        if !config.capability_mode.is_subset_of(parent.capability_mode) {
-            return Err(WorkspaceError::CapabilityWidening {
-                parent: parent.capability_mode,
-                child: config.capability_mode,
-            });
-        }
-        if parent.fork_budget == 0 {
-            return Err(WorkspaceError::MaxDepthExceeded { parent: parent_id });
-        }
-        let new_depth = parent.depth.saturating_add(1);
-        let new_fork_budget = parent.fork_budget.saturating_sub(1).min(config.max_depth);
-        let baseline = config
-            .tool_config
-            .clone()
-            .unwrap_or_else(|| (*parent.effective_tool_config()).clone());
-        let cwd = config
-            .cwd_override
-            .clone()
-            .unwrap_or_else(|| parent.cwd.clone());
-        let mut env: std::collections::HashMap<String, String> = (**parent.session_env()).clone();
-        env.extend(config.extra_env.clone());
-        let session_env = Arc::new(env);
-        let mcp_snapshot = self.shared.mcp_tools_snapshot.load_full();
-        let inherited_viewer_ctx = parent.viewer_ctx().cloned();
-        let (effective, toolset, terminal_backend) = resolve_session_toolset(
-            baseline,
-            config.capability_mode,
-            &mcp_snapshot,
-            cwd.clone(),
-            session_env.clone(),
-            &config.agent_id,
-            self.shared.session_factory.as_ref(),
-            Some(self.shared.local_registry.clone()),
-            self.shared.lsp.clone(),
-            inherited_viewer_ctx.clone(),
-            None,
-        )?;
-        let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let hunk_cancel = tokio_util::sync::CancellationToken::new();
-        let hunk_tracker = HunkTrackerActor::spawn(
-            config.agent_id.clone(),
-            cwd.clone(),
-            hunk_event_tx,
-            TrackingMode::AllDirty,
-            hunk_cancel.clone(),
-        );
-        let session = Arc::new(WorkspaceSession::new(
-            config.agent_id.clone(),
-            cwd,
-            session_env,
-            config.capability_mode,
-            new_depth,
-            new_fork_budget,
-            Arc::new(effective),
-            toolset,
-            terminal_backend,
-            hunk_tracker,
-            Some(hunk_cancel),
-            inherited_viewer_ctx,
-            false,
-            None,
-        ));
-        {
-            let mut sessions = self.shared.sessions.write();
-            if sessions.contains_key(&config.agent_id) {
-                session.cancel_hunk_tracker();
-                return Err(WorkspaceError::SessionAlreadyExists(config.agent_id));
-            }
-            sessions.insert(config.agent_id.clone(), session.clone());
-        }
-        record_toolset_swap(&self.shared.activity_tracker, "fork", session.session_id());
-        self.finalize_session_setup(&session).await;
-        Ok(session)
-    }
     /// Remove a session.
     pub fn drop_session(&self, caller_session_id: &str, session_id: &str) -> WorkspaceResult<()> {
         if caller_session_id != session_id {
@@ -1467,20 +1327,6 @@ impl WorkspaceHandle {
         session.shutdown_terminal_backend();
         session.cancel_hunk_tracker();
         Ok(())
-    }
-    /// Re-resolve every session's toolset against `new_snapshot` and
-    /// emit one `WorkspaceEvent::ToolsChanged` per session.
-    pub fn on_mcp_snapshot_changed(
-        &self,
-        new_snapshot: Vec<tools::registry::types::ToolConfig>,
-    ) -> usize {
-        self.shared.mcp_tools_snapshot.store(Arc::new(new_snapshot));
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                self.shared
-                    .re_resolve_all_sessions("mcp_snapshot_changed", true),
-            )
-        })
     }
 }
 /// Apply a tool notification to the ActivityTracker background-task count.
@@ -1651,8 +1497,7 @@ impl WorkspaceHandle {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::capability::CapabilityMode;
-    use crate::config::{AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig};
+    use crate::config::{DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig};
     use crate::error::WorkspaceError;
     use crate::session::tool_config::resolve_session_toolset;
     use crate::session::tool_config::test_support::{
@@ -1796,14 +1641,7 @@ pub(crate) mod tests {
         let handle = make_handle();
         let cfg = explicit_cfg("renamed_read");
         let session = handle
-            .create_session_with_config(
-                "hot",
-                None,
-                Some(cfg.clone()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("hot", None, Some(cfg.clone()), None, false)
             .expect("create session");
         session.set_tool_config_fingerprint(serde_json::to_value(&cfg).ok());
         handle.activity_tracker().turn_started("hot", 1);
@@ -1817,14 +1655,7 @@ pub(crate) mod tests {
         let handle = make_handle();
         let cfg = explicit_cfg("renamed_read");
         let session = handle
-            .create_session_with_config(
-                "stale",
-                None,
-                Some(cfg.clone()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("stale", None, Some(cfg.clone()), None, false)
             .expect("create session");
         session.set_tool_config_fingerprint(serde_json::to_value(&cfg).ok());
         let toolset_before = session.toolset();
@@ -1951,61 +1782,12 @@ pub(crate) mod tests {
             .await
             .expect("start background task")
     }
-    /// A snapshot-driven `re_resolve_all_sessions` rebuild (MCP snapshot
-    /// change) must also rebuild around the session-owned backend — with a
-    /// LIVE background task riding through the rebuild. This is the
-    /// regression lock for snapshot-triggered swaps killing background
-    /// tasks by minting a fresh backend per session.
-    #[tokio::test]
-    async fn re_resolve_all_sessions_preserves_session_terminal_backend() {
-        let orphaned_before = orphaned_swap_count();
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let backend = session.terminal_backend().clone();
-        let out_dir = tempfile::tempdir().expect("temp dir");
-        let bg = start_background_sleep(&session, out_dir.path(), "snapshot-bg").await;
-        handle
-            .shared
-            .mcp_tools_snapshot
-            .store(Arc::new(vec![tc("Grow:read_file", Some(ToolKind::Read))]));
-        let rebuilt = handle
-            .shared
-            .re_resolve_all_sessions("mcp_snapshot_changed", true)
-            .await;
-        assert!(rebuilt >= 1, "the main session must be rebuilt");
-        let session = handle.session("main").expect("main session still exists");
-        assert!(
-            Arc::ptr_eq(&backend, session.terminal_backend()),
-            "the session-owned backend must survive a snapshot rebuild"
-        );
-        let new_terminal = toolset_terminal(&session.toolset()).await;
-        assert!(
-            Arc::ptr_eq(&backend, &new_terminal),
-            "the rebuilt toolset must reference the session-owned backend"
-        );
-        assert!(
-            !new_terminal
-                .get_task(&bg.task_id)
-                .await
-                .expect("the task table must survive the snapshot rebuild")
-                .completed,
-            "the task's process must still be running after the rebuild"
-        );
-        assert_eq!(
-            orphaned_swap_count(),
-            orphaned_before,
-            "the orphaned-backend tripwire must stay 0"
-        );
-        new_terminal.kill_task(&bg.task_id).await;
-    }
     /// A local-bound session (external toolset installed via
     /// `bind_local_session`: the toolset keeps the shell's backend, the
-    /// session-owned backend is an idle decoy) must be SKIPPED by
-    /// snapshot-driven rebuilds — rebuilding around the decoy would detach
-    /// tools from the shell's live task table — and must not fire the
-    /// orphan tripwire (the mismatch is the local-bind contract).
+    /// session-owned backend is an idle decoy) must reject Workspace-owned
+    /// rebuilds rather than detach tools from the shell's live task table.
     #[tokio::test]
-    async fn local_bound_session_skips_snapshot_rebuild() {
+    async fn local_bound_session_rejects_workspace_rebuild() {
         let orphaned_before = orphaned_swap_count();
         let handle = make_handle();
         let donor = handle
@@ -2013,7 +1795,6 @@ pub(crate) mod tests {
                 "donor",
                 None,
                 Some(explicit_cfg("read_donor")),
-                CapabilityMode::All,
                 None,
                 false,
             )
@@ -2023,7 +1804,6 @@ pub(crate) mod tests {
                 "local",
                 None,
                 Some(explicit_cfg("read_local")),
-                CapabilityMode::All,
                 None,
                 false,
             )
@@ -2034,18 +1814,10 @@ pub(crate) mod tests {
             !local.toolset_terminal_is_session_owned().await,
             "precondition: the installed toolset's Terminal must be external"
         );
-        handle
-            .shared
-            .mcp_tools_snapshot
-            .store(Arc::new(vec![tc("Grow:read_file", Some(ToolKind::Read))]));
-        handle
-            .shared
-            .re_resolve_all_sessions("mcp_snapshot_changed", true)
-            .await;
         let local = handle.session("local").expect("local session still exists");
         assert!(
             Arc::ptr_eq(&local.toolset(), &external_toolset),
-            "the local-bound session's toolset must be untouched by the rebuild"
+            "the local-bound session's toolset must remain externally owned"
         );
         assert!(
             Arc::ptr_eq(
@@ -2060,11 +1832,7 @@ pub(crate) mod tests {
             "the skip must not fire the orphaned-backend tripwire"
         );
         let outcome = handle
-            .resolve_and_swap_session_toolset(
-                &local,
-                explicit_cfg("read_new"),
-                SwapTrigger::UpdateRpc,
-            )
+            .resolve_and_swap_session_toolset(&local, explicit_cfg("read_new"))
             .await
             .expect("the skip is not an internal error at the choke point");
         assert_eq!(outcome, SwapOutcome::SkippedExternallyOwned);
@@ -2110,14 +1878,7 @@ pub(crate) mod tests {
         let handle = make_handle();
         let cfg_a = explicit_cfg("read_a");
         let session = handle
-            .create_session_with_config(
-                "bg",
-                None,
-                Some(cfg_a.clone()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("bg", None, Some(cfg_a.clone()), None, false)
             .expect("create session");
         session.set_tool_config_fingerprint(serde_json::to_value(&cfg_a).ok());
         let out_dir = tempfile::tempdir().expect("temp dir");
@@ -2207,14 +1968,7 @@ pub(crate) mod tests {
         let root = handle.root_cwd().expect("root cwd");
         let cfg_a = explicit_cfg("read_a");
         let session = handle
-            .create_session_with_config(
-                "shell-swap",
-                None,
-                Some(cfg_a.clone()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("shell-swap", None, Some(cfg_a.clone()), None, false)
             .expect("create session");
         session.set_tool_config_fingerprint(serde_json::to_value(&cfg_a).ok());
         std::fs::create_dir_all(root.join("swap_kept_dir")).expect("create subdir");
@@ -2256,33 +2010,6 @@ pub(crate) mod tests {
             "the persistent shell's cwd must survive the toolset swap"
         );
     }
-    /// Each fork owns its own fresh backend: fork teardown kills only the
-    /// fork's tasks, never the parent's.
-    #[tokio::test]
-    async fn fork_session_owns_distinct_terminal_backend() {
-        let handle = make_handle();
-        let parent = handle.session("main").expect("main session exists");
-        let fork = handle
-            .fork_session(fork_cfg_with(
-                "fork-backend",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork succeeds");
-        assert!(
-            !Arc::ptr_eq(parent.terminal_backend(), fork.terminal_backend()),
-            "a fork must own its own backend, not share the parent's"
-        );
-        assert!(
-            Arc::ptr_eq(
-                fork.terminal_backend(),
-                &toolset_terminal(&fork.toolset()).await
-            ),
-            "the fork's toolset must reference the fork-owned backend"
-        );
-    }
     /// Poll `backend` with a trivial command until its actor refuses it —
     /// proving an explicit shutdown, since callers still hold live `Arc`s.
     /// Shared by session teardown tests.
@@ -2310,7 +2037,7 @@ pub(crate) mod tests {
     async fn drop_session_shuts_down_terminal_backend_explicitly() {
         let handle = make_handle();
         let session = handle
-            .create_session_with_config("doomed", None, None, CapabilityMode::All, None, false)
+            .create_session_with_config("doomed", None, None, None, false)
             .expect("create session");
         let retained_backend = session.terminal_backend().clone();
         let retained_toolset = session.toolset();
@@ -2337,7 +2064,7 @@ pub(crate) mod tests {
     async fn drop_session_cancels_workspace_spawned_hunk_tracker() {
         let handle = make_handle();
         let session = handle
-            .create_session_with_config("doomed-ht", None, None, CapabilityMode::All, None, false)
+            .create_session_with_config("doomed-ht", None, None, None, false)
             .expect("create session");
         let leaked_tracker = session.hunk_tracker().clone();
         assert!(
@@ -2346,28 +2073,6 @@ pub(crate) mod tests {
         );
         drop(session);
         handle.drop_session("doomed-ht", "doomed-ht").expect("drop");
-        assert_hunk_tracker_stops(&leaked_tracker).await;
-    }
-    /// Same guarantee for the fork spawn site.
-    #[tokio::test]
-    async fn drop_session_cancels_forked_session_hunk_tracker() {
-        let handle = make_handle();
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "child-ht",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
-        let leaked_tracker = child.hunk_tracker().clone();
-        assert!(
-            !leaked_tracker.is_closed(),
-            "precondition: the actor is alive while the session exists"
-        );
-        drop(child);
-        handle.drop_session("child-ht", "child-ht").expect("drop");
         assert_hunk_tracker_stops(&leaked_tracker).await;
     }
     /// The inverse guarantee: a tracker bound via `create_session_with_tracker`
@@ -2387,13 +2092,7 @@ pub(crate) mod tests {
             owner_cancel.clone(),
         );
         let session = handle
-            .create_session_with_tracker(
-                "external-ht",
-                cwd,
-                tracker.clone(),
-                None,
-                CapabilityMode::All,
-            )
+            .create_session_with_tracker("external-ht", cwd, tracker.clone(), None)
             .expect("create session");
         assert!(
             !tracker.is_closed(),
@@ -2420,14 +2119,7 @@ pub(crate) mod tests {
     async fn restarted_workspace_recreates_session_and_reports_lost_task() {
         let handle_a = make_handle();
         let session_a = handle_a
-            .create_session_with_config(
-                "reborn",
-                None,
-                Some(background_capable_cfg()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("reborn", None, Some(background_capable_cfg()), None, false)
             .expect("create session");
         let out_dir = tempfile::tempdir().expect("temp dir");
         let bg = start_background_sleep(&session_a, out_dir.path(), "restart-bg").await;
@@ -2441,14 +2133,7 @@ pub(crate) mod tests {
         );
         let handle_b = make_handle();
         let session_b = handle_b
-            .create_session_with_config(
-                "reborn",
-                None,
-                Some(background_capable_cfg()),
-                CapabilityMode::All,
-                None,
-                false,
-            )
+            .create_session_with_config("reborn", None, Some(background_capable_cfg()), None, false)
             .expect("the session must recreate cleanly after a restart");
         assert!(
             session_b.terminal_backend().list_tasks().await.is_empty(),
@@ -2551,18 +2236,6 @@ pub(crate) mod tests {
             "expected alpha_widget in matches, got: {last}"
         );
     }
-    pub(crate) fn fork_cfg_with(
-        agent_id: &str,
-        capability: CapabilityMode,
-        tool_config: Option<ToolServerConfig>,
-        parent: Option<&str>,
-    ) -> AgentSessionConfig {
-        let mut c = AgentSessionConfig::new(agent_id);
-        c.capability_mode = capability;
-        c.tool_config = tool_config;
-        c.parent_session_id = parent.map(|p| p.to_owned());
-        c
-    }
     /// `WorkspaceHandle::new` (the test/default path, not `connect_local_workspace`)
     /// must use an ephemeral temp `workspace_home` — never the real
     /// `$GROW_WORKSPACE_HOME`; `new` stays runtime-light and never touches
@@ -2583,454 +2256,12 @@ pub(crate) mod tests {
             "default construction must NOT use the real $GROW_WORKSPACE_HOME"
         );
     }
-    /// `server_metadata_typed` defaults cleanly when no metadata is configured.
-    #[tokio::test]
-    async fn fork_session_inherits_parent_tool_config_when_none() {
-        let handle = make_handle();
-        let parent = handle.session("main").expect("main session present");
-        let parent_baseline = parent.effective_tool_config();
-        let parent_ids: Vec<String> = parent_baseline.tools.iter().map(|t| t.id.clone()).collect();
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "child",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
-        let child_baseline = child.effective_tool_config();
-        let child_ids: Vec<String> = child_baseline.tools.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(child_ids, parent_ids);
-        let new_parent_baseline = ToolServerConfig {
-            tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-        };
-        let factory = handle.shared.session_factory.clone();
-        let mcp_snapshot = handle.shared.mcp_tools_snapshot.load_full();
-        let (eff, ts, _backend) = resolve_session_toolset(
-            new_parent_baseline,
-            parent.capability_mode(),
-            &mcp_snapshot,
-            parent.cwd().to_path_buf(),
-            parent.session_env().clone(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("re-resolve should succeed");
-        parent.replace(Arc::new(eff), ts);
-        let child_after: Vec<String> = child
-            .effective_tool_config()
-            .tools
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
-        assert_eq!(
-            child_after, child_ids,
-            "child baseline must not change when parent is mutated"
-        );
-    }
-    #[tokio::test]
-    async fn fork_session_uses_explicit_tool_config_when_provided() {
-        let handle = make_handle();
-        let custom = ToolServerConfig {
-            tools: vec![
-                tc("Grow:read_file", Some(ToolKind::Read)),
-                tc("Grow:list_dir", Some(ToolKind::ListDir)),
-            ],
-        };
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "explicit",
-                CapabilityMode::ReadWrite,
-                Some(custom.clone()),
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
-        let baseline_ids: Vec<String> = child
-            .effective_tool_config()
-            .tools
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
-        let custom_ids: Vec<String> = custom.tools.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(baseline_ids, custom_ids);
-    }
-    #[tokio::test]
-    async fn fork_session_uses_main_session_when_parent_session_id_is_none() {
-        let handle = make_handle();
-        let marker_config = ToolServerConfig {
-            tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-        };
-        let main = handle.session("main").expect("main present");
-        let factory = handle.shared.session_factory.clone();
-        let mcp_snapshot = handle.shared.mcp_tools_snapshot.load_full();
-        let (eff, ts, _backend) = resolve_session_toolset(
-            marker_config,
-            main.capability_mode(),
-            &mcp_snapshot,
-            main.cwd().to_path_buf(),
-            main.session_env().clone(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("re-resolve should succeed");
-        main.replace(Arc::new(eff), ts);
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "child",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
-        let baseline_ids: Vec<String> = child
-            .effective_tool_config()
-            .tools
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
-        assert_eq!(baseline_ids, vec!["Grow:read_file".to_string()]);
-    }
-    #[tokio::test]
-    async fn fork_session_uses_named_parent_when_parent_session_id_is_set() {
-        let handle = make_handle();
-        let custom = ToolServerConfig {
-            tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-        };
-        handle
-            .fork_session(fork_cfg_with(
-                "intermediate",
-                CapabilityMode::ReadWrite,
-                Some(custom.clone()),
-                Some("main"),
-            ))
-            .await
-            .expect("intermediate fork should succeed");
-        let leaf = handle
-            .fork_session(fork_cfg_with(
-                "leaf",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("intermediate"),
-            ))
-            .await
-            .expect("leaf fork should succeed");
-        let baseline_ids: Vec<String> = leaf
-            .effective_tool_config()
-            .tools
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
-        let custom_ids: Vec<String> = custom.tools.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(baseline_ids, custom_ids);
-    }
-    #[test]
-    fn fork_session_concurrent_same_id_only_one_winner() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(8)
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let _g = rt.enter();
-        let handle = Arc::new(make_handle());
-        let mut handles = vec![];
-        for _ in 0..16 {
-            let h = handle.clone();
-            let g = rt.handle().clone();
-            handles.push(std::thread::spawn(move || {
-                g.block_on(h.fork_session({
-                    let mut c = AgentSessionConfig::new("racer");
-                    c.parent_session_id = Some("main".into());
-                    c
-                }))
-            }));
-        }
-        let mut wins = 0;
-        let mut losses = 0;
-        for jh in handles {
-            let res = jh.join().expect("thread panic");
-            match res {
-                Ok(_) => wins += 1,
-                Err(WorkspaceError::SessionAlreadyExists(id)) => {
-                    assert_eq!(id, "racer");
-                    losses += 1;
-                }
-                Err(other) => panic!("unexpected error: {other:?}"),
-            }
-        }
-        assert_eq!(wins, 1, "exactly one fork must succeed");
-        assert_eq!(losses, 15, "the other 15 must see SessionAlreadyExists");
-    }
-    #[tokio::test]
-    async fn fork_session_empty_agent_id_rejected() {
-        let handle = make_handle();
-        let err = handle
-            .fork_session({
-                let mut c = AgentSessionConfig::new("");
-                c.parent_session_id = Some("main".into());
-                c
-            })
-            .await
-            .expect_err("empty agent_id must error");
-        assert!(matches!(err, WorkspaceError::EmptyAgentId), "got {err:?}");
-    }
-    #[tokio::test]
-    async fn fork_session_capability_widening_rejected() {
-        let handle = make_handle();
-        handle
-            .fork_session(fork_cfg_with(
-                "ro",
-                CapabilityMode::ReadOnly,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("readonly fork ok");
-        let err = handle
-            .fork_session(fork_cfg_with(
-                "widen",
-                CapabilityMode::All,
-                None,
-                Some("ro"),
-            ))
-            .await
-            .expect_err("widening must error");
-        assert!(
-            matches!(
-                err,
-                WorkspaceError::CapabilityWidening {
-                    parent: CapabilityMode::ReadOnly,
-                    child: CapabilityMode::All
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-    #[tokio::test]
-    async fn fork_session_capability_widening_readwrite_to_execute_rejected() {
-        let handle = make_handle();
-        handle
-            .fork_session(fork_cfg_with(
-                "rw",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("rw fork ok");
-        let err = handle
-            .fork_session(fork_cfg_with(
-                "exe",
-                CapabilityMode::Execute,
-                None,
-                Some("rw"),
-            ))
-            .await
-            .expect_err("incomparable widen must error");
-        assert!(matches!(err, WorkspaceError::CapabilityWidening { .. }));
-    }
-    #[tokio::test]
-    async fn fork_session_max_depth_rejected_when_budget_zero() {
-        let handle = make_handle();
-        let mut cfg = AgentSessionConfig::new("budgeted");
-        cfg.parent_session_id = Some("main".into());
-        cfg.max_depth = 0;
-        let child = handle.fork_session(cfg).await.expect("budgeted fork ok");
-        assert_eq!(child.fork_budget(), 0);
-        let err = handle
-            .fork_session(fork_cfg_with(
-                "grandchild",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("budgeted"),
-            ))
-            .await
-            .expect_err("further fork must error");
-        assert!(matches!(err, WorkspaceError::MaxDepthExceeded { .. }));
-    }
-    #[tokio::test]
-    async fn fork_session_parent_session_not_found_errors() {
-        let handle = make_handle();
-        let mut cfg = AgentSessionConfig::new("orphan");
-        cfg.parent_session_id = Some("ghost".into());
-        let err = handle
-            .fork_session(cfg)
-            .await
-            .expect_err("missing parent must error");
-        match err {
-            WorkspaceError::ParentSessionNotFound(id) => assert_eq!(id, "ghost"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-    #[tokio::test]
-    async fn fork_session_finalize_error_propagated() {
-        let handle = make_handle();
-        let bad = ToolServerConfig {
-            tools: vec![tc("DoesNotExist:nope", Some(ToolKind::Read))],
-        };
-        let cfg = fork_cfg_with("bogus", CapabilityMode::ReadOnly, Some(bad), Some("main"));
-        let err = handle
-            .fork_session(cfg)
-            .await
-            .expect_err("bogus id must error");
-        assert!(matches!(err, WorkspaceError::Finalize(_)), "got {err:?}");
-    }
-    #[tokio::test]
-    async fn fork_session_extra_env_layered_on_parent() {
-        let handle = make_handle();
-        let mut intermediate_cfg = AgentSessionConfig::new("parent_env");
-        intermediate_cfg
-            .extra_env
-            .insert("INHERITED".into(), "from_parent".into());
-        intermediate_cfg
-            .extra_env
-            .insert("OVERRIDDEN".into(), "old_value".into());
-        intermediate_cfg.parent_session_id = Some("main".into());
-        let parent = handle
-            .fork_session(intermediate_cfg)
-            .await
-            .expect("parent ok");
-        assert_eq!(
-            parent.session_env().get("INHERITED").map(String::as_str),
-            Some("from_parent")
-        );
-        let mut child_cfg = AgentSessionConfig::new("child_env");
-        child_cfg.parent_session_id = Some("parent_env".into());
-        child_cfg
-            .extra_env
-            .insert("OVERRIDDEN".into(), "new_value".into());
-        child_cfg
-            .extra_env
-            .insert("CHILD_ONLY".into(), "yes".into());
-        let child = handle.fork_session(child_cfg).await.expect("child ok");
-        assert_eq!(
-            child.session_env().get("INHERITED").map(String::as_str),
-            Some("from_parent"),
-            "parent var must be inherited"
-        );
-        assert_eq!(
-            child.session_env().get("OVERRIDDEN").map(String::as_str),
-            Some("new_value"),
-            "extra_env must override parent var"
-        );
-        assert_eq!(
-            child.session_env().get("CHILD_ONLY").map(String::as_str),
-            Some("yes"),
-            "extra_env must add new var"
-        );
-    }
-    #[tokio::test]
-    async fn fork_session_cwd_override_used_when_set() {
-        let handle = make_handle();
-        let alt = std::env::temp_dir().join("grow-workspace-test-cwd-override");
-        std::fs::create_dir_all(&alt).expect("create alt cwd");
-        let mut cfg = AgentSessionConfig::new("cwdchild");
-        cfg.cwd_override = Some(alt.clone());
-        cfg.parent_session_id = Some("main".into());
-        let child = handle.fork_session(cfg).await.expect("ok");
-        assert_eq!(child.cwd(), alt);
-    }
-    #[tokio::test]
-    async fn fork_session_inheritance_arc_distinct() {
-        let handle = make_handle();
-        let main = handle.session("main").expect("main");
-        let child = handle
-            .fork_session({
-                let mut c = AgentSessionConfig::new("kid");
-                c.parent_session_id = Some("main".into());
-                c
-            })
-            .await
-            .expect("ok");
-        assert!(
-            !Arc::ptr_eq(
-                &main.effective_tool_config(),
-                &child.effective_tool_config()
-            ),
-            "child must hold its own Arc<ToolServerConfig>"
-        );
-        assert!(
-            !Arc::ptr_eq(&main.toolset(), &child.toolset()),
-            "child must hold its own Arc<FinalizedToolset>"
-        );
-    }
-    #[tokio::test]
-    async fn fork_session_empty_baseline_tools_succeeds() {
-        let handle = make_handle();
-        let empty = ToolServerConfig { tools: vec![] };
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "empty",
-                CapabilityMode::ReadOnly,
-                Some(empty),
-                Some("main"),
-            ))
-            .await
-            .expect("empty tool set is valid");
-        assert!(child.toolset().tool_definitions().is_empty());
-    }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn on_mcp_snapshot_changed_emits_per_session_events_and_rebuilds() {
-        let handle = make_handle();
-        handle
-            .fork_session(fork_cfg_with(
-                "subA",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("subA ok");
-        handle
-            .fork_session(fork_cfg_with(
-                "subB",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("subB ok");
-        let mut rx = handle.shared.events.subscribe();
-        let mcp_tool = tc("Grow:read_file", Some(ToolKind::Read));
-        let rebuilt = handle.on_mcp_snapshot_changed(vec![mcp_tool]);
-        assert_eq!(rebuilt, 3, "main + 2 subagents");
-        let mut got: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for _ in 0..3 {
-            let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-                .await
-                .expect("event arrives")
-                .expect("not closed");
-            match ev {
-                WorkspaceEvent::ToolsChanged { session_id } => {
-                    got.insert(session_id);
-                }
-                other => panic!("unexpected event: {other:?}"),
-            }
-        }
-        assert_eq!(
-            got,
-            ["main".to_string(), "subA".to_string(), "subB".to_string()]
-                .into_iter()
-                .collect::<std::collections::BTreeSet<String>>()
-        );
-    }
     #[tokio::test]
     async fn shared_accessors_round_trip() {
         let handle = make_handle();
         assert!(handle.shared().root_cwd().to_str().is_some());
         assert!(!handle.shared().respect_gitignore());
         assert!(handle.shared().memory_config().is_none());
-        assert!(handle.shared().mcp_tools_snapshot().is_empty());
         assert!(!handle.shared().default_tool_config().tools.is_empty());
     }
     #[tokio::test]
@@ -3434,14 +2665,8 @@ pub(crate) mod tests {
     async fn per_session_hunk_tracker_isolation() {
         let handle = make_handle();
         let child = handle
-            .fork_session(fork_cfg_with(
-                "child",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
+            .create_session_with_config("child", None, None, None, false)
+            .expect("session should be created");
         child.hunk_tracker().record_agent_write(
             std::path::PathBuf::from("/tmp/test-file.rs"),
             "fn main() {}".to_string(),
@@ -3502,39 +2727,6 @@ pub(crate) mod tests {
             tracker.known_sessions(),
             sessions_before,
             "on_session_ended must not create a new session entry"
-        );
-    }
-    #[tokio::test]
-    async fn fork_session_inherits_viewer_ctx_from_parent() {
-        let handle = make_handle();
-        handle.drop_session("main", "main").expect("drop main");
-        let parent = handle
-            .create_session_with_tracker_and_viewer_ctx(
-                "main",
-                handle.root_cwd().unwrap(),
-                hunk_tracker::HunkTrackerHandle::noop(),
-                None,
-                CapabilityMode::All,
-                Some(tool_runtime::WorkspaceViewerContext {
-                    stream_tool_progress: true,
-                }),
-                false,
-            )
-            .expect("create parent");
-        assert!(parent.viewer_ctx().is_some());
-        let child = handle
-            .fork_session(fork_cfg_with(
-                "child",
-                CapabilityMode::ReadWrite,
-                None,
-                Some("main"),
-            ))
-            .await
-            .expect("fork should succeed");
-        let inherited = child.viewer_ctx().expect("child inherits viewer_ctx");
-        assert!(
-            inherited.stream_tool_progress,
-            "child must inherit the parent's stream_tool_progress flag"
         );
     }
     #[tokio::test]

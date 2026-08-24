@@ -285,12 +285,6 @@ impl SessionActor {
                     ),
                 )
                 .await;
-            if let Some(reservations) = self.tool_context.task_completion_reservations.clone() {
-                bridge.update_resource(reservations).await;
-            }
-            if let Some(gate) = self.tool_context.task_wake_suppressed.clone() {
-                bridge.update_resource(gate).await;
-            }
             self.inject_deny_read_globs().await;
         }
         {
@@ -347,7 +341,7 @@ mod tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let actor = super::super::support::create_test_actor(
+                let mut actor = super::super::support::create_test_actor(
                     0,
                     256_000,
                     85,
@@ -355,6 +349,11 @@ mod tests {
                     persistence_tx,
                 )
                 .await;
+                actor.todo_gate.enabled = true;
+                actor.todo_gate.max_fires_per_prompt = 7;
+                actor.compaction.threshold_percent.set(73);
+                actor.compaction.memory_flush_enabled = true;
+                actor.compaction.wall_clock_budget_secs = 41;
                 let (_, revision) = actor
                     .chat_state_handle
                     .get_conversation_with_revision()
@@ -399,6 +398,11 @@ mod tests {
                         .contains("`reviewer`")
                 );
                 assert_eq!(actor.agent.borrow().name(), "reviewer");
+                assert!(actor.todo_gate.enabled);
+                assert_eq!(actor.todo_gate.max_fires_per_prompt, 7);
+                assert_eq!(actor.compaction.threshold_percent.get(), 73);
+                assert!(actor.compaction.memory_flush_enabled);
+                assert_eq!(actor.compaction.wall_clock_budget_secs, 41);
 
                 let events = actor.chat_state_handle.timeline_events().await.unwrap();
                 assert_eq!(
@@ -522,7 +526,13 @@ mod tests {
                     .unwrap();
 
                 let surface = actor.chat_state_handle.get_conversation().await;
-                assert!(surface.last().unwrap().text_content().contains("<agent-role>"));
+                assert!(
+                    surface
+                        .last()
+                        .unwrap()
+                        .text_content()
+                        .contains("<agent-role>")
+                );
                 let events = actor.chat_state_handle.timeline_events().await.unwrap();
                 assert_eq!(
                     events

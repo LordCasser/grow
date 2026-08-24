@@ -891,11 +891,7 @@ impl SessionActor {
             return;
         }
 
-        let nudge_text = build_laziness_nudge(
-            category,
-            &evidence,
-            Some("todo_write"),
-        );
+        let nudge_text = build_laziness_nudge(category, &evidence, Some("todo_write"));
         if nudge_text.is_empty() {
             // Defensive — `evaluate_laziness` only returns Nudge for
             // stalled_* variants which all produce non-empty text.

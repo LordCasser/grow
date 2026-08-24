@@ -233,11 +233,10 @@ impl SessionActor {
     /// itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        // Keep the plan-mode gate's read-only classification in sync with the
-        // config on every snapshot refresh (whole-set replace, same source as
-        // the init-time load below).
-        let server_scopes = crate::util::config::get_mcp_server_scopes(cwd);
-        self.mcp_state.lock().await.mcp_server_scopes = server_scopes;
+        // Keep the MCP trust-domain ceilings in sync with config on every
+        // snapshot refresh (whole-set replace, same source as init).
+        let server_access = crate::util::config::get_mcp_server_max_access(cwd);
+        self.mcp_state.lock().await.mcp_server_max_access = server_access;
         let mcp_initialized = self.mcp_state.lock().await.is_initialized();
         refresh_mcp_snapshot_and_schedule_reminder_with(
             self.agent.borrow().tool_bridge().clone(),
@@ -354,12 +353,12 @@ impl SessionActor {
         }
         if let Some(mut text) = reminder_text {
             if let Some(capabilities) = &self.subagent_capabilities {
-                text.push_str("\nSubagent MCP grants:\n");
+                text.push_str("\nSubagent MCP eligibility:\n");
                 for server in &server_summaries {
-                    let status = if capabilities.mcp_server_granted(&server.name) {
-                        "granted"
+                    let status = if capabilities.mcp_server_eligible(&server.name) {
+                        "eligible; exact calls use the call-bound permission Gate"
                     } else {
-                        "requires request_tool_access"
+                        "forbidden or transport revoked"
                     };
                     text.push_str(&format!("- {}: {status}\n", server.name));
                 }
@@ -716,10 +715,9 @@ impl SessionActor {
                     mcp_state.disabled_tools = dt;
                 }
             }
-            // Tool-scope classification for the plan-mode gate: whole-set
-            // replace (no populate-once guard) so config edits that add or
-            // scope changes are reflected on the next init.
-            mcp_state.mcp_server_scopes = crate::util::config::get_mcp_server_scopes(
+            // Trust-domain ceilings: whole-set replace so config edits are
+            // reflected on the next init.
+            mcp_state.mcp_server_max_access = crate::util::config::get_mcp_server_max_access(
                 std::path::Path::new(&self.session_info.cwd),
             );
             let existing: std::collections::HashSet<String> =
@@ -912,9 +910,9 @@ impl SessionActor {
         let mcp_reminder_dirty = Arc::clone(&self.mcp_reminder_dirty);
         let mcp_handshakes_done = Arc::clone(&self.mcp_handshakes_done);
         let session_id_owned = self.session_info.id.0.clone();
-        let server_scopes_bg = crate::util::config::get_mcp_server_scopes(std::path::Path::new(
-            &self.session_info.cwd,
-        ));
+        let server_access_bg = crate::util::config::get_mcp_server_max_access(
+            std::path::Path::new(&self.session_info.cwd),
+        );
         let server_transport_map: std::collections::HashMap<String, &'static str> =
             mcp_server_configs
                 .iter()
@@ -1308,13 +1306,11 @@ impl SessionActor {
                     }
                 }
             }
-            // Refresh the read-only classification with the value loaded at
-            // background-task start (same whole-set pattern as the init-time
-            // load), so the plan-mode gate sees the config this init was
-            // launched against.
+            // Refresh trust-domain ceilings with the snapshot loaded when
+            // background initialization started.
             {
                 let mut mcp_state = mcp_state_bg.lock().await;
-                mcp_state.mcp_server_scopes = server_scopes_bg;
+                mcp_state.mcp_server_max_access = server_access_bg;
             }
             refresh_mcp_snapshot_and_schedule_reminder_with(
                 tool_bridge.clone(),
@@ -1389,7 +1385,7 @@ impl SessionActor {
     /// fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
         let hint_template = if self.subagent_capabilities.is_some() {
-            "\nWhen a connected MCP server could provide authoritative data or an in-scope action for the assigned task, proactively call `${{ tools.by_kind.search_tool }}` instead of guessing or waiting for an explicit MCP request. If its server has `requires_grant`, call `${{ tools.by_kind.capability_request }}` with target type `mcp_server` and a task-specific purpose, wait for `granted`, then call `${{ tools.by_kind.use_tool }}` with the exact returned schema. The eventual MCP call still requires permission."
+            "\nWhen a connected MCP server could provide authoritative data or an in-scope action for the assigned task, proactively call `${{ tools.by_kind.search_tool }}` instead of guessing or waiting for an explicit MCP request. Retrieve the exact schema, then invoke `${{ tools.by_kind.use_tool }}` directly. Eligibility is immutable for the child: calls inside its initial RWX proceed normally, while a locked exact call enters the call-bound Ask/Auto permission Gate."
         } else {
             "\nWhen a connected MCP server could provide authoritative data or perform an in-scope action for the user's request, proactively call `${{ tools.by_kind.search_tool }}` before answering instead of guessing or asking the user to copy that data. You MUST retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`."
         };

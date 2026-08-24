@@ -303,7 +303,8 @@ pub struct AcpPrompter {
 
 /// Per-tool always-allow/always-reject option ids stripped when the gate is off.
 /// `allow-once`, `reject-once`, `enable-always-approve`, and `allow-edits-session`
-/// always remain.
+/// remain for primary requests. Child requests are reduced separately to the
+/// two one-shot outcomes, independent of option ids.
 const REMEMBER_TOOL_APPROVALS_GATED_IDS: &[&str] = &[
     "allow-always-command",
     "reject-always-command",
@@ -497,9 +498,16 @@ impl AcpPrompter {
                 base.shift_remove(&acp::PermissionOptionId::new(*id));
             }
         }
-        // Capability grants are child-local and ephemeral. Do not offer the
-        // primary-session "enable always-approve" control from this prompt.
-        if !allow_global_mode_toggle || matches!(access, AccessKind::CapabilityGrant { .. }) {
+        if !allow_global_mode_toggle {
+            // A child approval authorizes exactly the frozen call being
+            // prepared. Never let a newly added persistent option silently
+            // reintroduce session-level child grants.
+            base.retain(|_, option| {
+                matches!(
+                    option.kind,
+                    acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::RejectOnce
+                )
+            });
             return base;
         }
         // Prepend the "enable always-approve mode" option as position 0
@@ -538,16 +546,6 @@ impl AcpPrompter {
     ) -> Option<acp::Meta> {
         if let Some(bash) = self.bash_selection_meta(access) {
             return Some(bash);
-        }
-        if let AccessKind::CapabilityGrant { target, purpose } = access {
-            return serde_json::json!({
-                "subagentCapabilityGrant": {
-                    "target": target,
-                    "purpose": purpose,
-                }
-            })
-            .as_object()
-            .cloned();
         }
         let reason = protected_edit?;
         let payload = crate::permission::ProtectedEditPermission::from_reason(reason);
@@ -691,26 +689,6 @@ impl AcpPrompter {
                 );
                 options
             }
-            AccessKind::CapabilityGrant { .. } => {
-                let mut options = IndexMap::new();
-                options.insert(
-                    acp::PermissionOptionId::new("allow-once"),
-                    acp::PermissionOption::new(
-                        "allow-once",
-                        "Grant for this subagent session".to_owned(),
-                        acp::PermissionOptionKind::AllowOnce,
-                    ),
-                );
-                options.insert(
-                    acp::PermissionOptionId::new("reject-once"),
-                    acp::PermissionOption::new(
-                        "reject-once",
-                        REJECT_ONCE_LABEL.to_owned(),
-                        acp::PermissionOptionKind::RejectOnce,
-                    ),
-                );
-                options
-            }
             _ => self.fallback_options.clone(),
         }
     }
@@ -786,7 +764,7 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
-        AccessKind::CapabilityGrant { .. } => "request_tool_access".to_owned(),
+        AccessKind::InternalControl { name } => name.clone(),
     }
 }
 
@@ -1515,7 +1493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_request_routes_to_child_session_with_context() {
+    async fn locked_call_routes_to_child_session_with_one_shot_options() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let prompter = AcpPrompter::new(
             acp::SessionId::new(Arc::from("parent-session")),
@@ -1523,10 +1501,26 @@ mod tests {
             ClientType::Generic,
             Duration::from_secs(5),
         );
-        let access = AccessKind::CapabilityGrant {
-            target: "native:Execute".to_owned(),
-            purpose: "Run focused tests".to_owned(),
-        };
+        let access = AccessKind::Bash("cargo test -p workspace".to_owned());
+        for access in [
+            AccessKind::Edit("src/lib.rs".to_owned()),
+            AccessKind::MCPTool {
+                name: "github__get_repository".to_owned(),
+                input: serde_json::json!({"owner": "openai", "repo": "grow"}),
+            },
+        ] {
+            assert!(
+                prompter
+                    .build_options_for_request(&access, false)
+                    .values()
+                    .all(|option| matches!(
+                        option.kind,
+                        acp::PermissionOptionKind::AllowOnce
+                            | acp::PermissionOptionKind::RejectOnce
+                    )),
+                "every child access kind must remain call-bound"
+            );
+        }
         let update = acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc-capability")),
             acp::ToolCallUpdateFields::default(),
@@ -1540,12 +1534,12 @@ mod tests {
             panic!("expected permission request");
         };
         assert_eq!(args.session_id.0.as_ref(), "child-session");
-        let meta = args.meta.as_ref().expect("capability context metadata");
-        assert_eq!(
-            meta.get("subagentCapabilityGrant")
-                .and_then(|value| value.get("purpose"))
-                .and_then(|value| value.as_str()),
-            Some("Run focused tests")
+        assert!(
+            args.options.iter().all(|option| {
+                option.option_id.0.as_ref() == "allow-once"
+                    || option.option_id.0.as_ref() == "reject-once"
+            }),
+            "a child permission must not create persistent session grants"
         );
         args.response_tx
             .send(Ok(acp::RequestPermissionResponse::new(

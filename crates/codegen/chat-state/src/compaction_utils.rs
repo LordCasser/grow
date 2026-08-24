@@ -17,9 +17,7 @@ use std::collections::BTreeSet;
 ///
 /// This is the single turn-boundary definition used by fork truncation and
 /// child-context summarization.
-pub fn complete_turn_ends<'a>(
-    items: impl IntoIterator<Item = &'a ConversationItem>,
-) -> Vec<usize> {
+pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationItem>) -> Vec<usize> {
     let items = items.into_iter().collect::<Vec<_>>();
     let mut turn_ends = Vec::new();
     let mut index = 0;

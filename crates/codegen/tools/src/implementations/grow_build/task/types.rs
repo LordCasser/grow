@@ -69,7 +69,6 @@ impl SubagentOwner {
     pub fn is_workflow(&self) -> bool {
         matches!(self, Self::Workflow { .. })
     }
-
 }
 
 // Request / Response
@@ -101,7 +100,7 @@ pub struct SubagentRequest {
     ///
     /// Controls immediate handle delivery and completion surfacing. A
     /// background child still auto-surfaces its completion to the model
-    /// (buffered reminder / auto-wake) when `surface_completion` is set —
+    /// (durable completion notification) when `surface_completion` is set —
     /// background does not mean fire-and-forget. Prompt cancellation still
     /// cancels every child owned by that prompt.
     pub run_in_background: bool,
@@ -213,181 +212,14 @@ pub fn is_valid_resume_id(s: &str) -> bool {
     is_not_sentinel(s)
 }
 
-/// Extension methods for [`SubagentCapabilityMode`] that depend on this crate's
-/// tool-config internals (`ToolKind` / `ToolServerConfig`).
-pub trait SubagentCapabilityModeExt {
-    /// Filter a tool config to only include tools allowed by this mode.
-    ///
-    /// Uses the `kind` field on each `ToolConfig`, populated automatically
-    /// by `for_tool::<T>()` / `From<&T: Tool>` at toolset construction time.
-    /// Restricted modes reject tools without an explicit kind.
-    fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig);
-
-    /// Return the set of `ToolKind`s allowed under this capability mode.
-    fn allowed_tool_kinds(self) -> &'static [crate::types::tool::ToolKind];
-}
-
-/// Prune background-task lifecycle tools (`get_task_output` / `kill_task`) when
-/// no tool that can spawn background work remains in the config.
-pub fn prune_orphaned_background_task_tools(config: &mut crate::registry::types::ToolServerConfig) {
-    use crate::types::tool::ToolKind;
-
-    let has_task_tool = config
-        .tools
-        .iter()
-        .any(|tc| tc.kind == Some(ToolKind::Task));
-    let has_background_capable_bash = config.tools.iter().any(is_background_capable_bash_tool);
-    if has_task_tool || has_background_capable_bash {
-        return;
-    }
-
-    config.tools.retain(|tc| {
-        !matches!(
-            tc.kind,
-            Some(ToolKind::BackgroundTaskAction | ToolKind::KillTaskAction)
-        )
-    });
-}
-
-fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> bool {
-    match tc.id.as_str() {
-        "Grow:run_terminal_cmd" | "GrowConcise:run_terminal_cmd" => tc
-            .params
-            .as_ref()
-            .and_then(|params| params.get("enabled_background"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true),
-        _ => false,
-    }
-}
-
-impl SubagentCapabilityModeExt for SubagentCapabilityMode {
-    fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig) {
-        let allowed = self.allowed_tool_kinds();
-        config.tools.retain(|tc| match tc.kind {
-            // `All` means every classified capability, not an escape hatch
-            // for opaque tools. Other modes use their explicit allowlist.
-            Some(k) => self == Self::All || allowed.contains(&k),
-            None => false,
-        });
-        prune_orphaned_background_task_tools(config);
-    }
-
-    /// Return the set of `ToolKind`s allowed under this capability mode.
-    fn allowed_tool_kinds(self) -> &'static [crate::types::tool::ToolKind] {
-        use crate::types::tool::ToolKind;
-        match self {
-            Self::ReadOnly => &[
-                ToolKind::Read,
-                ToolKind::ListDir,
-                ToolKind::List,
-                ToolKind::Search,
-                ToolKind::Lsp,
-                ToolKind::Plan,
-                ToolKind::MemorySearch,
-                ToolKind::MemoryGet,
-                ToolKind::ContextRecall,
-                ToolKind::WebFetch,
-                ToolKind::BackgroundTaskAction,
-                ToolKind::KillTaskAction,
-                ToolKind::Task,
-                ToolKind::PlanControl,
-                ToolKind::AskUser,
-                ToolKind::Skill,
-                ToolKind::GoalRead,
-                ToolKind::SearchTool,
-                ToolKind::UseTool,
-                ToolKind::CapabilityRequest,
-            ],
-            Self::ReadWrite => &[
-                ToolKind::Read,
-                ToolKind::ListDir,
-                ToolKind::List,
-                ToolKind::Search,
-                ToolKind::Lsp,
-                ToolKind::Edit,
-                ToolKind::Write,
-                ToolKind::Delete,
-                ToolKind::Move,
-                ToolKind::Plan,
-                ToolKind::MemorySearch,
-                ToolKind::MemoryGet,
-                ToolKind::ContextRecall,
-                ToolKind::WebFetch,
-                ToolKind::BackgroundTaskAction,
-                ToolKind::KillTaskAction,
-                ToolKind::Task,
-                ToolKind::PlanControl,
-                ToolKind::AskUser,
-                ToolKind::Skill,
-                ToolKind::GoalRead,
-                ToolKind::SearchTool,
-                ToolKind::UseTool,
-                ToolKind::CapabilityRequest,
-            ],
-            Self::Execute => &[
-                ToolKind::Read,
-                ToolKind::ListDir,
-                ToolKind::List,
-                ToolKind::Search,
-                ToolKind::Lsp,
-                ToolKind::Execute,
-                ToolKind::Monitor,
-                ToolKind::Plan,
-                ToolKind::MemorySearch,
-                ToolKind::MemoryGet,
-                ToolKind::ContextRecall,
-                ToolKind::WebFetch,
-                ToolKind::BackgroundTaskAction,
-                ToolKind::KillTaskAction,
-                ToolKind::Task,
-                ToolKind::PlanControl,
-                ToolKind::AskUser,
-                ToolKind::Skill,
-                ToolKind::GoalRead,
-                ToolKind::SearchTool,
-                ToolKind::UseTool,
-                ToolKind::CapabilityRequest,
-            ],
-            Self::All => &[
-                ToolKind::Read,
-                ToolKind::ListDir,
-                ToolKind::List,
-                ToolKind::Search,
-                ToolKind::Lsp,
-                ToolKind::Edit,
-                ToolKind::Write,
-                ToolKind::Delete,
-                ToolKind::Move,
-                ToolKind::Execute,
-                ToolKind::Monitor,
-                ToolKind::Plan,
-                ToolKind::MemorySearch,
-                ToolKind::MemoryGet,
-                ToolKind::ContextRecall,
-                ToolKind::WebFetch,
-                ToolKind::BackgroundTaskAction,
-                ToolKind::KillTaskAction,
-                ToolKind::Task,
-                ToolKind::PlanControl,
-                ToolKind::AskUser,
-                ToolKind::Skill,
-                ToolKind::SearchTool,
-                ToolKind::UseTool,
-                ToolKind::CapabilityRequest,
-            ],
-        }
-    }
-}
-
 /// Result returned by a completed subagent.
 #[derive(Debug, Clone)]
 pub struct SubagentResult {
     pub success: bool,
     /// The subagent's final output text.
     ///
-    /// Stored as `Arc<str>` so cloning into per-consumer summaries
-    /// (`SubagentCompletionSummary`, snapshot status, etc.) is a refcount
+    /// Stored as `Arc<str>` so cloning into completion payloads, snapshot
+    /// status, and other projections is a refcount
     /// bump rather than a full copy. Subagent outputs can be arbitrarily
     /// large (entire transcript), so this matters at scale.
     pub output: Arc<str>,
@@ -409,7 +241,7 @@ pub struct SubagentResult {
     /// Path to the isolated worktree if one was created.
     pub worktree_path: Option<String>,
     /// Set when a blocking subagent exceeded its await budget and was
-    /// auto-backgrounded: the child is still running (result via auto-wake /
+    /// auto-backgrounded: the child is still running (result via durable notification /
     /// `get_command_or_subagent_output`), so the tool returns a `task_id` notice
     /// instead of a completion. Never set for natively backgrounded subagents.
     pub backgrounded: bool,
@@ -604,9 +436,8 @@ pub enum SubagentCancelOutcome {
     NotFound,
 }
 
-/// Summary of a completed subagent, used for between-turn delivery.
-/// Session ownership lives on the coordinator's `BufferedCompletion` wrapper;
-/// drains are scoped there, so delivered summaries carry no owner field.
+/// Model-facing projection of one completed subagent. The shell serializes it
+/// into a content-addressed durable notification payload.
 #[derive(Debug, Clone)]
 pub struct SubagentCompletionSummary {
     pub subagent_id: String,
@@ -617,24 +448,14 @@ pub struct SubagentCompletionSummary {
     pub tool_calls: u32,
     pub turns: u32,
     /// The subagent's final output text. Refcount-shared with
-    /// `SubagentResult.output` (no allocation on the path from coordinator
-    /// to between-turn drain).
+    /// `SubagentResult.output` (no allocation on the path from coordinator to
+    /// notification receipt).
     ///
     /// Surfaced inline in completion notifications when the parent agent's
     /// toolset has no `BackgroundTaskAction` tool. Toolsets
     /// that DO have a polling tool keep the existing metadata-only line +
     /// "Use get_task_output(...)" pointer.
     pub output: Arc<str>,
-}
-
-/// Request to drain buffered completion summaries.
-#[derive(Educe)]
-#[educe(Debug)]
-pub struct SubagentCompletionsRequest {
-    pub parent_session_id: Option<String>,
-    pub suppress_ids: Vec<String>,
-    #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Vec<SubagentCompletionSummary>>,
 }
 
 /// Live subagents and whether finished-subagent usage is still missing from the parent bill.
@@ -765,8 +586,7 @@ pub enum SubagentEvent {
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
-    Completions(SubagentCompletionsRequest),
-    /// Discard a closed session's buffered completions and cancel its children.
+    /// Cancel a closed session's children and discard its runtime admission state.
     TeardownSession {
         parent_session_id: String,
     },
@@ -931,16 +751,6 @@ register_resource!(
     CurrentSubagentOwnerResource
 );
 
-/// True while a `/goal` loop is active. Set by shell at turn start.
-/// When true, `TaskCompletionReminder` suppresses bg-task completion
-/// reminders (marking them reported) so async "task completed" nudges don't
-/// pull a weak model off the goal continuation (e.g. relaunching a killed
-/// dev server).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GoalLoopActive(pub bool);
-
-register_resource!("grow_build", "GoalLoopActive", GoalLoopActive);
-
 /// Thread-local tracing capture for behavioral log-emission tests.
 #[cfg(test)]
 pub(crate) mod test_capture {
@@ -1016,140 +826,7 @@ pub(crate) mod test_capture {
 
 #[cfg(test)]
 mod tests {
-    use crate::registry::types::{ToolConfig, ToolServerConfig};
-    use crate::types::tool::ToolKind;
-
-    use super::SubagentCapabilityMode;
-    use super::SubagentCapabilityModeExt;
     use super::is_valid_resume_id;
-
-    /// Create a `ToolConfig` with the given id and kind set.
-    fn tc(id: &str, kind: ToolKind) -> ToolConfig {
-        let mut c = ToolConfig::from_id(id);
-        c.kind = Some(kind);
-        c
-    }
-
-    #[test]
-    fn read_only_filter_prunes_orphaned_background_task_tools() {
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("Grow:run_terminal_cmd", ToolKind::Execute),
-                tc("Grow:read_file", ToolKind::Read),
-                tc("Grow:list_dir", ToolKind::List),
-                tc("Grow:grep", ToolKind::Search),
-                tc("Grow:kill_task", ToolKind::KillTaskAction),
-                tc("Grow:get_task_output", ToolKind::BackgroundTaskAction),
-            ],
-        };
-
-        SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
-
-        let ids: Vec<&str> = config.tools.iter().map(|tc| tc.id.as_str()).collect();
-        assert_eq!(ids, vec!["Grow:read_file", "Grow:list_dir", "Grow:grep",]);
-    }
-
-    #[test]
-    fn read_only_filter_keeps_background_task_tools_when_task_tool_remains() {
-        let mut config = ToolServerConfig {
-            tools: vec![
-                tc("Grow:run_terminal_cmd", ToolKind::Execute),
-                tc("Grow:read_file", ToolKind::Read),
-                tc("Grow:list_dir", ToolKind::List),
-                tc("Grow:grep", ToolKind::Search),
-                tc("Grow:kill_task", ToolKind::KillTaskAction),
-                tc("Grow:get_task_output", ToolKind::BackgroundTaskAction),
-                tc("Grow:task", ToolKind::Task),
-            ],
-        };
-
-        SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
-
-        let ids: Vec<&str> = config.tools.iter().map(|tc| tc.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "Grow:read_file",
-                "Grow:list_dir",
-                "Grow:grep",
-                "Grow:kill_task",
-                "Grow:get_task_output",
-                "Grow:task",
-            ]
-        );
-    }
-
-    #[test]
-    fn capability_modes_include_lsp_kind() {
-        use crate::types::tool::ToolKind;
-
-        for mode in [
-            SubagentCapabilityMode::ReadOnly,
-            SubagentCapabilityMode::ReadWrite,
-            SubagentCapabilityMode::Execute,
-            SubagentCapabilityMode::All,
-        ] {
-            assert!(
-                mode.allowed_tool_kinds().contains(&ToolKind::Lsp),
-                "{mode:?} should preserve ToolKind::Lsp"
-            );
-        }
-    }
-
-    #[test]
-    fn read_write_filter_keeps_background_capable_bash_when_explicitly_enabled() {
-        let mut bash = tc("Grow:run_terminal_cmd", ToolKind::Execute);
-        bash.params = Some(
-            serde_json::json!({ "enabled_background": true })
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        let mut config = ToolServerConfig { tools: vec![bash] };
-
-        SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
-
-        assert!(
-            config.tools.is_empty(),
-            "execute tools should still be filtered out"
-        );
-    }
-
-    #[test]
-    fn restricted_modes_keep_goal_read_and_reject_goal_mutation() {
-        let mut opaque = ToolConfig::from_id("custom:opaque");
-        opaque.kind = None;
-        let goal_read = tc("Grow:get_goal", ToolKind::GoalRead);
-        let goal_lifecycle = tc("Grow:update_goal", ToolKind::GoalLifecycleUpdate);
-
-        for mode in [
-            SubagentCapabilityMode::ReadOnly,
-            SubagentCapabilityMode::ReadWrite,
-            SubagentCapabilityMode::Execute,
-        ] {
-            let mut config = ToolServerConfig {
-                tools: vec![
-                    opaque.clone(),
-                    goal_read.clone(),
-                    goal_lifecycle.clone(),
-                ],
-            };
-            mode.filter_tool_config(&mut config);
-            let kinds: Vec<_> = config.tools.iter().filter_map(|tool| tool.kind).collect();
-            assert_eq!(
-                kinds,
-                [ToolKind::GoalRead],
-                "mode={mode:?}"
-            );
-        }
-
-        let mut all = ToolServerConfig {
-            tools: vec![opaque, goal_read, goal_lifecycle],
-        };
-        SubagentCapabilityMode::All.filter_tool_config(&mut all);
-        assert!(all.tools.iter().all(|tool| tool.kind.is_some()));
-        assert_eq!(all.tools.len(), 2, "All keeps every classified capability");
-    }
 
     #[test]
     fn is_valid_resume_id_rejects_sentinels() {
@@ -1330,93 +1007,11 @@ mod tests {
     }
 
     #[test]
-    fn completions_request_round_trips_through_channel() {
-        use tokio::sync::{mpsc, oneshot};
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<super::SubagentCompletionsRequest>();
-        let (respond_to, mut response_rx) = oneshot::channel();
-
-        tx.send(super::SubagentCompletionsRequest {
-            parent_session_id: Some("parent".into()),
-            suppress_ids: vec!["id-1".into(), "id-2".into()],
-            respond_to,
-        })
-        .unwrap();
-
-        let req = rx.try_recv().unwrap();
-        assert_eq!(req.parent_session_id.as_deref(), Some("parent"));
-        assert_eq!(req.suppress_ids, vec!["id-1", "id-2"]);
-
-        let summaries = vec![super::SubagentCompletionSummary {
-            subagent_id: "sub-1".into(),
-            subagent_type: "general-purpose".into(),
-            description: "test task".into(),
-            success: true,
-            duration_ms: 1500,
-            tool_calls: 7,
-            turns: 3,
-            output: std::sync::Arc::from("subagent answer"),
-        }];
-        req.respond_to.send(summaries).unwrap();
-
-        let result = response_rx.try_recv().unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].subagent_id, "sub-1");
-        assert!(result[0].success);
-        assert_eq!(result[0].duration_ms, 1500);
-        assert_eq!(result[0].tool_calls, 7);
-        assert_eq!(result[0].turns, 3);
-    }
-
-    #[test]
-    fn event_sender_wraps_channel_and_delivers_completions() {
-        use tokio::sync::{mpsc, oneshot};
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<super::SubagentEvent>();
-        let sender = super::SubagentEventSender(tx);
-
-        let (respond_to, mut response_rx) = oneshot::channel();
-        sender
-            .0
-            .send(super::SubagentEvent::Completions(
-                super::SubagentCompletionsRequest {
-                    parent_session_id: None,
-                    suppress_ids: vec![],
-                    respond_to,
-                },
-            ))
-            .unwrap();
-
-        let event = rx.try_recv().unwrap();
-        let req = match event {
-            super::SubagentEvent::Completions(r) => r,
-            _ => panic!("Expected Completions, got different variant"),
-        };
-        assert!(req.suppress_ids.is_empty());
-        req.respond_to.send(vec![]).unwrap();
-
-        let result = response_rx.try_recv().unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn event_sender_is_clone() {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::unbounded_channel::<super::SubagentEvent>();
         let sender = super::SubagentEventSender(tx);
-        let cloned = sender.clone();
-        // Both clones should be able to send
-        let (respond_to, _) = tokio::sync::oneshot::channel();
-        cloned
-            .0
-            .send(super::SubagentEvent::Completions(
-                super::SubagentCompletionsRequest {
-                    parent_session_id: None,
-                    suppress_ids: vec![],
-                    respond_to,
-                },
-            ))
-            .unwrap();
+        let _cloned = sender.clone();
     }
 }

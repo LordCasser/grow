@@ -288,7 +288,6 @@ ask_user_question = true
 session_recap = true
 write_file = true
 cancel_rewind = true
-auto_wake = true
 compaction_verbatim_input = true
 subagent_worktree_snapshot = false
 mcp_liveness_watchers = true
@@ -431,9 +430,9 @@ enabled = false
 # from = "region"
 # map = { us = "https://us-mcp.example.com/api/mcp", eu = "https://eu-mcp.example.com/api/mcp" }
 
-# 声明该 server 全部工具的副作用范围；默认 write，Plan 审批前仅放行 read。
-# 这是 server 级分类，混合读写工具应拆分成不同 server。
-# tool_scope = "read"
+# 声明该 server 信任域的 RWX 上界；默认 all（fail closed）。远端查询因同时
+# 发出请求并读取响应应使用 read_write；含远端 mutation/执行的 server 使用 all。
+# max_access = "read_write"
 
 # 按 server 禁用工具；server/tool 名称均为发现后的实际 ID。
 [disabled_mcp_tools]

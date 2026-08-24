@@ -413,20 +413,20 @@ pub(crate) fn read_summary_from_dir(session_dir: &Path) -> io::Result<Summary> {
         Path::new(""),
         "session directory",
         false,
-    )
-    ?;
-    let bytes = directory
-        .read_bounded(
-            std::ffi::OsStr::new("summary.json"),
-            "session summary",
-            crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
-        )
-        ?;
+    )?;
+    let bytes = directory.read_bounded(
+        std::ffi::OsStr::new("summary.json"),
+        "session summary",
+        crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
+    )?;
     let summary: Summary = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    summary
-        .validate_current_format()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {error}", path.display())))?;
+    summary.validate_current_format().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {error}", path.display()),
+        )
+    })?;
     Ok(summary)
 }
 
@@ -830,11 +830,7 @@ pub(crate) fn write_immutable_blob_to_directory(
             "immutable blob path has no file name",
         )
     })?;
-    let parent = root.open_relative(
-        parent_relative,
-        "immutable blob directory",
-        true,
-    )?;
+    let parent = root.open_relative(parent_relative, "immutable blob directory", true)?;
     #[cfg(any(unix, windows))]
     match parent.write_atomic(file_name, content, true, false) {
         Ok(()) => Ok(()),
@@ -1857,6 +1853,9 @@ impl SessionPersistence {
                     let refreshes_session_index = matches!(
                         &event.kind,
                         chat_state::TimelineEventKind::Messages(_)
+                            | chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Consumed { input: Some(_), .. }
+                            )
                             | chat_state::TimelineEventKind::Turn(
                                 chat_state::TurnEvent::Started { .. }
                             )
@@ -1948,10 +1947,7 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write rewind point");
                     }
                 }
-                PersistenceMsg::ReplaceRewindPointsAndAck {
-                    points,
-                    respond_to,
-                } => {
+                PersistenceMsg::ReplaceRewindPointsAndAck { points, respond_to } => {
                     let result = self
                         .storage
                         .replace_rewind_points(&self.info, &points)
@@ -2351,15 +2347,14 @@ pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
         );
 
         let adapter = JsonlStorageAdapter::with_root(root);
-        let (sessions_deleted, errors) = match adapter
-            .cleanup_stale_sessions_sync(ttl_days, skip_session_dir)
-        {
-            Ok(stats) => stats,
-            Err(error) => {
-                tracing::error!(%error, "session entity cleanup failed closed");
-                return;
-            }
-        };
+        let (sessions_deleted, errors) =
+            match adapter.cleanup_stale_sessions_sync(ttl_days, skip_session_dir) {
+                Ok(stats) => stats,
+                Err(error) => {
+                    tracing::error!(%error, "session entity cleanup failed closed");
+                    return;
+                }
+            };
 
         tracing::info!(
             target: "shell::session::persistence",

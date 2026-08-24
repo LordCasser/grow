@@ -480,7 +480,6 @@ fn viewer_finalize_runs_full_teardown_once() {
         .cancel_turn_buttons
         .push(ratatui::layout::Rect::default());
     agent.bash_turn = true;
-    agent.cron_task_id = Some("task-1".into());
     agent.activity_started_at = Some(Instant::now());
     agent.last_activity = Some(crate::acp::tracker::TurnActivity::Thinking);
     let generation = agent.prompt.prompt_suggestion.begin_fetch();
@@ -518,7 +517,6 @@ fn viewer_finalize_runs_full_teardown_once() {
         "cancel buttons cleared"
     );
     assert!(!agent.bash_turn, "bash turn flag reset");
-    assert!(agent.cron_task_id.is_none(), "cron id cleared");
     assert!(agent.activity_started_at.is_none());
     assert!(agent.last_activity.is_none());
     assert!(

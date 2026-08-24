@@ -201,8 +201,6 @@ async fn test_agent_from_config(
         String::new(),
         None,
         tool_bridge,
-        agent::ReminderPolicy::default(),
-        agent::CompactionPolicy::default(),
     )
 }
 #[cfg(test)]
@@ -279,16 +277,11 @@ pub(crate) async fn create_test_actor_ex(
     );
     let mut tool_context =
         ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
-    tool_context.task_completion_reservations =
-        Some(tools::reminders::task_completion::TaskCompletionReservations::default());
-    tool_context.task_wake_suppressed =
-        Some(tools::reminders::task_completion::TaskWakeSuppressed::default());
     let state = TokioMutex::new(State {
         foreground: ForegroundState::Idle,
         pending_manual_compact: None,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
-        pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
@@ -372,6 +365,8 @@ pub(crate) async fn create_test_actor_ex(
         compaction: crate::session::compaction_config::CompactionConfig {
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),
+            memory_flush_enabled: false,
+            wall_clock_budget_secs: 0,
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
             count: std::sync::atomic::AtomicU64::new(0),
@@ -382,6 +377,7 @@ pub(crate) async fn create_test_actor_ex(
             pre_prune_token_budget: std::cell::Cell::new(None),
             cancel: Default::default(),
         },
+        todo_gate: Default::default(),
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
             is_flushing: std::sync::atomic::AtomicBool::new(false),
@@ -482,22 +478,6 @@ pub(crate) async fn create_test_actor_ex(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
     };
-    if let Some(reservations) = actor.tool_context.task_completion_reservations.clone() {
-        actor
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(reservations)
-            .await;
-    }
-    if let Some(gate) = actor.tool_context.task_wake_suppressed.clone() {
-        actor
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(gate)
-            .await;
-    }
     (actor, event_rx)
 }
 #[cfg(test)]
@@ -529,6 +509,7 @@ pub(crate) fn user_item_with_rx(
     let (respond_to, rx) = oneshot::channel();
     let text = format!("text for {id}");
     let item = InputItem {
+        notification_ids: Vec::new(),
         prompt_id: id.to_string(),
         turn_kind: crate::session::TurnKind::User,
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
@@ -537,7 +518,6 @@ pub(crate) fn user_item_with_rx(
         verbatim: false,
         json_schema: None,
         origin: crate::session::PromptOrigin::User,
-        task_wake_fallback: None,
         respond_to,
         persist_ack: None,
         queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
@@ -566,6 +546,7 @@ pub(crate) fn input_with_origin_rx(
     let (respond_to, rx) = oneshot::channel();
     let verbatim = origin.is_synthetic();
     let item = InputItem {
+        notification_ids: Vec::new(),
         prompt_id: prompt_id.to_string(),
         turn_kind: if origin.is_synthetic() {
             crate::session::TurnKind::Internal
@@ -578,7 +559,6 @@ pub(crate) fn input_with_origin_rx(
         verbatim,
         json_schema: None,
         origin,
-        task_wake_fallback: None,
         respond_to,
         persist_ack: None,
         queue_meta: None,

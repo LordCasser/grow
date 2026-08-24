@@ -1,7 +1,6 @@
 //! Notification bridge: translates `tools` `ToolNotification` events
 //! into `shell`'s native systems (ACP gateway, hunk tracker, file state tracker).
 use crate::session::commands::SessionCommand;
-use crate::session::commands::{NotificationPriority, NotificationSource};
 use crate::session::persistence::{DurableAppendError, PersistenceHandle, PersistenceMsg};
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent_client_protocol::{self as acp, Client as _};
@@ -13,7 +12,6 @@ use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tools::notification::types::{ToolNotification, ToolNotificationHandle};
 use tools::types::output::{BashOutput, ToolOutput};
 use workspace::session::file_state::FileStateTracker;
-const TASK_WAKE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 /// Configuration for the notification bridge.
 pub struct NotificationBridgeConfig {
     /// ACP gateway for sending streaming updates to TUI
@@ -41,8 +39,6 @@ pub struct NotificationBridgeConfig {
     pub behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
     /// Session command channel for monitor events and task-completed injections.
     pub session_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
-    pub task_completion_reservations: tools::reminders::task_completion::TaskCompletionReservations,
-    pub task_wake_suppressed: tools::reminders::task_completion::TaskWakeSuppressed,
     /// Resolved name of the `BackgroundTaskAction` tool. Written exactly
     /// once after the agent's toolset is finalized; read many times
     /// thereafter from the notification bridge and the session actor's
@@ -54,13 +50,6 @@ pub struct NotificationBridgeConfig {
     /// `task.output_file` even when no polling tool is available. Same
     /// write-once-read-many lifecycle as `task_output_tool_name`.
     pub read_tool_name: Arc<std::sync::OnceLock<Option<String>>>,
-    /// When `false`, bash task completions fall back to the idle-gated
-    /// `InjectNotification` path instead of immediate synthetic prompts.
-    pub auto_wake_enabled: bool,
-    /// When `true`, suppress the bash auto-wake synthetic prompt. Shared `Arc`
-    /// written at one chokepoint — see
-    /// `SessionActor::set_goal_loop_active_resource` for the rationale.
-    pub goal_loop_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 /// Snapshot a shared `OnceLock` tool-name slot as a borrowed `&str`.
 /// Returns `None` if the slot is still unset (toolset not yet finalized)
@@ -363,15 +352,7 @@ async fn handle_notification(
         ToolNotification::TaskCompleted(task_snapshot) => {
             let is_monitor = task_snapshot.kind == tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
-            let goal_loop_active = config
-                .goal_loop_active
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if goal_loop_active {
-                // Goal suppresses unrelated background noise, but a task
-                // whose blocking wait was displaced by steering has an
-                // explicit delivery obligation. The actor-side tracker owns
-                // the race with the original wait result and ignores task ids
-                // that were never deferred.
+            if !task_snapshot.block_waited && !task_snapshot.explicitly_killed {
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
                 let read_name = resolved_tool_name(&config.read_tool_name);
                 let body = if is_monitor {
@@ -388,157 +369,17 @@ async fn handle_notification(
                 };
                 let _ = config
                     .session_cmd_tx
-                    .send(SessionCommand::DeferredCompletionAvailable {
-                        source: if is_monitor {
-                            NotificationSource::MonitorCompleted {
-                                task_id: task_id.clone(),
-                            }
-                        } else {
-                            NotificationSource::BashTaskCompleted {
-                                task_id: task_id.clone(),
-                            }
-                        },
-                        body,
-                    });
-                tracing::info!(
-                    task_id = %task_id,
-                    is_monitor,
-                    "auto-wake: routed Goal completion through deferred-delivery tracker"
-                );
-            } else if task_snapshot.block_waited || task_snapshot.explicitly_killed {
-            } else if config.auto_wake_enabled {
-                config.task_completion_reservations.reserve(task_id.clone());
-                let tool_name = resolved_tool_name(&config.task_output_tool_name);
-                let read_name = resolved_tool_name(&config.read_tool_name);
-                let body = if is_monitor {
-                    tools::reminders::task_completion::format_monitor_completion(
-                        &task_snapshot,
-                        tool_name,
-                    )
-                } else {
-                    tools::reminders::task_completion::format_bash_completion(
-                        &task_snapshot,
-                        tool_name,
-                        read_name,
-                    )
-                };
-                let message = tools::reminders::wrap_reminder(&body);
-                let prompt_id = format!("task-completed-{task_id}");
-                let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(message))];
-                let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
-                let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
-                tracing::info!(
-                    task_id = %task_id,
-                    prompt_id = %prompt_id,
-                    is_monitor,
-                    "auto-wake: requesting synthetic prompt admission for completed background task"
-                );
-                let enqueued = config
-                    .session_cmd_tx
-                    .send(SessionCommand::QueuePrompt {
-                        prompt_id: prompt_id.clone(),
-                        prompt_blocks,
-                        origin: crate::session::PromptOrigin::TaskCompleted {
+                    .send(SessionCommand::ReceiveNotification {
+                        source: chat_state::NotificationSource::TaskCompleted {
                             task_id: task_id.clone(),
-                        },
-                        turn_kind: crate::session::TurnKind::Internal,
-                        client_identifier: None,
-                        screen_mode: None,
-                        verbatim: true,
-                        json_schema: None,
-                        admission: Some(crate::session::commands::TaskWakeAdmission {
-                            respond_to: admission_tx,
-                            fallback: crate::session::commands::TaskWakeFallback {
-                                prompt_id: if is_monitor {
-                                    format!("monitor-completed-{task_id}")
-                                } else {
-                                    format!("bash-completed-{task_id}")
-                                },
-                                prompt_blocks: vec![acp::ContentBlock::Text(
-                                    acp::TextContent::new(body.clone()),
-                                )],
-                                source: if is_monitor {
-                                    NotificationSource::MonitorCompleted {
-                                        task_id: task_id.clone(),
-                                    }
-                                } else {
-                                    NotificationSource::BashTaskCompleted {
-                                        task_id: task_id.clone(),
-                                    }
-                                },
+                            task_kind: if is_monitor {
+                                chat_state::NotificationTaskKind::Monitor
+                            } else {
+                                chat_state::NotificationTaskKind::Task
                             },
-                        }),
-                        respond_to,
-                        persist_ack: None,
-                    })
-                    .is_ok();
-                if !enqueued {
-                    config.task_completion_reservations.release(&task_id);
-                }
-                let admitted = if enqueued {
-                    tokio::time::timeout(TASK_WAKE_ADMISSION_TIMEOUT, admission_rx)
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                ::diagnostics::unified_log::info(
-                    "shell.task_wake.bridge_admission",
-                    Some(config.session_id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "task_id": &task_id,
-                        "monitor": is_monitor,
-                        "enqueued": enqueued,
-                        "admitted": admitted,
-                        "gate": config.task_wake_suppressed.get(),
-                    })),
-                );
-                if admitted && is_monitor {
-                    let _ = config
-                        .session_cmd_tx
-                        .send(SessionCommand::DropMonitorNotifications {
-                            task_id: task_id.clone(),
-                        });
-                }
-            } else {
-                let tool_name = resolved_tool_name(&config.task_output_tool_name);
-                let read_name = resolved_tool_name(&config.read_tool_name);
-                let message = if is_monitor {
-                    tools::reminders::task_completion::format_monitor_completion(
-                        &task_snapshot,
-                        tool_name,
-                    )
-                } else {
-                    tools::reminders::task_completion::format_bash_completion(
-                        &task_snapshot,
-                        tool_name,
-                        read_name,
-                    )
-                };
-                let source = if is_monitor {
-                    NotificationSource::MonitorCompleted {
-                        task_id: task_id.clone(),
-                    }
-                } else {
-                    NotificationSource::BashTaskCompleted {
-                        task_id: task_id.clone(),
-                    }
-                };
-                let _ = config
-                    .session_cmd_tx
-                    .send(SessionCommand::InjectNotification {
-                        prompt_id: if is_monitor {
-                            format!("monitor-completed-{task_id}")
-                        } else {
-                            format!("bash-completed-{task_id}")
                         },
-                        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                            message,
-                        ))],
-                        priority: NotificationPriority::Later,
-                        source,
+                        source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        body,
                     });
             }
             let mut notification = crate::extensions::notification::SessionNotification {
@@ -668,26 +509,16 @@ async fn handle_notification(
                         params.into(),
                     ));
             }
-            if config.task_completion_reservations.contains(&event.task_id) {
-                tracing::debug!(
-                    task_id = %event.task_id,
-                    "skipping model inject for monitor event: task already auto-woke via TaskCompleted"
-                );
-                return;
-            }
-            let prompt_id = format!("monitor-{}-{}", event.task_id, uuid::Uuid::now_v7());
-            let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                event.event_text,
-            ))];
             let _ = config
                 .session_cmd_tx
-                .send(SessionCommand::InjectNotification {
-                    prompt_id,
-                    prompt_blocks,
-                    priority: NotificationPriority::Next,
-                    source: NotificationSource::MonitorEvent {
+                .send(SessionCommand::ReceiveNotification {
+                    source: chat_state::NotificationSource::MonitorProgress {
                         task_id: event.task_id.clone(),
                     },
+                    source_version: chat_state::NotificationSourceVersion::Opaque {
+                        value: uuid::Uuid::now_v7().to_string(),
+                    },
+                    body: event.event_text,
                 });
         }
         ToolNotification::ScheduledTaskRemoved(removed) => {
@@ -730,36 +561,6 @@ mod tests {
     use super::*;
     use tools::computer::types::TaskKind;
     use tools::types::TaskSnapshot;
-    /// Drive the admission handshake inline so receiver assertions observe the
-    /// bridge's command order without racing a detached proxy task.
-    async fn handle_notification_with_admission(
-        config: &NotificationBridgeConfig,
-        notification: ToolNotification,
-        offsets: &mut HashMap<String, usize>,
-        cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
-        accepted: bool,
-    ) {
-        let notification = handle_notification(config, notification, offsets);
-        tokio::pin!(notification);
-        let mut command = tokio::select! {
-            _ = &mut notification => panic!("notification completed before requesting admission"),
-            command = cmd_rx.recv() => command.expect("expected task-wake prompt"),
-        };
-        let SessionCommand::QueuePrompt { admission, .. } = &mut command else {
-            panic!("expected task-wake prompt");
-        };
-        admission
-            .take()
-            .expect("expected task-wake admission request")
-            .respond_to
-            .send(accepted)
-            .expect("notification must still be awaiting admission");
-        config
-            .session_cmd_tx
-            .send(command)
-            .expect("test command receiver must remain open");
-        notification.await;
-    }
     fn make_test_config() -> (
         NotificationBridgeConfig,
         mpsc::UnboundedReceiver<SessionCommand>,
@@ -801,13 +602,8 @@ mod tests {
                 crate::session::behavior::BehaviorCoordinator::new(),
             )),
             session_cmd_tx,
-            task_completion_reservations:
-                tools::reminders::task_completion::TaskCompletionReservations::default(),
-            task_wake_suppressed: tools::reminders::task_completion::TaskWakeSuppressed::default(),
             task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
             read_tool_name: Arc::new(std::sync::OnceLock::new()),
-            auto_wake_enabled: true,
-            goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         (config, gateway_rx, persistence_rx, session_cmd_rx)
     }
@@ -843,28 +639,21 @@ mod tests {
         let snapshot = make_task_snapshot("bg-123", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
-            .await;
+        handle_notification(&config, notification, &mut offsets).await;
         let command = cmd_rx.try_recv().expect("expected Prompt");
         match command {
-            SessionCommand::QueuePrompt {
-                prompt_id,
-                prompt_blocks,
-                verbatim,
-                ..
-            } => {
-                assert!(prompt_id.starts_with("task-completed-"));
-                assert!(verbatim);
-                let text = match &prompt_blocks[0] {
-                    acp::ContentBlock::Text(t) => &t.text,
-                    _ => panic!("expected text block"),
-                };
-                assert!(text.contains("bg-123"));
-                assert!(text.contains("exit code: 0"));
-                assert!(text.contains(r#"get_command_or_subagent_output("bg-123")"#));
-                assert!(!text.contains(r#"get_task_output("bg-123")"#));
+            SessionCommand::ReceiveNotification { source, body, .. } => {
+                assert!(matches!(
+                    source,
+                    chat_state::NotificationSource::TaskCompleted { task_id, .. }
+                        if task_id == "bg-123"
+                ));
+                assert!(body.contains("bg-123"));
+                assert!(body.contains("exit code: 0"));
+                assert!(body.contains(r#"get_command_or_subagent_output("bg-123")"#));
+                assert!(!body.contains(r#"get_task_output("bg-123")"#));
             }
-            _ => panic!("expected Prompt"),
+            _ => panic!("expected ReceiveNotification"),
         }
         let cmd3 = cmd_rx
             .try_recv()
@@ -884,20 +673,15 @@ mod tests {
             _ => panic!("expected DispatchNotificationHook"),
         }
     }
-    /// Goal completions enter the actor's deferred-delivery gate instead of
-    /// firing a synthetic prompt. The actor drops unrelated task ids and only
-    /// wakes for a wait that steering explicitly transferred to the background.
+    /// Every unsurfaced background completion enters the durable inbox.
     #[tokio::test]
-    async fn bash_task_completed_routes_through_deferred_gate_during_goal_loop() {
-        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+    async fn bash_task_completed_emits_one_durable_receipt() {
+        let (config, mut cmd_rx) = make_test_config();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
-        config
-            .goal_loop_active
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let snapshot = make_task_snapshot("bg-goal", TaskKind::Bash);
+        let snapshot = make_task_snapshot("bg-normal", TaskKind::Bash);
         let mut offsets = HashMap::new();
         handle_notification(
             &config,
@@ -907,71 +691,12 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
-                if source.task_id() == "bg-goal"
-        ));
-        match cmd_rx
-            .try_recv()
-            .expect("expected DispatchNotificationHook for task_complete")
-        {
-            SessionCommand::DispatchNotificationHook {
-                notification_type, ..
-            } => {
-                assert_eq!(notification_type, "task_complete")
-            }
-            _ => panic!("unexpected session command"),
-        }
-        assert!(cmd_rx.try_recv().is_err());
-        assert!(
-            config.task_completion_reservations.snapshot().is_empty(),
-            "goal-loop-active completion must not be marked reserved"
-        );
-        let mut found_ext = false;
-        while let Ok(msg) = gateway_rx.try_recv() {
-            if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
-                && args.request.method.as_ref() == "grow/task_completed"
-            {
-                found_ext = true;
-            }
-        }
-        assert!(
-            found_ext,
-            "grow/task_completed ExtNotification must still be sent for UI"
-        );
-    }
-    /// Gap 1 (preserve non-goal behavior): with the goal loop inactive — the
-    /// default for a normal session — a completed bash task DOES fire the
-    /// synthetic auto-wake prompt AND is marked reserved so surface
-    /// 2 suppresses the duplicate reminder.
-    #[tokio::test]
-    async fn bash_task_completed_auto_wakes_and_reserves_without_goal_loop() {
-        let (config, mut cmd_rx) = make_test_config();
-        config
-            .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
-            .expect("slot is fresh in this test fixture");
-        let snapshot = make_task_snapshot("bg-normal", TaskKind::Bash);
-        let mut offsets = HashMap::new();
-        handle_notification_with_admission(
-            &config,
-            ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
-            &mut cmd_rx,
-            true,
-        )
-        .await;
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::QueuePrompt { .. })
+            Ok(SessionCommand::ReceiveNotification { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
-        assert_eq!(
-            config.task_completion_reservations.snapshot(),
-            vec!["bg-normal".to_string()],
-        );
     }
     fn take_task_completed_notification(
         gateway_rx: &mut mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
@@ -987,48 +712,40 @@ mod tests {
         None
     }
     #[tokio::test]
-    async fn task_completed_notification_is_independent_of_wake_admission() {
+    async fn task_completed_receipt_preserves_ui_and_storage_projections() {
         let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(
+        handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-wake", TaskKind::Bash)),
             &mut offsets,
-            &mut cmd_rx,
-            true,
         )
         .await;
         assert!(matches!(
             cmd_rx.recv().await,
-            Some(SessionCommand::QueuePrompt { .. })
+            Some(SessionCommand::ReceiveNotification { .. })
         ));
         let notification = take_task_completed_notification(&mut gateway_rx)
             .expect("completion notification must be emitted");
         assert!(notification["update"].get("will_wake").is_none());
         let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(
+        handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-declined", TaskKind::Bash)),
             &mut offsets,
-            &mut cmd_rx,
-            false,
         )
         .await;
         let notification = take_task_completed_notification(&mut gateway_rx)
-            .expect("declined admission must still emit a completion notification");
+            .expect("completion must still emit a UI notification");
         assert!(notification["update"].get("will_wake").is_none());
-        assert!(
-            config.task_completion_reservations.contains("bg-declined"),
-            "the actor owns reservation release after queuing the deferred fallback"
-        );
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::QueuePrompt { .. })
+            Ok(SessionCommand::ReceiveNotification { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -1048,102 +765,7 @@ mod tests {
         }
         assert!(
             persisted,
-            "declined admission must still persist grow/task_completed"
-        );
-    }
-    #[tokio::test(start_paused = true)]
-    async fn stalled_admission_is_bounded_and_task_completion_still_emits() {
-        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full_raw();
-        config
-            .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
-            .expect("slot is fresh in this test fixture");
-        let mut offsets = HashMap::new();
-        let notification = handle_notification(
-            &config,
-            ToolNotification::TaskCompleted(make_task_snapshot("bg-stalled", TaskKind::Bash)),
-            &mut offsets,
-        );
-        tokio::pin!(notification);
-        tokio::select! {
-            _ = &mut notification => panic!("admission should still be waiting"),
-            command = cmd_rx.recv() => assert!(matches!(command, Some(SessionCommand::QueuePrompt { .. }))),
-        }
-        tokio::time::advance(TASK_WAKE_ADMISSION_TIMEOUT + std::time::Duration::from_millis(1))
-            .await;
-        tokio::task::yield_now().await;
-        notification.await;
-        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
-        assert!(
-            config.task_completion_reservations.contains("bg-stalled"),
-            "a timed-out admission may still be handled and deferred by the actor"
-        );
-        let mut persisted_completion = false;
-        while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
-                message
-                && matches!(
-                    &update.update,
-                    crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
-                )
-            {
-                persisted_completion = true;
-            }
-        }
-        assert!(persisted_completion);
-    }
-    #[tokio::test(start_paused = true)]
-    async fn timed_out_monitor_admission_queues_one_fallback_and_late_actor_drops_prompt() {
-        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full_raw();
-        config
-            .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
-            .expect("slot is fresh in this test fixture");
-        let mut offsets = HashMap::new();
-        let notification = handle_notification(
-            &config,
-            ToolNotification::TaskCompleted(make_task_snapshot("mon-timeout", TaskKind::Monitor)),
-            &mut offsets,
-        );
-        tokio::pin!(notification);
-        let prompt = tokio::select! {
-            _ = &mut notification => panic!("admission should still be waiting"),
-            command = cmd_rx.recv() => command.expect("prompt command"),
-        };
-        tokio::time::advance(TASK_WAKE_ADMISSION_TIMEOUT + std::time::Duration::from_millis(1))
-            .await;
-        tokio::task::yield_now().await;
-        notification.await;
-        let SessionCommand::QueuePrompt {
-            admission: Some(admission),
-            respond_to,
-            ..
-        } = prompt
-        else {
-            panic!("expected task wake prompt");
-        };
-        assert!(matches!(
-            admission.fallback.source,
-            NotificationSource::MonitorCompleted { ref task_id } if task_id == "mon-timeout"
-        ));
-        assert!(admission.respond_to.send(true).is_err());
-        let _ = respond_to.send(Ok(crate::session::commands::PromptTurnOk {
-            stop_reason: acp::StopReason::Cancelled,
-            total_tokens: 0,
-            turn_snapshot: None,
-            completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
-            structured_output: None,
-            usage: None,
-        }));
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::DispatchNotificationHook { .. })
-        ));
-        assert!(cmd_rx.try_recv().is_err());
-        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
-        assert!(
-            config.task_completion_reservations.contains("mon-timeout"),
-            "the late actor fallback retains the reservation until user delivery"
+            "completion must still persist grow/task_completed"
         );
     }
     #[tokio::test]
@@ -1154,9 +776,6 @@ mod tests {
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
         drop(cmd_rx);
-        config
-            .task_completion_reservations
-            .reserve("bg-dead".into());
         let mut offsets = HashMap::new();
         handle_notification(
             &config,
@@ -1165,46 +784,6 @@ mod tests {
         )
         .await;
         assert!(take_task_completed_notification(&mut gateway_rx).is_some());
-        assert!(config.task_completion_reservations.contains("bg-dead"));
-        config.task_completion_reservations.release("bg-dead");
-        assert!(!config.task_completion_reservations.contains("bg-dead"));
-    }
-    /// The Goal deferred-delivery gate is independent of the ordinary
-    /// auto-wake preference: disabling auto-wake must not lose a completion
-    /// whose wait may have been displaced by steering.
-    #[tokio::test]
-    async fn bash_task_completed_auto_wake_disabled_still_routes_through_deferred_gate() {
-        let (mut config, mut cmd_rx) = make_test_config();
-        config.auto_wake_enabled = false;
-        config
-            .goal_loop_active
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let snapshot = make_task_snapshot("bg-disabled-goal", TaskKind::Bash);
-        let mut offsets = HashMap::new();
-        handle_notification(
-            &config,
-            ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
-        )
-        .await;
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
-                if source.task_id() == "bg-disabled-goal"
-        ));
-        match cmd_rx
-            .try_recv()
-            .expect("expected DispatchNotificationHook for task_complete")
-        {
-            SessionCommand::DispatchNotificationHook {
-                notification_type, ..
-            } => {
-                assert_eq!(notification_type, "task_complete")
-            }
-            _ => panic!("unexpected session command"),
-        }
-        assert!(cmd_rx.try_recv().is_err());
-        assert!(config.task_completion_reservations.snapshot().is_empty());
     }
     /// Natural monitor exit (including exit code 0) must immediate-auto-wake
     /// the same way bash does — not only via the idle-gated MonitorEvent path.
@@ -1222,28 +801,21 @@ mod tests {
         snapshot.command = "tail -f deploy.log".into();
         snapshot.exit_code = Some(0);
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(
+        handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
             &mut offsets,
-            &mut cmd_rx,
-            true,
         )
         .await;
-        let cmd = cmd_rx.try_recv().expect("expected Prompt auto-wake");
+        let cmd = cmd_rx.try_recv().expect("expected ReceiveNotification");
         match cmd {
-            SessionCommand::QueuePrompt {
-                prompt_id,
-                prompt_blocks,
-                verbatim,
-                ..
-            } => {
-                assert_eq!(prompt_id, "task-completed-mon-456");
-                assert!(verbatim);
-                let text = match &prompt_blocks[0] {
-                    acp::ContentBlock::Text(t) => t.text.as_str(),
-                    _ => panic!("expected text block"),
-                };
+            SessionCommand::ReceiveNotification { source, body, .. } => {
+                assert!(matches!(
+                    source,
+                    chat_state::NotificationSource::TaskCompleted { task_id, .. }
+                        if task_id == "mon-456"
+                ));
+                let text = body.as_str();
                 assert!(
                     text.contains("[monitor ended: exited (code 0)]"),
                     "auto-wake must carry the terminal ended wording: {text}"
@@ -1257,45 +829,32 @@ mod tests {
                     "auto-wake should point at the poll tool: {text}"
                 );
             }
-            _ => panic!("expected Prompt auto-wake for natural monitor exit"),
+            _ => panic!("expected ReceiveNotification for natural monitor exit"),
         }
-        match cmd_rx
-            .try_recv()
-            .expect("accepted monitor wake must drop pipeline notifications")
-        {
-            SessionCommand::DropMonitorNotifications { task_id } => {
-                assert_eq!(task_id, "mon-456");
-            }
-            _ => panic!("expected DropMonitorNotifications after accepted Prompt"),
-        }
+        // Durable receipt admission replaces the old queue-drop side channel;
+        // the actor's inbox projection suppresses duplicate monitor progress.
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
-        assert_eq!(
-            config.task_completion_reservations.snapshot(),
-            vec!["mon-456".to_string()],
-        );
     }
     #[tokio::test]
-    async fn declined_quiet_monitor_wake_queues_canonical_deferred_completion() {
+    async fn quiet_monitor_completion_emits_receipt_and_persists_projection() {
         let (config, _gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(
+        handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("mon-declined", TaskKind::Monitor)),
             &mut offsets,
-            &mut cmd_rx,
-            false,
         )
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::QueuePrompt { .. })
+            Ok(SessionCommand::ReceiveNotification { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -1315,19 +874,12 @@ mod tests {
             }
         }
         assert!(persisted_completion);
-        assert!(
-            config.task_completion_reservations.contains("mon-declined"),
-            "the actor owns reservation release after queuing the deferred fallback"
-        );
     }
-    /// After TaskCompleted auto-wake reserves the task, late pipeline
-    /// MonitorEvents must not inject another model-facing notification.
+    /// Late progress still enters the durable inbox. Timeline folding owns
+    /// suppression after a terminal monitor receipt, including after reload.
     #[tokio::test]
-    async fn monitor_event_skipped_after_task_completed_auto_wake() {
+    async fn monitor_event_emits_progress_receipt_for_timeline_folding() {
         let (config, mut cmd_rx) = make_test_config();
-        config
-            .task_completion_reservations
-            .reserve("mon-done".into());
         let mut offsets = HashMap::new();
         handle_notification(
             &config,
@@ -1341,10 +893,13 @@ mod tests {
             &mut offsets,
         )
         .await;
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "post-auto-wake MonitorEvent must not InjectNotification"
-        );
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::ReceiveNotification {
+                source: chat_state::NotificationSource::MonitorProgress { task_id },
+                ..
+            }) if task_id == "mon-done"
+        ));
     }
     /// Explicit kill of a monitor still skips auto-wake — the model already
     /// got the kill_task tool result.
@@ -1375,41 +930,6 @@ mod tests {
             cmd_rx.try_recv().is_err(),
             "explicitly-killed monitor must not auto-wake"
         );
-        assert!(config.task_completion_reservations.snapshot().is_empty());
-    }
-    /// Monitor completions use the same Goal deferred-delivery gate as bash.
-    #[tokio::test]
-    async fn monitor_task_completed_routes_through_deferred_gate_during_goal_loop() {
-        let (config, mut cmd_rx) = make_test_config();
-        config
-            .goal_loop_active
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let snapshot = make_task_snapshot("mon-goal", TaskKind::Monitor);
-        let mut offsets = HashMap::new();
-        handle_notification(
-            &config,
-            ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
-        )
-        .await;
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
-                if source.task_id() == "mon-goal"
-        ));
-        match cmd_rx
-            .try_recv()
-            .expect("expected DispatchNotificationHook for task_complete")
-        {
-            SessionCommand::DispatchNotificationHook {
-                notification_type, ..
-            } => {
-                assert_eq!(notification_type, "task_complete")
-            }
-            _ => panic!("unexpected session command"),
-        }
-        assert!(cmd_rx.try_recv().is_err());
-        assert!(config.task_completion_reservations.snapshot().is_empty());
     }
     #[tokio::test]
     async fn scheduled_task_created_is_persisted() {
@@ -1661,8 +1181,8 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn scheduled_task_fired_is_not_persisted() {
-        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+    async fn scheduled_task_fired_updates_ui_without_waking_main_agent() {
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let notification =
             ToolNotification::ScheduledTaskFired(tools::notification::types::ScheduledTaskFired {
                 task_id: "loop-1".into(),
@@ -1678,6 +1198,10 @@ mod tests {
         assert!(
             persistence_rx.try_recv().is_err(),
             "scheduled_task_fired must NOT be persisted (recurring \u{2192} unbounded log growth)"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "loop fire is only lifecycle/UI state; the loop subagent completion owns model wake"
         );
         let fired = gateway_rx
             .try_recv()
@@ -1728,13 +1252,15 @@ mod tests {
             .try_recv()
             .expect("own-session monitor event must be injected")
         {
-            SessionCommand::InjectNotification { source, .. } => match source {
-                NotificationSource::MonitorEvent { task_id } => {
-                    assert_eq!(task_id, "mon-own")
-                }
-                _ => panic!("expected MonitorEvent notification source"),
-            },
-            _ => panic!("expected InjectNotification"),
+            SessionCommand::ReceiveNotification { source, body, .. } => {
+                assert!(matches!(
+                    source,
+                    chat_state::NotificationSource::MonitorProgress { task_id }
+                        if task_id == "mon-own"
+                ));
+                assert!(body.contains("boom"));
+            }
+            _ => panic!("expected ReceiveNotification"),
         }
     }
     #[tokio::test]
@@ -1766,7 +1292,7 @@ mod tests {
         }
         assert!(
             cmd_rx.try_recv().is_err(),
-            "block_waited completion should not send Prompt or InjectNotification"
+            "block_waited completion should not send a durable receipt"
         );
         let mut found_ext = false;
         while let Ok(msg) = gateway_rx.try_recv() {
@@ -1802,7 +1328,7 @@ mod tests {
         }
         assert!(
             cmd_rx.try_recv().is_err(),
-            "explicitly_killed completion should not send Prompt or InjectNotification"
+            "explicitly_killed completion should not send a durable receipt"
         );
         let mut found_ext = false;
         while let Ok(msg) = gateway_rx.try_recv() {
@@ -1818,73 +1344,21 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn bash_task_completed_falls_back_when_auto_wake_disabled() {
-        let (mut config, mut cmd_rx) = make_test_config();
-        config.auto_wake_enabled = false;
-        config
-            .task_output_tool_name
-            .set(Some("get_command_or_subagent_output".to_string()))
-            .expect("slot is fresh in this test fixture");
-        let snapshot = make_task_snapshot("bg-disabled", TaskKind::Bash);
-        let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
-        match cmd {
-            SessionCommand::InjectNotification {
-                prompt_id,
-                prompt_blocks,
-                priority,
-                source,
-                ..
-            } => {
-                assert!(prompt_id.starts_with("bash-completed-"));
-                assert_eq!(priority, NotificationPriority::Later);
-                assert!(matches!(
-                    source,
-                    NotificationSource::BashTaskCompleted { ref task_id } if task_id == "bg-disabled"
-                ));
-                let text = match &prompt_blocks[0] {
-                    acp::ContentBlock::Text(t) => &t.text,
-                    _ => panic!("expected text block"),
-                };
-                assert!(text.contains(r#"get_command_or_subagent_output("bg-disabled")"#));
-                assert!(!text.contains(r#"get_task_output("bg-disabled")"#));
-                assert!(!text.contains("response:"));
-            }
-            _ => panic!("expected InjectNotification"),
-        }
-        let hook_cmd = cmd_rx
-            .try_recv()
-            .expect("expected DispatchNotificationHook for task_complete");
-        match hook_cmd {
-            SessionCommand::DispatchNotificationHook {
-                notification_type,
-                message,
-                ..
-            } => {
-                assert_eq!(notification_type, "task_complete");
-                assert_eq!(
-                    message.as_deref(),
-                    Some("Background task completed: bg-disabled")
-                );
-            }
-            _ => panic!("expected DispatchNotificationHook"),
-        }
-    }
-    #[tokio::test]
     async fn bash_completion_uses_single_task_id_clone() {
         let (config, mut cmd_rx) = make_test_config();
         let snapshot = make_task_snapshot("unique-id-789", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
-            .await;
+        handle_notification(&config, notification, &mut offsets).await;
         let cmd = cmd_rx.try_recv().unwrap();
-        if let SessionCommand::QueuePrompt { prompt_id, .. } = cmd {
-            assert_eq!(prompt_id, "task-completed-unique-id-789");
+        if let SessionCommand::ReceiveNotification { source, .. } = cmd {
+            assert!(matches!(
+                source,
+                chat_state::NotificationSource::TaskCompleted { task_id, .. }
+                    if task_id == "unique-id-789"
+            ));
         } else {
-            panic!("expected Prompt");
+            panic!("expected ReceiveNotification");
         }
     }
     /// Build a completed-bash `TaskSnapshot` whose `output` is large enough
@@ -1912,39 +1386,19 @@ mod tests {
             is_backgrounded: false,
         }
     }
-    /// Extract the auto-wake prompt text emitted on the session command channel.
-    fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
-        let cmd = cmd_rx.try_recv().expect("expected Prompt");
+    /// Extract the durable notification body emitted on the session command channel.
+    fn notification_body(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
+        let cmd = cmd_rx.try_recv().expect("expected ReceiveNotification");
         match cmd {
-            SessionCommand::QueuePrompt { prompt_blocks, .. } => match &prompt_blocks[0] {
-                acp::ContentBlock::Text(t) => t.text.clone(),
-                _ => panic!("expected text block"),
-            },
-            _ => panic!("expected Prompt"),
+            SessionCommand::ReceiveNotification { body, .. } => body,
+            _ => panic!("expected ReceiveNotification"),
         }
     }
-    /// Extract the InjectNotification prompt text emitted on the session
-    /// command channel (auto-wake-disabled fallback path).
-    fn inject_notification_prompt_text(
-        cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
-    ) -> String {
-        let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
-        match cmd {
-            SessionCommand::InjectNotification { prompt_blocks, .. } => match &prompt_blocks[0] {
-                acp::ContentBlock::Text(t) => t.text.clone(),
-                _ => panic!("expected text block"),
-            },
-            _ => panic!("expected InjectNotification"),
-        }
-    }
-    /// Bash completion with a large output and no polling tool (compat-harness
-    /// toolset) renders the truncation marker AND the disk-pointer footer
+    /// Bash completion with a large output and no task-output polling tool
+    /// renders the truncation marker AND the disk-pointer footer
     /// pointing the model at `output_file` via the resolved Read tool name.
-    /// Covers BOTH the auto-wake branch and the auto-wake-disabled fallback
-    /// so the truncation + footer behaviour stays consistent across both
-    /// completion-injection paths.
     #[tokio::test]
-    async fn bash_completion_renders_disk_pointer_footer_in_both_branches() {
+    async fn bash_completion_receipt_renders_disk_pointer_footer() {
         let output_file = PathBuf::from("/tmp/bg-disk-pointer.log");
         let (config_auto, mut cmd_rx_auto) = make_test_config();
         config_auto
@@ -1953,18 +1407,16 @@ mod tests {
             .expect("fresh slot");
         let snapshot = make_large_bash_snapshot("bg-disk-1", output_file.clone());
         let mut offsets = HashMap::new();
-        handle_notification_with_admission(
+        handle_notification(
             &config_auto,
             ToolNotification::TaskCompleted(snapshot),
             &mut offsets,
-            &mut cmd_rx_auto,
-            true,
         )
         .await;
-        let prompt = auto_wake_prompt_text(&mut cmd_rx_auto);
+        let prompt = notification_body(&mut cmd_rx_auto);
         assert!(
             prompt.contains("[Output truncated"),
-            "auto-wake: expected truncation marker, got: {prompt}"
+            "expected truncation marker, got: {prompt}"
         );
         let expected_footer = format!(
             "Use read_file on {} for full content",
@@ -1972,42 +1424,11 @@ mod tests {
         );
         assert!(
             prompt.contains(&expected_footer),
-            "auto-wake: expected disk-pointer footer `{expected_footer}`, got: {prompt}"
+            "expected disk-pointer footer `{expected_footer}`, got: {prompt}"
         );
         assert!(
             prompt.contains("bg-disk-1"),
-            "auto-wake: prompt must reference task id"
-        );
-        let (mut config_no_wake, mut cmd_rx_no_wake) = make_test_config();
-        config_no_wake.auto_wake_enabled = false;
-        config_no_wake
-            .read_tool_name
-            .set(Some("read_file".to_string()))
-            .expect("fresh slot");
-        let snapshot = make_large_bash_snapshot("bg-disk-2", output_file.clone());
-        let mut offsets = HashMap::new();
-        handle_notification(
-            &config_no_wake,
-            ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
-        )
-        .await;
-        let prompt = inject_notification_prompt_text(&mut cmd_rx_no_wake);
-        assert!(
-            prompt.contains("[Output truncated"),
-            "auto-wake-disabled: expected truncation marker, got: {prompt}"
-        );
-        let expected_footer = format!(
-            "Use read_file on {} for full content",
-            output_file.display()
-        );
-        assert!(
-            prompt.contains(&expected_footer),
-            "auto-wake-disabled: expected disk-pointer footer `{expected_footer}`, got: {prompt}"
-        );
-        assert!(
-            prompt.contains("bg-disk-2"),
-            "auto-wake-disabled: prompt must reference task id"
+            "receipt must reference task id"
         );
     }
 }

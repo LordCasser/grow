@@ -1298,7 +1298,11 @@ mod tests {
             Some(&home),
             Some(&home.join(".grow")),
         );
-        assert!(entries.iter().any(|entry| entry.name == "plugin-one:painter"));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "plugin-one:painter")
+        );
 
         let definition = by_name_in_cwd_with_plugins_and_home(
             "plugin-one:painter",

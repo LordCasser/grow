@@ -1162,9 +1162,8 @@ mod grow_event_id_stamping_tests {
                 let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
-                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
-                    super::support::running_task_stub("active-turn"),
-                );
+                actor.state.lock().await.foreground =
+                    ForegroundState::RegularTurn(super::support::running_task_stub("active-turn"));
                 let surface_before = actor.chat_state_handle.get_conversation().await;
 
                 let outcome = actor
@@ -1199,13 +1198,9 @@ mod grow_event_id_stamping_tests {
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 {
                     let mut tracker = actor.goal_tracker.lock();
-                    tracker.create_goal(
-                        "completed-goal".into(),
-                        "done".into(),
-                        None,
-                        "now".into(),
-                    )
-                    .unwrap();
+                    tracker
+                        .create_goal("completed-goal".into(), "done".into(), None, "now".into())
+                        .unwrap();
                     assert!(tracker.complete());
                 }
 
@@ -1360,6 +1355,7 @@ mod synthetic_prompt_behavior_tests {
                                 crate::session::PromptOrigin::SubagentCompleted {
                                     subagent_id: "sa-1".to_string(),
                                 },
+                                Vec::new(),
                                 crate::session::TurnKind::Internal,
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-1 finished",
@@ -1444,6 +1440,7 @@ mod synthetic_prompt_behavior_tests {
                                 crate::session::PromptOrigin::SubagentCompleted {
                                     subagent_id: "sa-2".to_string(),
                                 },
+                                Vec::new(),
                                 crate::session::TurnKind::Internal,
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-2 finished",

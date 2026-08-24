@@ -178,8 +178,8 @@ pub struct ToolServerConfig {
 #[derive(Clone)]
 pub struct SubagentSessionResources {
     pub backend: crate::implementations::grow_build::task::backend::SubagentBackendResource,
-    /// Same channel as [`Self::backend`]; required so `TaskCompletionReminder`
-    /// can drain completions onto the next tool result (shell parity).
+    /// Same channel as [`Self::backend`], used by task tools and scheduler
+    /// orchestration that address the coordinator directly.
     pub event_sender: crate::implementations::grow_build::task::types::SubagentEventSender,
     pub depth: crate::implementations::grow_build::task::types::SubagentDepthCounter,
     pub session_id: crate::implementations::grow_build::task::types::SessionIdResource,
@@ -309,6 +309,7 @@ struct ToolEntry {
     namespace: String,
     id: String,
     kind: ToolKind,
+    capabilities: tool_protocol::ToolCapabilities,
     requires: Expr<ToolRequirement>,
     default_params: serde_json::Value,
     input_schema: serde_json::Value,
@@ -349,6 +350,7 @@ struct FinalizedTool {
     client_name: String,
     /// Tool metadata — kind, fingerprinting, doom-loop, reminders.
     metadata: Arc<dyn ToolMetadata>,
+    capabilities: tool_protocol::ToolCapabilities,
     /// Converts `serde_json::Value` (from dispatch) back to `ToolOutput`.
     output_converter:
         Arc<dyn Fn(serde_json::Value) -> Result<ToolOutput, serde_json::Error> + Send + Sync>,
@@ -510,6 +512,7 @@ impl ToolRegistryBuilder {
         let namespace = tool.tool_namespace().to_string();
         let id = tool_runtime::Tool::id(&tool).as_str().to_string();
         let kind = tool.kind();
+        let capabilities = tool_runtime::Tool::capabilities(&tool);
         let requires = tool.requires_expr();
         self.tools.insert(
             name,
@@ -517,6 +520,7 @@ impl ToolRegistryBuilder {
                 namespace,
                 id,
                 kind,
+                capabilities,
                 requires,
                 default_params: serde_json::to_value(P::default()).unwrap_or_default(),
                 input_schema: generate_schema::<T::Args>(),
@@ -562,6 +566,13 @@ impl ToolRegistryBuilder {
         self.tools
             .iter()
             .map(|(name, entry)| (name.clone(), entry.kind))
+            .collect()
+    }
+    /// Fully-qualified tool id → descriptor-owned RWX requirement.
+    pub fn known_tool_max_accesses(&self) -> HashMap<String, tool_protocol::ToolAccess> {
+        self.tools
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.capabilities.max_access))
             .collect()
     }
     /// Register a cross-cutting reminder.
@@ -610,7 +621,6 @@ impl ToolRegistryBuilder {
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
         b.register::<grow_build::PlanControlTool>();
-        b.register::<grow_build::RequestToolAccessTool>();
         b.register_with_params::<
                 grow_build::AskUserQuestionTool,
                 grow_build::ask_user_question::AskUserQuestionParams,
@@ -649,7 +659,6 @@ impl ToolRegistryBuilder {
                 grow_build_hashline::config::HashlineSchemeParams,
             >();
         b.register_reminder(crate::reminders::LspDiagnosticsReminder);
-        b.register_reminder(crate::reminders::TaskCompletionReminder);
         b.register_reminder(SkillDiscoveryReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);
@@ -672,6 +681,7 @@ impl ToolRegistryBuilder {
                         "namespace": e.namespace,
                         "id": e.id,
                         "kind": e.kind,
+                        "max_access": e.capabilities.max_access,
                         "default_params": e.default_params,
                         "input_schema": e.input_schema,
                         "requires": e.requires,
@@ -911,7 +921,6 @@ impl ToolRegistryBuilder {
         if has_concise_tools {
             resources.insert(crate::types::resources::SystemRemindersEnabled(false));
         }
-        resources.register_state::<crate::reminders::task_completion::ReportedTaskCompletions>();
         resources.register_state::<crate::implementations::grow_build::todo::TodoState>();
         resources.register_state::<crate::types::resources::WebCitationCounter>();
         resources.register_state::<crate::types::resources::ModelImageInputState>();
@@ -968,6 +977,7 @@ impl ToolRegistryBuilder {
                 id: entry.id,
                 client_name,
                 metadata: Arc::from(entry.metadata),
+                capabilities: entry.capabilities,
                 output_converter: Arc::from(entry.output_converter),
                 definition,
                 effective_params,
@@ -1161,6 +1171,48 @@ impl FinalizedToolset {
             .map(|t| (t.client_name.clone(), t.metadata.kind()))
             .collect()
     }
+    /// Descriptor snapshot for every model-visible native tool. Authorization
+    /// consumers use the exact client-facing identity; `ToolKind` remains
+    /// presentation metadata and must not be projected back into RWX.
+    pub fn native_tool_descriptors(&self) -> Vec<(String, ToolKind, tool_protocol::ToolAccess)> {
+        self.tools
+            .read()
+            .iter()
+            .filter(|tool| tool.metadata.tool_namespace() != ToolNamespace::MCP)
+            .map(|tool| {
+                (
+                    tool.client_name.clone(),
+                    tool.metadata.kind(),
+                    tool.capabilities.max_access,
+                )
+            })
+            .collect()
+    }
+
+    /// Resolve the authored config snapshot to exact client-facing native tool
+    /// identities in this finalized registry. Convenience tools injected after
+    /// that snapshot are deliberately absent and must be admitted explicitly by
+    /// the child capability policy.
+    pub fn authored_native_tool_names(
+        &self,
+        config: &ToolServerConfig,
+    ) -> std::collections::HashSet<String> {
+        let tools = self.tools.read();
+        config
+            .tools
+            .iter()
+            .filter_map(|configured| {
+                tools
+                    .iter()
+                    .find(|tool| {
+                        tool.metadata.tool_namespace() != ToolNamespace::MCP
+                            && configured.id == format!("{}:{}", tool.namespace, tool.id)
+                            && configured.resolve_client_name(&tool.id) == tool.client_name
+                    })
+                    .map(|tool| tool.client_name.clone())
+            })
+            .collect()
+    }
     /// Finalized canonical-to-client parameter names by tool kind.
     pub fn template_param_names(&self) -> HashMap<ToolKind, HashMap<String, String>> {
         self.renderer.param_names()
@@ -1201,7 +1253,12 @@ impl FinalizedToolset {
             .read()
             .iter()
             .find(|t| t.client_name == tool_name)
-            .map(|t| crate::normalization::tool_identity_of(t.metadata.as_ref()))
+            .map(|t| {
+                crate::normalization::tool_identity_of(
+                    t.metadata.as_ref(),
+                    t.capabilities.max_access,
+                )
+            })
     }
     fn tool_not_found_error(tool_name: &str) -> tool_runtime::ToolError {
         let tid = tool_protocol::ToolId::new(tool_name)
@@ -1604,6 +1661,7 @@ impl FinalizedToolset {
         }
         let description = tool.description_template().to_string();
         let kind = tool.kind();
+        let capabilities = tool_runtime::Tool::capabilities(&tool);
         let registry_id = tool_runtime::Tool::id(&tool).as_str().to_owned();
         let input_schema = input_schema_override.unwrap_or_else(generate_schema::<T::Args>);
         let definition = ToolDefinition::function(&name, Some(&description), input_schema.clone());
@@ -1617,6 +1675,7 @@ impl FinalizedToolset {
                 kind,
                 description: description.clone(),
             }),
+            capabilities,
             output_converter: Arc::new(|value| {
                 serde_json::from_value::<ToolOutput>(value.clone()).or_else(|_| match value {
                     serde_json::Value::String(s) => Ok(ToolOutput::Text(s.into())),
@@ -2326,9 +2385,10 @@ mod tests {
         let identity = toolset
             .tool_identity("get_task_output")
             .expect("get_task_output resolves");
-        assert!(
-            identity.scope == tool_protocol::ToolScope::Read,
-            "get_task_output overrides its action kind with read scope"
+        assert_eq!(
+            identity.max_access,
+            tool_protocol::ToolAccess::Read,
+            "background task output is observation-only",
         );
     }
     /// `ToolConfig::kind` parsing is strict; absent remains `None` for dynamic
@@ -2618,10 +2678,9 @@ mod tests {
             "lookup is by fully-qualified id, not the bare tool id"
         );
     }
-    /// Consumers backfill kinds onto kind-less pinned toolsets from this map
-    /// before capability
-    /// filtering; a wrong or missing kind here silently changes which
-    /// tools a `capability_mode` keeps.
+    /// Presentation/discovery consumers can resolve the stable kind of pinned
+    /// built-ins from this map. Authorization uses descriptor RWX and exact
+    /// tool identity, never this taxonomy.
     #[test]
     fn known_tool_kinds_maps_pinned_tool_config_ids() {
         let kinds = ToolRegistryBuilder::new().known_tool_kinds();

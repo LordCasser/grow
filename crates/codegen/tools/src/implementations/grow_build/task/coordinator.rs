@@ -19,10 +19,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::coordinator_state::{
-    ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
-    ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
-    active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
-    completion_summary, sleep_until, workflow_outstanding,
+    ActiveChild, BlockingWaiter, ChildRecord, CompletedChild, InternalEvent, ListRequest,
+    PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
+    background_at_deadline, background_if_caller_gone, completed_snapshot, sleep_until,
+    workflow_outstanding,
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
@@ -54,7 +54,6 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     /// teardown, so a detached late `TaskTool` spawn cannot outrun Stop.
     spawn_blocked_sessions: HashSet<String>,
     usage_not_applied_prompts: HashSet<PromptScope>,
-    pending_completions: Vec<BufferedCompletion>,
     runs: FuturesUnordered<
         TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
     >,
@@ -100,7 +99,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             workflow_cancel_waiters: HashMap::new(),
             spawn_blocked_sessions: HashSet::new(),
             usage_not_applied_prompts: HashSet::new(),
-            pending_completions: Vec::new(),
             runs: FuturesUnordered::new(),
             validations: FuturesUnordered::new(),
             progress: FuturesUnordered::new(),
@@ -326,27 +324,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             SubagentEvent::ListRunning(request) => {
                 self.handle_list_running(request.parent_session_id, request.respond_to);
             }
-            SubagentEvent::Completions(request) => {
-                let (owned, foreign): (Vec<_>, Vec<_>) =
-                    std::mem::take(&mut self.pending_completions)
-                        .into_iter()
-                        .partition(|completion| {
-                            request
-                                .parent_session_id
-                                .as_ref()
-                                .is_none_or(|id| completion.parent_session_id == *id)
-                        });
-                self.pending_completions = foreign;
-                let completions = owned
-                    .into_iter()
-                    .map(|completion| completion.summary)
-                    .filter(|summary| !request.suppress_ids.contains(&summary.subagent_id))
-                    .collect();
-                let _ = request.respond_to.send(completions);
-            }
             SubagentEvent::TeardownSession { parent_session_id } => {
-                self.pending_completions
-                    .retain(|completion| completion.parent_session_id != parent_session_id);
                 self.spawn_blocked_sessions.remove(&parent_session_id);
                 self.teardown_session_children(&parent_session_id);
             }
@@ -566,7 +544,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child.spawn_reply,
                     child.handle_only,
                 ),
-        };
+            };
 
         if !self.runner.terminal_committed(&output.completion_data) {
             output.result.success = false;
@@ -605,26 +583,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             handle_only = true;
         }
 
-        if self.config.buffer_completions
-            && request.surface_completion
-            && !request.owner.is_workflow()
-        {
-            let mut summary = completion_summary(&request, &output.result);
-            if let Some(cap) = self.config.buffered_completion_output_cap {
-                summary.output = super::cap_completion_output(&summary.output, cap);
-            }
-            self.pending_completions.push(BufferedCompletion {
-                parent_session_id: request.parent_session_id.clone(),
-                summary,
-            });
-            // Bound the buffer (drop oldest): sessions unloaded without a
-            // TeardownSession cannot grow it unboundedly.
-            const MAX_PENDING_COMPLETIONS: usize = 256;
-            if self.pending_completions.len() > MAX_PENDING_COMPLETIONS {
-                let excess = self.pending_completions.len() - MAX_PENDING_COMPLETIONS;
-                self.pending_completions.drain(..excess);
-            }
-        }
         if completed.persisted_output_ref.is_some() {
             completed.result.output = Arc::from("");
         }

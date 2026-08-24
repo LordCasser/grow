@@ -12,7 +12,7 @@ pub struct EffectiveRuntimeConfig {
     pub model: Option<String>,
     /// Resolved reasoning effort (e.g. "low", "medium", "high").
     // TODO(phase2): consider a typed `ReasoningEffort` enum to prevent typos.
-    // Currently stringly-typed for compatibility with the shell's existing API.
+    // The sampling/model boundary currently exposes this value as a string.
     pub reasoning_effort: Option<String>,
     /// Fully resolved initial capability request. Agent-definition and global
     /// defaults have already been applied; parent confinement is the only

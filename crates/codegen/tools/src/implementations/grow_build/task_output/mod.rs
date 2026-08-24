@@ -761,10 +761,6 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         task_output_requires_expr()
     }
-
-    fn tool_scope(&self) -> tool_protocol::ToolScope {
-        tool_protocol::ToolScope::Read
-    }
 }
 
 /// Resolve the model-facing `get_task_output` description from the finalized
@@ -817,7 +813,7 @@ impl tool_runtime::Tool for TaskOutputTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::Read,
             ..Default::default()
         }
     }
@@ -1591,11 +1587,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_scope_is_read() {
+    fn task_output_is_observation_only() {
         let tool = TaskOutputTool;
-        assert!(
-            ToolMetadata::tool_scope(&tool) == tool_protocol::ToolScope::Read,
-            "get_task_output must be classified as read-only"
+        assert_eq!(
+            tool_runtime::Tool::capabilities(&tool).max_access,
+            tool_protocol::ToolAccess::Read,
         );
     }
 

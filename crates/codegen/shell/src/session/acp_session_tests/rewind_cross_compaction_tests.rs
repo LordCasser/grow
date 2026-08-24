@@ -269,8 +269,7 @@ async fn rewind_persistence_failure_rolls_back_files_and_keeps_tracker() {
 
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut actor =
-                create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
             let path = paths::RelPathBuf::new("a.rs").unwrap();
             actor
                 .tool_context
@@ -322,12 +321,7 @@ async fn rewind_persistence_failure_rolls_back_files_and_keeps_tracker() {
                 .unwrap_err();
             assert!(error.to_string().contains("injected rewind failure"));
             assert_eq!(
-                actor
-                    .tool_context
-                    .fs
-                    .read_to_string(&path)
-                    .await
-                    .unwrap(),
+                actor.tool_context.fs.read_to_string(&path).await.unwrap(),
                 "after"
             );
             assert_eq!(actor.file_state_tracker.get_rewind_points().await.len(), 1);
@@ -382,9 +376,7 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
             actor
                 .session_directory
                 .write_atomic(
-                    std::ffi::OsStr::new(
-                        crate::session::persistence::REWIND_TRANSACTION_FILE,
-                    ),
+                    std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
                     &serde_json::to_vec(&transaction).unwrap(),
                     true,
                     true,
@@ -395,15 +387,16 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
 
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
             assert_eq!(
-                actor
-                    .tool_context
-                    .fs
-                    .read_to_string(&path)
-                    .await
-                    .unwrap(),
+                actor.tool_context.fs.read_to_string(&path).await.unwrap(),
                 "before"
             );
-            assert!(actor.file_state_tracker.get_rewind_points().await.is_empty());
+            assert!(
+                actor
+                    .file_state_tracker
+                    .get_rewind_points()
+                    .await
+                    .is_empty()
+            );
         })
         .await;
 }

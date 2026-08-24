@@ -1,6 +1,6 @@
 //! System-reminder injection concern for `SessionActor`: reminder policy,
-//! the TodoGate, date/interrupt reminders, and between-turn completion
-//! reminders.
+//! the TodoGate, date/interrupt reminders, workflow status snapshots, and
+//! formatting for durable workflow-completion notifications.
 use super::*;
 /// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
 ///
@@ -128,30 +128,50 @@ pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &
     );
     buf
 }
-/// Resolve the runtime `ReminderPolicy` from the resolved inputs.
+/// Default per-prompt fire cap for the runtime turn-end TodoGate.
+pub(crate) const DEFAULT_TODO_GATE_MAX_FIRES: u32 = 2;
+
+/// Session-owned TodoGate policy. Other reminders are typed Timeline inputs
+/// or tool-output annotations and do not share a mutable global switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TodoGateConfig {
+    pub enabled: bool,
+    pub max_fires_per_prompt: u32,
+}
+
+impl Default for TodoGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
+        }
+    }
+}
+
+/// Resolve the session TodoGate from the resolved inputs.
 ///
 /// Precedence: CLI `--todo-gate` > remote `/settings` > built-in default
 /// (which is disabled). Extracted from `spawn_session_actor` so the
 /// precedence rules are unit-testable. Named `resolve_*` to match the
 /// sibling precedence helpers in `crate::util::config`
 /// (`resolve_zdr_access_enabled`, `resolve_restore_code`, …).
-pub(crate) fn resolve_reminder_policy(
+pub(crate) fn resolve_todo_gate_config(
     remote: Option<&crate::util::config::RemoteSettings>,
     todo_gate: bool,
-) -> agent::ReminderPolicy {
-    let mut policy = agent::ReminderPolicy::default();
+) -> TodoGateConfig {
+    let mut config = TodoGateConfig::default();
     if let Some(remote) = remote {
         if let Some(enabled) = remote.todo_gate_enabled {
-            policy.todo_gate.enabled = enabled;
+            config.enabled = enabled;
         }
         if let Some(cap) = remote.todo_gate_max_fires_per_prompt {
-            policy.todo_gate.max_fires_per_prompt = cap;
+            config.max_fires_per_prompt = cap;
         }
     }
     if todo_gate {
-        policy.todo_gate.enabled = true;
+        config.enabled = true;
     }
-    policy
+    config
 }
 /// Build the date-rollover reminder when the local calendar
 /// date has advanced past the date last surfaced to the model.
@@ -223,8 +243,9 @@ impl SessionActor {
             ));
         }
         body.push_str(&format!(
-            "\nIt runs in the background: status snapshots and the final result arrive as \
-             reminders at turn starts, and the user can watch it in /workflows. If it pauses, \
+            "\nIt runs in the background: live status snapshots appear at ordinary turn starts, \
+             its final result arrives through the durable notification inbox, and the user can \
+             watch it in /workflows. If it pauses, \
              it can be resumed by calling the workflow tool with action: \"control_run\", \
              run_id: \"{run_id}\", operation: \"resume\". Keep run ids internal — the user \
              knows runs by display name. No \
@@ -242,6 +263,43 @@ impl SessionActor {
             return;
         }
         self.push_system_reminder(&format_workflow_status_reminder(&report));
+    }
+
+    /// Render the exact terminal manifest snapshot into the durable
+    /// notification payload. Report discovery descends from the pinned
+    /// session-directory capability rather than reopening its display path.
+    pub(super) async fn workflow_completion_notification(
+        &self,
+        run: &crate::session::workflow::tracker::WorkflowRunState,
+    ) -> String {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let read_tool_name =
+            tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
+        let report_path = self.workflow_report_path(&run.run_id).await;
+        format_workflow_completion_notification(
+            run,
+            report_path.as_deref(),
+            read_tool_name.as_deref(),
+        )
+    }
+
+    async fn workflow_report_path(&self, run_id: &str) -> Option<std::path::PathBuf> {
+        let directory = self.session_directory.try_clone().ok()?;
+        let relative = std::path::PathBuf::from("workflows")
+            .join(run_id)
+            .join("scratch");
+        tokio::task::spawn_blocking(move || {
+            let scratch = directory
+                .open_relative(&relative, "workflow scratch directory", false)
+                .ok()?;
+            scratch
+                .open_regular(std::ffi::OsStr::new("report.md"), "workflow report")
+                .ok()?;
+            Some(scratch.display_path().join("report.md"))
+        })
+        .await
+        .ok()
+        .flatten()
     }
 }
 fn format_workflow_status_reminder(
@@ -361,8 +419,9 @@ fn format_workflow_status_reminder(
         }
     }
     buf.push_str(
-        "\nThese run in the background — do not poll task tools for them; updates arrive as \
-         reminders. Keep run ids internal (the user knows runs by display name).",
+        "\nThese run in the background — do not poll task tools for them. Live status snapshots \
+         appear at ordinary turn starts and terminal results arrive through the durable \
+         notification inbox. Keep run ids internal (the user knows runs by display name).",
     );
     buf
 }
@@ -376,142 +435,161 @@ fn format_workflow_elapsed(ms: u64) -> String {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
-fn format_workflow_completion_reminder(
-    runs: &[crate::session::workflow::tracker::WorkflowRunState],
-    session_dir: &std::path::Path,
-    before_resume: bool,
+fn format_workflow_completion_notification(
+    run: &crate::session::workflow::tracker::WorkflowRunState,
+    report_path: Option<&std::path::Path>,
     read_tool_name: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
-    let n = runs.len();
-    let noun = if n == 1 {
-        "background workflow run"
-    } else {
-        "background workflow runs"
-    };
-    let verb = if runs.iter().any(|r| !r.status.is_terminal()) {
-        "stopped (finished or paused)"
-    } else {
-        "finished"
-    };
-    let mut buf = if before_resume {
-        format!("This session was resumed. {n} {noun} {verb} before the resume:\n")
-    } else {
-        format!("While you were idle, {n} {noun} {verb}:\n")
-    };
-    for run in runs {
+    let mut buf = format!(
+        "A background workflow run stopped:\n\n- Workflow '{}' (run id {}) — status: {}",
+        run.name,
+        run.run_id,
+        run.status.as_str()
+    );
+    if let Some(definition_id) = run.definition_id.as_ref() {
+        let provenance = run
+            .definition_scope
+            .zip(run.definition_hash.as_deref())
+            .map(|(scope, hash)| format!("{}@{}", scope.as_str(), hash.get(..8).unwrap_or(hash)))
+            .unwrap_or_else(|| "unknown hash".into());
+        let _ = write!(buf, "\n  Definition: {definition_id} ({provenance})");
+    }
+    let objective = run
+        .objective
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !objective.is_empty() {
         let _ = write!(
             buf,
-            "\n- Workflow '{}' (run id {}) — status: {}",
-            run.name,
-            run.run_id,
-            run.status.as_str()
+            "\n  Objective: {}",
+            tools::util::truncate_str(&objective, WORKFLOW_OBJECTIVE_REMINDER_CAP)
         );
-        if let Some(definition_id) = run.definition_id.as_ref() {
-            let provenance = run
-                .definition_scope
-                .zip(run.definition_hash.as_deref())
-                .map(|(scope, hash)| {
-                    format!("{}@{}", scope.as_str(), hash.get(..8).unwrap_or(hash))
-                })
-                .unwrap_or_else(|| "unknown hash".into());
-            let _ = write!(buf, "\n  Definition: {definition_id} ({provenance})");
+    }
+    let _ = write!(
+        buf,
+        "\n  Elapsed: {}",
+        format_workflow_elapsed(run.elapsed_ms_floor)
+    );
+    if let Some(summary) = run.result_summary.as_deref() {
+        let capped = tools::util::truncate_str(summary, WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);
+        buf.push_str("\n  Result:\n");
+        for line in capped.lines() {
+            let _ = writeln!(buf, "    {line}");
         }
-        let objective = run
-            .objective
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !objective.is_empty() {
-            let _ = write!(
-                buf,
-                "\n  Objective: {}",
-                tools::util::truncate_str(&objective, WORKFLOW_OBJECTIVE_REMINDER_CAP)
-            );
-        }
-        let _ = write!(
-            buf,
-            "\n  Elapsed: {}",
-            format_workflow_elapsed(run.elapsed_ms_floor)
-        );
-        if let Some(summary) = run.result_summary.as_deref() {
-            let capped = tools::util::truncate_str(summary, WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);
-            buf.push_str("\n  Result:\n");
-            for line in capped.lines() {
-                let _ = writeln!(buf, "    {line}");
-            }
-            if capped.len() < summary.len() {
-                let _ = writeln!(
-                    buf,
-                    "    [... result truncated ({} bytes total)]",
-                    summary.len()
-                );
-            }
-        } else if let Some(detail) = run.pause_message.as_deref() {
-            let detail = workflow_completion_detail(detail);
-            let _ = write!(buf, "\n  Detail: {detail}\n");
-        } else {
-            buf.push('\n');
-        }
-        if run.status == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited {
-            if run.agents_used >= workflow::MAX_AGENT_BUDGET {
-                let _ = writeln!(
-                    buf,
-                    "  Not resumable: this run reached the maximum agent budget; start a new \
-                     workflow run."
-                );
-            } else {
-                let _ = writeln!(
-                    buf,
-                    "  Resumable: call the workflow tool with action: \"control_run\", \
-                     run_id: \"{}\", operation: \"resume\", and a raised agent_budget (the \
-                     resume is rejected while usage is at or over the cap).",
-                    run.run_id
-                );
-            }
-        }
-        if run.save_prompt {
+        if capped.len() < summary.len() {
             let _ = writeln!(
                 buf,
-                "  This temporary Definition completed successfully. Offer to publish this hash and ask the user to choose Project or User scope. Publishing requires Workflow behavior; if the current behavior differs, direct the user to /workflow first."
+                "    [... result truncated ({} bytes total)]",
+                summary.len()
             );
         }
-        if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
+    } else if let Some(detail) = run.pause_message.as_deref() {
+        let detail = workflow_completion_detail(detail);
+        let _ = write!(buf, "\n  Detail: {detail}\n");
+    } else {
+        buf.push('\n');
+    }
+    if run.status == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited {
+        if run.agents_used >= workflow::MAX_AGENT_BUDGET {
+            let _ = writeln!(
+                buf,
+                "  Not resumable: this run reached the maximum agent budget; start a new \
+                     workflow run."
+            );
+        } else {
             let _ = writeln!(
                 buf,
                 "  Resumable: call the workflow tool with action: \"control_run\", \
-                 run_id: \"{}\", operation: \"resume\" — completed agents replay from the \
-                 journal and the failed step re-executes.",
+                     run_id: \"{}\", operation: \"resume\", and a raised agent_budget (the \
+                     resume is rejected while usage is at or over the cap).",
                 run.run_id
             );
         }
-        let report_path = session_dir
-            .join("workflows")
-            .join(&run.run_id)
-            .join("scratch")
-            .join("report.md");
-        if report_path.is_file() {
-            let _ = writeln!(
-                buf,
-                "  Full report: {} (use {} on that path to view it)",
-                report_path.display(),
-                read_tool_name.unwrap_or("Read"),
-            );
-        }
     }
+    if run.save_prompt {
+        let _ = writeln!(
+            buf,
+            "  This temporary Definition completed successfully. Offer to publish this hash and ask the user to choose Project or User scope. Publishing requires Workflow behavior; if the current behavior differs, direct the user to /workflow first."
+        );
+    }
+    if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
+        let _ = writeln!(
+            buf,
+            "  Resumable: call the workflow tool with action: \"control_run\", \
+                 run_id: \"{}\", operation: \"resume\" — completed agents replay from the \
+                 journal and the failed step re-executes.",
+            run.run_id
+        );
+    }
+    if let Some(report_path) = report_path {
+        let _ = writeln!(
+            buf,
+            "  Full report: {} (use {} on that path to view it)",
+            report_path.display(),
+            read_tool_name.unwrap_or("Read"),
+        );
+    }
+    buf.push_str(
+        "\nReport this outcome to the user and take the appropriate next action. Keep the run id internal; the user knows the run by display name.",
+    );
     buf
+}
+
+fn format_running_task_checkpoint_notification(
+    task: &tools::computer::types::TaskSnapshot,
+    checkpoint_time: std::time::SystemTime,
+) -> String {
+    use std::fmt::Write as _;
+
+    let command = task.display_command.as_deref().unwrap_or(&task.command);
+    let kind_label = match task.kind {
+        tools::computer::types::TaskKind::Bash => "",
+        tools::computer::types::TaskKind::Monitor => " [monitor]",
+    };
+    let elapsed = checkpoint_time
+        .duration_since(task.start_time)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let elapsed = if elapsed < 60 {
+        format!("{elapsed}s")
+    } else if elapsed < 3_600 {
+        format!("{}m", elapsed / 60)
+    } else {
+        let hours = elapsed / 3_600;
+        let minutes = (elapsed % 3_600) / 60;
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {minutes}m")
+        }
+    };
+    let mut body = String::from(
+        "A background task was still running when this session last checkpointed and may still be in progress:\n",
+    );
+    let _ = writeln!(
+        body,
+        "- \"{}\"{} (running for {} at checkpoint): {}",
+        task.task_id, kind_label, elapsed, command
+    );
+    let _ = writeln!(body, "  Output log: {}", task.output_file.display());
+    body.push_str(
+        "Check whether it is still running and inspect its output log to determine whether it completed successfully.",
+    );
+    body
 }
 /// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
 /// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
 /// continuation directive drives the loop there (see the body).
 pub(super) fn todo_gate_active(
-    policy: &agent::system_reminder::ReminderPolicy,
+    config: TodoGateConfig,
     audience: agent::prompt::context::PromptAudience,
     definition: &AgentDefinition,
     goal_runtime_available: bool,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
 ) -> bool {
-    if !policy.todo_gate.enabled {
+    if !config.enabled {
         return false;
     }
     if laziness_injection_active(goal_runtime_available, goal_status) {
@@ -566,227 +644,78 @@ impl SessionActor {
         let message = ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"));
         self.chat_state_handle.push_user_message(message);
     }
-    /// Mark completion IDs as reported in the shared
-    /// `ReportedTaskCompletions` state so the per-tool-call
-    /// `TaskCompletionReminder` won't (re-)surface them. Used both to dedupe
-    /// completions the model actually saw (notification-drain / started
-    /// auto-wake prompts) and to drop them during the goal loop (between-turn drain).
-    /// No-op on an empty list.
-    pub(super) async fn mark_completions_reported(&self, ids: &[&str]) {
-        if ids.is_empty() {
+    /// Checkpoint every running background task into the canonical durable
+    /// notification inbox before the final session flush. These receipts are
+    /// context for the next real turn and never autonomously wake the model.
+    pub(super) async fn checkpoint_running_task_notifications(&self) {
+        let mut tasks = self
+            .tool_bridge_handle()
+            .list_background_tasks()
+            .await
+            .into_iter()
+            .filter(tools::computer::types::TaskSnapshot::is_outstanding)
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        if tasks.is_empty() {
             return;
         }
-        use tools::reminders::task_completion::ReportedTaskCompletions;
-        use tools::types::resources::State;
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        let resources = bridge.shared_resources().await;
-        let mut res = resources.lock().await;
-        let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
-        for id in ids {
-            reported.mark_reported(id);
-        }
-    }
-    pub(super) async fn drain_between_turn_completions(&self) {
-        let goal_loop_active = self.goal_loop_active();
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        let reserved = self
-            .tool_context
-            .task_completion_reservations
-            .as_ref()
-            .map(|reservations| reservations.snapshot())
-            .unwrap_or_default();
-        let bash_completions = bridge.drain_between_turn_bash_completions(&reserved).await;
-        if !bash_completions.is_empty() {
-            let ids: Vec<&str> = bash_completions
-                .iter()
-                .map(|t| t.task_id.as_str())
-                .collect();
-            if goal_loop_active {
-                tracing::info!(
-                    count = bash_completions.len(),
-                    task_ids = ?ids,
-                    "dropping between-turn bash task completions (goal loop active)"
-                );
-                self.mark_completions_reported(&ids).await;
-            } else {
-                tracing::info!(
-                    count = bash_completions.len(),
-                    task_ids = ?ids,
-                    "draining between-turn bash task completions"
-                );
-                let task_output_name =
-                    tools::reminders::task_completion::resolve_task_output_tool_name(&bridge).await;
-                let read_tool_name =
-                    tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
-                let reminder =
-                    tools::reminders::task_completion::format_between_turn_bash_completions(
-                        &bash_completions,
-                        task_output_name.as_deref(),
-                        read_tool_name.as_deref(),
+
+        let checkpoint_time = std::time::SystemTime::now();
+        let checkpoint_id = uuid::Uuid::now_v7().to_string();
+        let task_count = tasks.len();
+        let mut checkpointed = 0usize;
+        for task in tasks {
+            let task_kind = match task.kind {
+                tools::computer::types::TaskKind::Bash => chat_state::NotificationTaskKind::Task,
+                tools::computer::types::TaskKind::Monitor => {
+                    chat_state::NotificationTaskKind::Monitor
+                }
+            };
+            let source = chat_state::NotificationSource::TaskStillRunning {
+                task_id: task.task_id.clone(),
+                task_kind,
+            };
+            let body = format_running_task_checkpoint_notification(&task, checkpoint_time);
+            match self
+                .receive_notification(
+                    source,
+                    chat_state::NotificationSourceVersion::Opaque {
+                        value: checkpoint_id.clone(),
+                    },
+                    body,
+                )
+                .await
+            {
+                Ok(_) => checkpointed += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = task.task_id,
+                        %error,
+                        "failed to checkpoint running task notification"
                     );
-                self.push_system_reminder(&reminder);
+                }
             }
         }
-        self.drain_between_turn_workflow_completions(goal_loop_active)
-            .await;
-        let Some(tx) = &self.tool_context.subagent_event_tx else {
-            return;
-        };
-        use tools::implementations::grow_build::task::types::{
-            SubagentCompletionsRequest, SubagentEvent,
-        };
-        let suppress_ids = self
-            .tool_context
-            .task_completion_reservations
-            .as_ref()
-            .map(|reservations| reservations.snapshot())
-            .unwrap_or_default();
-        let parent_session_id = Some(self.session_id_string());
-        let (respond_to, rx) = tokio::sync::oneshot::channel();
-        if tx
-            .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                parent_session_id,
-                suppress_ids,
-                respond_to,
-            }))
-            .is_err()
-        {
-            return;
-        }
-        let Ok(completions) = rx.await else {
-            return;
-        };
-        if completions.is_empty() {
-            return;
-        }
-        let ids: Vec<&str> = completions.iter().map(|c| c.subagent_id.as_str()).collect();
-        if goal_loop_active {
-            tracing::info!(
-                count = completions.len(),
-                subagent_ids = ?ids,
-                "dropping between-turn subagent completions (goal loop active)"
-            );
-            self.mark_completions_reported(&ids).await;
-            return;
-        }
         tracing::info!(
-            count = completions.len(),
-            subagent_ids = ?ids,
-            "draining between-turn subagent completions"
+            checkpointed,
+            failed = task_count - checkpointed,
+            checkpoint_id,
+            "checkpointed running background tasks into durable notifications"
         );
-        let reminder = tools::reminders::task_completion::format_between_turn_completion_reminder(
-            &completions,
-            &bridge,
-        )
-        .await;
-        self.push_system_reminder(&reminder);
-    }
-    pub(super) async fn drain_between_turn_workflow_completions(&self, goal_loop_active: bool) {
-        if goal_loop_active {
-            return;
-        }
-        let (restored, fresh) = {
-            let tracker = self.workflow_tracker().await;
-            let mut tracker = tracker.lock();
-            tracker.take_unreported_terminal_runs()
-        };
-        if restored.is_empty() && fresh.is_empty() {
-            return;
-        }
-        let names = |runs: &[crate::session::workflow::tracker::WorkflowRunState]| {
-            runs.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
-        };
-        tracing::info!(
-            restored = ?names(&restored),
-            fresh = ?names(&fresh),
-            "draining between-turn workflow completions"
-        );
-        let session_dir = &self.session_dir;
-        let bridge = self.tool_bridge_handle();
-        let read_tool_name =
-            tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
-        if !restored.is_empty() {
-            self.push_system_reminder(&format_workflow_completion_reminder(
-                &restored,
-                &session_dir,
-                true,
-                read_tool_name.as_deref(),
-            ));
-        }
-        if !fresh.is_empty() {
-            self.push_system_reminder(&format_workflow_completion_reminder(
-                &fresh,
-                &session_dir,
-                false,
-                read_tool_name.as_deref(),
-            ));
-        }
-    }
-    /// Persist a manifest of running background tasks to the session directory.
-    ///
-    /// Called during session shutdown (both explicit and channel-closed paths)
-    /// so a resumed session can inform the model about processes that were
-    /// still alive when the session ended.
-    pub(super) async fn persist_background_task_manifest(&self) {
-        let tasks = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .list_background_tasks()
-            .await;
-        let entries: Vec<crate::terminal::BackgroundTaskManifestEntry> = tasks
-            .into_iter()
-            .filter(|t| !t.completed)
-            .map(|t| crate::terminal::BackgroundTaskManifestEntry {
-                task_id: t.task_id,
-                command: t.command,
-                display_command: t.display_command,
-                output_file: t.output_file,
-                start_time: t.start_time,
-                cwd: t.cwd,
-                kind: t.kind,
-            })
-            .collect();
-        if !entries.is_empty() {
-            tracing::info!(
-                count = entries.len(),
-                "persisting background task manifest for session resume"
-            );
-        }
-        let session_dir = &self.session_dir;
-        crate::terminal::persist_manifest(&session_dir, entries);
-    }
-    /// Load the background task manifest from a prior session and inject a
-    /// system-reminder so the model knows about orphaned tasks.
-    ///
-    /// The manifest file is deleted after loading so it is only shown once.
-    pub(super) fn inject_resumed_tasks_reminder(&self) {
-        let session_dir = &self.session_dir;
-        let entries = crate::terminal::load_and_clear_manifest(&session_dir);
-        if entries.is_empty() {
-            return;
-        }
-        tracing::info!(
-            count = entries.len(),
-            "injecting resumed background tasks reminder"
-        );
-        let reminder = crate::terminal::format_resumed_tasks_reminder(&entries);
-        self.push_system_reminder(&reminder);
     }
     /// Turn-end TodoGate config, or `None` when [`todo_gate_active`] is false.
-    pub(super) fn todo_gate_policy(&self) -> Option<agent::system_reminder::TodoGateConfig> {
+    pub(super) fn todo_gate_policy(&self) -> Option<TodoGateConfig> {
         let goal_status = self.goal_tracker.lock().status();
         let agent = self.agent.borrow();
-        let policy = agent.reminder_policy();
         let active = todo_gate_active(
-            policy,
+            self.todo_gate,
             agent.prompt_audience(),
             agent.definition(),
             self.goal_runtime_available(),
             goal_status,
         );
         tracing::debug!(
-            enabled = policy.todo_gate.enabled,
+            enabled = self.todo_gate.enabled,
             goal_runtime_available = self.goal_runtime_available(),
             ?goal_status,
             active,
@@ -795,7 +724,7 @@ impl SessionActor {
         if !active {
             return None;
         }
-        Some(policy.todo_gate)
+        Some(self.todo_gate)
     }
     /// Gather the inputs needed by `evaluate_todo_gate` from live session
     /// state.
@@ -873,8 +802,7 @@ mod workflow_reminder_tests {
             "😀".repeat(WORKFLOW_RESULT_SUMMARY_REMINDER_CAP)
         );
         let run = failed_run(detail);
-        let session_dir = tempfile::tempdir().unwrap();
-        let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), false, None);
+        let reminder = format_workflow_completion_notification(&run, None, None);
         let rendered_detail = reminder
             .split_once("  Detail: ")
             .unwrap()
@@ -890,5 +818,60 @@ mod workflow_reminder_tests {
         assert!(!rendered_detail.contains('\n'));
         assert!(!rendered_detail.contains('\t'));
         assert!(!rendered_detail.contains("  "));
+    }
+
+    #[test]
+    fn completion_notification_contains_the_terminal_snapshot_result() {
+        let mut run = failed_run(String::new());
+        run.status = WorkflowRunStatus::Complete;
+        run.pause_message = None;
+        run.result_summary = Some("verified output from the completed workflow".to_string());
+        let report_path = std::path::Path::new("/session/workflows/wf_1/scratch/report.md");
+
+        let notification =
+            format_workflow_completion_notification(&run, Some(report_path), Some("read_file"));
+
+        assert!(notification.contains("status: complete"));
+        assert!(notification.contains("verified output from the completed workflow"));
+        assert!(notification.contains(report_path.to_str().unwrap()));
+        assert!(notification.contains("use read_file"));
+        assert!(!notification.contains("Review the workflow completion reminder"));
+    }
+
+    #[test]
+    fn running_task_checkpoint_preserves_model_facing_command_and_output_path() {
+        let start = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10_000);
+        let task = tools::computer::types::TaskSnapshot {
+            task_id: "monitor-1".into(),
+            command: "internal isolation wrapper".into(),
+            display_command: Some("cargo test -p shell".into()),
+            cwd: "/workspace".into(),
+            start_time: start,
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/monitor-1.log".into(),
+            truncated: false,
+            exit_code: None,
+            signal: None,
+            completed: false,
+            kind: tools::computer::types::TaskKind::Monitor,
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: Some("session-1".into()),
+            description: None,
+            is_backgrounded: true,
+        };
+
+        let notification = format_running_task_checkpoint_notification(
+            &task,
+            start + std::time::Duration::from_secs(3_660),
+        );
+
+        assert!(notification.contains("\"monitor-1\" [monitor]"));
+        assert!(notification.contains("running for 1h 1m at checkpoint"));
+        assert!(notification.contains("cargo test -p shell"));
+        assert!(!notification.contains("internal isolation wrapper"));
+        assert!(notification.contains("/tmp/monitor-1.log"));
+        assert!(notification.contains("may still be in progress"));
     }
 }

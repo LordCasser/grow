@@ -1574,14 +1574,10 @@ impl LocalTerminalActor {
         }
         // Second pass: send completion notifications (requires async file read).
         //
-        // The `block_waited` gate that suppresses the redundant auto-wake
-        // synthetic prompt for awaited tasks lives in
-        // `tools/notification_bridge.rs` (the `TaskCompleted` arm checks
-        // `task_snapshot.block_waited` before the auto-wake injection
-        // branch — see the comment there). This pass must still fire
-        // `send_task_complete` unconditionally for newly-completed
-        // background tasks so the pager UI, persistence, and
-        // `TaskCompletionReservations` bookkeeping all still get the snapshot.
+        // This pass always publishes the canonical completion snapshot. The
+        // shell bridge decides whether the model already observed it through a
+        // blocking tool result; UI and persistence projections remain
+        // unconditional.
         for task_id in newly_completed {
             if let Some(process) = self.processes.get(&task_id) {
                 let snapshot = process.to_task_snapshot(&task_id).await;

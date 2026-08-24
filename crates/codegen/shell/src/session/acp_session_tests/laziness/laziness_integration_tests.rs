@@ -334,6 +334,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                     .await
                     .pending_inputs
                     .push_back(InputItem {
+                        notification_ids: Vec::new(),
                         prompt_id: "user-real-prompt".to_string(),
                         turn_kind: crate::session::TurnKind::User,
                         prompt_blocks: vec![],
@@ -342,7 +343,6 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         verbatim: true,
                         json_schema: None,
                         origin: crate::session::PromptOrigin::User,
-                        task_wake_fallback: None,
                         respond_to,
                         persist_ack: None,
                         queue_meta: None,

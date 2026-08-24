@@ -123,7 +123,7 @@ Transitions:
 
 During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Workflow is not advertised and stale Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
 
-MCP servers declared with `[mcp_servers.<name>] tool_scope = "read"` are the one exception to the mutation gate: every tool of that server may pass the gate, but still goes through the normal permission policy; all `write` or unclassified MCP tools remain rejected. The scope is server-wide — split servers that mix read and write tools, or leave the conservative `write` default.
+MCP servers declared with `[mcp_servers.<name>] max_access = "read_write"` are the one remote-query exception to the file-mutation gate: every tool of that trust domain may pass the gate, but still goes through normal permission policy. Broader or unclassified MCP domains remain rejected. The ceiling is server-wide—split servers that mix queries and mutations, or keep the conservative `all` default.
 
 This enforcement is independent of the permission mode:
 

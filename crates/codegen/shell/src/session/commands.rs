@@ -88,46 +88,6 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         usage: None,
     })
 }
-/// Priority levels for notification drain timing.
-///
-/// Ordering: `Next < Later` (derived from declaration order).
-/// `Next` = more urgent, eligible for mid-turn drain (future enhancement).
-/// `Later` = deferred to end-of-turn or idle drain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NotificationPriority {
-    /// Drain mid-turn (between tool calls). For urgent monitor events.
-    Next,
-    /// Drain only at end-of-turn or when idle. Used for bash task completions.
-    Later,
-}
-#[derive(Debug, Clone)]
-pub enum NotificationSource {
-    MonitorEvent { task_id: String },
-    MonitorCompleted { task_id: String },
-    BashTaskCompleted { task_id: String },
-    SubagentCompleted { task_id: String },
-}
-impl NotificationSource {
-    pub fn task_id(&self) -> &str {
-        match self {
-            Self::MonitorEvent { task_id }
-            | Self::MonitorCompleted { task_id }
-            | Self::BashTaskCompleted { task_id }
-            | Self::SubagentCompleted { task_id } => task_id,
-        }
-    }
-}
-#[derive(Debug)]
-pub struct TaskWakeFallback {
-    pub prompt_id: String,
-    pub prompt_blocks: Vec<acp::ContentBlock>,
-    pub source: NotificationSource,
-}
-#[derive(Debug)]
-pub struct TaskWakeAdmission {
-    pub respond_to: oneshot::Sender<bool>,
-    pub fallback: TaskWakeFallback,
-}
 pub enum SessionCommand {
     Initialize {
         system_prompt: String,
@@ -159,8 +119,6 @@ pub enum SessionCommand {
         /// Skip `<user_query>` wrapping and large-prompt truncation.
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
-        /// Actor-authoritative admission and deferred fallback for terminal task wakes.
-        admission: Option<TaskWakeAdmission>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         /// Optional oneshot fired after the user-message Timeline event is
         /// durably committed, before LLM inference begins.
@@ -190,12 +148,12 @@ pub enum SessionCommand {
     QueryForeground {
         respond_to: oneshot::Sender<Option<prompt_queue::ForegroundSnapshot>>,
     },
-    /// System event (NOT a user input): a background task completed after its
-    /// Goal wait was displaced by user steering, or completed while the Goal
-    /// turn gate was active. The actor either satisfies the explicit deferred
-    /// wait or puts the completion through the ordinary idle drain.
-    DeferredCompletionAvailable {
-        source: NotificationSource,
+    /// Admit one source-owned signal into the durable Timeline inbox.
+    /// Producers never queue model turns directly; the actor derives delivery
+    /// from received-minus-consumed facts after the immutable payload lands.
+    ReceiveNotification {
+        source: chat_state::NotificationSource,
+        source_version: chat_state::NotificationSourceVersion,
         body: String,
     },
     BehaviorChange {
@@ -474,25 +432,8 @@ pub enum SessionCommand {
     PluginsList {
         respond_to: oneshot::Sender<Option<std::sync::Arc<agent::plugins::PluginRegistry>>>,
     },
-    /// System event (NOT a user input): inject a notification (monitor
-    /// event or bash task completion) into the session's notification queue.
-    /// Notifications are idle-gated and batched by
-    /// `maybe_drain_notifications`.
-    InjectNotification {
-        prompt_id: String,
-        prompt_blocks: Vec<acp::ContentBlock>,
-        priority: NotificationPriority,
-        source: NotificationSource,
-    },
-    /// Drop queued / mid-turn-buffered `MonitorEvent` notifications for a
-    /// task. Used when natural monitor exit already auto-woke via
-    /// `TaskCompleted` so stdout + terminal pipeline events do not start a
-    /// second `NotificationDrain` turn for the same completion.
-    DropMonitorNotifications {
-        task_id: String,
-    },
-    /// Dispatch a compat `Notification` hook (e.g. `task_complete`
-    /// from the notification bridge, which does not go through `send_grow_notification`).
+    /// Dispatch a host `Notification` hook (e.g. `task_complete` from the
+    /// notification bridge, which does not go through `send_grow_notification`).
     DispatchNotificationHook {
         notification_type: String,
         message: Option<String>,
@@ -677,11 +618,11 @@ pub enum SessionCommand {
         images: Vec<acp::ImageContent>,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
-    /// System event (NOT a user input): a workflow run completed and the
-    /// actor queues a synthetic completion turn for the model.
-    WorkflowCompletionTurn {
-        run_id: String,
-        revision: u64,
+    /// Workflow terminal producer notification. The state is the exact
+    /// manifest snapshot whose revision ended the execution, so a queued
+    /// command can never render a later retry as this completion.
+    WorkflowCompleted {
+        state: crate::session::workflow::tracker::WorkflowRunState,
         outcome: workflow::WorkflowOutcome,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).

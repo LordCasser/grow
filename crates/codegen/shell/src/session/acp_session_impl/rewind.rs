@@ -182,10 +182,7 @@ impl SessionActor {
                     .try_read_to_string(path)
                     .await
                     .map_err(|error| {
-                        anyhow::anyhow!(
-                            "failed to read {} before rewind: {error}",
-                            path
-                        )
+                        anyhow::anyhow!("failed to read {} before rewind: {error}", path)
                     })?;
                 current_files.insert(path.clone(), current_content.clone());
 
@@ -249,7 +246,8 @@ impl SessionActor {
         self.write_rewind_transaction(transaction).await?;
 
         let (reverted_files, changed_files) = if wants_file_revert {
-            self.apply_file_rewind(&files_to_revert, &current_files).await?
+            self.apply_file_rewind(&files_to_revert, &current_files)
+                .await?
         } else {
             (Vec::new(), Vec::new())
         };
@@ -266,16 +264,15 @@ impl SessionActor {
                 target_index,
             )
         };
-        if let Err(error) = self
-            .persist_rewind_points(next_rewind_points.clone())
-            .await
-        {
-            let rollback = self.rollback_rewind_files(&changed_files, &current_files).await;
+        if let Err(error) = self.persist_rewind_points(next_rewind_points.clone()).await {
+            let rollback = self
+                .rollback_rewind_files(&changed_files, &current_files)
+                .await;
             return Err(match rollback {
                 Ok(()) => error,
-                Err(rollback) => anyhow::anyhow!(
-                    "{error}; file compensation also failed: {rollback}"
-                ),
+                Err(rollback) => {
+                    anyhow::anyhow!("{error}; file compensation also failed: {rollback}")
+                }
             });
         }
 
@@ -292,11 +289,7 @@ impl SessionActor {
 
             // Timeline owns both branch selection and all derived prompt state.
             // There is no intermediate Chat snapshot to install.
-            if let Err(error) = self
-                .chat_state_handle
-                .rewind_durably(target_index)
-                .await
-            {
+            if let Err(error) = self.chat_state_handle.rewind_durably(target_index).await {
                 let projection_rollback = self.persist_rewind_points(all_points.clone()).await;
                 let file_rollback = self
                     .rollback_rewind_files(&changed_files, &current_files)
@@ -396,9 +389,9 @@ impl SessionActor {
             .persistence_tx
             .send(PersistenceMsg::ClearRewindTransactionAndAck { respond_to })
             .map_err(|_| anyhow::anyhow!("rewind persistence actor is unavailable"))?;
-        response
-            .await
-            .map_err(|_| anyhow::anyhow!("rewind transaction clear acknowledgement was dropped"))??;
+        response.await.map_err(|_| {
+            anyhow::anyhow!("rewind transaction clear acknowledgement was dropped")
+        })??;
         Ok(())
     }
 
@@ -414,9 +407,8 @@ impl SessionActor {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let transaction = serde_json::from_slice::<
-            crate::session::persistence::RewindTransaction,
-        >(&bytes)?;
+        let transaction =
+            serde_json::from_slice::<crate::session::persistence::RewindTransaction>(&bytes)?;
         transaction.validate()?;
         Ok(Some(transaction))
     }
@@ -451,10 +443,8 @@ impl SessionActor {
         }
 
         let all_points = self.file_state_tracker.get_rewind_points().await;
-        let mut desired =
-            std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
-        let mut originals =
-            std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
+        let mut desired = std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
+        let mut originals = std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
         if wants_files {
             for point in all_points
                 .iter()

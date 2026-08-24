@@ -62,7 +62,7 @@ impl tool_runtime::Tool for PlanControlTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::None,
             ..Default::default()
         }
     }

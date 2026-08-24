@@ -42,10 +42,6 @@ fn permission_audit_access_summary(
             url.set_fragment(None);
             url.to_string()
         }),
-        "capability_grant" => event
-            .capability_target
-            .as_deref()
-            .map(|target| format!("target: {target}")),
         _ => None,
     };
     permission_audit_text(summary)
@@ -142,8 +138,6 @@ mod permission_audit_tests {
             requested_permission_mode: Some(
                 workspace::permission::types::RequestPermissionMode::Auto,
             ),
-            capability_target: None,
-            capability_purpose: None,
             decision_reason: Some("auto_classifier_allow".into()),
             classifier_source: Some("llm".into()),
             classifier_verdict: Some("allow".into()),
@@ -1078,7 +1072,6 @@ pub(crate) async fn spawn_session_actor(
         foreground: ForegroundState::Idle,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
-        pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
@@ -1095,11 +1088,6 @@ pub(crate) async fn spawn_session_actor(
         None => FileStateTracker::new(),
     });
     let file_state_handle = FileStateHandle::new(file_state_tracker.clone());
-    let task_completion_reservations =
-        tools::reminders::task_completion::TaskCompletionReservations::default();
-    let task_wake_suppressed = tools::reminders::task_completion::TaskWakeSuppressed::default();
-    tool_context.task_completion_reservations = Some(task_completion_reservations.clone());
-    tool_context.task_wake_suppressed = Some(task_wake_suppressed.clone());
     let mut tool_context = tool_context.with_file_state_handle(file_state_handle);
     let index_root_for_session =
         workspace::session::git::find_git_root_from_path(tool_context.cwd.as_path())
@@ -1201,12 +1189,8 @@ pub(crate) async fn spawn_session_actor(
             incremental_bash_output,
             behavior: behavior.clone(),
             session_cmd_tx: cmd_tx.clone(),
-            task_completion_reservations: task_completion_reservations.clone(),
-            task_wake_suppressed: task_wake_suppressed.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
-            auto_wake_enabled: tool_context.auto_wake_enabled,
-            goal_loop_active: tool_context.goal_loop_active_gate.clone(),
         },
     );
     let tool_context_for_handle = tool_context.clone();
@@ -1313,17 +1297,14 @@ pub(crate) async fn spawn_session_actor(
             plugin_names,
         })
     };
-    let compaction_policy = agent::CompactionPolicy {
-        auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
-        compact_model: None,
-        memory_flush_enabled: memory_config.as_ref().is_some_and(|mc| mc.flush.enabled),
-        wall_clock_budget_secs: crate::util::config::resolve_compaction_wall_clock_budget_secs(
+    let memory_flush_before_compaction = memory_config.as_ref().is_some_and(|mc| mc.flush.enabled);
+    let compaction_wall_clock_budget_secs =
+        crate::util::config::resolve_compaction_wall_clock_budget_secs(
             remote_settings
                 .as_ref()
                 .and_then(|r| r.compaction_wall_clock_budget_secs),
-        ),
-    };
-    let reminder_policy = resolve_reminder_policy(remote_settings.as_ref(), todo_gate);
+        );
+    let todo_gate_config = resolve_todo_gate_config(remote_settings.as_ref(), todo_gate);
     let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::ask_user_question::types::UserQuestionRequest,
     >();
@@ -1482,8 +1463,6 @@ pub(crate) async fn spawn_session_actor(
         resources_persistence: resources_persistence.clone(),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
-        compaction_policy,
-        reminder_policy,
         memory_enabled: memory_config.as_ref().is_some_and(|mc| mc.enabled),
         memory_backend: memory_backend_for_spec,
         context_recall_backend,
@@ -1502,7 +1481,6 @@ pub(crate) async fn spawn_session_actor(
         plugin_registry: plugin_registry.clone(),
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
-        monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
         subagents_max_depth,
@@ -1540,10 +1518,7 @@ pub(crate) async fn spawn_session_actor(
             e
         })?;
     let (subagent_capabilities, delegable_capability_ceiling) = if startup_hints.is_subagent {
-        let initial_mode = agent
-            .definition()
-            .capability_mode
-            .unwrap_or_default();
+        let initial_mode = agent.definition().capability_mode.unwrap_or_default();
         let bound_mcp_client_ids = mcp_state.lock().await.shared_client_ids();
         let state = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
             agent.tool_bridge(),
@@ -1557,29 +1532,6 @@ pub(crate) async fn spawn_session_actor(
             bound_mcp_client_ids.clone(),
         )
         .await;
-        let backend = crate::session::subagent_capability::ShellToolAccessGrantBackend {
-            state: state.clone(),
-            permissions: permissions.clone(),
-            request_mode: startup_hints.permission_request_mode().unwrap_or_default(),
-            session_id: session_info.id.0.to_string(),
-            acp_session_id: session_info.id.clone(),
-            execution_cwd: std::path::PathBuf::from(session_info.cwd.as_str()),
-            subagent_type: startup_hints.subagent_type.clone(),
-            subagent_description: startup_hints.subagent_description.clone(),
-            mcp_tool_metadata: tool_metadata_snapshot.clone(),
-            pending_interactions: pending_interactions.clone(),
-            gateway: gateway.clone(),
-            followup_messages: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            cancelled_requests: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        };
-        agent
-            .tool_bridge()
-            .update_resource(
-                tools::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource(
-                    Arc::new(backend),
-                ),
-            )
-            .await;
         (
             Some(state),
             Some(
@@ -1615,14 +1567,6 @@ pub(crate) async fn spawn_session_actor(
             .lock()
             .select_behavior(tool_types::BehaviorId::Normal);
     }
-    agent
-        .tool_bridge()
-        .update_resource(task_completion_reservations.clone())
-        .await;
-    agent
-        .tool_bridge()
-        .update_resource(task_wake_suppressed)
-        .await;
     let resolved_task_output =
         tools::reminders::task_completion::resolve_task_output_tool_name(agent.tool_bridge()).await;
     let resolved_read =
@@ -2307,6 +2251,8 @@ pub(crate) async fn spawn_session_actor(
         compaction: super::compaction_config::CompactionConfig {
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
+            memory_flush_enabled: memory_flush_before_compaction,
+            wall_clock_budget_secs: compaction_wall_clock_budget_secs,
             force_compact: force_compact.clone(),
             context_window_override,
             count: std::sync::atomic::AtomicU64::new(0),
@@ -2317,6 +2263,7 @@ pub(crate) async fn spawn_session_actor(
             pre_prune_token_budget: std::cell::Cell::new(compaction_pre_prune_token_budget),
             cancel: Default::default(),
         },
+        todo_gate: todo_gate_config,
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(
                 || crate::config::MemoryFlushConfig {

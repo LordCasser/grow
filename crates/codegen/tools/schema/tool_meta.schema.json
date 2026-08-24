@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CanonicalToolMeta",
-  "description": "The canonical tool-identity envelope, attached to a tool-call event `_meta`\nas one nested object under [`TOOL_META_KEY`].\n\n```json\n\"grow/tool\": {\n  \"version\": 3,\n  \"name\": \"read_file\",\n  \"kind\": \"read\",\n  \"namespace\": \"grow\",\n  \"label\": \"Read\",\n  \"scope\": \"read\",\n  \"input\": { \"path\": \"...\" }\n}\n```\n\nConsumer contract:\n- **`label`** is the cross-harness grouping/display key: equivalent tools\n  share it (grow `read_file` → `\"Read\"`).\n- **`kind`** is a finer discriminator (`metadata.kind()`), *not* guaranteed\n  equal for equivalent ops across harnesses (listing is `list` in one\n  toolset, `list_dir` in another); prefer `label` to join.\n- **`name`** is the harness-specific model-facing name; for diagnostics.\n  For harness-initiated events (e.g. the `bash_mode` marker), `raw_input`\n  is not guaranteed to match `name`'s schema.\n- **`input`** is a canonical *projection*, not a mirror: cross-harness keys\n  only, so some raw fields are intentionally dropped (e.g. grep flags,\n  `replace_all`), and bulky payload\n  fields (edit `old_string`/`new_string`, full write contents) are never\n  projected — read them from `raw_input`. It is omitted entirely\n  when no stable shape exists (MCP / dynamic / out-of-scope). When a field or\n  the whole dict is absent, fall back to `raw_input` on this or an earlier\n  update for the same `tool_call_id` (some updates, e.g. a parse failure,\n  carry neither and rely on the merge below).\n- **Lifecycle:** updates for one call share a `tool_call_id` — merge across\n  them (last write wins); `input` may arrive on a later update.\n- **Versioning:** `kind`, `namespace`, and the envelope fields are closed.\n  Any vocabulary or shape change bumps `version`, forcing typed consumers to\n  update rather than silently reclassifying a tool.",
+  "description": "The canonical tool-identity envelope, attached to a tool-call event `_meta`\nas one nested object under [`TOOL_META_KEY`].\n\n```json\n\"grow/tool\": {\n  \"version\": 3,\n  \"name\": \"read_file\",\n  \"kind\": \"read\",\n  \"namespace\": \"grow\",\n  \"label\": \"Read\",\n  \"max_access\": \"read\",\n  \"input\": { \"path\": \"...\" }\n}\n```\n\nConsumer contract:\n- **`label`** is the cross-harness grouping/display key: equivalent tools\n  share it (grow `read_file` → `\"Read\"`).\n- **`kind`** is a finer discriminator (`metadata.kind()`), *not* guaranteed\n  equal for equivalent ops across harnesses (listing is `list` in one\n  toolset, `list_dir` in another); prefer `label` to join.\n- **`name`** is the harness-specific model-facing name; for diagnostics.\n  For harness-initiated events (e.g. the `bash_mode` marker), `raw_input`\n  is not guaranteed to match `name`'s schema.\n- **`input`** is a canonical *projection*, not a mirror: cross-harness keys\n  only, so some raw fields are intentionally dropped (e.g. grep flags,\n  `replace_all`), and bulky payload\n  fields (edit `old_string`/`new_string`, full write contents) are never\n  projected — read them from `raw_input`. It is omitted entirely\n  when no stable shape exists (MCP / dynamic / out-of-scope). When a field or\n  the whole dict is absent, fall back to `raw_input` on this or an earlier\n  update for the same `tool_call_id` (some updates, e.g. a parse failure,\n  carry neither and rely on the merge below).\n- **Lifecycle:** updates for one call share a `tool_call_id` — merge across\n  them (last write wins); `input` may arrive on a later update.\n- **Versioning:** `kind`, `namespace`, and the envelope fields are closed.\n  Any vocabulary or shape change bumps `version`, forcing typed consumers to\n  update rather than silently reclassifying a tool.",
   "type": "object",
   "properties": {
     "version": {
@@ -21,8 +21,8 @@
     "label": {
       "type": "string"
     },
-    "scope": {
-      "$ref": "#/definitions/ToolScope"
+    "max_access": {
+      "$ref": "#/definitions/ToolAccess"
     },
     "input": true
   },
@@ -33,7 +33,7 @@
     "kind",
     "namespace",
     "label",
-    "scope"
+    "max_access"
   ],
   "definitions": {
     "ToolKind": {
@@ -66,10 +66,7 @@
         "use_tool",
         "monitor",
         "goal_read",
-        "goal_progress_update",
-        "goal_replan_request",
         "goal_lifecycle_update",
-        "goal_plan_submit",
         "workflow",
         "capability_request",
         "other"
@@ -85,18 +82,25 @@
         "mcp"
       ]
     },
-    "ToolScope": {
-      "description": "Multi-agent write-coordination scope.\n\nTools that mutate external state declare `Write`; absence is treated as\n`Write` so unknown tools fail closed.",
+    "ToolAccess": {
+      "description": "Coarse read/write/execute authority required by a tool call.\n\n`Read` observes state, `Write` changes durable state or emits externally,\nand `Execute` starts or controls an active execution unit. Combined tools\ndeclare the union. This vocabulary is intentionally closed and replaces the\nold read/write-only `ToolScope` classification.",
       "oneOf": [
         {
-          "description": "Tool does not mutate external state.",
           "type": "string",
-          "const": "read"
+          "enum": [
+            "read",
+            "write",
+            "execute",
+            "read_write",
+            "read_execute",
+            "write_execute",
+            "all"
+          ]
         },
         {
-          "description": "Tool mutates external state.",
+          "description": "Pure control-plane operation with no external observation or emission.",
           "type": "string",
-          "const": "write"
+          "const": "none"
         }
       ]
     }

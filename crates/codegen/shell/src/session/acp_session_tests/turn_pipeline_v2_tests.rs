@@ -74,29 +74,6 @@ fn only_real_user_input_can_supply_an_implicit_goal_objective() {
     ));
 }
 
-#[test]
-fn goal_task_completion_filter_preserves_unrelated_background_results() {
-    fn pending(task_id: &str) -> PendingNotification {
-        PendingNotification {
-            prompt_id: format!("notification-{task_id}"),
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(task_id))],
-            priority: NotificationPriority::Next,
-            source: NotificationSource::BashTaskCompleted {
-                task_id: task_id.to_string(),
-            },
-        }
-    }
-
-    let goal_owned = std::collections::HashSet::from(["goal-task".to_string()]);
-    let (surfaced, dropped) = SessionActor::split_goal_suppressed(
-        &goal_owned,
-        vec![pending("goal-task"), pending("user-task")],
-    );
-    assert_eq!(dropped, 1);
-    assert_eq!(surfaced.len(), 1);
-    assert_eq!(surfaced[0].source.task_id(), "user-task");
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn every_continuation_audits_the_full_goal_before_planning_a_local_slice() {
     tokio::task::LocalSet::new()

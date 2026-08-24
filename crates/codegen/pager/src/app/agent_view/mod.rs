@@ -787,9 +787,6 @@ pub struct AgentView {
     /// Set when a bash command starts, cleared on next non-bash turn.
     /// Used to auto-focus scrollback after bash turn completion.
     pub bash_turn: bool,
-    /// The task ID of the currently running cron turn, if any.
-    /// Set when a cron prompt is drained, cleared on turn completion.
-    pub cron_task_id: Option<String>,
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
@@ -2239,8 +2236,6 @@ pub(crate) mod test_fixtures {
             &agent.session.bg_tasks,
             &agent.subagent_sessions,
             &agent.session.scheduled_tasks,
-            None,
-            &std::collections::HashSet::new(),
             &agent.workflow_runs,
         );
     }

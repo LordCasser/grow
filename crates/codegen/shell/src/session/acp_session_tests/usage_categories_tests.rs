@@ -1,6 +1,5 @@
-//! Actor-level tests for the `/context` usage categories: populated rows
-//! with counts, compat-harness suppression of the MCP row, and parity
-//! between the MCP snapshot and the injected reminder.
+//! Actor-level tests for `/context` usage categories: populated rows with
+//! counts and parity between the MCP snapshot and injected reminder.
 use super::support::*;
 use super::*;
 use crate::session::tool_index::{ServerMetadata, ToolMetadata};

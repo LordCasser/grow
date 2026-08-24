@@ -110,45 +110,12 @@ impl MonitorInput {
     }
 }
 
-// Mid-turn monitor event buffer
-
-/// A monitor event notification to be surfaced as a `<system-reminder>` mid-turn.
+/// A monitor event projection used to batch pending durable notifications for
+/// one model turn.
 #[derive(Debug, Clone)]
 pub struct MonitorEventNotification {
     pub task_id: String,
     pub event_text: String,
-    /// Session that owns the monitor which produced this event.
-    ///
-    /// In leader mode every session shares one [`MonitorEventBuffer`], so the
-    /// drain sites filter on this to avoid surfacing one session's monitor
-    /// events inside another session's turn. `None` for legacy / non-grow-build
-    /// backends. Ownerless events are not eligible for session delivery.
-    pub owner_session_id: Option<String>,
-}
-
-impl MonitorEventNotification {
-    /// Whether this buffered event should surface in the session whose owner id
-    /// is `my_owner`. Mirrors `task_owned_by_session`: an event surfaces only
-    /// when its owner matches the draining session. Foreign and ownerless
-    /// events stay buffered.
-    pub fn owned_by_session(&self, my_owner: &str) -> bool {
-        self.owner_session_id.as_deref() == Some(my_owner)
-    }
-}
-
-/// Shared buffer for mid-turn monitor event notifications: an [`EventQueue`]
-/// of [`MonitorEventNotification`]. Producers `push_capped`; the turn loop
-/// drains its session's events via [`drain_owned`].
-///
-/// [`EventQueue`]: crate::interjection::EventQueue
-pub type MonitorEventBuffer = crate::interjection::EventQueue<MonitorEventNotification>;
-
-crate::register_resource!("grow_build", "MonitorEventBuffer", MonitorEventBuffer);
-
-/// Drain only `my_owner`'s events (the buffer is shared across sessions in
-/// leader mode). Ownerless events are never session-deliverable.
-pub fn drain_owned(buffer: &MonitorEventBuffer, my_owner: &str) -> Vec<MonitorEventNotification> {
-    buffer.drain_matching(|e| e.owned_by_session(my_owner))
 }
 
 #[cfg(test)]

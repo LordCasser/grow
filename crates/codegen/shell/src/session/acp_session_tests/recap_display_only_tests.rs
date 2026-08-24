@@ -86,7 +86,6 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                     None,
                     false,
                     None,
-                    None,
                     respond_to,
                     None,
                 )
@@ -123,7 +122,6 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                     None,
                     None,
                     false,
-                    None,
                     None,
                     respond_to,
                     None,

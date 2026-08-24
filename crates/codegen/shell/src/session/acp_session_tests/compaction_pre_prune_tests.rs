@@ -198,6 +198,7 @@ async fn run_user_turn(
         actor.handle_prompt(
             prompt_id,
             crate::session::PromptOrigin::User,
+            Vec::new(),
             crate::session::TurnKind::User,
             vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "write a long answer",
@@ -532,8 +533,7 @@ fn pre_prune_insufficient_projection_runs_summary() {
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
             let (actor, _gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             seed_tool_result_rounds(&actor, 2).await;
             actor
                 .chat_state_handle

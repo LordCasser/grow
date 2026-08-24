@@ -32,14 +32,14 @@ The turn terminal is also a steering-scope fence. A residual steer that missed t
 
 All regular work shares one admission sequence:
 
-1. settle the exact foreground owner;
-2. persist its single terminal;
-3. promote the oldest user FIFO entry;
-4. only if still idle, run Goal `on_idle` work.
+1. settle the exact foreground owner and persist its single terminal;
+2. promote the oldest user FIFO entry;
+3. drain pending durable notification receipts that are allowed to start a turn;
+4. only if foreground, FIFO, and notification work are all settled, run Goal continuation.
 
-An Active Goal rechecks foreground and FIFO while holding the same state lock before reserving its continuation turn. This closes the race where a continuation and user input arrive together: the user wins.
+The idle arbiter drains the durable inbox before it invokes the Goal driver; the Goal driver then rechecks foreground and FIFO under the same state lock before reserving its continuation turn. This closes the race where a continuation and user input or a completed background task arrive together: user input wins, then the durable receipt, and Goal remains last.
 
-Background completion delivery follows the same ownership rule. A completion that satisfies an explicitly displaced wait is delivered exactly once; otherwise it enters the idle notification drain. The drain suppresses only task ids stamped as Goal-owned and continues to surface unrelated user/watcher work even while Goal is Active or after its Complete receipt remains loaded.
+The notification inbox is the only cross-turn completion path. During an active turn, a pending receipt is consumed at a safe sampling boundary and becomes visible in that turn; receipts already pending when a real turn starts are consumed before its first user input is committed, except for the primary receipt already owned by that turn. A tool-result boundary consumes the same inbox with `input=None`, so the result is not mistaken for a user message. During idle, an autostart `Received` receipt is either consumed into a notification turn or explicitly `Dismissed` by policy. `TaskStillRunning` is an active-turn-only checkpoint: by itself it remains pending and does not spend a model call; the next user, Goal, or independently required notification turn consumes it. Goal-owned shell/monitor task ids are dismissed with `reason=goal-owned-autostart` instead of starting an autonomous turn, while those notifications remain visible if they arrive during an active turn. `SubagentCompleted` and `WorkflowCompleted` are never suppressed by this Goal-owned shell/monitor rule. Monitor progress is folded away when its terminal receipt arrives. Every receipt is idempotent and replayable through Timeline; no memory buffer, streaming line, hidden reminder queue, or background-task manifest participates in admission.
 
 ## Message identity
 

@@ -9,14 +9,18 @@ pub use crate::tool_taxonomy::{CanonicalToolMeta, ToolIdentity};
 use crate::types::tool_io::ToolInput;
 use crate::types::tool_metadata::ToolMetadata;
 use serde::Serialize;
-/// Resolve [`ToolIdentity`] from a tool's registered metadata.
-pub fn tool_identity_of(metadata: &dyn ToolMetadata) -> ToolIdentity {
+/// Resolve [`ToolIdentity`] from registered metadata plus the runtime
+/// descriptor-owned access requirement.
+pub fn tool_identity_of(
+    metadata: &dyn ToolMetadata,
+    max_access: tool_protocol::ToolAccess,
+) -> ToolIdentity {
     let kind = metadata.kind();
     ToolIdentity {
         tool_kind: kind,
         namespace: metadata.tool_namespace(),
         presentation_name: kind.presentation_name(),
-        scope: metadata.tool_scope(),
+        max_access,
     }
 }
 /// Resolve `wire_name` in `toolset` and merge the canonical `grow/tool` object
@@ -121,7 +125,6 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::GetGoal(_)
         | ToolInput::UpdateGoal(_)
         | ToolInput::Workflow(_)
-        | ToolInput::RequestToolAccess(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

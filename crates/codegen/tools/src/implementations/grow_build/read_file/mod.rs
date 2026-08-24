@@ -34,7 +34,7 @@ const STREAM_DELTA_TARGET_BYTES: usize = 4 * 1024;
 /// `PlainText` / `Append`.
 static READ_FILE_CAPABILITIES: LazyLock<tool_protocol::ToolCapabilities> =
     LazyLock::new(|| tool_protocol::ToolCapabilities {
-        tool_scope: tool_protocol::ToolScope::Read,
+        max_access: tool_protocol::ToolAccess::Read,
         streaming: Some(tool_protocol::StreamingSpec {
             subkind: "read_file_chunk".to_owned(),
             max_delta_bytes: None,

@@ -113,9 +113,6 @@ pub enum SyntheticReason {
     /// Idle-gated notification drain: batched monitor events and/or bash
     /// task completions drained when the session is idle.  Wakes the agent.
     NotificationDrain,
-    /// Scheduled task (`/loop`) prompt fired by the scheduler.  Wakes the
-    /// agent.
-    SchedulerFired,
     /// Feedback from a `Stop`/`SubagentStop` hook that blocked the agent from
     /// stopping. Injected in-turn so the model keeps working within the same turn.
     StopHookFeedback,
@@ -148,10 +145,7 @@ impl SyntheticReason {
     ///
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
-            Self::TaskCompleted
-            | Self::SubagentCompleted
-            | Self::NotificationDrain
-            | Self::SchedulerFired => true,
+            Self::TaskCompleted | Self::SubagentCompleted | Self::NotificationDrain => true,
             Self::CompactionMeta
             | Self::SystemReminder
             | Self::ProjectInstructions
@@ -1431,21 +1425,6 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::NotificationDrain),
-            permission_evidence: None,
-            goal_directive: None,
-            cwd_generation: None,
-            prior_turn_interrupt: None,
-            prompt_index: None,
-        })
-    }
-
-    /// Scheduled task (`/loop`) prompt fired by the scheduler.
-    pub fn scheduler_fired(content: impl Into<String>) -> Self {
-        Self::User(UserItem {
-            content: vec![ContentPart::Text {
-                text: Arc::<str>::from(content.into()),
-            }],
-            synthetic_reason: Some(SyntheticReason::SchedulerFired),
             permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
@@ -3569,21 +3548,12 @@ mod tests {
             "projection preserves chronology"
         );
         assert_eq!(projected[0].text_content(), "ordinary");
-        assert_eq!(
-            projected[1].text_content(),
-            SUPERSEDED_GOAL_DIRECTIVE
-        );
-        assert_eq!(
-            projected[2].text_content(),
-            SUPERSEDED_GOAL_DIRECTIVE
-        );
+        assert_eq!(projected[1].text_content(), SUPERSEDED_GOAL_DIRECTIVE);
+        assert_eq!(projected[2].text_content(), SUPERSEDED_GOAL_DIRECTIVE);
         assert_matches!(&projected[2], ConversationItem::User(user) => {
             assert_eq!(user.prompt_index, Some(7));
         });
-        assert_eq!(
-            projected[4].text_content(),
-            SUPERSEDED_GOAL_DIRECTIVE
-        );
+        assert_eq!(projected[4].text_content(), SUPERSEDED_GOAL_DIRECTIVE);
         assert_eq!(projected[5].text_content(), "latest current directive");
 
         let stopped = project_conversation_for_goal_scope(items, None);
@@ -6199,8 +6169,8 @@ mod tests {
             ConversationItem::user("P0"),
             ConversationItem::interjection("also do this"), // mid-turn
             ConversationItem::assistant("A0"),
-            ConversationItem::scheduler_fired("loop fired"), // turn 1
-            ConversationItem::system_reminder("reminder"),   // mid-turn
+            ConversationItem::notification_drain("notification"), // turn 1
+            ConversationItem::system_reminder("reminder"),        // mid-turn
             ConversationItem::assistant("A1"),
             ConversationItem::user("P2"),
         ];

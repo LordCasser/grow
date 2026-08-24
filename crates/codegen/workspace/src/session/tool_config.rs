@@ -1,26 +1,20 @@
 //! Tool config resolution pipeline.
 //!
-//! Four-step resolution:
+//! Two-step resolution:
 //! 1. `effective_tool_config = config.tool_config.unwrap_or_else(|| parent.effective_tool_config.clone())`
-//! 2. `merged = merge_mcp_tools(effective_tool_config, shared.mcp_servers.snapshot())`
-//! 3. `filtered = config.capability_mode.filter(merged)`
-//! 4. `toolset = build_finalized_toolset(filtered, &session.cwd, &session.session_env, ...)`
-use crate::capability::{CapabilityMode, kind_allowed};
+//! 2. `toolset = build_finalized_toolset(effective_tool_config, &session.cwd, &session.session_env, ...)`
 use crate::config::SessionContextFactory;
 use crate::error::{WorkspaceError, WorkspaceResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tools::registry::types::{FinalizedToolset, ToolConfig, ToolRegistryBuilder, ToolServerConfig};
-use tools::types::tool::ToolKind;
 /// Create-shaped entry of the resolution pipeline: run
 /// [`resolve_session_toolset_rebuild`] around a FRESH factory-built
 /// session-lifetime terminal backend, and return that backend so the caller
 /// can store it on the session it is creating. Session-less resolves (the
 pub(crate) fn resolve_session_toolset(
     effective_tool_config: ToolServerConfig,
-    capability_mode: CapabilityMode,
-    mcp_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
@@ -37,8 +31,6 @@ pub(crate) fn resolve_session_toolset(
     let terminal_backend = factory.build_terminal_backend();
     let (effective, toolset) = resolve_session_toolset_rebuild(
         effective_tool_config,
-        capability_mode,
-        mcp_snapshot,
         cwd,
         session_env,
         session_id,
@@ -51,7 +43,7 @@ pub(crate) fn resolve_session_toolset(
     )?;
     Ok((effective, toolset, terminal_backend))
 }
-/// Rebuild-shaped entry: run steps 2-5 of the resolution pipeline around an
+/// Rebuild-shaped entry: finalize the effective config around an
 /// EXISTING session-owned terminal backend. The parameter is non-optional on
 /// purpose: every toolset-swap call site must state which backend it rebuilds
 /// around, so background tasks and shell state can never be orphaned by a
@@ -59,17 +51,11 @@ pub(crate) fn resolve_session_toolset(
 ///
 /// Returns the *unmodified* `effective_tool_config` (step-1 baseline) so
 /// the caller can store it on the session. The FinalizedToolset reflects
-/// MCP merging and capability filtering on top of that baseline.
-///
-/// Every `kind: None` tool is dropped under a non-`All` mode. Before
-/// filtering, kind-less baseline entries whose id the binary's
-/// registry knows get their [`ToolKind`] backfilled (see
-/// [`backfill_tool_kinds`]), so the capability filter applies to pinned
-/// server-bind toolsets whose wire entries cannot carry a kind.
+/// exactly that baseline. Workspace owns resource assembly, not actor
+/// authorization or MCP lifecycle; the shell's live bridge, exact-identity
+/// capability state, and call-bound RWX permit are the single boundary.
 pub(crate) fn resolve_session_toolset_rebuild(
     effective_tool_config: ToolServerConfig,
-    capability_mode: CapabilityMode,
-    mcp_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
@@ -84,8 +70,6 @@ pub(crate) fn resolve_session_toolset_rebuild(
     if let Some(lr) = local_registry {
         builder = builder.with_local_registry(lr);
     }
-    let baseline = backfill_tool_kinds(&effective_tool_config, &builder.known_tool_kinds());
-    let filtered = merge_and_filter(&baseline, mcp_snapshot, capability_mode, session_id);
     let mut ctx = factory.build_session_context(session_id, cwd, session_env, terminal_backend);
     if let Some(lsp_handle) = lsp {
         ctx.lsp = Some(lsp_handle);
@@ -95,7 +79,7 @@ pub(crate) fn resolve_session_toolset_rebuild(
     }
     let toolset = builder
         .finalize_with_trunc_config(
-            filtered,
+            effective_tool_config.clone(),
             ctx,
             tools::types::context::TruncationConfig::default(),
             viewer_ctx,
@@ -105,87 +89,6 @@ pub(crate) fn resolve_session_toolset_rebuild(
             WorkspaceError::Finalize(summary.join("; "))
         })?;
     Ok((effective_tool_config, Arc::new(toolset)))
-}
-/// Backfill `kind: None` baseline entries from the binary's own registry
-/// (fully-qualified id -> declared [`ToolKind`]).
-///
-/// Ids unknown to the registry stay `None` and are dropped by every
-/// restricted capability mode. Entries that already carry a kind are left
-/// untouched.
-fn backfill_tool_kinds(
-    config: &ToolServerConfig,
-    kinds: &HashMap<String, ToolKind>,
-) -> ToolServerConfig {
-    ToolServerConfig {
-        tools: config
-            .tools
-            .iter()
-            .map(|tool| {
-                let mut tool = tool.clone();
-                if tool.kind.is_none() {
-                    tool.kind = kinds.get(&tool.id).copied();
-                }
-                tool
-            })
-            .collect(),
-    }
-}
-/// Steps 2-3 of the resolution pipeline, without finalization:
-///
-/// - **Step 2** -- MCP merge: append MCP-origin tools, skipping ID/name collisions with baseline.
-/// - **Step 3** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
-///   Every tool with `kind: None` is only kept under `CapabilityMode::All`.
-///
-/// Priority on ID/name collision: baseline wins over MCP.
-pub(crate) fn merge_and_filter(
-    baseline: &ToolServerConfig,
-    mcp_snapshot: &[ToolConfig],
-    mode: CapabilityMode,
-    session_id: &str,
-) -> ToolServerConfig {
-    if mcp_snapshot.is_empty() {
-        return mode.filter(baseline);
-    }
-    let baseline_ids: std::collections::HashSet<&str> =
-        baseline.tools.iter().map(|t| t.id.as_str()).collect();
-    let mut taken_names: std::collections::HashSet<String> = baseline
-        .tools
-        .iter()
-        .map(|t| {
-            let unqualified = t.id.rsplit_once(':').map_or(t.id.as_str(), |(_, n)| n);
-            t.resolve_client_name(unqualified)
-        })
-        .collect();
-    let mut merged: Vec<ToolConfig> = baseline.tools.clone();
-    for mcp_tool in mcp_snapshot {
-        if baseline_ids.contains(mcp_tool.id.as_str()) {
-            tracing::warn!(
-                mcp_id = %mcp_tool.id,
-                session = %session_id,
-                "skipping MCP tool: id collides with baseline"
-            );
-            continue;
-        }
-        let client_name = mcp_tool.resolve_client_name(&mcp_tool.id);
-        if !taken_names.insert(client_name.clone()) {
-            tracing::warn!(
-                mcp_id = %mcp_tool.id,
-                client_name = %client_name,
-                session = %session_id,
-                "skipping MCP tool: resolved client name collides with another tool"
-            );
-            continue;
-        }
-        merged.push(mcp_tool.clone());
-    }
-    let kept: Vec<ToolConfig> = merged
-        .into_iter()
-        .filter(|tool| match tool.kind {
-            Some(k) => kind_allowed(mode, k),
-            None => matches!(mode, CapabilityMode::All),
-        })
-        .collect();
-    ToolServerConfig { tools: kept }
 }
 /// Sanitize a `session_id` into a single safe filesystem path segment: chars
 /// outside `[A-Za-z0-9_-]` become `_`, empty becomes `anon`. When any
@@ -285,9 +188,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
-            resources_persistence: Arc::new(
-                tools::persistence::ResourcesPersistence::noop(),
-            ),
+            resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
             memory_backend: None,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
@@ -436,15 +337,13 @@ mod tests {
         Arc::new(HashMap::new())
     }
     #[tokio::test]
-    async fn resolve_session_toolset_empty_mcp_snapshot_is_noop_for_baseline() {
+    async fn resolve_session_toolset_preserves_baseline() {
         let factory = factory_for_test();
         let cwd = PathBuf::from("/tmp");
         let baseline = test_support::baseline_config();
         let baseline_ids: Vec<String> = baseline.tools.iter().map(|t| t.id.clone()).collect();
         let (eff, ts, _backend) = resolve_session_toolset(
             baseline,
-            CapabilityMode::ReadWrite,
-            &[],
             cwd,
             empty_env(),
             "main",
@@ -463,187 +362,6 @@ mod tests {
             baseline_ids
         );
         assert!(!ts.tool_definitions().is_empty());
-    }
-    #[tokio::test]
-    async fn resolve_session_toolset_mcp_merge_dedup_by_id_baseline_wins() {
-        let factory = factory_for_test();
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-        };
-        let mut mcp_dup = test_support::tc("Grow:read_file", Some(ToolKind::Read));
-        mcp_dup.name_override = Some("mcp_read".into());
-        let snapshot = vec![mcp_dup];
-        let (_eff, ts, _backend) = resolve_session_toolset(
-            baseline,
-            CapabilityMode::ReadWrite,
-            &snapshot,
-            PathBuf::from("/tmp"),
-            empty_env(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("resolve");
-        let defs = ts.tool_definitions();
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert!(
-            names.contains(&"read_file"),
-            "baseline read_file must survive: {names:?}"
-        );
-        assert!(
-            !names.contains(&"mcp_read"),
-            "MCP duplicate must be skipped: {names:?}"
-        );
-    }
-    #[test]
-    fn backfill_tool_kinds_fills_known_kindless_ids_only() {
-        let kinds = HashMap::from([
-            ("Grow:search_replace".to_owned(), ToolKind::Edit),
-            ("Grow:read_file".to_owned(), ToolKind::Read),
-        ]);
-        let config = ToolServerConfig {
-            tools: vec![
-                test_support::tc("Grow:search_replace", None),
-                test_support::tc("adhoc.opaque", None),
-                // Pre-set kinds must never be overwritten by the registry.
-                test_support::tc("Grow:read_file", Some(ToolKind::Search)),
-            ],
-        };
-        let backfilled = backfill_tool_kinds(&config, &kinds);
-        let kind_of = |id: &str| {
-            backfilled
-                .tools
-                .iter()
-                .find(|t| t.id == id)
-                .expect("tool present")
-                .kind
-        };
-        assert_eq!(kind_of("Grow:search_replace"), Some(ToolKind::Edit));
-        assert_eq!(
-            kind_of("adhoc.opaque"),
-            None,
-            "ids unknown to the registry stay kind-less"
-        );
-        assert_eq!(
-            kind_of("Grow:read_file"),
-            Some(ToolKind::Search),
-            "an explicit kind wins over the registry's"
-        );
-    }
-    /// Regression: pinned server-bind toolsets arrive kind-less (the gRPC
-    /// `ToolConfigEntry` has no kind field), which used to make every
-    /// baseline entry bypass the capability filter — a `read_only`
-    /// sub-agent kept edit + execute tools. The registry backfill must
-    /// restore the filter.
-    #[tokio::test]
-    async fn resolve_session_toolset_readonly_filters_kindless_pinned_tools() {
-        let factory = factory_for_test();
-        let baseline = ToolServerConfig {
-            tools: vec![
-                test_support::tc("Grow:read_file", None),
-                test_support::tc("Grow:grep", None),
-                test_support::tc("Grow:list_dir", None),
-                test_support::tc("Grow:search_replace", None),
-                test_support::tc("Grow:run_terminal_cmd", None),
-            ],
-        };
-        let (eff, ts, _backend) = resolve_session_toolset(
-            baseline,
-            CapabilityMode::ReadOnly,
-            &[],
-            PathBuf::from("/tmp"),
-            empty_env(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("resolve");
-        assert!(eff.tools.iter().all(|t| t.kind.is_none()));
-        let names: Vec<String> = ts
-            .tool_definitions()
-            .into_iter()
-            .map(|d| d.function.name)
-            .collect();
-        for kept in ["read_file", "grep", "list_dir"] {
-            assert!(
-                names.iter().any(|n| n == kept),
-                "{kept} must survive ReadOnly: {names:?}"
-            );
-        }
-        for dropped in ["search_replace", "run_terminal_cmd"] {
-            assert!(
-                !names.iter().any(|n| n == dropped),
-                "{dropped} must be dropped under ReadOnly: {names:?}"
-            );
-        }
-    }
-    #[test]
-    fn resolve_session_toolset_mcp_edit_dropped_under_readonly() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-        };
-        let mcp_edit = test_support::tc("mcp.editor", Some(ToolKind::Edit));
-        let filtered = merge_and_filter(&baseline, &[mcp_edit], CapabilityMode::ReadOnly, "test");
-        assert!(!filtered.tools.iter().any(|t| t.id == "mcp.editor"));
-    }
-    #[tokio::test]
-    async fn resolve_session_toolset_mcp_kind_none_dropped_under_readonly() {
-        let factory = factory_for_test();
-        let baseline = ToolServerConfig {
-            tools: vec![
-                test_support::tc("Grow:read_file", Some(ToolKind::Read)),
-                test_support::tc("baseline.opaque", None),
-            ],
-        };
-        let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
-        let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            !kept_ids.contains(&"baseline.opaque"),
-            "baseline kind: None must fail closed under ReadOnly: {kept_ids:?}"
-        );
-        assert!(
-            !kept_ids.contains(&"mcp.opaque"),
-            "MCP kind: None MUST be dropped under ReadOnly: {kept_ids:?}"
-        );
-        assert!(
-            kept_ids.contains(&"Grow:read_file"),
-            "baseline Read kind must survive ReadOnly: {kept_ids:?}"
-        );
-        let _ = factory;
-    }
-    #[tokio::test]
-    async fn resolve_session_toolset_mcp_kind_none_kept_under_all() {
-        let baseline = ToolServerConfig { tools: vec![] };
-        let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::All, "test_session");
-        let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            kept_ids.contains(&"mcp.opaque"),
-            "All mode keeps MCP kind: None: {kept_ids:?}"
-        );
-    }
-    #[tokio::test]
-    async fn resolve_session_toolset_mcp_name_override_collision_skipped() {
-        let baseline = ToolServerConfig { tools: vec![] };
-        let mut mcp_a = test_support::tc("mcp.tool_a", Some(ToolKind::Read));
-        mcp_a.name_override = Some("shared_name".into());
-        let mut mcp_b = test_support::tc("mcp.tool_b", Some(ToolKind::Read));
-        mcp_b.name_override = Some("shared_name".into());
-        let mcp = vec![mcp_a, mcp_b];
-        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&"mcp.tool_a"), "first wins: {ids:?}");
-        assert!(
-            !ids.contains(&"mcp.tool_b"),
-            "duplicate name dropped: {ids:?}"
-        );
     }
     #[test]
     fn factory_session_folder_is_tmp_sessions_not_project_cwd() {
@@ -720,8 +438,6 @@ mod tests {
         let cwd = PathBuf::from("/tmp");
         let (_eff, ts_a, _backend_a) = resolve_session_toolset(
             test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
             cwd.clone(),
             empty_env(),
             "sess-A",
@@ -741,8 +457,6 @@ mod tests {
         drop(ts_a);
         let (_eff, ts_b, _backend_b) = resolve_session_toolset(
             test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
             cwd.clone(),
             empty_env(),
             "sess-A",
@@ -765,8 +479,6 @@ mod tests {
         }
         let (_eff, ts_c, _backend_c) = resolve_session_toolset(
             test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
             cwd,
             empty_env(),
             "sess-B",

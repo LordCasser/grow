@@ -30,11 +30,7 @@ impl SessionActor {
     /// Set up `[system, session_rules?, skill_reminder?]` — prefix is deferred
     /// to background. Session rules are a typed Timeline item and never mutate
     /// the stable system head.
-    pub(super) async fn initialize(
-        &self,
-        system_prompt: String,
-        session_rules: Option<String>,
-    ) {
+    pub(super) async fn initialize(&self, system_prompt: String, session_rules: Option<String>) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
         let system_message = ConversationItem::system(system_prompt);
@@ -116,9 +112,7 @@ impl SessionActor {
     }
     /// Await the background prefix and inject at conversation index 1.
     /// Falls back to synchronous build on timeout (10s) or panic.
-    pub(super) async fn ensure_prefix_ready(
-        &self,
-    ) -> Result<(), chat_state::TimelineWriteError> {
+    pub(super) async fn ensure_prefix_ready(&self) -> Result<(), chat_state::TimelineWriteError> {
         let Some(mut handle) = self.deferred_prefix.take() else {
             return Ok(());
         };

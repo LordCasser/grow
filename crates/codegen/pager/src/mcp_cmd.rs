@@ -240,7 +240,7 @@ async fn run_add(args: AddArgs) -> Result<()> {
     let config = McpServerConfig {
         transport: resolved.transport,
         enabled: true,
-        tool_scope: tool_protocol::ToolScope::Write,
+        max_access: tool_protocol::ToolAccess::All,
         setup: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
@@ -491,7 +491,7 @@ fn surviving_definition(
         .or_else(|| user_defined.then(|| (McpScope::User, shell::util::config::user_config_path())))
 }
 
-/// TOML / disabled list / compat JSON / plugin catalog.
+/// Grow TOML, personal disable state, and the plugin catalog.
 fn mcp_server_is_known(name: &str, cwd: &Path) -> bool {
     shell::util::config::cli_known_mcp_server_names(cwd).contains(name)
 }
@@ -506,7 +506,7 @@ fn available_mcp_server_names(cwd: &Path) -> Vec<String> {
 
 async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     // Do not use validate_server_name (add-only: [A-Za-z0-9_-]). Enable/disable
-    // also targets compat/plugin names that may contain dots or other keys.
+    // also targets plugin names that may contain dots or other keys.
     if name.is_empty() {
         bail!("Server name cannot be empty.");
     }

@@ -184,8 +184,8 @@ pub fn collect_skill_config_dirs(
         }
     }
 
-    // Priority 3: Grow's user root (`~/.grow`). Vendor compatibility roots
-    // are intentionally project-only.
+    // Priority 3: Grow's user root (`~/.grow`). Other products' resource
+    // roots are intentionally project-only.
     for root in user_roots {
         try_add(root.clone());
     }

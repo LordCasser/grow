@@ -1424,7 +1424,7 @@ fn session_grant_pre_decision(
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::Edit(_)
-        | AccessKind::CapabilityGrant { .. } => None,
+        | AccessKind::InternalControl { .. } => None,
     }
 }
 
@@ -1611,9 +1611,8 @@ fn spawn_permission_manager_with_pin(
                     let request_subagent_description =
                         context.source.subagent_description().map(str::to_owned);
                     let child_permission_key = context.source.child_session_id().map(str::to_owned);
-                    let within_capability_fence = context.within_capability_fence
-                        && child_permission_key.is_some()
-                        && !matches!(access, AccessKind::CapabilityGrant { .. });
+                    let within_capability_fence =
+                        context.within_capability_fence && child_permission_key.is_some();
                     let request_cwd = context.execution_cwd.as_deref().unwrap_or(cwd.as_path());
                     let permission_mode =
                         resolve_request_mode(request_mode, primary_mode, always_approve_pin);
@@ -1663,10 +1662,9 @@ fn spawn_permission_manager_with_pin(
                             )),
                         ),
                         AccessKind::WebFetch(url) => ("web_fetch".to_owned(), Some(url.clone())),
-                        AccessKind::CapabilityGrant { target, purpose } => (
-                            "capability_grant".to_owned(),
-                            Some(format!("target: {target}\npurpose: {purpose}")),
-                        ),
+                        AccessKind::InternalControl { name } => {
+                            ("internal_control".to_owned(), Some(name.clone()))
+                        }
                     };
                     let classifier_access_detail = match &access {
                         AccessKind::MCPTool { name, input } => {
@@ -1674,13 +1672,6 @@ fn spawn_permission_manager_with_pin(
                         }
                         _ => access_detail.clone(),
                     };
-                    let (capability_target, capability_purpose) = match &access {
-                        AccessKind::CapabilityGrant { target, purpose } => {
-                            (Some(target.clone()), Some(purpose.clone()))
-                        }
-                        _ => (None, None),
-                    };
-
                     let diagnostics = std::cell::Cell::new(PermissionDiagnosticSnapshot {
                         classifier: None,
                         auto_denials_consecutive: auto_runtime.consecutive_denials,
@@ -1742,8 +1733,6 @@ fn spawn_permission_manager_with_pin(
                                     permission_mode_artifact_str(permission_mode).to_string(),
                                 ),
                                 requested_permission_mode: request_mode,
-                                capability_target: capability_target.clone(),
-                                capability_purpose: capability_purpose.clone(),
                                 decision_reason: decision_reason.map(|s| s.to_string()),
                                 classifier_source: diagnostics
                                     .classifier
@@ -1911,11 +1900,8 @@ fn spawn_permission_manager_with_pin(
                     // rules + Bash shell-file args) up front so the always-approve/sandbox fast
                     // paths below honor a deny or forced prompt. The preflight also
                     // resolves every managed Ask before any mode-specific fast path.
-                    let preflight = GatePreflight::evaluate(
-                        compiled_policy.as_ref(),
-                        &access,
-                        request_cwd,
-                    );
+                    let preflight =
+                        GatePreflight::evaluate(compiled_policy.as_ref(), &access, request_cwd);
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
                     // An `Ask` from either bash gate must block the always-approve/auto fast paths.
@@ -1940,12 +1926,12 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    // The child capability authority has already admitted this
-                    // concrete tool kind (and, for MCP, this server binding).
-                    // Routine calls stop here. A managed Ask or a secondary
-                    // shell/protected/interactive risk signal continues through
-                    // the child's own permission mode below; capability grants
-                    // enrich that mode and must never replace its semantics.
+                    // Calls inside the child's immutable initial RWX normally
+                    // stop here. A locked-but-hard-eligible call arrives with
+                    // `within_capability_fence = false` and continues through
+                    // Ask/Auto to obtain only a call-bound permit. Managed Ask
+                    // and secondary shell/protected/interactive risk signals
+                    // remain binding even for an in-fence call.
                     let child_shell_escalation = child_permission_key.is_some()
                         && within_capability_fence
                         && matches!(access, AccessKind::Bash(_))
@@ -2021,20 +2007,23 @@ fn spawn_permission_manager_with_pin(
                     // unless auto fast-path/classifier decides first for non-forced
                     // paths; every policy Ask skips auto entirely. Bash request
                     // floors may still use their separate explicit deferral rule.
-                    let is_capability_grant = matches!(access, AccessKind::CapabilityGrant { .. });
                     let child_auto_judgment = child_permission_key.is_some()
-                        && (is_capability_grant || child_shell_escalation);
+                        && (!within_capability_fence || child_shell_escalation);
+                    let human_confirmation_boundary = protected_edit.is_some()
+                        || crate::permission::auto_mode::access_requires_user_interaction(
+                            &tool_name, &access,
+                        );
                     let admits_auto_classifier = match child_permission_key.as_ref() {
                         // A child spends primary-context judgment only on an
-                        // explicit fence widening request or a secondary shell
-                        // risk escalation. Actual managed Ask rules stay human.
-                        Some(_) => child_auto_judgment && !managed_prompt_required,
-                        None => {
-                            preflight.admits_auto_classifier()
-                                || is_capability_grant
-                                    && !policy_forced_prompt
-                                    && !shell_forced_prompt
+                        // exact locked call or a secondary shell risk
+                        // escalation. Protected/interactive operations and
+                        // actual managed Ask rules stay human.
+                        Some(_) => {
+                            child_auto_judgment
+                                && !managed_prompt_required
+                                && !human_confirmation_boundary
                         }
+                        None => preflight.admits_auto_classifier(),
                     };
                     if effective_auto_mode
                         && admits_auto_classifier
@@ -2048,11 +2037,7 @@ fn spawn_permission_manager_with_pin(
                         };
                         let needs_user = protected_edit.is_some()
                             || access_requires_user_interaction(&tool_name, &access);
-                        // Capability exposure always needs an explicit LLM verdict.
-                        // It must not inherit command/edit safety fast paths.
                         let fast = if child_auto_judgment {
-                            AutoFastPath::Classify
-                        } else if matches!(access, AccessKind::CapabilityGrant { .. }) {
                             AutoFastPath::Classify
                         } else {
                             auto_mode_fast_path(&access, &tool_name, needs_user)
@@ -2249,32 +2234,6 @@ fn spawn_permission_manager_with_pin(
                                         );
                                         auto_forced_prompt = true;
                                         auto_prompt_reason = Some(reasons::AUTO_CLASSIFIER_BLOCK);
-                                    }
-                                    ClassifierVerdict::Block
-                                        if matches!(access, AccessKind::CapabilityGrant { .. }) =>
-                                    {
-                                        tracing::info!(
-                                            tool = %tool_name,
-                                            "auto mode: classifier blocked capability grant"
-                                        );
-                                        let reason = match outcome.reason() {
-                                            Some(r) => format!(
-                                                "Auto mode blocked this capability request ({}).",
-                                                r.trim_end_matches('.')
-                                            ),
-                                            None => "Auto mode blocked this capability request."
-                                                .to_owned(),
-                                        };
-                                        let decision = Decision::PolicyDeny(reason);
-                                        emit_event(
-                                            &decision,
-                                            false,
-                                            false,
-                                            None,
-                                            Some(reasons::AUTO_CLASSIFIER_DENY),
-                                        );
-                                        let _ = respond_to.send(decision);
-                                        continue;
                                     }
                                     ClassifierVerdict::Block
                                         if auto_runtime.consecutive_denials
@@ -2578,7 +2537,9 @@ fn spawn_permission_manager_with_pin(
                                 }
                             }
                         }
-                        AccessKind::CapabilityGrant { .. } => None,
+                        AccessKind::InternalControl { .. } => {
+                            Some((Decision::Allow, reasons::SAFE_COMMAND))
+                        }
                     };
                     // Auto forced a prompt: neutralize leftover non-bash Allows.
                     // Session grants already short-circuited; bash grants stay gated
@@ -2995,7 +2956,10 @@ mod tests {
             resolve_request_mode(Some(RequestPermissionMode::Ask), PermissionMode::Auto, None,),
             PermissionMode::Ask
         );
-        assert_eq!(resolve_request_mode(None, PermissionMode::Auto, None), PermissionMode::Auto);
+        assert_eq!(
+            resolve_request_mode(None, PermissionMode::Auto, None),
+            PermissionMode::Auto
+        );
     }
 
     #[test]
@@ -3972,10 +3936,7 @@ mod tests {
                 for (session_id, task) in [("child-a", "task-a"), ("child-b", "task-b")] {
                     let decision = manager
                         .request_with_context(
-                            AccessKind::CapabilityGrant {
-                                target: "native:execute".to_owned(),
-                                purpose: format!("purpose-{session_id}"),
-                            },
+                            AccessKind::Bash(format!("cargo test -p {session_id}")),
                             tool_call(),
                             None,
                             PermissionRequestContext {
@@ -4015,7 +3976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_child_capability_grant_is_judged_once() {
+    async fn each_child_locked_call_is_judged_once() {
         use crate::permission::auto_mode::ClassifierVerdict;
 
         tokio::task::LocalSet::new()
@@ -4026,13 +3987,10 @@ mod tests {
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
                 let accesses = [
-                    AccessKind::CapabilityGrant {
-                        target: "native:execute".into(),
-                        purpose: "run focused tests".into(),
-                    },
-                    AccessKind::CapabilityGrant {
-                        target: "mcp_server:github".into(),
-                        purpose: "inspect the assigned repository".into(),
+                    AccessKind::Bash("cargo test -p workspace".into()),
+                    AccessKind::MCPTool {
+                        name: "github__search".into(),
+                        input: serde_json::json!({"query": "assigned repository"}),
                     },
                 ];
 
@@ -4069,7 +4027,7 @@ mod tests {
                 assert_eq!(
                     seen.lock().unwrap().len(),
                     2,
-                    "each explicit boundary grant must invoke exactly one judgment"
+                    "each exact locked call must invoke exactly one judgment"
                 );
             })
             .await;
@@ -4180,8 +4138,9 @@ mod tests {
                         client,
                         ClientType::Generic,
                     );
-                    let (classifier, seen) =
-                        capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    let (classifier, seen) = capturing_classifier(
+                        crate::permission::auto_mode::ClassifierVerdict::Allow,
+                    );
                     manager.set_classifier(Some(classifier));
                     let decision = manager
                         .request_with_context(
@@ -4207,7 +4166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_auto_capability_grant_deny_is_final() {
+    async fn child_auto_locked_call_deny_is_final() {
         use crate::permission::auto_mode::LlmPermissionClassifier;
 
         tokio::task::LocalSet::new()
@@ -4221,10 +4180,7 @@ mod tests {
 
                 let decision = manager
                     .request_with_context(
-                        AccessKind::CapabilityGrant {
-                            target: "native:execute".into(),
-                            purpose: "run focused verification".into(),
-                        },
+                        AccessKind::Bash("cargo test -p workspace".into()),
                         tool_call(),
                         None,
                         PermissionRequestContext {
@@ -4243,7 +4199,7 @@ mod tests {
 
                 assert!(
                     matches!(&decision, Decision::PolicyDeny(reason) if reason.contains("outside the assigned task")),
-                    "an explicit boundary grant must honor the primary-context verdict, got {decision:?}"
+                    "an exact locked call must honor the primary-context verdict, got {decision:?}"
                 );
                 let event = events.try_recv().expect("permission event");
                 assert_eq!(event.user_prompted, false);
@@ -4276,10 +4232,7 @@ mod tests {
 
                 let decision = manager
                     .request_with_mode(
-                        AccessKind::CapabilityGrant {
-                            target: "native:execute".into(),
-                            purpose: "run focused verification".into(),
-                        },
+                        AccessKind::Bash("cargo test -p workspace".into()),
                         tool_call(),
                         Some("child-unavailable".into()),
                         Some("explore".into()),
@@ -4326,10 +4279,7 @@ mod tests {
 
                 let decision = manager
                     .request_with_mode(
-                        AccessKind::CapabilityGrant {
-                            target: "native:execute".into(),
-                            purpose: "run focused verification".into(),
-                        },
+                        AccessKind::Bash("cargo test -p workspace".into()),
                         tool_call(),
                         Some("child-timeout".into()),
                         Some("explore".into()),
@@ -4369,6 +4319,12 @@ mod tests {
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
+                let protected_target = resolve_model_path(cwd.as_path(), None, ".grow/config.toml");
+                assert!(
+                    edit_target_protection(&protected_target).is_some(),
+                    "test precondition: {} must be a protected edit target",
+                    protected_target.display()
+                );
 
                 let decision = manager
                     .request_with_context(
@@ -4392,7 +4348,12 @@ mod tests {
                     )
                     .await;
 
-                assert!(matches!(decision, Decision::Reject(_)));
+                assert!(
+                    matches!(decision, Decision::Reject(_)),
+                    "protected child edit must remain human-gated, got {decision:?}; prompts={}; classifications={}",
+                    prompts.borrow().len(),
+                    seen.lock().unwrap().len(),
+                );
                 assert_eq!(prompts.borrow().len(), 1);
                 assert!(
                     seen.lock().unwrap().is_empty(),
@@ -6197,10 +6158,7 @@ mod tests {
                 let request = tokio::task::spawn_local(async move {
                     requesting_manager
                         .request_with_mode(
-                            AccessKind::CapabilityGrant {
-                                target: "native:execute".into(),
-                                purpose: "run verification".into(),
-                            },
+                            AccessKind::Bash("cargo test -p workspace".into()),
                             tool_call(),
                             Some("child-shutdown".into()),
                             Some("coder".into()),
@@ -9287,7 +9245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_capability_policy_allow_precedes_permission_modes() {
+    async fn child_locked_call_policy_allow_precedes_permission_modes() {
         use crate::permission::auto_mode::ClassifierVerdict;
         use crate::permission::types::{
             PatternMode, PermissionConfig, PermissionRule, RequestPermissionMode, RuleAction,
@@ -9300,8 +9258,8 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Allow,
-                    tool: ToolFilter::Any,
-                    pattern: Some("native:execute".to_owned()),
+                    tool: ToolFilter::Bash,
+                    pattern: Some("cargo test -p workspace".to_owned()),
                     pattern_mode: PatternMode::Glob,
                 }]);
                 let (mgr, mut events) = test_manager_with_config(&cwd, config, PermissionMode::Ask);
@@ -9317,10 +9275,7 @@ mod tests {
                 ] {
                     let decision = mgr
                         .request_with_mode(
-                            AccessKind::CapabilityGrant {
-                                target: "native:execute".to_owned(),
-                                purpose: "Run focused tests".to_owned(),
-                            },
+                            AccessKind::Bash("cargo test -p workspace".to_owned()),
                             tool_call(),
                             Some("child-session".to_owned()),
                             Some("explore".to_owned()),

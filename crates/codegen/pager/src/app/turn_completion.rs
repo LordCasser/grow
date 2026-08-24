@@ -262,8 +262,6 @@ pub(super) fn finalize_prompt_terminal(
         agent.bash_turn = false;
         agent.scrollback.goto_bottom();
     }
-    agent.cron_task_id = None;
-
     // Predicted-next-prompt (tab autocomplete): wipe any stale suggestion at
     // every turn boundary.
     agent.prompt.prompt_suggestion.clear();

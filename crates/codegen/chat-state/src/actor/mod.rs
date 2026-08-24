@@ -21,7 +21,7 @@ use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::TimelinePersistence;
 use crate::types::TurnCapture;
-use crate::{Timeline, TimelineEvent};
+use crate::{Timeline, TimelineEvent, TimelineEventKind};
 
 use sampling_types::{ConversationItem, SamplingConfig};
 use state::ChatState;
@@ -307,6 +307,67 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
+            ChatStateCommand::ReceiveNotificationDurably {
+                owner_session_id,
+                source,
+                source_version,
+                payload_ref,
+                reply,
+            } => {
+                let existing =
+                    self.state
+                        .timeline
+                        .events()
+                        .iter()
+                        .find_map(|event| match &event.kind {
+                            TimelineEventKind::Notification(
+                                crate::NotificationEvent::Received {
+                                    owner_session_id: existing_owner,
+                                    source: existing_source,
+                                    source_version: existing_version,
+                                    payload_ref: existing_payload,
+                                    ..
+                                },
+                            ) if existing_source == &source
+                                && existing_version == &source_version =>
+                            {
+                                Some((
+                                    event.clone(),
+                                    existing_owner == &owner_session_id
+                                        && existing_payload == &payload_ref,
+                                ))
+                            }
+                            _ => None,
+                        });
+                let result = match existing {
+                    Some((event, true)) => Ok(event),
+                    Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(
+                        crate::TimelineError::InvalidNotification,
+                    )),
+                    None => {
+                        match crate::notification_id(&owner_session_id, &source, &source_version) {
+                            Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                            Ok(id) => {
+                                match self.state.timeline.prepare(TimelineEventKind::Notification(
+                                    crate::NotificationEvent::Received {
+                                        id,
+                                        owner_session_id,
+                                        source,
+                                        source_version,
+                                        payload_ref,
+                                    },
+                                )) {
+                                    Err(error) => {
+                                        Err(crate::commands::TimelineWriteError::Invalid(error))
+                                    }
+                                    Ok(event) => self.commit_timeline_event(event).await,
+                                }
+                            }
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
             ChatStateCommand::RecoverInterruptedDurably { reply } => {
                 let result = match (|| {
                     let mut candidate = self.state.timeline.clone();
@@ -538,6 +599,9 @@ impl ChatStateActor {
             ChatStateCommand::GetTimelineEvents { reply } => {
                 let _ = reply.send(self.state.timeline.events().to_vec());
             }
+            ChatStateCommand::GetPendingNotifications { reply } => {
+                let _ = reply.send(self.state.timeline.pending_notifications());
+            }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
                 let materialized = self.state.timeline.events().last().map(|event| {
                     crate::TimelineMaterialization {
@@ -549,10 +613,7 @@ impl ChatStateActor {
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
-                        active_image_projections: self
-                            .state
-                            .timeline
-                            .active_image_projections(),
+                        active_image_projections: self.state.timeline.active_image_projections(),
                         active_control_contexts: self.state.timeline.active_control_contexts(),
                     }
                 });

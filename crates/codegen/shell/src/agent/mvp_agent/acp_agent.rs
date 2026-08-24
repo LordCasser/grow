@@ -1325,7 +1325,6 @@ impl acp::Agent for MvpAgent {
                 screen_mode: prompt_screen_mode,
                 verbatim,
                 json_schema,
-                admission: None,
                 respond_to: tx,
                 persist_ack: None,
             })

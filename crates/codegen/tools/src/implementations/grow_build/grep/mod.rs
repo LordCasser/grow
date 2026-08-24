@@ -214,7 +214,7 @@ pub fn max_head_limit(output_mode: &OutputMode) -> usize {
 /// terminal-only footer, so the stream is a faithful prefix of the card body.
 static GREP_CAPABILITIES: LazyLock<tool_protocol::ToolCapabilities> =
     LazyLock::new(|| tool_protocol::ToolCapabilities {
-        tool_scope: tool_protocol::ToolScope::Read,
+        max_access: tool_protocol::ToolAccess::Read,
         streaming: Some(tool_protocol::StreamingSpec {
             subkind: "grep_match_chunk".to_owned(),
             max_delta_bytes: None,

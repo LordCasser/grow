@@ -1068,19 +1068,10 @@ impl AgentView {
                 }
             }
         }
-        let queued_cron_ids: HashSet<&str> = self
-            .session
-            .pending_prompts
-            .iter()
-            .filter(|p| p.kind == crate::app::agent::QueueEntryKind::Cron)
-            .filter_map(|p| p.task_id.as_deref())
-            .collect();
         self.tasks.sync_at(
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
-            self.cron_task_id.as_deref(),
-            &queued_cron_ids,
             &self.workflow_runs,
             &self.private_workflow_runs,
             frame_stamp,

@@ -224,10 +224,10 @@ async fn tool_dyn_delegates_id_description_capabilities() {
         "blocking_echo"
     );
     assert_eq!(
-        tool.capabilities().tool_scope,
+        tool.capabilities().max_access,
         // `BlockingEcho` declares no scope; the protocol default is `Write`
         // (unknown tools fail closed as mutating until they declare `Read`).
-        tool_protocol::ToolScope::Write
+        tool_protocol::ToolAccess::All
     );
 }
 

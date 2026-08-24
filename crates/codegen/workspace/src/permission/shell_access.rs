@@ -1137,7 +1137,7 @@ pub(crate) fn words_are_opaque_shell(words: &[ShellWord<'_>]) -> bool {
 
 /// Undecomposable-path opaque-shell floor: word-only decomposition failed, so
 /// apply the canonical word predicate to each parsed invocation directly.
-pub(crate) fn tree_has_opaque_shell(root: Node<'_>, src: &str) -> bool {
+pub fn tree_has_opaque_shell(root: Node<'_>, src: &str) -> bool {
     shell_command_invocations(root, src)
         .iter()
         .any(|invocation| {

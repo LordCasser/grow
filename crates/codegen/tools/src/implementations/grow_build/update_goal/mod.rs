@@ -173,7 +173,9 @@ async fn command_output(
     code: &'static str,
 ) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
     let (respond_to, response) = tokio::sync::oneshot::channel();
-    sender.send(build(respond_to)).map_err(|_| channel_error())?;
+    sender
+        .send(build(respond_to))
+        .map_err(|_| channel_error())?;
     let summary = response
         .await
         .map_err(|_| channel_error())?
@@ -207,7 +209,7 @@ impl tool_runtime::Tool for GetGoalTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Read,
+            max_access: tool_protocol::ToolAccess::Read,
             ..Default::default()
         }
     }
@@ -261,6 +263,13 @@ impl tool_runtime::Tool for CreateGoalTool {
         tool_types::ToolDescription::new(CREATE_GOAL_TOOL_NAME, self.description_template())
     }
 
+    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
+        tool_protocol::ToolCapabilities {
+            max_access: tool_protocol::ToolAccess::WriteExecute,
+            ..Default::default()
+        }
+    }
+
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
@@ -301,6 +310,13 @@ impl tool_runtime::Tool for UpdateGoalTool {
         tool_types::ToolDescription::new(UPDATE_GOAL_TOOL_NAME, self.description_template())
     }
 
+    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
+        tool_protocol::ToolCapabilities {
+            max_access: tool_protocol::ToolAccess::WriteExecute,
+            ..Default::default()
+        }
+    }
+
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
@@ -325,9 +341,11 @@ mod tests {
         assert!(serde_json::from_str::<GetGoalInput>("{}").is_ok());
         assert!(serde_json::from_str::<GetGoalInput>(r#"{"phase":"planning"}"#).is_err());
         assert!(serde_json::from_str::<UpdateGoalInput>(r#"{"status":"complete"}"#).is_ok());
-        assert!(serde_json::from_str::<UpdateGoalInput>(
-            r#"{"status":"candidate_complete","message":"done"}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<UpdateGoalInput>(
+                r#"{"status":"candidate_complete","message":"done"}"#
+            )
+            .is_err()
+        );
     }
 }

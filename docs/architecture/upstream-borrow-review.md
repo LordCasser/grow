@@ -55,9 +55,9 @@
 
 ## 4. T1 重定位：readOnly 标注 → ToolKind 审计
 
-**已核实**：grow 的 `ToolConfig.kind: Option<ToolKind>`（30+ 变体）+ `workspace/src/capability.rs` 的 `CapabilityMode`（ReadOnly/ReadWrite/Execute/All 偏序）+ `kind_allowed` 穷尽 match + `ALL_TOOL_KINDS` 编译期守卫，**已覆盖且强于**上游的 `read_only: bool` 两级标注。照搬上游字段会制造第二权威来源，违反单一权威来源原则。
+**当前裁决**：旧的 `workspace::CapabilityMode + ToolKind` 过滤已经删除。`ToolKind` 只服务模板、UI 分组与发现；授权的唯一事实来自工具 descriptor 的 `max_access`、冻结参数的调用级 RWX 投影、actor 的 exact-identity eligibility/grant，以及一次性 permit。MCP 由 server trust-domain mask 与 transport generation 绑定。继续用 `kind` 推导权限会重新制造第二权威来源。
 
-**T1 实际任务**：审计内置工具 kind 声明完整性（找出语义应为 Read 类但 kind=None/Other 的声明并修正）+ "所有内置工具 kind 非 None"契约测试（MCP/custom 工具 None 是合法例外，需在测试中显式列举）+ 三条权限路径（主 agent All、subagent capabilityMode、workflow subagent）围栏消费一致性验证。
+**T1 实际落点**：契约测试同时钉住所有内置工具的 kind（展示语义）和 descriptor RWX（授权天花板）；MCP/custom 的 kind-less config id 作为显式例外保留，但不会因此获得或失去执行权。主 Agent、普通 subagent 与 Workflow subagent 最终都在同一 dispatch Gate 消费调用级权限事实。
 
 ## 5. T2 重定位：StopCancelledReason → 复用 CancellationCategory
 

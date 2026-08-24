@@ -781,7 +781,7 @@ pub fn get_all_mcp_disabled_tools(
         .collect()
 }
 
-/// Load the declared scope for every `[mcp_servers.<name>]` entry.
+/// Load the declared RWX ceiling for every `[mcp_servers.<name>]` entry.
 ///
 /// Single source of truth for the plan-mode read-only MCP classification:
 /// while a Plan is in a non-executing phase, tools from a listed server are
@@ -789,20 +789,20 @@ pub fn get_all_mcp_disabled_tools(
 /// `annotations`/`readOnlyHint` are never consulted. Mirrors
 /// `get_all_mcp_disabled_tools` (whole-set, config-derived; the session caches
 /// the result in `McpState` at init instead of re-reading per tool call).
-pub fn get_mcp_server_scopes(
+pub fn get_mcp_server_max_access(
     _cwd: &std::path::Path,
-) -> std::collections::HashMap<String, tool_protocol::ToolScope> {
-    mcp_server_scopes_from_config(&load_mcp_server_configs())
+) -> std::collections::HashMap<String, tool_protocol::ToolAccess> {
+    mcp_server_max_access_from_config(&load_mcp_server_configs())
 }
 
 /// Pure filter over parsed server configs; split out so the classification
 /// rule is unit-testable without the process-cached config home.
-fn mcp_server_scopes_from_config(
+fn mcp_server_max_access_from_config(
     servers: &IndexMap<String, McpServerConfig>,
-) -> std::collections::HashMap<String, tool_protocol::ToolScope> {
+) -> std::collections::HashMap<String, tool_protocol::ToolAccess> {
     servers
         .iter()
-        .map(|(name, config)| (name.clone(), config.tool_scope))
+        .map(|(name, config)| (name.clone(), config.max_access))
         .collect()
 }
 
@@ -1353,26 +1353,26 @@ command = ""
     }
 
     #[test]
-    fn mcp_server_scopes_match_config() {
+    fn mcp_server_max_access_matches_config() {
         let mut servers = IndexMap::new();
-        for (name, tool_scope) in [
-            ("docs", "read"),
-            ("search", "read"),
-            ("linear", "write"),
-            ("defaults", "write"),
+        for (name, max_access) in [
+            ("docs", "read_write"),
+            ("search", "read_write"),
+            ("linear", "all"),
+            ("defaults", "all"),
         ] {
             let config: McpServerConfig = serde_json::from_value(serde_json::json!({
                 "command": "npx",
-                "tool_scope": tool_scope,
+                "max_access": max_access,
             }))
             .unwrap();
             servers.insert(name.to_string(), config);
         }
-        // `get_mcp_server_scopes` itself reads the process-cached config
+        // `get_mcp_server_max_access` itself reads the process-cached config
         // home (`grow_home()` OnceLock), so the pure filter is tested here.
-        let scopes = mcp_server_scopes_from_config(&servers);
-        assert_eq!(scopes["docs"], tool_protocol::ToolScope::Read);
-        assert_eq!(scopes["linear"], tool_protocol::ToolScope::Write);
+        let access = mcp_server_max_access_from_config(&servers);
+        assert_eq!(access["docs"], tool_protocol::ToolAccess::ReadWrite);
+        assert_eq!(access["linear"], tool_protocol::ToolAccess::All);
     }
 
     #[test]

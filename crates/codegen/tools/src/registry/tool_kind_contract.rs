@@ -1,8 +1,9 @@
 //! Contract tests pinning the built-in tool → `ToolKind` taxonomy.
 //!
 //! The allowlist table in [`expected_builtin_tool_kinds`] is the test-side
-//! source of truth for (a) which tools are built-in and (b) the capability
-//! kind each one declares. It is asserted equal to the live registry, so a
+//! source of truth for (a) which tools are built-in and (b) the presentation
+//! kind and descriptor access ceiling each one declares. It is asserted equal
+//! to the live registry, so a
 //! tool may never be added, removed, or re-kind'd without an explicit edit
 //! here. This is deliberately an allowlist: there is no "everything else"
 //! catch-all, and kind-less MCP/custom ids are an explicit, separate list
@@ -12,9 +13,10 @@
 //! - `ToolConfig::kind` is auto-filled as `Some(kind)` by
 //!   `ToolConfig::for_tool::<T>()` for every built-in tool (never `None`).
 //! - `ToolRegistryBuilder::new()` registers exactly the allowlisted set.
-//! - `ToolConfig::from_id()` leaves `kind: None` for MCP/custom ids, which
-//!   restricted capability modes drop fail-closed (enforced by
-//!   `workspace::capability` tests).
+//! - `ToolConfig::from_id()` leaves `kind: None` for opaque MCP/custom ids.
+//!   Authorization never derives from this optional presentation field: the
+//!   descriptor RWX ceiling, exact actor eligibility, and call-bound permit
+//!   are authoritative.
 
 use std::collections::HashMap;
 
@@ -25,11 +27,12 @@ use crate::implementations::{
 use crate::registry::types::{ToolConfig, ToolRegistryBuilder};
 use crate::types::tool::ToolKind;
 use crate::types::tool_metadata::ToolMetadata;
+use tool_protocol::ToolAccess;
 
 /// Asserts `for_tool::<T>()` auto-fills `kind` with `expected` (invariant:
 /// a built-in tool never carries `kind: None`) and returns the
 /// fully-qualified id for the contract table.
-fn entry<T>(expected: ToolKind) -> (String, ToolKind)
+fn entry<T>(expected_kind: ToolKind, expected_access: ToolAccess) -> (String, ToolKind)
 where
     T: ToolMetadata + tool_runtime::Tool + Default + 'static,
 {
@@ -41,81 +44,87 @@ where
     );
     assert_eq!(
         cfg.kind,
-        Some(expected),
+        Some(expected_kind),
         "{} declares a kind different from the contract table",
         cfg.id
+    );
+    assert_eq!(
+        tool_runtime::Tool::capabilities(&T::default()).max_access,
+        expected_access,
+        "{} declares an RWX requirement different from the contract table",
+        cfg.id,
     );
     (cfg.id, cfg.kind.expect("checked above"))
 }
 
-/// The complete built-in tool allowlist: fully-qualified id → `ToolKind`.
+/// The complete built-in tool allowlist: fully-qualified id → `ToolKind`, with
+/// a separately asserted descriptor ceiling. `ToolKind` is presentation and
+/// discovery metadata only; authorization must never derive from it.
 ///
-/// Kind semantics are pinned to `workspace::capability::kind_allowed`:
-/// - Read class (ReadOnly/ReadWrite/Execute): Read, Search, Lsp, ListDir,
-///   List, MemoryGet, MemorySearch, ContextRecall, GoalRead.
-/// - Search class: Search, WebFetch.
-/// - Edit class (ReadWrite): Edit, Write, Delete, Move, DeployApp.
-/// - Execute class (Execute): Execute, BackgroundTaskAction,
-///   KillTaskAction, Task, Monitor, Workflow.
-/// - Meta (always): Plan, PlanControl, AskUser, Skill, SearchTool,
-///   CapabilityRequest.
-/// - `Other`: fail-closed — only the All mode keeps it.
-///
-/// The scheduler tools are intentionally pinned to `Other` (fail-closed in
-/// every restricted mode) even though `scheduler_list` only reads and
-/// create/delete manage background loops. Reclassifying them would widen
-/// the restricted-mode fence (scheduled tasks fire loop subagents), which
-/// is a capability decision owned by the architect, not this table.
+/// Scheduler tools remain `Other` because eligibility is owner/depth policy,
+/// not an RWX inference. Their explicit ceilings prevent `Other` from becoming
+/// an implicit authorization fallback.
 /// `list_dir` declaring `List` (not `ListDir`) is the documented grow
 /// toolset choice; both variants share one capability class.
 fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
     [
         // ── Grow file tools ────────────────────────────────────────────────
-        entry::<grow_build::ReadFileTool>(ToolKind::Read),
-        entry::<grow_build::SearchReplaceTool>(ToolKind::Edit),
-        entry::<grow_build::WriteTool>(ToolKind::Write),
-        entry::<grow_build::ListDirTool>(ToolKind::List),
-        entry::<grow_build::GrepTool>(ToolKind::Search),
+        entry::<grow_build::ReadFileTool>(ToolKind::Read, ToolAccess::Read),
+        entry::<grow_build::SearchReplaceTool>(ToolKind::Edit, ToolAccess::ReadWrite),
+        entry::<grow_build::WriteTool>(ToolKind::Write, ToolAccess::Write),
+        entry::<grow_build::ListDirTool>(ToolKind::List, ToolAccess::Read),
+        entry::<grow_build::GrepTool>(ToolKind::Search, ToolAccess::Read),
         // ── Grow shell / background-task lifecycle ─────────────────────────
-        entry::<grow_build::BashTool>(ToolKind::Execute),
-        entry::<grow_build::KillTaskTool>(ToolKind::KillTaskAction),
-        entry::<grow_build::KillTerminalCommandTool>(ToolKind::KillTaskAction),
-        entry::<grow_build::TaskOutputTool>(ToolKind::BackgroundTaskAction),
-        entry::<grow_build::GetTerminalCommandOutputTool>(ToolKind::BackgroundTaskAction),
-        entry::<grow_build::MonitorTool>(ToolKind::Monitor),
+        entry::<grow_build::BashTool>(ToolKind::Execute, ToolAccess::All),
+        entry::<grow_build::KillTaskTool>(ToolKind::KillTaskAction, ToolAccess::None),
+        entry::<grow_build::KillTerminalCommandTool>(ToolKind::KillTaskAction, ToolAccess::None),
+        entry::<grow_build::TaskOutputTool>(ToolKind::BackgroundTaskAction, ToolAccess::Read),
+        entry::<grow_build::GetTerminalCommandOutputTool>(
+            ToolKind::BackgroundTaskAction,
+            ToolAccess::Read,
+        ),
+        entry::<grow_build::MonitorTool>(ToolKind::Monitor, ToolAccess::All),
         // ── Grow planning / meta ───────────────────────────────────────────
-        entry::<grow_build::TodoWriteTool>(ToolKind::Plan),
-        entry::<grow_build::PlanControlTool>(ToolKind::PlanControl),
-        entry::<grow_build::AskUserQuestionTool>(ToolKind::AskUser),
-        entry::<grow_build::RequestToolAccessTool>(ToolKind::CapabilityRequest),
+        entry::<grow_build::TodoWriteTool>(ToolKind::Plan, ToolAccess::None),
+        entry::<grow_build::PlanControlTool>(ToolKind::PlanControl, ToolAccess::None),
+        entry::<grow_build::AskUserQuestionTool>(ToolKind::AskUser, ToolAccess::None),
         // ── Grow goal control plane ────────────────────────────────────────
-        entry::<grow_build::CreateGoalTool>(ToolKind::GoalLifecycleUpdate),
-        entry::<grow_build::GetGoalTool>(ToolKind::GoalRead),
-        entry::<grow_build::UpdateGoalTool>(ToolKind::GoalLifecycleUpdate),
+        entry::<grow_build::CreateGoalTool>(
+            ToolKind::GoalLifecycleUpdate,
+            ToolAccess::WriteExecute,
+        ),
+        entry::<grow_build::GetGoalTool>(ToolKind::GoalRead, ToolAccess::Read),
+        entry::<grow_build::UpdateGoalTool>(
+            ToolKind::GoalLifecycleUpdate,
+            ToolAccess::WriteExecute,
+        ),
         // ── Grow orchestration ─────────────────────────────────────────────
-        entry::<grow_build::TaskTool>(ToolKind::Task),
-        entry::<grow_build::WorkflowTool>(ToolKind::Workflow),
-        entry::<grow_build::WebFetchTool>(ToolKind::WebFetch),
-        entry::<grow_build::LspTool>(ToolKind::Lsp),
+        entry::<grow_build::TaskTool>(ToolKind::Task, ToolAccess::None),
+        entry::<grow_build::WorkflowTool>(ToolKind::Workflow, ToolAccess::All),
+        entry::<grow_build::WebFetchTool>(ToolKind::WebFetch, ToolAccess::ReadWrite),
+        entry::<grow_build::LspTool>(ToolKind::Lsp, ToolAccess::Read),
         // ── Grow scheduler (loop control) — fail-closed by design ──────────
-        entry::<grow_build::SchedulerCreateTool>(ToolKind::Other),
-        entry::<grow_build::SchedulerDeleteTool>(ToolKind::Other),
-        entry::<grow_build::SchedulerListTool>(ToolKind::Other),
+        entry::<grow_build::SchedulerCreateTool>(ToolKind::Other, ToolAccess::WriteExecute),
+        entry::<grow_build::SchedulerDeleteTool>(ToolKind::Other, ToolAccess::WriteExecute),
+        entry::<grow_build::SchedulerListTool>(ToolKind::Other, ToolAccess::Read),
         // ── Grow integration dispatch ──────────────────────────────────────
-        entry::<use_tool::UseTool>(ToolKind::UseTool),
-        entry::<search_tool::SearchTool>(ToolKind::SearchTool),
+        entry::<use_tool::UseTool>(ToolKind::UseTool, ToolAccess::All),
+        entry::<search_tool::SearchTool>(ToolKind::SearchTool, ToolAccess::None),
         // ── Grow memory ────────────────────────────────────────────────────
-        entry::<memory::MemorySearchImpl>(ToolKind::MemorySearch),
-        entry::<memory::MemoryGetImpl>(ToolKind::MemoryGet),
-        entry::<context_recall::ContextRecallImpl>(ToolKind::ContextRecall),
+        entry::<memory::MemorySearchImpl>(ToolKind::MemorySearch, ToolAccess::Read),
+        entry::<memory::MemoryGetImpl>(ToolKind::MemoryGet, ToolAccess::Read),
+        entry::<context_recall::ContextRecallImpl>(ToolKind::ContextRecall, ToolAccess::Read),
         // ── GrowConcise variants ───────────────────────────────────────────
-        entry::<grow_build_concise::ReadFileConciseTool>(ToolKind::Read),
-        entry::<grow_build_concise::SearchReplaceConciseTool>(ToolKind::Edit),
-        entry::<grow_build_concise::BashConciseTool>(ToolKind::Execute),
+        entry::<grow_build_concise::ReadFileConciseTool>(ToolKind::Read, ToolAccess::Read),
+        entry::<grow_build_concise::SearchReplaceConciseTool>(
+            ToolKind::Edit,
+            ToolAccess::ReadWrite,
+        ),
+        entry::<grow_build_concise::BashConciseTool>(ToolKind::Execute, ToolAccess::All),
         // ── GrowHashline variants ──────────────────────────────────────────
-        entry::<grow_build_hashline::HashlineReadTool>(ToolKind::Read),
-        entry::<grow_build_hashline::HashlineEditTool>(ToolKind::Edit),
-        entry::<grow_build_hashline::HashlineGrepTool>(ToolKind::Search),
+        entry::<grow_build_hashline::HashlineReadTool>(ToolKind::Read, ToolAccess::Read),
+        entry::<grow_build_hashline::HashlineEditTool>(ToolKind::Edit, ToolAccess::ReadWrite),
+        entry::<grow_build_hashline::HashlineGrepTool>(ToolKind::Search, ToolAccess::Read),
     ]
     .into_iter()
     .collect()
@@ -144,17 +153,16 @@ fn registry_registers_exactly_the_builtin_allowlist_with_expected_kinds() {
     }
 }
 
-/// The ONLY ids allowed to carry `kind: None` are MCP/custom tools created
+/// The pinned examples allowed to carry `kind: None` are MCP/custom tools created
 /// via `ToolConfig::from_id`. This list is explicit: a new kind-less id
 /// must be added here with a reason, never silently absorbed by a
 /// "everything else stays None" catch-all.
 ///
-/// Note this covers the *config* layer. Dynamically registered MCP tools in
-/// a finalized toolset carry `Some(ToolKind::Other)` (see
-/// `FinalizedToolset::register_tool` and `mcp::McpErasedTool`), which
-/// restricted capability modes also drop via `kind_allowed` — the second,
-/// runtime fail-closed layer. Both layers reject MCP/custom tools outside
-/// `All`.
+/// Note this covers the *config* layer. Dynamically registered MCP tools in a
+/// finalized toolset carry `Some(ToolKind::Other)` for display/discovery (see
+/// `FinalizedToolset::register_tool` and `mcp::McpErasedTool`). Their runtime
+/// authority instead comes from the server trust-domain mask and transport
+/// generation binding.
 #[test]
 fn kindless_mcp_custom_exceptions_are_explicit() {
     let registry = ToolRegistryBuilder::new();
@@ -180,8 +188,8 @@ fn kindless_mcp_custom_exceptions_are_explicit() {
         let cfg = ToolConfig::from_id(*id);
         assert_eq!(
             cfg.kind, None,
-            "{id} must stay kind-less (reason: {reason}); assigning a kind \
-             here would silently widen restricted capability modes"
+            "{id} must stay kind-less (reason: {reason}); opaque config ids \
+             must not invent presentation metadata"
         );
         assert!(
             !known.contains_key(*id),
@@ -189,8 +197,4 @@ fn kindless_mcp_custom_exceptions_are_explicit() {
              registry tool — the exception list and the registry disagree"
         );
     }
-
-    // Restricted-mode fail-closed behavior for these kind-less ids is
-    // enforced by `workspace::capability` tests
-    // (`capability_mode_kind_none_fails_closed_outside_all`).
 }

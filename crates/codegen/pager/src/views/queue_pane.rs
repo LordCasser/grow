@@ -92,7 +92,6 @@ fn synth_server_id(prompt_id: &str) -> u64 {
 pub fn kind_from_wire(kind: &str) -> QueueEntryKind {
     match kind {
         "bash" => QueueEntryKind::BashCommand,
-        "cron" => QueueEntryKind::Cron,
         "command" => QueueEntryKind::Command,
         _ => QueueEntryKind::Prompt,
     }
@@ -266,24 +265,6 @@ impl QueuedPromptEntry {
                 let mut spans = vec![
                     Span::styled("! ", Style::default().fg(theme.command)),
                     Span::styled(display_text, Style::default().fg(theme.command)),
-                ];
-
-                if extra_lines > 0 {
-                    spans.push(Span::styled(suffix, Style::default().fg(theme.gray)));
-                }
-
-                Line::from(spans)
-            }
-            QueueEntryKind::Cron => {
-                let display_text = if let Some(max_w) = content_max_width {
-                    truncate_str(first_line, max_w.saturating_sub(2))
-                } else {
-                    first_line.to_string()
-                };
-
-                let mut spans = vec![
-                    Span::styled("\u{21BB}  ", Style::default().fg(theme.gray_dim)),
-                    Span::styled(display_text, Style::default().fg(theme.accent_user)),
                 ];
 
                 if extra_lines > 0 {

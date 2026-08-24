@@ -1,10 +1,10 @@
 use super::*;
 use crate::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grow_build::task::types::{
-    SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
-    SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
-    SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentSnapshotStatus,
+    SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentListActiveRequest,
+    SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply,
+    SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
+    SubagentSnapshotStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -651,14 +651,7 @@ async fn await_to_completion_has_no_foreground_deadline() {
 
 #[tokio::test]
 async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
-    let mut harness = harness_with_options(
-        true,
-        true,
-        CoordinatorConfig {
-            buffer_completions: true,
-            ..CoordinatorConfig::default()
-        },
-    );
+    let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
 
     let mut active_request = request("workflow-active", false);
     active_request.await_to_completion = true;
@@ -759,17 +752,6 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
     );
     assert!(harness.backend.inspect("workflow-active").await.is_some());
 
-    let (completions_respond_to, completions_response_rx) = oneshot::channel();
-    harness
-        .backend
-        .sender()
-        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-            parent_session_id: Some("parent".to_owned()),
-            suppress_ids: Vec::new(),
-            respond_to: completions_respond_to,
-        }))
-        .expect("actor command channel open");
-    assert!(completions_response_rx.await.unwrap().is_empty());
     harness.actor.abort();
 }
 
@@ -838,17 +820,11 @@ async fn teardown_session_children_spares_other_sessions() {
 }
 
 #[tokio::test]
-async fn teardown_cancels_background_child_without_rebuffering() {
-    let mut harness = harness_with_config(
-        true,
-        CoordinatorConfig {
-            buffer_completions: true,
-            ..CoordinatorConfig::default()
-        },
-    );
+async fn teardown_cancels_background_child() {
+    let mut harness = harness_with_config(true, CoordinatorConfig::default());
 
-    // A background subagent that outlives its parent is the production case that
-    // rebuffers a completion for a later resume of the same session id.
+    // A background subagent that outlives its parent must be cancelled during
+    // teardown; notification persistence is owned by the shell, not this actor.
     let mut req = request("bg", true);
     req.parent_session_id = "parent".to_owned();
     let spawn = tokio::spawn({
@@ -875,23 +851,9 @@ async fn teardown_cancels_background_child_without_rebuffering() {
         })
         .expect("actor command channel open");
 
-    // Wait for the cancelled child to finish, then assert it buffered nothing.
+    // Wait for the cancelled child to finish.
     let _ = harness.completions.recv().await;
-    let (tx, rx) = oneshot::channel();
-    harness
-        .backend
-        .sender()
-        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-            parent_session_id: Some("parent".to_owned()),
-            suppress_ids: Vec::new(),
-            respond_to: tx,
-        }))
-        .expect("actor command channel open");
-    assert!(
-        rx.await.unwrap().is_empty(),
-        "torn-down background child must not rebuffer a completion"
-    );
-    let _ = spawn.await;
+    assert!(spawn.await.unwrap().unwrap().cancelled);
     harness.actor.abort();
 }
 
@@ -1356,57 +1318,6 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
 }
 
 #[tokio::test]
-async fn completion_buffer_caps_summary_without_mutating_result() {
-    let mut harness = harness_with_config(
-        false,
-        CoordinatorConfig {
-            buffer_completions: true,
-            ..CoordinatorConfig::default()
-        },
-    );
-    let mut request = request("buffered", true);
-    request.prompt = "aéb".to_owned();
-    request.runtime_overrides.completion_output_cap = Some(2);
-    let spawn = tokio::spawn({
-        let backend = harness.backend.clone();
-        async move { backend.spawn(request).await }
-    });
-    assert_eq!(harness.started.recv().await.as_deref(), Some("buffered"));
-    let _ = harness.finish.send(());
-    let result = spawn.await.unwrap().unwrap();
-    assert_eq!(result.output.as_ref(), "aéb");
-    let _ = harness.completions.recv().await;
-    let snapshot = harness
-        .backend
-        .query("buffered", false, None)
-        .await
-        .unwrap();
-    let SubagentSnapshotStatus::Completed { output, .. } = snapshot.status else {
-        panic!("expected completed snapshot");
-    };
-    assert_eq!(output, "aéb");
-
-    let (respond_to, response_rx) = oneshot::channel();
-    harness
-        .backend
-        .sender()
-        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-            parent_session_id: Some("parent".to_owned()),
-            suppress_ids: Vec::new(),
-            respond_to,
-        }))
-        .expect("actor command channel open");
-    let buffered = response_rx.await.expect("completion response");
-    assert_eq!(buffered.len(), 1);
-    assert_eq!(buffered[0].subagent_id, "buffered");
-    assert_eq!(
-        buffered[0].output.as_ref(),
-        "a\n[output truncated: 1 of 4 bytes shown]"
-    );
-    harness.actor.abort();
-}
-
-#[tokio::test]
 async fn missing_persisted_output_is_typed_as_unavailable() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn = tokio::spawn({
@@ -1469,146 +1380,6 @@ async fn definition_background_counts_as_background_for_outstanding() {
     let result = spawn.await.unwrap().unwrap();
     assert!(result.success);
     assert!(!result.backgrounded);
-    harness.actor.abort();
-}
-
-#[tokio::test]
-async fn buffered_completion_output_cap_bounds_buffered_summary() {
-    let mut harness = harness_with_config(
-        false,
-        CoordinatorConfig {
-            buffer_completions: true,
-            buffered_completion_output_cap: Some(8),
-            ..CoordinatorConfig::default()
-        },
-    );
-    let mut request = request("capped", true);
-    request.prompt = "x".repeat(64);
-    let spawn = tokio::spawn({
-        let backend = harness.backend.clone();
-        async move { backend.spawn(request).await }
-    });
-    assert_eq!(harness.started.recv().await.as_deref(), Some("capped"));
-    let _ = harness.finish.send(());
-    // Spawn result and queryable snapshot keep the full output…
-    let result = spawn.await.unwrap().unwrap();
-    assert_eq!(result.output.len(), 64);
-    let _ = harness.completions.recv().await;
-
-    // …only the buffered reminder copy is truncated.
-    let (respond_to, response_rx) = oneshot::channel();
-    harness
-        .backend
-        .sender()
-        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-            parent_session_id: Some("parent".to_owned()),
-            suppress_ids: Vec::new(),
-            respond_to,
-        }))
-        .expect("actor command channel open");
-    let buffered = response_rx.await.expect("completion response");
-    assert_eq!(buffered.len(), 1);
-    assert!(
-        buffered[0]
-            .output
-            .contains("[output truncated: 8 of 64 bytes shown]"),
-        "buffered output must be capped, got: {}",
-        buffered[0].output
-    );
-    harness.actor.abort();
-}
-
-#[tokio::test]
-async fn teardown_session_drops_only_that_sessions_buffer() {
-    let mut harness = harness_with_config(
-        false,
-        CoordinatorConfig {
-            buffer_completions: true,
-            ..CoordinatorConfig::default()
-        },
-    );
-    for (id, parent) in [("child-a", "parent-a"), ("child-b", "parent-b")] {
-        let mut request = request(id, true);
-        request.parent_session_id = parent.to_owned();
-        let spawn = tokio::spawn({
-            let backend = harness.backend.clone();
-            async move { backend.spawn(request).await }
-        });
-        assert_eq!(harness.started.recv().await.as_deref(), Some(id));
-        let _ = harness.finish.send(());
-        assert!(spawn.await.unwrap().unwrap().success);
-        let _ = harness.completions.recv().await;
-    }
-
-    // Tearing down parent-a discards its buffered completion...
-    harness
-        .backend
-        .sender()
-        .send(SubagentEvent::TeardownSession {
-            parent_session_id: "parent-a".to_owned(),
-        })
-        .expect("actor command channel open");
-
-    let drain = |parent: &str| {
-        let sender = harness.backend.sender();
-        let parent = parent.to_owned();
-        async move {
-            let (respond_to, response_rx) = oneshot::channel();
-            sender
-                .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                    parent_session_id: Some(parent),
-                    suppress_ids: Vec::new(),
-                    respond_to,
-                }))
-                .expect("actor command channel open");
-            response_rx.await.expect("completion response")
-        }
-    };
-    assert!(drain("parent-a").await.is_empty());
-    // ...while parent-b's completion stays buffered for its own drain.
-    let b = drain("parent-b").await;
-    assert_eq!(b.len(), 1);
-    assert_eq!(b[0].subagent_id, "child-b");
-    harness.actor.abort();
-}
-
-#[tokio::test]
-async fn completion_drain_is_scoped_to_parent_session() {
-    let mut harness = harness_with_config(
-        false,
-        CoordinatorConfig {
-            buffer_completions: true,
-            ..CoordinatorConfig::default()
-        },
-    );
-    for (id, parent) in [("child-a", "parent-a"), ("child-b", "parent-b")] {
-        let mut request = request(id, true);
-        request.parent_session_id = parent.to_owned();
-        let spawn = tokio::spawn({
-            let backend = harness.backend.clone();
-            async move { backend.spawn(request).await }
-        });
-        assert_eq!(harness.started.recv().await.as_deref(), Some(id));
-        let _ = harness.finish.send(());
-        assert!(spawn.await.unwrap().unwrap().success);
-        let _ = harness.completions.recv().await;
-    }
-
-    for (parent, expected_id) in [("parent-a", "child-a"), ("parent-b", "child-b")] {
-        let (respond_to, response_rx) = oneshot::channel();
-        harness
-            .backend
-            .sender()
-            .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                parent_session_id: Some(parent.to_owned()),
-                suppress_ids: Vec::new(),
-                respond_to,
-            }))
-            .expect("actor command channel open");
-        let completions = response_rx.await.expect("completion response");
-        assert_eq!(completions.len(), 1);
-        assert_eq!(completions[0].subagent_id, expected_id);
-    }
     harness.actor.abort();
 }
 

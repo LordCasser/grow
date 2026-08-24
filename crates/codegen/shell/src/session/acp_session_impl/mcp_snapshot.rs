@@ -82,7 +82,6 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
 
     mcp_reminder_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     tracing::debug!("MCP snapshot updated, reminder marked dirty");
-
 }
 
 impl SessionActor {

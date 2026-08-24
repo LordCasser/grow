@@ -1,12 +1,10 @@
 //! AgentBuilder — fluent construction API for building Agents.
 use crate::agent::Agent;
-use crate::compaction::CompactionPolicy;
 use crate::config::{AgentDefinition, BuiltinAgentName, PromptComposition};
 use crate::config::{short_tool_name, tool_config_eq, tool_config_matches, tool_id_eq};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
 use crate::prompt::context::PromptContext;
-use crate::system_reminder::ReminderPolicy;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,13 +19,13 @@ use tools::types::tool::ToolKind;
 ///
 ///   // 1. From a definition file
 ///   let def = AgentDefinition::from_file("agents/code-reviewer.md")?;
-///   let agent = AgentBuilder::new(cwd, None, notification_handle)
+///   let agent = AgentBuilder::new(cwd, terminal_backend, notification_handle)
 ///       .from_definition(def)
 ///       .build()
 ///       .await?;
 ///
 ///   // 2. Programmatic (no file)
-///   let agent = AgentBuilder::new(cwd, None, notification_handle)
+///   let agent = AgentBuilder::new(cwd, terminal_backend, notification_handle)
 ///       .with_name("my-agent")
 ///       .with_description("A custom agent")
 ///       .with_tools(vec!["read_file".into(), "grep".into()])
@@ -62,8 +60,6 @@ pub struct AgentBuilder {
     skill_names: Vec<String>,
     agents_md: bool,
     custom_agent_role: Option<String>,
-    compaction_policy: CompactionPolicy,
-    reminder_policy: ReminderPolicy,
     memory_enabled: bool,
     is_non_interactive: bool,
     system_prompt_label: String,
@@ -123,17 +119,6 @@ fn ensure_plan_tools(tool_config: &mut tools::registry::types::ToolServerConfig)
     }
 }
 
-/// Install the host-owned capability request control plane for child sessions.
-fn ensure_subagent_capability_tool(tool_config: &mut tools::registry::types::ToolServerConfig) {
-    use tools::implementations::grow_build::RequestToolAccessTool;
-    if !tool_config
-        .tools
-        .iter()
-        .any(|tool| tool.id == "Grow:request_tool_access")
-    {
-        tool_config.tools.push((&RequestToolAccessTool).into());
-    }
-}
 /// Merge a shell-resolved params map into every matching tool's
 /// `ToolConfig.params` (single copy of the loop the per-tool injections share).
 fn merge_tool_params(
@@ -185,8 +170,6 @@ impl AgentBuilder {
             skill_names: vec![],
             agents_md: true,
             custom_agent_role: None,
-            compaction_policy: CompactionPolicy::default(),
-            reminder_policy: ReminderPolicy::default(),
             memory_enabled: false,
             is_non_interactive: false,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
@@ -280,10 +263,6 @@ impl AgentBuilder {
         self.custom_agent_role = Some(prompt);
         self
     }
-    pub fn with_compaction_policy(mut self, policy: CompactionPolicy) -> Self {
-        self.compaction_policy = policy;
-        self
-    }
     pub fn with_memory_enabled(mut self, enabled: bool) -> Self {
         self.memory_enabled = enabled;
         self
@@ -298,10 +277,6 @@ impl AgentBuilder {
     }
     pub fn with_system_prompt_label(mut self, label: impl Into<String>) -> Self {
         self.system_prompt_label = label.into();
-        self
-    }
-    pub fn with_reminder_policy(mut self, policy: ReminderPolicy) -> Self {
-        self.reminder_policy = policy;
         self
     }
     pub fn with_session_env(mut self, env: Arc<HashMap<String, String>>) -> Self {
@@ -602,9 +577,6 @@ impl AgentBuilder {
             tool_config.tools.retain(|tc| tc.id != ask_user_id);
         }
         apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
-        if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
-            ensure_subagent_capability_tool(&mut tool_config);
-        }
         let task_tool_id = format!("{}:{}", tools::types::tool::ToolNamespace::Grow, "task");
         let mut task_stripped = false;
         if !self.subagents_enabled {
@@ -721,12 +693,7 @@ impl AgentBuilder {
             }
             tool_config.tools.retain(|tc| {
                 tool_config_matches(&definition.tools, tc)
-                    || matches!(
-                        tc.kind,
-                        Some(
-                            ToolKind::SearchTool | ToolKind::UseTool | ToolKind::CapabilityRequest
-                        )
-                    )
+                    || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
             });
             tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
             if !unresolved.is_empty() {
@@ -891,8 +858,6 @@ impl AgentBuilder {
             system_prompt,
             role_prompt,
             tool_bridge,
-            self.reminder_policy,
-            self.compaction_policy,
         ))
     }
 }

@@ -19,7 +19,6 @@ pub mod lsp;
 pub mod monitor;
 pub mod plan_control;
 pub mod read_file;
-pub mod request_tool_access;
 pub mod scheduler;
 pub mod search_replace;
 pub(crate) mod storage;
@@ -40,7 +39,6 @@ pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
 pub use plan_control::PlanControlTool;
 pub use read_file::ReadFileTool;
-pub use request_tool_access::RequestToolAccessTool;
 pub use scheduler::create::{
     SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
 };

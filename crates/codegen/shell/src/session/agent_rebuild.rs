@@ -42,7 +42,7 @@ use agent::config::AgentDefinition;
 use agent::error::AgentBuildError;
 use agent::prompt::context::PromptAudience;
 use agent::prompt::skills::SkillsConfig;
-use agent::{Agent, AgentBuilder, CompactionPolicy, ReminderPolicy};
+use agent::{Agent, AgentBuilder};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,7 +50,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use tools::computer::types::{AsyncFileSystem, TerminalBackend};
 use tools::implementations::grow_build::ask_user_question::types::UserQuestionRequest;
 use tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig;
-use tools::implementations::grow_build::monitor::types::MonitorEventBuffer;
 use tools::implementations::grow_build::task::types::{SubagentEvent, TaskModelValidator};
 use tools::implementations::grow_build::web_fetch::WebFetchConfig;
 use tools::implementations::lsp::LspBackend;
@@ -80,8 +79,6 @@ pub(crate) struct AgentRebuildSpec {
     pub resources_persistence: Arc<tools::persistence::ResourcesPersistence>,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
-    pub compaction_policy: CompactionPolicy,
-    pub reminder_policy: ReminderPolicy,
     pub memory_enabled: bool,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
     pub context_recall_backend:
@@ -101,7 +98,6 @@ pub(crate) struct AgentRebuildSpec {
     pub plugin_registry: Option<Arc<agent::plugins::PluginRegistry>>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
-    pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
     pub subagents_max_depth: u32,
@@ -164,8 +160,6 @@ impl AgentRebuildSpec {
             resources_persistence,
             session_env,
             models_manager,
-            compaction_policy,
-            reminder_policy,
             memory_enabled,
             memory_backend,
             context_recall_backend,
@@ -184,7 +178,6 @@ impl AgentRebuildSpec {
             plugin_registry,
             tool_params_json,
             subagent_event_tx,
-            monitor_event_buffer,
             user_question_tx,
             subagent_depth,
             subagents_max_depth,
@@ -203,8 +196,6 @@ impl AgentRebuildSpec {
             tools_notification_handle.clone(),
         )
         .from_definition(definition)
-        .with_compaction_policy(compaction_policy.clone())
-        .with_reminder_policy(reminder_policy.clone())
         .with_memory_enabled(*memory_enabled)
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
@@ -307,9 +298,6 @@ impl AgentRebuildSpec {
                     Arc::clone(blocking_wait_depth),
                 ))
                 .await;
-            if let Some(buffer) = monitor_event_buffer.clone() {
-                agent.tool_bridge().update_resource(buffer).await;
-            }
         }
         agent
             .tool_bridge()
@@ -350,8 +338,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
-        compaction_policy: CompactionPolicy::default(),
-        reminder_policy: ReminderPolicy::default(),
         memory_enabled: false,
         memory_backend: None,
         context_recall_backend: crate::session::context_recall::context_recall_channel().0,
@@ -370,7 +356,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         plugin_registry: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
-        monitor_event_buffer: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,
         subagents_max_depth: tools::implementations::grow_build::task::MAX_SUBAGENT_DEPTH,

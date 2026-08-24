@@ -302,58 +302,6 @@ fn no_parent_lsp_means_child_gets_none() {
     let ctx = ctx_with_toggle(HashMap::new());
     assert!(ctx.lsp.is_none());
 }
-#[test]
-fn should_auto_wake_subagent_requires_background_and_enabled() {
-    assert!(!should_auto_wake_subagent(
-            false, false, true, false, false, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, false, false, false, false, true
-        ));
-    assert!(should_auto_wake_subagent(
-            true, false, true, false, false, false, true
-        ));
-}
-/// A cancelled child never wakes the parent — most acutely the Ctrl+C
-/// race where `ParentGone` backgrounds a foreground child moments before
-/// the teardown cancel lands its token.
-#[test]
-fn should_auto_wake_subagent_refuses_cancelled_results() {
-    assert!(!should_auto_wake_subagent(
-            true, true, true, false, false, false, true
-        ));
-}
-#[test]
-fn should_auto_wake_subagent_suppressed_by_block_waited_or_killed() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, true, false, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, true, false, true
-        ));
-    assert!(!should_auto_wake_subagent(
-            true, false, true, true, true, false, true
-        ));
-}
-/// A goal loop active in the parent suppresses the subagent
-/// auto-wake synthetic prompt — the structural sibling of the bash gate.
-/// Skipping the inject here also skips its completion reservation, so the
-/// per-tool-call / between-turn surfaces stay free to drain the completion.
-#[test]
-fn should_auto_wake_subagent_suppressed_by_goal_loop() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, false, true, true
-        ));
-    assert!(should_auto_wake_subagent(
-            true, false, true, false, false, false, true
-        ));
-}
-#[test]
-fn should_auto_wake_subagent_requires_open_parent_channel() {
-    assert!(!should_auto_wake_subagent(
-            true, false, true, false, false, false, false
-        ));
-}
 fn auto_wake_test_request(id: &str) -> SubagentRequest {
     SubagentRequest {
         id: id.into(),
@@ -374,17 +322,11 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         cancel_token: CancellationToken::new(),
     }
 }
-/// Behavior-level: the action half of the subagent auto-wake.
-/// When the gate lets it run, `inject_subagent_completed_prompt` sends the
-/// synthetic `Prompt` to the parent and reserves its completion ID.
-/// Paired with `should_auto_wake_subagent_suppressed_by_goal_loop`, this
-/// proves the full Gap-1 contract on the subagent surface: goal active →
-/// gate false → this never runs (no prompt, not marked, so surfaces 2/3
-/// drain it); goal inactive → gate true → it runs (today's behavior).
 #[test]
-fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
+fn background_subagent_completion_emits_one_durable_receipt() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-    let reservations = tools::reminders::task_completion::TaskCompletionReservations::default();
+    ctx.parent_cmd_tx = Some(cmd_tx);
     let request = auto_wake_test_request("sa-1");
     let result = SubagentResult {
         success: true,
@@ -392,48 +334,135 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         child_session_id: "sa-1".into(),
         ..Default::default()
     };
-    inject_subagent_completed_prompt(
-        "sa-1",
-        &result,
-        &request,
-        &Some(reservations.clone()),
-        Some(&cmd_tx),
-        "get_command_or_subagent_output",
-    );
-    match cmd_rx.try_recv().expect("expected synthetic Prompt") {
-        SessionCommand::QueuePrompt { prompt_id, verbatim, .. } => {
-            assert!(prompt_id.starts_with("subagent-completed-"));
-            assert!(verbatim);
-        }
-        _ => panic!("expected SessionCommand::QueuePrompt"),
-    }
-    assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
-}
-#[test]
-fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-    drop(cmd_rx);
-    let reservations = tools::reminders::task_completion::TaskCompletionReservations::default();
-    reservations.reserve("sa-closed".into());
-    inject_subagent_completed_prompt(
-        "sa-closed",
-        &SubagentResult {
-            success: true,
-            subagent_id: "sa-closed".into(),
-            child_session_id: "sa-closed".into(),
-            ..Default::default()
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.mark_terminal_committed();
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    present_child_completion(
+        ChildCompletion {
+            request,
+            result,
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: false,
+                backgrounded: true,
+                waiter_delivered: false,
+                explicitly_killed: false,
+                should_surface: true,
+            },
         },
-        &auto_wake_test_request("sa-closed"),
-        &Some(reservations.clone()),
-        Some(&cmd_tx),
-        "get_command_or_subagent_output",
+        &gateway,
     );
-    assert!(
-            reservations.contains("sa-closed"),
-            "send failure must release only the reservation acquired by this attempt"
-        );
-    reservations.release("sa-closed");
-    assert!(!reservations.contains("sa-closed"));
+    match cmd_rx.try_recv().expect("expected durable receipt") {
+        SessionCommand::ReceiveNotification { source, body, .. } => {
+            assert!(matches!(
+                source,
+                chat_state::NotificationSource::SubagentCompleted { subagent_id }
+                    if subagent_id == "sa-1"
+            ));
+            assert!(body.contains("sa-1"));
+        }
+        _ => panic!("expected SessionCommand::ReceiveNotification"),
+    }
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(SessionCommand::GrowSessionNotification { .. })
+    ));
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[test]
+fn loop_completion_uses_the_same_single_durable_receipt() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    ctx.parent_cmd_tx = Some(cmd_tx);
+    let mut request = auto_wake_test_request("loop-child");
+    request.description = "loop: check deploy (every 5 minutes)".into();
+    request.runtime_overrides.loop_task_id = Some("loop-1".into());
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.mark_terminal_committed();
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    present_child_completion(
+        ChildCompletion {
+            request,
+            result: SubagentResult {
+                success: true,
+                output: Arc::from("deploy is healthy"),
+                subagent_id: "loop-child".into(),
+                child_session_id: "loop-child".into(),
+                ..Default::default()
+            },
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: false,
+                backgrounded: true,
+                waiter_delivered: false,
+                explicitly_killed: false,
+                should_surface: true,
+            },
+        },
+        &gateway,
+    );
+    match cmd_rx.try_recv().expect("expected loop completion receipt") {
+        SessionCommand::ReceiveNotification { source, body, .. } => {
+            assert!(matches!(
+                source,
+                chat_state::NotificationSource::SubagentCompleted { subagent_id }
+                    if subagent_id == "loop-child"
+            ));
+            assert!(body.contains("loop: check deploy"));
+            assert!(body.contains("loop-child"));
+        }
+        _ => panic!("expected SessionCommand::ReceiveNotification"),
+    }
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(SessionCommand::GrowSessionNotification { .. })
+    ));
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[test]
+fn goal_steering_race_still_emits_the_single_receipt() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    ctx.parent_cmd_tx = Some(cmd_tx);
+    ctx.goal_loop_active
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.mark_terminal_committed();
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    present_child_completion(
+        ChildCompletion {
+            request: auto_wake_test_request("sa-race"),
+            result: SubagentResult {
+            success: true,
+                subagent_id: "sa-race".into(),
+                child_session_id: "sa-race".into(),
+                ..Default::default()
+            },
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: false,
+                backgrounded: true,
+                waiter_delivered: true,
+                explicitly_killed: false,
+                should_surface: false,
+            },
+        },
+        &gateway,
+    );
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(SessionCommand::ReceiveNotification {
+            source: chat_state::NotificationSource::SubagentCompleted { subagent_id },
+            ..
+        }) if subagent_id == "sa-race"
+    ));
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(SessionCommand::GrowSessionNotification { .. })
+    ));
+    assert!(cmd_rx.try_recv().is_err());
 }
 #[test]
 fn initializing_snapshot_is_running() {

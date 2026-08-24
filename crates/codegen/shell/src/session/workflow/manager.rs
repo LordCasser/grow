@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use fs2::FileExt as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
-use fs2::FileExt as _;
 
 use super::host_service::{
     DiagnosticHook, HostDrainOutcome, WorkflowHostParams, spawn_workflow_host_service,
@@ -586,8 +586,10 @@ impl WorkflowManager {
                         state.definition_id.as_ref(),
                         state.definition_hash.as_deref(),
                     )
-                    && let Ok(mut workspace) =
-                        super::workspace::WorkflowWorkspace::open_in_session(session, &completion_cwd)
+                    && let Ok(mut workspace) = super::workspace::WorkflowWorkspace::open_in_session(
+                        session,
+                        &completion_cwd,
+                    )
                     && workspace
                         .take_save_prompt(definition_id, definition_hash)
                         .unwrap_or(false)
@@ -625,9 +627,8 @@ impl WorkflowManager {
                 notify.broadcast(&state, elapsed, 0, true);
                 if state.status.is_completion_reportable() {
                     let _ = session_cmd_tx.send(
-                        crate::session::commands::SessionCommand::WorkflowCompletionTurn {
-                            run_id: watcher_run_id.clone(),
-                            revision: state.revision,
+                        crate::session::commands::SessionCommand::WorkflowCompleted {
+                            state,
                             outcome: outcome.clone(),
                         },
                     );
@@ -1182,7 +1183,10 @@ mod tests {
             WorkflowOutcome::Paused { .. }
         ));
         std::fs::write(
-            dir.path().join("workflows").join(&run_id).join("script.rhai"),
+            dir.path()
+                .join("workflows")
+                .join(&run_id)
+                .join("script.rhai"),
             "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"edited\");",
         )
         .unwrap();
