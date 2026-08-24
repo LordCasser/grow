@@ -555,6 +555,10 @@ pub(crate) struct SessionActor {
     /// path). Uses `OnceLock` for lock-free reads, set-once semantics, and
     /// `&self` mutability (SessionActor is behind `Arc`).
     pub(crate) display_cwd: std::sync::OnceLock<String>,
+    /// Actor-owned stable catalog selection. Provider wire routing lives in
+    /// ChatState's SamplingConfig; keeping the catalog axis here prevents UI
+    /// mirrors from inventing the `from` side of durable model transitions.
+    pub(crate) selected_model_id: std::cell::RefCell<acp::ModelId>,
     /// The active agent type for this session. Initialized from the
     /// `AgentDefinition` at spawn, updated when the session mode changes
     /// via `request_behavior_change()`. Used by the model-switch guard to

@@ -244,6 +244,7 @@ pub enum SessionCommand {
         inference_idle_timeout: std::time::Duration,
         max_retries: u32,
         auto_compact_threshold_percent: u8,
+        responds_to: oneshot::Sender<Result<(), acp::Error>>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,

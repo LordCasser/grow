@@ -116,6 +116,8 @@ Rewind 不读取 compaction checkpoint。Timeline fold 直接展开被压缩的�
 - 覆盖前缀指纹只哈希实际发送给 provider 的 wire 字段；
 - cache warm/cold/unknown 只用于观测，不能触发历史改写。
 
+模型选择是独立控制轴。SessionActor 持有稳定 catalog model id，ChatState 的 SamplingConfig 持有 provider wire model 与 reasoning effort；外部 SessionHandle 只是 UI 镜像，不能提供持久事件的 `from` 值。用户切换与 catalog 热加载造成的 fallback、wire route 或 effort 变化都必须先 durable append `observation(model.changed)`，完整记录 catalog/provider/effort 的 from/to 与 `reason=user_selection|catalog_reload`，之后才能修改运行配置。热加载调用必须等待每个 actor 的 acknowledgement，只有成功后才更新 handle 镜像。`summary.current_model_id/reasoning_effort` 是该事件链的可修复投影：加载时严格校验所有匹配事件及其连续性，落后时从最新 `to` 自动修复，畸形或断链时 fail closed。
+
 ## 标题与 Sideband
 
 标题不是 `summary.json` 自己拥有的字符串。自动标题先创建 `purpose=session-title` 的 Sideband，Sideband 的 request、attempt、result、end 使用独立 seq 空间写入 `sidebands/<id>/timeline.jsonl`；主 Timeline 只记录 `sideband/spawn`。通过结构化校验的 result 或失败 fallback 随后追加 `session/title`，并引用精确的 Sideband result/end seq。`/rename` 也只能追加 source=user 的同一种事件。SessionActor 串行化在线 rename，并在用户标题提交时消耗一次性自动标题 capability；已经运行的自动 Sideband 会在提交阶段 fail closed。
@@ -160,6 +162,7 @@ Grow 不为旧的可变 Chat 快照格式或 Timeline schema v1 保留执行兼�
 - 服务从 `workflow/spawn` 加载 `workflows/<run-id>/journal.jsonl`，journal 行使用独立身份 `t:<run-id>/<seq>` 并挂在 exact spawn 下；同一 spawn 下以固定 path namespace 区分 journal 与尚未链接的父 Timeline lifecycle，并强制所有合并行的 `nesting_path` 唯一。Workflow 发起的 subagent 先挂在 run spawn，journal 已记录且能反向验证对应 owned `spawn_agent.result.agent_id` 后再精确挂到该 host-call 行，child Timeline 继续递归嵌套；
 - current / shadowed / log-only 由统一 Surface fold 计算；
 - request 展示 TTFT、总耗时、token/cache usage，tool/turn/compaction 展示真实终态耗时；
+- `model.changed` 作为独立 lifecycle 行显示模型、effort 或 provider route 的 from/to 与 reload 原因；`control` 行按前后原子快照归纳 Behavior/Plan phase 与 Goal create/edit/status/budget/checkpoint 变化，不再只显示无语义的 revision 编号；
 - 每次查询只构造一个 relocation-aware session storage view，主实体和全部递归 child 都从这一个权威目录快照解析；服务再按字节 offset 增量 fold 各 Session / Sideband Timeline 与 Workflow journal，完整批次中任一坏行会让整批拒绝且不推进对应 cache，未换行尾片等待下一次刷新；所有 cache 在复用增量 fold 前重新计算完整已消费前缀的 BLAKE3，任何 truncate、前部同长度替换或 replacement+append 都会丢弃旧投影并从 seq 0 重建，不使用只能证明末尾 4 KiB 的采样探针；
 - 每次刷新对整棵递归树共享一个预算，同时限制 nesting depth、Session/Sideband/Workflow 实体数、被打开的源文件数、源字节总量和物化事件总数；API 的 root-row `limit` 只负责分页，不能被误当成读取阶段的资源边界；
 - 进行中的事件不伪造 duration；页面以 Input / Model / Tools 三条时间泳道总览同一批事件，支持向前分页、每秒刷新、tail-follow、稳定 ID 深链与 canonical JSON 检查；账本表格只挂载 viewport + overscan 行，长会话刷新不再反复创建数千个 DOM 行。

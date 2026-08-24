@@ -98,6 +98,7 @@ pub struct TrajectoryProjector {
     tool_scopes: BTreeMap<String, (String, u32)>,
     surface_rows: BTreeMap<SurfaceId, usize>,
     current_items_per_row: Vec<usize>,
+    control_snapshot: Option<serde_json::Value>,
 }
 
 impl TrajectoryProjector {
@@ -154,7 +155,7 @@ impl TrajectoryProjector {
             _ => 0,
         };
         self.current_items_per_row.push(current_items);
-        self.rows.push(row(
+        let mut projected = row(
             event,
             if current_items == 0 {
                 SurfaceVisibility::LogOnly
@@ -163,7 +164,13 @@ impl TrajectoryProjector {
             },
             &self.request_scopes,
             &self.tool_scopes,
-        ));
+        );
+        if let TimelineEventKind::Control(control) = &event.kind {
+            projected.summary =
+                describe_control_transition(self.control_snapshot.as_ref(), &control.snapshot);
+            self.control_snapshot = Some(control.snapshot.clone());
+        }
+        self.rows.push(projected);
     }
 
     pub fn rows(&self) -> &[TrajectoryRow] {
@@ -247,6 +254,11 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
         }
         TimelineEventKind::Recovery(_) => {
             coordinates("meta", "governance", "core", "context.recovery", state)
+        }
+        TimelineEventKind::Observation(observation)
+            if observation.scope == "model" && observation.name == "changed" =>
+        {
+            coordinates("meta", "lifecycle", "core", "model", "changed")
         }
         TimelineEventKind::Observation(observation) => {
             let producer = producer_from_scope(&observation.scope);
@@ -546,6 +558,25 @@ fn describe(
             name,
             turn,
             step,
+            data,
+        }) if scope == "model" && name == "changed" => tuple(
+            "model",
+            "change",
+            "changed",
+            turn.map(|id| id.0.to_string()),
+            step.map(|id| id.index),
+            data.as_ref()
+                .and_then(|value| value.get("to_model_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            None,
+            describe_model_change(data.as_ref()),
+        ),
+        TimelineEventKind::Observation(ObservationEvent {
+            scope,
+            name,
+            turn,
+            step,
             ..
         }) => tuple(
             "observation",
@@ -661,6 +692,174 @@ fn describe(
             error.clone().unwrap_or_else(|| "subagent completed".into()),
         ),
     }
+}
+
+fn describe_model_change(data: Option<&serde_json::Value>) -> String {
+    let summary = describe_model_transition(data);
+    match data
+        .and_then(|value| value.get("reason"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("catalog_reload") => format!("{summary} · catalog reload"),
+        _ => summary,
+    }
+}
+
+fn describe_model_transition(data: Option<&serde_json::Value>) -> String {
+    let string = |field: &str| {
+        data.and_then(|value| value.get(field))
+            .and_then(serde_json::Value::as_str)
+    };
+    let (Some(from_model), Some(to_model)) = (string("from_model_id"), string("to_model_id"))
+    else {
+        return "model changed".into();
+    };
+    if from_model != to_model {
+        return format!("{from_model} → {to_model}");
+    }
+    let effort = |field: &str| {
+        data.and_then(|value| value.get(field)).and_then(|value| {
+            if value.is_null() {
+                Some("default")
+            } else {
+                value.as_str()
+            }
+        })
+    };
+    let from_effort = effort("from_reasoning_effort");
+    let to_effort = effort("to_reasoning_effort");
+    if from_effort != to_effort {
+        return format!(
+            "{from_model}: {} → {}",
+            from_effort.unwrap_or("?"),
+            to_effort.unwrap_or("?")
+        );
+    }
+    let from_provider = string("from_provider_model");
+    let to_provider = string("to_provider_model");
+    if from_provider != to_provider {
+        return format!(
+            "{from_model} route: {} → {}",
+            from_provider.unwrap_or("?"),
+            to_provider.unwrap_or("?")
+        );
+    }
+    format!("model {to_model} selected")
+}
+
+fn describe_control_transition(
+    previous: Option<&serde_json::Value>,
+    current: &serde_json::Value,
+) -> String {
+    let mut changes = Vec::new();
+    let previous_behavior = previous.and_then(control_behavior);
+    let current_behavior = control_behavior(current);
+    if previous_behavior != current_behavior {
+        changes.push(match (previous_behavior, current_behavior.as_deref()) {
+            (None, Some(current)) => format!("behavior {current} selected"),
+            (Some(previous), Some(current)) => format!("behavior {previous} → {current}"),
+            (Some(previous), None) => format!("behavior {previous} cleared"),
+            (None, None) => "behavior changed".into(),
+        });
+    }
+
+    let previous_goal = previous.and_then(|snapshot| snapshot.get("goal"));
+    let current_goal = current.get("goal");
+    match (
+        previous_goal.filter(|goal| !goal.is_null()),
+        current_goal.filter(|goal| !goal.is_null()),
+    ) {
+        (None, Some(goal)) => {
+            let id = json_string(goal, "goal_id").unwrap_or("?");
+            let status = json_string(goal, "status").unwrap_or("unknown");
+            changes.push(format!("goal {id} created · {status}"));
+        }
+        (Some(goal), None) => {
+            changes.push(format!(
+                "goal {} cleared",
+                json_string(goal, "goal_id").unwrap_or("?")
+            ));
+        }
+        (Some(previous_goal), Some(current_goal)) => {
+            let previous_id = json_string(previous_goal, "goal_id").unwrap_or("?");
+            let current_id = json_string(current_goal, "goal_id").unwrap_or("?");
+            if previous_id != current_id {
+                changes.push(format!("goal {previous_id} → {current_id}"));
+            } else {
+                let previous_status = json_string(previous_goal, "status");
+                let current_status = json_string(current_goal, "status");
+                if previous_status != current_status {
+                    changes.push(format!(
+                        "goal {current_id}: {} → {}",
+                        previous_status.unwrap_or("unknown"),
+                        current_status.unwrap_or("unknown")
+                    ));
+                }
+                if previous_goal.get("objective") != current_goal.get("objective") {
+                    changes.push(format!("goal {current_id} objective revised"));
+                }
+                if previous_goal.get("token_budget") != current_goal.get("token_budget") {
+                    changes.push(format!("goal {current_id} budget updated"));
+                }
+                if changes.is_empty() && goal_tokens(previous_goal) != goal_tokens(current_goal) {
+                    changes.push(format!(
+                        "goal {current_id} checkpoint · {} tokens",
+                        goal_tokens(current_goal)
+                    ));
+                }
+            }
+        }
+        (None, None) => {}
+    }
+
+    if changes.is_empty() {
+        match current_behavior {
+            Some(behavior) => format!("{behavior} control checkpoint"),
+            None => "control checkpoint".into(),
+        }
+    } else {
+        changes.join("; ")
+    }
+}
+
+fn control_behavior(snapshot: &serde_json::Value) -> Option<String> {
+    let state = snapshot.get("behavior")?.get("state")?;
+    match state {
+        serde_json::Value::String(state) => Some(match state.as_str() {
+            "Normal" => "normal".into(),
+            "Clarify" => "clarify".into(),
+            "Workflow" => "workflow".into(),
+            "Goal" => "goal".into(),
+            other => other.to_lowercase(),
+        }),
+        serde_json::Value::Object(state) if state.len() == 1 => {
+            let (kind, value) = state.iter().next()?;
+            match kind.as_str() {
+                "Plan" => Some(format!(
+                    "plan/{}",
+                    value.as_str().unwrap_or("unknown").to_lowercase()
+                )),
+                "DeepResearch" => Some("deep_research".into()),
+                other => Some(other.to_lowercase()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    value.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn goal_tokens(goal: &serde_json::Value) -> i64 {
+    goal.get("parent_tokens_spent")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .saturating_add(
+            goal.get("subagent_tokens_spent")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        )
 }
 
 fn describe_message(event: &MessageEvent) -> ReturnTuple {
@@ -996,6 +1195,74 @@ mod tests {
         assert_eq!(row.kind, "control.committed");
         assert_eq!(row.state, "committed");
         assert_eq!(row.correlation_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn projection_exposes_model_changes_as_lifecycle_rows() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "model".into(),
+                name: "changed".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!({
+                    "from_model_id": "provider/old",
+                    "to_model_id": "provider/new",
+                    "from_reasoning_effort": "medium",
+                    "to_reasoning_effort": "high",
+                    "from_provider_model": "old-wire",
+                    "to_provider_model": "new-wire",
+                    "reason": "user_selection",
+                })),
+            }))
+            .unwrap();
+
+        let row = timeline.trajectory().rows.pop().unwrap();
+        assert_eq!(row.layer, "meta");
+        assert_eq!(row.class, "lifecycle");
+        assert_eq!(row.producer, "core");
+        assert_eq!(row.kind, "model.changed");
+        assert_eq!(row.state, "changed");
+        assert_eq!(row.correlation_id.as_deref(), Some("provider/new"));
+        assert_eq!(row.summary, "provider/old → provider/new");
+    }
+
+    #[test]
+    fn projection_summarizes_behavior_and_goal_transitions() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({
+                    "behavior": { "state": "Normal" },
+                    "goal": null,
+                }),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({
+                    "behavior": { "state": "Goal" },
+                    "goal": {
+                        "goal_id": "goal-1",
+                        "status": "active",
+                        "objective": "rebuild",
+                        "token_budget": null,
+                        "parent_tokens_spent": 0,
+                        "subagent_tokens_spent": 0,
+                    },
+                }),
+            }))
+            .unwrap();
+
+        let rows = timeline.trajectory().rows;
+        assert_eq!(rows[0].summary, "behavior normal selected");
+        assert_eq!(
+            rows[1].summary,
+            "behavior normal → goal; goal goal-1 created · active"
+        );
     }
 
     #[test]

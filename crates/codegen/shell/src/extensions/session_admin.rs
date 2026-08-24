@@ -39,7 +39,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_mcp_catalog" => handle_reload_mcp_catalog(agent, args).await,
         "grow/internal/reload_skills" => handle_reload_skills(agent),
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
-        "grow/internal/reload_models" => handle_reload_models(agent),
+        "grow/internal/reload_models" => handle_reload_models(agent).await,
         "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
         "grow/commands/list" => handle_commands_list(agent, args).await,
@@ -373,7 +373,7 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// `new_with_models()` for user TOML config entries, and swaps the model list
 /// in-place. Prefetched (API) and default models are NOT re-fetched -- only
 /// BYOK entries from config are updated.
-fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
+async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let disk_config = crate::config::load_effective_config()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
@@ -409,53 +409,94 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // resolved default; explicit per-session reasoning effort remains intact.
     let fallback_model = agent.models_manager.current_model_id();
     let live_catalog = agent.models_manager.models();
-    for handle in agent.sessions.borrow_mut().values_mut() {
-        let selected = if agent
-            .models_manager
-            .model_in_catalog(handle.model_id.0.as_ref())
-        {
-            handle.model_id.clone()
-        } else {
-            fallback_model.clone()
-        };
-        let Some(mut sampling_config) = agent
-            .models_manager
-            .sampling_config_for_model(selected.0.as_ref())
-        else {
-            continue;
-        };
-        let inference_idle_timeout = {
-            let per_model =
-                crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref())
-                    .and_then(|entry| entry.info.inference_idle_timeout_secs);
-            let remote = merged_config
-                .remote_settings
-                .as_ref()
-                .and_then(|settings| settings.inference_idle_timeout_secs);
-            std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
-        };
-        let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
-        let auto_compact_threshold_percent =
-            crate::util::config::resolve_auto_compact_threshold_percent(
-                &merged_config,
-                selected.0.as_ref(),
-                crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref())
+    let (reloads, mut reload_error) = {
+        let mut sessions = agent.sessions.borrow_mut();
+        let mut reloads = Vec::with_capacity(sessions.len());
+        let mut reload_error = None;
+        for (session_id, handle) in sessions.iter_mut() {
+            let selected = if agent
+                .models_manager
+                .model_in_catalog(handle.model_id.0.as_ref())
+            {
+                handle.model_id.clone()
+            } else {
+                fallback_model.clone()
+            };
+            let Some(mut sampling_config) = agent
+                .models_manager
+                .sampling_config_for_model(selected.0.as_ref())
+            else {
+                continue;
+            };
+            let inference_idle_timeout = {
+                let per_model = crate::agent::config::find_model_by_catalog_id(
+                    &live_catalog,
+                    selected.0.as_ref(),
+                )
+                .and_then(|entry| entry.info.inference_idle_timeout_secs);
+                let remote = merged_config
+                    .remote_settings
+                    .as_ref()
+                    .and_then(|settings| settings.inference_idle_timeout_secs);
+                std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
+            };
+            let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
+            let auto_compact_threshold_percent =
+                crate::util::config::resolve_auto_compact_threshold_percent(
+                    &merged_config,
+                    selected.0.as_ref(),
+                    crate::agent::config::find_model_by_catalog_id(
+                        &live_catalog,
+                        selected.0.as_ref(),
+                    )
                     .map(|entry| &entry.info),
-            );
-        if handle.reasoning_effort.is_some() {
-            sampling_config.reasoning_effort = handle.reasoning_effort;
-        }
-        let _ = handle.cmd_tx.send(
-            crate::session::commands::SessionCommand::ReloadModelConfig {
+                );
+            if handle.reasoning_effort.is_some() {
+                sampling_config.reasoning_effort = handle.reasoning_effort;
+            }
+            let (responds_to, response) = tokio::sync::oneshot::channel();
+            let command = crate::session::commands::SessionCommand::ReloadModelConfig {
                 model_id: selected.clone(),
                 sampling_config,
                 image_description_model: merged_config.image_description_model.clone(),
                 inference_idle_timeout,
                 max_retries,
                 auto_compact_threshold_percent,
-            },
-        );
-        handle.model_id = selected;
+                responds_to,
+            };
+            if handle.cmd_tx.send(command).is_err() {
+                reload_error.get_or_insert_with(|| {
+                    acp::Error::internal_error().data(format!(
+                        "session {} rejected the catalog reload command",
+                        session_id.0
+                    ))
+                });
+            } else {
+                reloads.push((session_id.clone(), selected, response));
+            }
+        }
+        (reloads, reload_error)
+    };
+    for (session_id, selected, response) in reloads {
+        let result = response.await.unwrap_or_else(|_| {
+            Err(acp::Error::internal_error().data(format!(
+                "session {} dropped the catalog reload acknowledgement",
+                session_id.0
+            )))
+        });
+        match result {
+            Ok(()) => {
+                if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
+                    handle.model_id = selected;
+                }
+            }
+            Err(error) => {
+                reload_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = reload_error {
+        return Err(error);
     }
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");

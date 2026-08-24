@@ -31,7 +31,7 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = false;
-    let previous_model_id = handle.model_id.0.clone();
+    let previous_model_id = handle.model_id.clone();
     let mut model_sampling =
         agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
     if let Some(eff) = effort_override {
@@ -55,7 +55,7 @@ pub(crate) async fn apply(
         }
     }
     let applied_effort = model_sampling.reasoning_effort;
-    let model_unchanged = previous_model_id == model_id.0;
+    let model_unchanged = previous_model_id == model_id;
     let new_threshold = {
         let cfg = agent.cfg.borrow();
         let models = agent.models_manager.models();
@@ -91,7 +91,7 @@ pub(crate) async fn apply(
     );
     ::diagnostics::session_ctx::log_event(::diagnostics::events::ModelSwitched {
         session_id: session_id.0.to_string(),
-        previous_model_id: previous_model_id.to_string(),
+        previous_model_id: previous_model_id.0.to_string(),
         new_model_id: model_id.0.to_string(),
         success: true,
         error_code: None,

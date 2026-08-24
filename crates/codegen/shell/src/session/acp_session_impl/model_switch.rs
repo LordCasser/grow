@@ -2,6 +2,43 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    async fn commit_model_change(
+        &self,
+        model_id: &acp::ModelId,
+        sampling_config: &sampler::SamplerConfig,
+        reason: &str,
+    ) -> std::io::Result<()> {
+        let previous_model_id = self.selected_model_id.borrow().clone();
+        let previous_sampling = self.chat_state_handle.get_sampling_config().await;
+        let previous_provider_model = previous_sampling
+            .as_ref()
+            .map(|config| config.model.as_str())
+            .filter(|model| !model.is_empty())
+            .unwrap_or("unknown");
+        let previous_reasoning_effort = previous_sampling
+            .as_ref()
+            .and_then(|config| config.reasoning_effort);
+        if previous_model_id != *model_id
+            || previous_reasoning_effort != sampling_config.reasoning_effort
+            || previous_provider_model != sampling_config.model
+        {
+            self.chat_state_handle
+                .record_timeline_event_durably(crate::session::persistence::model_change_event(
+                    &previous_model_id,
+                    model_id,
+                    previous_reasoning_effort,
+                    sampling_config.reasoning_effort,
+                    previous_provider_model,
+                    &sampling_config.model,
+                    reason,
+                ))
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        *self.selected_model_id.borrow_mut() = model_id.clone();
+        Ok(())
+    }
+
     /// Adopt a validated live catalog/provider snapshot at a mailbox safe
     /// point. This updates routing, limits, credentials and the auxiliary
     /// image model without rebuilding the agent harness.
@@ -13,7 +50,14 @@ impl SessionActor {
         inference_idle_timeout: std::time::Duration,
         max_retries: u32,
         auto_compact_threshold_percent: u8,
-    ) {
+    ) -> Result<(), acp::Error> {
+        self.commit_model_change(&model_id, &sampling_config, "catalog_reload")
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "catalog reload model transition was not durable: {error}"
+                ))
+            })?;
         // These actor-local knobs participate in the same mailbox snapshot as
         // the provider route. Setting them before the first await prevents a
         // turn spawned after this command from rebuilding a hybrid old/new
@@ -65,6 +109,7 @@ impl SessionActor {
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(sampling_config.reasoning_effort),
             });
+        Ok(())
     }
 
     pub(super) async fn handle_set_session_model(
@@ -76,6 +121,12 @@ impl SessionActor {
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
+        self.commit_model_change(&model_id, &sampling_config, "user_selection")
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("model change was not durably recorded: {error}"))
+            })?;
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)

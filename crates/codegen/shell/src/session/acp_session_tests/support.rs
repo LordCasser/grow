@@ -428,6 +428,7 @@ pub(crate) async fn create_test_actor_ex(
         owns_permission_manager: false,
         permission_audit_bridge: parking_lot::Mutex::new(None),
         display_cwd: std::sync::OnceLock::new(),
+        selected_model_id: std::cell::RefCell::new(acp::ModelId::new("test")),
         active_agent_type: parking_lot::Mutex::new(None),
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(tool_types::BehaviorId::Normal)),

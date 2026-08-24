@@ -3057,6 +3057,70 @@ async fn malformed_timeline_control_bricks_session_load() {
 }
 
 #[tokio::test]
+async fn model_change_repairs_selection_summary_from_timeline() {
+    use sampling_types::ReasoningEffort;
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let old_model = acp::ModelId::new("provider/old");
+    let new_model = acp::ModelId::new("provider/new");
+    adapter.init_session(&info, old_model.clone()).await.unwrap();
+    let events = adapter.read_timeline_events_sync(&info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let event = timeline
+        .record(crate::session::persistence::model_change_event(
+            &old_model,
+            &new_model,
+            Some(ReasoningEffort::Medium),
+            Some(ReasoningEffort::High),
+            "old-wire",
+            "new-wire",
+            "user_selection",
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &event).await.unwrap();
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.summary.current_model_id, new_model);
+    assert_eq!(
+        loaded.summary.reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    let repaired = adapter.read_summary_sync(&info).unwrap();
+    assert_eq!(repaired.current_model_id, new_model);
+    assert_eq!(repaired.reasoning_effort, Some(ReasoningEffort::High));
+}
+
+#[tokio::test]
+async fn malformed_model_change_bricks_session_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let events = adapter.read_timeline_events_sync(&info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let event = timeline
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: crate::session::persistence::MODEL_CHANGE_SCOPE.into(),
+                name: crate::session::persistence::MODEL_CHANGE_NAME.into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!({ "to_model_id": "provider/new" })),
+            },
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &event).await.unwrap();
+
+    let error = adapter
+        .load_session_without_updates(&info)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
 async fn committed_timeline_is_not_rejected_when_summary_projection_fails() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();

@@ -1021,8 +1021,9 @@ pub(super) async fn run_session(
                         inference_idle_timeout,
                         max_retries,
                         auto_compact_threshold_percent,
+                        responds_to,
                     } => {
-                        session
+                        let result = session
                             .handle_reload_model_config(
                                 model_id,
                                 sampling_config,
@@ -1032,6 +1033,7 @@ pub(super) async fn run_session(
                                 auto_compact_threshold_percent,
                             )
                             .await;
+                        let _ = responds_to.send(result);
                     }
                     SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                         let outcome = session.handle_rebuild_agent_for_definition(definition).await;

@@ -28,6 +28,125 @@ pub const SESSION_FORMAT_VERSION: u8 = 6;
 pub const REWIND_TRANSACTION_VERSION: u8 = 1;
 pub const REWIND_TRANSACTION_FILE: &str = "rewind-transaction.json";
 pub const MAX_REWIND_TRANSACTION_BYTES: u64 = 16 * 1024;
+pub(crate) const MODEL_CHANGE_SCOPE: &str = "model";
+pub(crate) const MODEL_CHANGE_NAME: &str = "changed";
+
+/// Build the canonical Timeline fact for a user-visible model selection.
+///
+/// The catalog IDs are the stable session selection; provider model names are
+/// retained as diagnostics because one catalog entry can change its wire
+/// route. `summary.json` is only a projection of the `to_*` fields.
+pub(crate) fn model_change_event(
+    previous_model_id: &acp::ModelId,
+    model_id: &acp::ModelId,
+    previous_reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<ReasoningEffort>,
+    previous_provider_model: &str,
+    provider_model: &str,
+    reason: &str,
+) -> chat_state::TimelineEventKind {
+    chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+        scope: MODEL_CHANGE_SCOPE.into(),
+        name: MODEL_CHANGE_NAME.into(),
+        turn: None,
+        step: None,
+        data: Some(serde_json::json!({
+            "from_model_id": previous_model_id.0.as_ref(),
+            "to_model_id": model_id.0.as_ref(),
+            "from_reasoning_effort": previous_reasoning_effort,
+            "to_reasoning_effort": reasoning_effort,
+            "from_provider_model": previous_provider_model,
+            "to_provider_model": provider_model,
+            "reason": reason,
+        })),
+    })
+}
+
+/// Fold model selection facts into the latest durable selection.
+///
+/// Matching observations are a closed contract: malformed or discontinuous
+/// facts fail session load instead of silently trusting a stale summary.
+pub(crate) fn latest_model_selection(
+    events: &[chat_state::TimelineEvent],
+) -> io::Result<Option<(acp::ModelId, Option<ReasoningEffort>)>> {
+    let mut latest: Option<(String, Option<ReasoningEffort>, String)> = None;
+    for event in events {
+        let chat_state::TimelineEventKind::Observation(observation) = &event.kind else {
+            continue;
+        };
+        if observation.scope != MODEL_CHANGE_SCOPE || observation.name != MODEL_CHANGE_NAME {
+            continue;
+        }
+        if observation.turn.is_some() || observation.step.is_some() {
+            return Err(invalid_model_change(
+                event,
+                "model changes cannot be turn-scoped",
+            ));
+        }
+        let data = observation
+            .data
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| invalid_model_change(event, "data must be an object"))?;
+        const FIELDS: [&str; 7] = [
+            "from_model_id",
+            "to_model_id",
+            "from_reasoning_effort",
+            "to_reasoning_effort",
+            "from_provider_model",
+            "to_provider_model",
+            "reason",
+        ];
+        if data.len() != FIELDS.len() || FIELDS.iter().any(|field| !data.contains_key(*field)) {
+            return Err(invalid_model_change(
+                event,
+                "data must contain exactly the model change fields",
+            ));
+        }
+        let required_string = |field: &str| -> io::Result<String> {
+            data.get(field)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    invalid_model_change(event, &format!("{field} must be a non-empty string"))
+                })
+        };
+        let effort = |field: &str| -> io::Result<Option<ReasoningEffort>> {
+            serde_json::from_value(data[field].clone())
+                .map_err(|error| invalid_model_change(event, &format!("invalid {field}: {error}")))
+        };
+        let from_model = required_string("from_model_id")?;
+        let to_model = required_string("to_model_id")?;
+        let from_effort = effort("from_reasoning_effort")?;
+        let to_effort = effort("to_reasoning_effort")?;
+        let from_provider = required_string("from_provider_model")?;
+        let to_provider = required_string("to_provider_model")?;
+        let _reason = required_string("reason")?;
+        if let Some((previous_model, previous_effort, previous_provider)) = &latest
+            && (previous_model != &from_model
+                || previous_effort != &from_effort
+                || previous_provider != &from_provider)
+        {
+            return Err(invalid_model_change(
+                event,
+                "model change does not continue the preceding durable selection",
+            ));
+        }
+        latest = Some((to_model, to_effort, to_provider));
+    }
+    Ok(latest.map(|(model, effort, _)| (acp::ModelId::new(model), effort)))
+}
+
+fn invalid_model_change(event: &chat_state::TimelineEvent, reason: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "invalid model.changed event at seq {}: {reason}",
+            event.seq.get()
+        ),
+    )
+}
 
 use crate::session::storage::SessionUpdate;
 use serde::{Deserialize, Serialize};

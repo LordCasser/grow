@@ -2405,6 +2405,7 @@ pub(crate) async fn spawn_session_actor(
             }
             lock
         },
+        selected_model_id: std::cell::RefCell::new(session_model_id.clone()),
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(behavior.lock().behavior())),

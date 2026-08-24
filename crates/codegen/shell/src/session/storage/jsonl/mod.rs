@@ -2307,6 +2307,27 @@ impl JsonlStorageAdapter {
         summary.title_event_seq = Some(seq.get());
         Ok(summary)
     }
+
+    async fn reconcile_model_projection(
+        &self,
+        info: &Info,
+        mut summary: Summary,
+        timeline: &Timeline,
+    ) -> io::Result<Summary> {
+        let Some((model_id, reasoning_effort)) =
+            crate::session::persistence::latest_model_selection(timeline.events())?
+        else {
+            return Ok(summary);
+        };
+        if summary.current_model_id == model_id && summary.reasoning_effort == reasoning_effort {
+            return Ok(summary);
+        }
+        self.update_current_model_and_agent(info, &model_id, None, Some(reasoning_effort))
+            .await?;
+        summary.current_model_id = model_id;
+        summary.reasoning_effort = reasoning_effort;
+        Ok(summary)
+    }
 }
 /// Transform session ID in a SessionUpdate
 fn transform_session_id_in_update(
@@ -2785,6 +2806,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
             .await?;
+        let summary = self
+            .reconcile_model_projection(info, summary, &timeline)
+            .await?;
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
                 timeline.events(),
@@ -2844,6 +2868,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
+            .await?;
+        let summary = self
+            .reconcile_model_projection(info, summary, &timeline)
             .await?;
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
