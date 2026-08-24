@@ -395,9 +395,9 @@ pub struct ObservationEvent {
 /// durability and revision monotonicity. A transition may also carry its one
 /// model-visible context item. Applying both from the same event prevents a
 /// crash from committing state without its context. If a turn is active, the
-/// fold activates only the latest pending transition after that turn's durable
-/// end. A re-projection restores an already-effective item immediately after
-/// compaction shadows its former Surface anchor.
+/// fold activates the latest pending transition in each layer after that
+/// turn's durable end. A re-projection restores an already-effective item
+/// immediately after compaction shadows its former Surface anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlContextLayer {
@@ -710,7 +710,7 @@ pub struct Timeline {
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
-    pending_control_context: Option<(EventSeq, ConversationItem)>,
+    pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     lifecycle: LifecycleFold,
 }
 
@@ -921,7 +921,7 @@ impl Timeline {
     ) -> std::collections::BTreeMap<ControlContextLayer, ActiveControlContext> {
         let mut active = std::collections::BTreeMap::new();
         let mut active_turn = false;
-        let mut pending = None;
+        let mut pending = BTreeMap::new();
         for event in &self.events {
             match &event.kind {
                 TimelineEventKind::Turn(TurnEvent::Started { .. }) => active_turn = true,
@@ -939,14 +939,14 @@ impl Timeline {
                     if active_turn
                         && context.activation == ControlContextActivation::Transition
                     {
-                        pending = Some((context.layer, projection));
+                        pending.insert(context.layer, projection);
                     } else {
                         active.insert(context.layer, projection);
                     }
                 }
                 TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
                     active_turn = false;
-                    if let Some((layer, projection)) = pending.take() {
+                    for (layer, projection) in std::mem::take(&mut pending) {
                         active.insert(layer, projection);
                     }
                 }
@@ -1054,7 +1054,7 @@ impl Timeline {
     pub fn branch_transcript_with_ids(&self) -> (Vec<SurfaceId>, Vec<ConversationItem>) {
         let mut branch = Vec::<(SurfaceId, ConversationItem)>::new();
         let mut active_turn = false;
-        let mut pending_control_context = None;
+        let mut pending_control_contexts = BTreeMap::new();
         for event in &self.events {
             if let Some(items) = event.appended_message_items() {
                 branch.extend(items.iter().cloned().enumerate().map(|(item, value)| {
@@ -1068,9 +1068,9 @@ impl Timeline {
                 }));
                 continue;
             }
-            if let Some((source, value)) = fold_control_context_activation(
+            for (source, value) in fold_control_context_activation(
                 &mut active_turn,
-                &mut pending_control_context,
+                &mut pending_control_contexts,
                 event,
             ) {
                 branch.push((
@@ -1133,7 +1133,7 @@ impl Timeline {
         let mut surface = Vec::<BranchProvenance>::new();
         let mut unloaded = BTreeSet::new();
         let mut active_turn = false;
-        let mut pending_control_context = None;
+        let mut pending_control_contexts = BTreeMap::new();
 
         for event in &self.events {
             if let Some(items) = event.appended_message_items() {
@@ -1150,9 +1150,9 @@ impl Timeline {
                 }));
                 continue;
             }
-            if let Some((source, value)) = fold_control_context_activation(
+            for (source, value) in fold_control_context_activation(
                 &mut active_turn,
-                &mut pending_control_context,
+                &mut pending_control_contexts,
                 event,
             ) {
                 let id = SurfaceId {
@@ -1871,14 +1871,17 @@ impl Timeline {
             }) if self.lifecycle.active_turn.is_some()
                 && context.activation == ControlContextActivation::Transition =>
             {
-                self.pending_control_context = Some((event.seq, context.item.clone()));
+                self.pending_control_contexts
+                    .insert(context.layer, (event.seq, context.item.clone()));
             }
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(context),
                 ..
             }) => self.append_surface_items(event.seq, std::slice::from_ref(&context.item)),
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                if let Some((source, item)) = self.pending_control_context.take() {
+                for (source, item) in
+                    take_pending_control_contexts(&mut self.pending_control_contexts)
+                {
                     self.append_surface_items(source, std::slice::from_ref(&item));
                 }
             }
@@ -2880,34 +2883,44 @@ fn is_valid_control_context(item: &ConversationItem) -> bool {
 /// enter Surface until that turn closes: doing so would place a synthetic user
 /// item between an assistant tool call and its result, or before late output
 /// conditioned by the previous protocol. Intermediate transitions are facts
-/// in the ledger, but only the latest pending context becomes model-visible.
+/// in the ledger, but only the latest pending context in each typed layer
+/// becomes model-visible. The retained per-layer transitions enter Surface in
+/// causal event order, so Surface identities never move backwards.
 fn fold_control_context_activation(
     active_turn: &mut bool,
-    pending: &mut Option<(EventSeq, ConversationItem)>,
+    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     event: &TimelineEvent,
-) -> Option<(EventSeq, ConversationItem)> {
+) -> Vec<(EventSeq, ConversationItem)> {
     match &event.kind {
         TimelineEventKind::Turn(TurnEvent::Started { .. }) => {
             *active_turn = true;
-            None
+            Vec::new()
         }
         TimelineEventKind::Control(ControlEvent {
             model_context: Some(context),
             ..
         }) if *active_turn && context.activation == ControlContextActivation::Transition => {
-            *pending = Some((event.seq, context.item.clone()));
-            None
+            pending.insert(context.layer, (event.seq, context.item.clone()));
+            Vec::new()
         }
         TimelineEventKind::Control(ControlEvent {
             model_context: Some(context),
             ..
-        }) => Some((event.seq, context.item.clone())),
+        }) => vec![(event.seq, context.item.clone())],
         TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
             *active_turn = false;
-            pending.take()
+            take_pending_control_contexts(pending)
         }
-        _ => None,
+        _ => Vec::new(),
     }
+}
+
+fn take_pending_control_contexts(
+    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
+) -> Vec<(EventSeq, ConversationItem)> {
+    let mut contexts = std::mem::take(pending).into_values().collect::<Vec<_>>();
+    contexts.sort_by_key(|(source, _)| *source);
+    contexts
 }
 
 fn reconcile_repaired_entries(
@@ -3505,6 +3518,117 @@ mod tests {
                 "old Behavior output".to_string(),
                 "normal".to_string(),
             ]
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                Timeline::from_events(timeline.events().to_vec())
+                    .unwrap()
+                    .surface()
+            )
+            .unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+    }
+
+    #[test]
+    fn in_turn_control_context_keeps_the_latest_transition_per_layer() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        for (revision, layer, text) in [
+            (1, ControlContextLayer::AgentRole, "role-v1"),
+            (2, ControlContextLayer::Behavior, "behavior-normal"),
+        ] {
+            timeline
+                .record(TimelineEventKind::Control(ControlEvent {
+                    revision,
+                    snapshot: serde_json::json!({ "revision": revision }),
+                    model_context: Some(ControlContext {
+                        layer,
+                        activation: ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder(text),
+                    }),
+                }))
+                .unwrap();
+        }
+        let turn = TurnId(43);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: timeline.surface().len(),
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        for (revision, layer, text) in [
+            (3, ControlContextLayer::Behavior, "behavior-plan"),
+            (4, ControlContextLayer::Behavior, "behavior-goal"),
+            (5, ControlContextLayer::AgentRole, "role-v2"),
+        ] {
+            timeline
+                .record(TimelineEventKind::Control(ControlEvent {
+                    revision,
+                    snapshot: serde_json::json!({ "revision": revision }),
+                    model_context: Some(ControlContext {
+                        layer,
+                        activation: ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder(text),
+                    }),
+                }))
+                .unwrap();
+        }
+        timeline
+            .append(
+                ConversationItem::assistant("output under the old layers"),
+                MessageCause::Assistant,
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            timeline
+                .surface()
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            [
+                "system",
+                "task",
+                "role-v1",
+                "behavior-normal",
+                "output under the old layers",
+                "behavior-goal",
+                "role-v2",
+            ]
+        );
+        let active = timeline.active_control_contexts();
+        assert_eq!(
+            active[&ControlContextLayer::AgentRole].item.text_content(),
+            "role-v2"
+        );
+        assert_eq!(
+            active[&ControlContextLayer::Behavior].item.text_content(),
+            "behavior-goal"
         );
         assert_eq!(
             serde_json::to_value(timeline.branch_transcript()).unwrap(),

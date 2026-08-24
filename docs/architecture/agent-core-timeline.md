@@ -38,7 +38,7 @@ TimelineEvent { version, seq, at_ms, kind }
 SurfaceOp = Append | Replace { start, end, shadowed }
 ```
 
-消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant、工具结果和 typed memory 使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v11 允许 `control` 事件额外携带至多一个受类型约束的 synthetic user `model_context`：Idle 时立即进入 Surface；active turn 中先进入 pending projection，并在该 turn 的 durable `TurnEnded` 后激活最后一个。状态与协议仍属于同一事实，且不会把 user 项插进 tool call/result 或排到旧 turn 的迟到输出之前。其余非消息事件不进入 Surface。闭合事件族为：
+消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant、工具结果和 typed memory 使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v11 允许 `control` 事件额外携带至多一个受类型约束的 synthetic user `model_context`：Idle 时立即进入 Surface；active turn 中先进入 pending projection，并在该 turn 的 durable `TurnEnded` 后按因果事件顺序激活每层最后一个。状态与协议仍属于同一事实，且不会把 user 项插进 tool call/result 或排到旧 turn 的迟到输出之前。其余非消息事件不进入 Surface。闭合事件族为：
 
 | 事件族 | 结构约束 |
 | --- | --- |
@@ -50,7 +50,7 @@ SurfaceOp = Append | Replace { start, end, shadowed }
 | `compaction` | started、唯一 summary 与 completed/failed 构成事务；成功路径的唯一 replacement 位于 summary 与 completed 之间 |
 | `recovery` | 只追加中断修复意图和依据，不改写物理尾部 |
 | `observation` | 治理、权限、MCP 等 log-only 事实，不参与 Surface |
-| `control` | Agent/Behavior/Goal 原子快照；revision 必须严格递增；可选 `model_context` 必须匹配 typed layer，Idle 时原子追加，turn 内则在终态后激活最后一个 pending context |
+| `control` | Agent/Behavior/Goal 原子快照；revision 必须严格递增；可选 `model_context` 必须匹配 typed layer，Idle 时原子追加，turn 内则在终态后按因果事件顺序激活每层最后一个 pending context |
 | `subagent` | 父 Timeline 记录 spawn/end；end 精确引用 child result |
 | `subagent_seed` / `subagent_result` | child Timeline 记录唯一 seed-source 和唯一终态结果 |
 | `session_title` | 标题事实；用户标题可覆盖自动标题，自动生成或 fallback 永远不能越过用户标题 |
@@ -64,7 +64,7 @@ SurfaceOp = Append | Replace { start, end, shadowed }
 4. 工具结果裁剪可以在一条事件中覆盖完整 Surface，但只能改变 `ToolResult.content`；项目数量、顺序、非工具项目、`tool_call_id` 与图片必须原样保留；
 5. 事件验证失败时 Timeline、Surface 与持久化队列都不变化。
 
-Actor 同时维护唯一的 `surface_revision`，它只在消息 append/replace、Idle Control context append，或 `TurnEnded` 激活 pending Control context 时推进；纯生命周期、纯 Control snapshot、尚未激活或被后续 Control 覆盖的 pending context 与 observation 事件不会推进。凡是在 actor 外读取 Surface、异步计算后再提交的完整变换，都必须携带读取时 revision 做 compare-and-swap；revision 已变化则整次变换失败，不合并、不覆盖后来消息。Actor 内的图片、typed memory append、修复与 pre-prune 变换直接在串行命令循环中计算和提交，不经过外部 read-modify-write；system head 没有运行时 mutation API。
+Actor 同时维护唯一的 `surface_revision`，它只在消息 append/replace、Idle Control context append，或 `TurnEnded` 激活每层 pending Control context 时推进；纯生命周期、纯 Control snapshot、尚未激活或被同层后续 Control 覆盖的 pending context 与 observation 事件不会推进。凡是在 actor 外读取 Surface、异步计算后再提交的完整变换，都必须携带读取时 revision 做 compare-and-swap；revision 已变化则整次变换失败，不合并、不覆盖后来消息。Actor 内的图片、typed memory append、修复与 pre-prune 变换直接在串行命令循环中计算和提交，不经过外部 read-modify-write；system head 没有运行时 mutation API。
 
 Timeline 接受的消息是完整原子记录。采样流的 token/delta 只属于 sampler 到实时 UI 的传输链，不进入 Timeline。
 
