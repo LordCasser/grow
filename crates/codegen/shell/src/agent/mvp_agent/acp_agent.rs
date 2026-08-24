@@ -644,6 +644,7 @@ impl acp::Agent for MvpAgent {
         let (persistence_info, persistence) = crate::session::persistence::load_light(
                 &session_info,
                 Some(self.gateway.clone()),
+                !session_exists,
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;

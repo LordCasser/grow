@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 
 const ARTIFACT_DIRECTORY: &str = "artifacts/notifications";
+const ORPHAN_SWEEP_BATCH_SIZE: usize = 1024;
 
 pub(crate) fn write_payload(
     session: &crate::session::storage::ContainedDirectory,
@@ -97,18 +98,19 @@ pub(crate) fn remove_payload(
 pub(crate) fn sweep_orphaned_payloads(
     session: &crate::session::storage::ContainedDirectory,
     retained_hashes: &std::collections::BTreeSet<String>,
-) -> io::Result<usize> {
+) -> io::Result<(usize, bool)> {
     let directory = match session.open_relative(
         Path::new(ARTIFACT_DIRECTORY),
         "notification payload directory",
         false,
     ) {
         Ok(directory) => directory,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((0, false)),
         Err(error) => return Err(error),
     };
     let mut removed = 0usize;
-    for name in directory.list_names()? {
+    let (names, truncated) = directory.list_names_up_to(ORPHAN_SWEEP_BATCH_SIZE)?;
+    for name in names {
         let Some(name) = name.to_str() else {
             continue;
         };
@@ -130,7 +132,7 @@ pub(crate) fn sweep_orphaned_payloads(
     if removed > 0 {
         directory.sync()?;
     }
-    Ok(removed)
+    Ok((removed, truncated))
 }
 
 #[cfg(test)]
@@ -171,7 +173,7 @@ mod tests {
         let retained_hashes = std::collections::BTreeSet::from([retained.blake3.clone()]);
         assert_eq!(
             sweep_orphaned_payloads(&session, &retained_hashes).unwrap(),
-            1
+            (1, false)
         );
         assert_eq!(
             read_payload(&session, &retained).unwrap(),
@@ -185,5 +187,27 @@ mod tests {
             std::fs::read(artifact_dir.join("unrelated.file")).unwrap(),
             b"leave me"
         );
+    }
+
+    #[test]
+    fn orphan_sweep_bounds_each_maintenance_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = crate::session::storage::ContainedDirectory::open(
+            temp.path(),
+            Path::new(""),
+            "notification test session",
+            false,
+        )
+        .unwrap();
+        let artifact_dir = temp.path().join(ARTIFACT_DIRECTORY);
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        for index in 0..=ORPHAN_SWEEP_BATCH_SIZE {
+            std::fs::write(artifact_dir.join(format!("{index:064x}.txt")), b"orphan").unwrap();
+        }
+
+        let (removed, truncated) = sweep_orphaned_payloads(&session, &Default::default()).unwrap();
+        assert_eq!(removed, ORPHAN_SWEEP_BATCH_SIZE);
+        assert!(truncated);
+        assert_eq!(std::fs::read_dir(artifact_dir).unwrap().count(), 1);
     }
 }

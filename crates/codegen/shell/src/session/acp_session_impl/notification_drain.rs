@@ -3,8 +3,8 @@
 use super::*;
 
 impl SessionActor {
-    /// Reconcile write-ahead payload artifacts against the replayed Timeline
-    /// before this session begins accepting new notification work.
+    /// Reconcile a bounded batch of write-ahead payload artifacts against the
+    /// Timeline projection held by this session's exclusive writer epoch.
     pub(super) async fn reconcile_notification_payloads(&self) {
         let _artifact_guard = self.notification_artifact_gate.lock().await;
         let Some(pending) = self.chat_state_handle.pending_notifications().await else {
@@ -32,9 +32,16 @@ impl SessionActor {
         })
         .await
         {
-            Ok(Ok(0)) => {}
-            Ok(Ok(removed)) => {
-                tracing::info!(removed, "reclaimed orphaned notification payloads")
+            Ok(Ok((removed, truncated))) => {
+                if removed > 0 {
+                    tracing::info!(removed, "reclaimed orphaned notification payloads");
+                }
+                if truncated {
+                    tracing::debug!(
+                        removed,
+                        "notification payload reconciliation reached its bounded batch size"
+                    );
+                }
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "notification payload reconciliation failed")

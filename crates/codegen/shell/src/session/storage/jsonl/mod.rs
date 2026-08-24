@@ -171,6 +171,18 @@ impl Default for JsonlStorageAdapter {
     }
 }
 impl JsonlStorageAdapter {
+    /// Claim this session's exclusive writer epoch before reading any mutable
+    /// projection. The same adapter is subsequently moved into the
+    /// persistence actor, so the lease covers replay, reconciliation, and all
+    /// live writes without a stale-snapshot window.
+    pub(crate) async fn load_session_for_write_without_updates(
+        &self,
+        info: &Info,
+    ) -> io::Result<super::PersistedDataLight> {
+        self.ensure_writer_lease(info)?;
+        <Self as StorageAdapter>::load_session_without_updates(self, info).await
+    }
+
     pub fn new() -> Self {
         Self {
             dir_mode: SessionDirMode::FromRoot(crate::util::grow_home::grow_home()),

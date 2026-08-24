@@ -2194,11 +2194,20 @@ pub(crate) struct PersistedInfoLight {
 pub(crate) async fn load_light(
     info: &Info,
     gateway: Option<GatewaySender>,
+    claim_writer: bool,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
     let root_dir = grow_home();
     let storage = JsonlStorageAdapter::with_root(root_dir.clone());
 
-    let persisted = storage.load_session_without_updates(info).await?;
+    // A dormant/external resume will spawn a new writer and must claim its
+    // epoch before reading Timeline. A resident reconnect reuses the existing
+    // actor, so its replay load remains observational and must not contend with
+    // that actor's lease.
+    let persisted = if claim_writer {
+        storage.load_session_for_write_without_updates(info).await?
+    } else {
+        storage.load_session_without_updates(info).await?
+    };
     let loaded_info = info.clone();
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;

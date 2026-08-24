@@ -19,6 +19,32 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
             ConversationItem::user("Test message"),
         ]
 }
+
+#[tokio::test]
+async fn write_load_claims_the_session_lease_before_timeline_replay() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let owner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    owner.init_session(&info, default_model_id()).await.unwrap();
+
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    contender
+        .load_session_without_updates(&info)
+        .await
+        .expect("an observational resident reconnect must not contend with its live actor");
+    let error = contender
+        .load_session_for_write_without_updates(&info)
+        .await
+        .expect_err("a second writer must fail before replaying Timeline");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("already has an active writer"));
+
+    drop(owner);
+    contender
+        .load_session_for_write_without_updates(&info)
+        .await
+        .expect("the writer lease must be released with its adapter");
+}
 #[cfg(unix)]
 #[tokio::test]
 async fn session_init_rejects_symlinked_sessions_root() {

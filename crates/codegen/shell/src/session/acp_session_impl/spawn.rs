@@ -2408,7 +2408,6 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
-    session.reconcile_notification_payloads().await;
     session.recover_pending_rewind().await.map_err(|error| {
         agent::AgentBuildError::IoError(std::io::Error::other(format!(
             "failed to recover pending rewind transaction: {error}"
@@ -2755,6 +2754,18 @@ pub(crate) async fn spawn_session_actor(
         == Some(crate::session::goal_tracker::GoalStatus::Active)
     {
         session.idle_arbiter.notify_one();
+    }
+    {
+        // The persisted adapter already owns the cross-process writer epoch.
+        // Reconcile in a bounded background batch so maintenance never extends
+        // the session spawn critical path; the actor-local gate serializes it
+        // with live notification admission and resolution.
+        let reconciliation_session = session.clone();
+        tokio::task::spawn_local(async move {
+            reconciliation_session
+                .reconcile_notification_payloads()
+                .await;
+        });
     }
     tokio::task::spawn_local(async move {
         ::diagnostics::session_ctx::with_session_ctx(
