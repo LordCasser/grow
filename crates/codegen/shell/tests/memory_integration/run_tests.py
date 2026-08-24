@@ -5,7 +5,7 @@ Memory System Integration Tests — Full Suite.
 
 Launches grow agent stdio in isolated environments ($HOME override)
 with pre-populated memory files. Tests the entire memory lifecycle:
-indexing, search, embeddings, flush, session-end, compaction, pruning.
+indexing, search, embeddings, flush, session-end, and compaction.
 
 The script auto-builds the binary (release + dev features) before running.
 Requires: cargo, rg (ripgrep).
@@ -304,10 +304,6 @@ min_score = 0.0
 enabled = true
 soft_threshold_tokens = 4000
 
-[compaction.pruning]
-enabled = true
-keep_last_n_turns = 3
-soft_trim_threshold = 4000
 """
 
 
@@ -325,8 +321,6 @@ min_score = 0.0
 [compaction.memory_flush]
 enabled = false
 
-[compaction.pruning]
-enabled = false
 """
 
 
@@ -1549,8 +1543,6 @@ enabled = true
 enabled = true
 soft_threshold_tokens = 100
 
-[compaction.pruning]
-enabled = false
 """)
         env.write_global_memory("# Flush logging test\n")
 
@@ -1681,123 +1673,7 @@ def test_compaction_preserves_index():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GROUP 11: Pruning — config acceptance & behavior verification
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_pruning_config_accepted():
-    """Custom pruning config values are accepted by the agent."""
-    section("30. Pruning Config Accepted")
-    env = IsolatedEnv()
-    try:
-        env.write_config("""
-[memory]
-enabled = true
-
-[compaction.pruning]
-enabled = true
-keep_last_n_turns = 2
-soft_trim_threshold = 500
-soft_trim_head = 100
-soft_trim_tail = 100
-hard_clear_age_turns = 5
-""")
-        env.write_global_memory("# Pruning Test\n")
-        client = env.spawn_agent()
-        resp = init_session(client)
-        if "error" in resp:
-            fail(f"agent rejected pruning config: {resp}")
-        else:
-            ok("agent accepted aggressive pruning config (keep_last=2, hard_clear=5)")
-        time.sleep(2)
-        client.close()
-    finally:
-        env.cleanup()
-
-
-def test_pruning_disabled_no_side_effects():
-    """With pruning disabled, tool results are never modified."""
-    section("31. Pruning Disabled — No Side Effects")
-    env = IsolatedEnv()
-    try:
-        env.write_config("""
-[memory]
-enabled = true
-
-[compaction.pruning]
-enabled = false
-""")
-        env.write_global_memory("# No-prune test\n")
-        client = env.spawn_agent()
-        init_session(client)
-        time.sleep(2)
-
-        # Send several messages
-        for i in range(4):
-            client.prompt(f"message {i} with pruning disabled", timeout=10)
-            time.sleep(1)
-
-        client.close()
-        time.sleep(1)
-
-        # With pruning disabled, the agent should run fine
-        ok("agent ran with pruning disabled, no errors")
-
-        # Verify no pruning log messages
-        log = env.memory_log()
-        if "pruned" not in log.lower() and "trimmed" not in log.lower():
-            ok("no pruning-related log entries when disabled")
-        else:
-            skip("pruning-related logs found (may be from other subsystem)")
-    finally:
-        env.cleanup()
-
-
-def test_pruning_extreme_config():
-    """Extreme pruning config (keep_last=0, threshold=1) doesn't crash."""
-    section("32. Pruning Extreme Config — No Crash")
-    env = IsolatedEnv()
-    try:
-        env.write_config("""
-[memory]
-enabled = true
-
-[compaction.pruning]
-enabled = true
-keep_last_n_turns = 0
-soft_trim_threshold = 1
-soft_trim_head = 10
-soft_trim_tail = 10
-hard_clear_age_turns = 1
-""")
-        env.write_global_memory("# Extreme pruning\n")
-        client = env.spawn_agent()
-        resp = init_session(client)
-        if "error" in resp:
-            fail(f"agent crashed with extreme pruning config: {resp}")
-        else:
-            ok("agent survived extreme pruning config (keep=0, threshold=1, hard_clear=1)")
-        time.sleep(2)
-
-        # Send a few messages — pruning should aggressively trim
-        for i in range(3):
-            client.prompt(f"extreme prune test message {i}", timeout=10)
-            time.sleep(1)
-
-        # Agent should still be alive
-        resp = client.prompt("final message after extreme pruning", timeout=10)
-        if "error" not in resp or resp.get("error") == "broken pipe":
-            ok("agent still responsive after extreme pruning")
-        else:
-            skip(f"agent response: {resp.get('error', 'ok')}")
-
-        client.close()
-    finally:
-        env.cleanup()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# GROUP 12: End-to-end round-trip — store → search → find
+# GROUP 11: End-to-end round-trip — store → search → find
 #
 # These are the most important tests. They verify that memory produced by
 # each lifecycle event (session_end hook, flush, reindex) is actually
@@ -2150,7 +2026,7 @@ def test_roundtrip_mixed_sources_searchable():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GROUP 13: End-to-end search — hybrid search through the live agent
+# GROUP 12: End-to-end search — hybrid search through the live agent
 #
 # These tests verify that the agent's search pipeline (hybrid_search with
 # FTS + optional vector KNN, recency decay, source weights) works end-to-end.
@@ -2385,7 +2261,7 @@ def test_e2e_memory_search_tool_invocation():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GROUP 14: Embedding (optional, depends on API availability)
+# GROUP 13: Embedding (optional, depends on API availability)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -2508,23 +2384,19 @@ ALL_TESTS = [
     # Group 10: Compaction
     test_compaction_resets_memory_injection,
     test_compaction_preserves_index,
-    # Group 11: Pruning
-    test_pruning_config_accepted,
-    test_pruning_disabled_no_side_effects,
-    test_pruning_extreme_config,
-    # Group 12: End-to-end round-trip (store → search → find)
+    # Group 11: End-to-end round-trip (store → search → find)
     test_roundtrip_session_end_searchable,
     test_roundtrip_flush_artifact_searchable,
     test_roundtrip_global_memory_searchable_across_sessions,
     test_roundtrip_workspace_memory_searchable,
     test_roundtrip_mixed_sources_searchable,
-    # Group 13: E2E search (hybrid search through the live agent)
+    # Group 12: E2E search (hybrid search through the live agent)
     test_e2e_first_turn_injection_finds_memory,
     test_e2e_first_turn_injection_query_matches_user_message,
     test_e2e_no_injection_when_memory_empty,
     test_e2e_injection_with_multiple_sources,
     test_e2e_memory_search_tool_invocation,
-    # Group 14: Embeddings
+    # Group 13: Embeddings
     test_embedding_computation,
     test_embedding_idempotency,
 ]
@@ -2551,8 +2423,6 @@ FAST_TESTS = [
     test_roundtrip_workspace_memory_searchable,
     test_e2e_first_turn_injection_finds_memory,
     test_e2e_no_injection_when_memory_empty,
-    test_pruning_config_accepted,
-    test_pruning_extreme_config,
 ]
 
 

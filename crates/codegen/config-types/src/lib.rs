@@ -472,12 +472,6 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub memory_embedding_dimensions: Option<u32>,
     #[serde(default)]
-    pub pruning_enabled: Option<bool>,
-    #[serde(default)]
-    pub pruning_keep_last_n_turns: Option<u32>,
-    #[serde(default)]
-    pub pruning_soft_trim_threshold: Option<u32>,
-    #[serde(default)]
     pub flush_enabled: Option<bool>,
     #[serde(default)]
     pub flush_soft_threshold_tokens: Option<u64>,

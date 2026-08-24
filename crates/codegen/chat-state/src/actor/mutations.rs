@@ -1,12 +1,11 @@
 //! Mutation handlers for the ChatStateActor.
 
 use sampling_types::{
-    ContentPart, ConversationItem, DanglingToolCallReason, dedup_duplicate_tool_results,
+    ConversationItem, DanglingToolCallReason, dedup_duplicate_tool_results,
     repair_dangling_tool_calls,
 };
 
 use super::ChatStateActor;
-use super::request_builder::HARD_CLEAR_PLACEHOLDER;
 use crate::MessageCause;
 use crate::events::ChatStateEvent;
 
@@ -237,9 +236,6 @@ impl ChatStateActor {
     /// method repairs them before appending the new message so the on-disk
     /// and in-memory state stay consistent.
     ///
-    /// Also runs [`prune_retained_conversation`] to eagerly hard-clear very
-    /// old tool results from the in-memory state, bounding long-session
-    /// retained memory without waiting for the context-window threshold.
     pub(super) async fn push_user_message(&mut self, item: ConversationItem) {
         self.push_user_message_with_repair_reason(item, DanglingToolCallReason::UserCancelled)
             .await;
@@ -266,7 +262,6 @@ impl ChatStateActor {
             model_reported_total = self.state.total_tokens,
             "ChatState: durable user message updated estimated_tokens_since_model"
         );
-        self.prune_retained_conversation().await;
         Ok(())
     }
 
@@ -289,130 +284,6 @@ impl ChatStateActor {
             model_reported_total = self.state.total_tokens,
             "ChatState: push_user_message updated estimated_tokens_since_model"
         );
-        self.prune_retained_conversation().await;
-    }
-
-    /// Eagerly hard-clear tool results from very old turns in the retained
-    /// in-memory conversation, freeing the actual string bytes.
-    ///
-    /// Unlike the API-copy pruning in `build_conversation_request` (which runs
-    /// on a *clone* only when context > 50% full), this operates on
-    /// the Timeline surface directly and runs after every user turn.
-    ///
-    /// # What this does
-    ///
-    /// Only **hard-clears** are applied (no soft-trim).  Soft-trimming is a
-    /// context-management operation that changes what the model sees;
-    /// hard-clearing is a memory-management operation that replaces content
-    /// that is so old the model should not need it again.  The threshold is
-    /// controlled by `PruningConfig::hard_clear_age_turns`.
-    ///
-    /// # Retained-memory measurement
-    ///
-    /// When any clearing occurs, a `tracing::debug!` event reports:
-    /// - `hard_cleared` — number of tool results cleared
-    /// - `bytes_freed` — approximate bytes recovered (sum of content lengths)
-    /// - `conversation_len` — total item count after the pass
-    ///
-    /// # Synthetic User items and turn-age accuracy
-    ///
-    /// The shell can inject synthetic `User` items mid-turn (e.g. system
-    /// corrective warnings) without calling `increment_prompt_index`.  These
-    /// do not represent real user turns.  The backward scan here counts every
-    /// `User` item as a turn boundary, so synthetic items would normally cause
-    /// old tool results to appear older than they really are.
-    ///
-    /// This is compensated by raising the effective clearing threshold by the
-    /// number of synthetic User items (`total_user_items - prompt_index`).
-    /// The result: a tool result is never cleared before `hard_clear_age_turns`
-    /// REAL turns have elapsed, even in sessions with many synthetic messages.
-    ///
-    /// # Replay / rewind correctness
-    ///
-    /// The original node remains in Timeline and only the Surface projection
-    /// changes, so rewind can expand the unpruned branch without consulting a
-    /// second replay log.
-    pub(super) async fn prune_retained_conversation(&mut self) -> usize {
-        if !self.pruning_config.enabled {
-            return 0;
-        }
-        // Fast exit: not enough turns have elapsed for any hard-clear to apply.
-        let prompt_index = self.state.timeline.next_prompt_index();
-        if prompt_index < self.pruning_config.hard_clear_age_turns {
-            return 0;
-        }
-
-        // Compute how many synthetic User items exist (system reminders, etc.).
-        // Synthetic User items are NOT real user turns — they are injected by the
-        // shell mid-turn and do not increment `prompt_index`.  The naive backward
-        // scan counts every User item as a turn boundary, so synthetic items make
-        // old tool results appear older than they really are and can cause
-        // premature hard-clears.
-        //
-        // Fix: raise the effective clearing threshold by the number of synthetic
-        // User items.  This guarantees a tool result is never cleared before
-        // `hard_clear_age_turns` REAL turns have elapsed, regardless of how many
-        // synthetic messages the session contains.
-        let total_user_items = self
-            .state
-            .timeline
-            .surface()
-            .iter()
-            .filter(|i| matches!(i, ConversationItem::User(_)))
-            .count();
-        let synthetic_count = total_user_items.saturating_sub(prompt_index);
-        let effective_threshold = self
-            .pruning_config
-            .hard_clear_age_turns
-            .saturating_add(synthetic_count);
-
-        let before_bytes = self.conversation_content_bytes();
-        let mut cleared = 0usize;
-        let mut turn_from_end: usize = 0;
-        let mut seen_first_user = false;
-        let mut conversation = self.state.timeline.surface().to_vec();
-
-        for i in (0..conversation.len()).rev() {
-            if matches!(&conversation[i], ConversationItem::User(_)) {
-                if seen_first_user {
-                    turn_from_end += 1;
-                }
-                seen_first_user = true;
-                continue;
-            }
-
-            let ConversationItem::ToolResult(tr) = &mut conversation[i] else {
-                continue;
-            };
-
-            if turn_from_end < effective_threshold {
-                continue;
-            }
-
-            if tr.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
-                tr.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
-                cleared += 1;
-            }
-        }
-
-        if cleared > 0 {
-            let mut candidate = self.state.timeline.clone();
-            let event = candidate
-                .replace_all(conversation, MessageCause::ToolResultPrune)
-                .expect("retained tool-result identities must remain stable");
-            if !self.commit_buffered_timeline_event(event).await {
-                return 0;
-            }
-            let after_bytes = self.conversation_content_bytes();
-            tracing::debug!(
-                hard_cleared = cleared,
-                bytes_freed = before_bytes.saturating_sub(after_bytes),
-                conversation_len = self.state.timeline.surface_len(),
-                "ChatState: in-memory tool-result prune"
-            );
-        }
-
-        cleared
     }
 
     /// Apply a [`compaction::PrunePlan`] to the stored conversation in one
@@ -451,15 +322,13 @@ impl ChatStateActor {
     ///
     /// Items whose content already contains [`PRUNE_MARKER`] or already fits
     /// the budget are skipped, so replaying the same plan never re-prunes.
-    /// `total_tokens` is re-estimated with
-    /// [`super::state::estimate_conversation_tokens`] and clamped to the
-    /// pre-prune value: pruning must never appear to increase usage (the same
-    /// `min(pre_replace_total)` guard as a complete Surface replacement).
+    /// The before/after Surface estimate is applied as a signed delta to the
+    /// latest provider anchor and clamped at zero. This preserves provider-side
+    /// accounting instead of replacing it with a fresh local estimate.
     /// `estimated_tokens_since_model` and `estimate_at_last_response` are
-    /// left untouched, matching [`Self::prune_retained_conversation`]: the
-    /// compaction overhead ratio must keep measuring against the
-    /// last-response snapshot, and the post-response delta self-heals at the
-    /// next `record_token_usage`.
+    /// left untouched: the compaction overhead ratio must keep measuring
+    /// against the last-response snapshot, and the post-response delta
+    /// self-heals at the next `record_token_usage`.
     pub(super) async fn prune_tool_results(
         &mut self,
         plan: compaction::PrunePlan,
@@ -471,6 +340,8 @@ impl ChatStateActor {
         }
 
         let tokens_before = self.state.total_tokens;
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         let mut pruned_count = 0usize;
         let mut conversation = self.state.timeline.surface().to_vec();
 
@@ -525,9 +396,12 @@ impl ChatStateActor {
                 .replace_all(conversation, MessageCause::ToolResultPrune)
                 .map_err(crate::commands::TimelineWriteError::Invalid)?;
             self.commit_timeline_event(event).await?;
-            // Pruning changes only retained content. Keep provider overhead
-            // accounting intact and never make the reported usage increase.
-            tokens_after = tokens_before.min(reestimated);
+            // Project the signed Surface delta from the latest provider
+            // anchor. This preserves provider-side overhead instead of
+            // replacing it with a fresh local estimate. The independent
+            // post-response addition estimate stays untouched below.
+            let removed_tokens = surface_tokens_before.saturating_sub(reestimated);
+            tokens_after = tokens_before.saturating_sub(removed_tokens);
             self.state.total_tokens = tokens_after;
             tracing::info!(
                 pruned_count,
@@ -543,36 +417,6 @@ impl ChatStateActor {
             tokens_before,
             tokens_after,
         })
-    }
-
-    /// Approximate byte footprint of all string content in the conversation.
-    ///
-    /// Used for before/after measurement logging when pruning runs.
-    /// Sums the byte lengths of all string fields; does not allocate.
-    fn conversation_content_bytes(&self) -> usize {
-        self.state
-            .timeline
-            .surface()
-            .iter()
-            .map(|item| match item {
-                ConversationItem::System(s) => s.content.len(),
-                ConversationItem::User(u) => u
-                    .content
-                    .iter()
-                    .map(|p| match p {
-                        ContentPart::Text { text } => text.len(),
-                        ContentPart::Image { url } => url.len(),
-                    })
-                    .sum::<usize>(),
-                ConversationItem::Assistant(a) => a.content.len(),
-                ConversationItem::ToolResult(tr) => tr.content.len(),
-                ConversationItem::BackendToolCall(b) => b.text_summary().len(),
-                ConversationItem::Reasoning(r) => {
-                    sampling_types::reasoning_item_text(r).len()
-                        + r.encrypted_content.as_deref().map(str::len).unwrap_or(0)
-                }
-            })
-            .sum()
     }
 
     /// Record accumulated token usage and emit an event.

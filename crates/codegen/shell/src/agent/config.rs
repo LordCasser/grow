@@ -391,7 +391,6 @@ impl PluginsConfig {
 #[serde(default)]
 pub struct CompactionConfig {
     pub memory_flush: Option<crate::config::MemoryFlushConfig>,
-    pub pruning: Option<crate::config::PruningConfig>,
     /// Session-side tool-result pruning before summary compaction (pre-prune).
     /// `None` = defer to env/remote settings/default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]

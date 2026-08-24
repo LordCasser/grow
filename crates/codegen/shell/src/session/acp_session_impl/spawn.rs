@@ -1017,13 +1017,6 @@ pub(crate) async fn spawn_session_actor(
     let primary_model_id = sampling_config.model.clone();
     let embed_base_url = sampling_config.base_url.clone();
     let embed_api_key = sampling_config.api_key.clone();
-    let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
-        || crate::config::PruningConfig {
-            enabled: false,
-            ..Default::default()
-        },
-        |mc| mc.pruning.clone(),
-    );
     let context_window_override = std::env::var("GROW_DEBUG_CONTEXT_WINDOW")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1054,23 +1047,14 @@ pub(crate) async fn spawn_session_actor(
         reasoning_effort: sampling_config.reasoning_effort,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
-    let actor_pruning_config = chat_state::PruningConfig {
-        enabled: session_pruning_config.enabled,
-        keep_last_n_turns: session_pruning_config.keep_last_n_turns,
-        soft_trim_threshold: session_pruning_config.soft_trim_threshold,
-        soft_trim_head: session_pruning_config.soft_trim_head,
-        soft_trim_tail: session_pruning_config.soft_trim_tail,
-        hard_clear_age_turns: session_pruning_config.hard_clear_age_turns,
-    };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let timeline_persistence = Box::new(
         super::timeline_persistence::ChannelTimelinePersistence::new(persistence.tx.clone()),
     );
     let chat_state_handle = if let Some(timeline) = validated_timeline {
-        chat_state::ChatStateActor::spawn_from_validated_timeline_with_pruning(
+        chat_state::ChatStateActor::spawn_from_validated_timeline(
             timeline,
             chat_state_sampling_config,
-            actor_pruning_config,
             timeline_persistence,
             chat_state_event_tx,
             tokio_util::sync::CancellationToken::new(),
@@ -1082,10 +1066,9 @@ pub(crate) async fn spawn_session_actor(
             ))
         })?
     } else {
-        chat_state::ChatStateActor::spawn_with_pruning(
+        chat_state::ChatStateActor::spawn(
             conversation.clone(),
             chat_state_sampling_config,
-            actor_pruning_config,
             timeline_persistence,
             chat_state_event_tx,
             tokio_util::sync::CancellationToken::new(),

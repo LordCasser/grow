@@ -20,7 +20,7 @@ use crate::commands::ChatStateCommand;
 use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::TimelinePersistence;
-use crate::types::{PruningConfig, TurnCapture};
+use crate::types::TurnCapture;
 use crate::{Timeline, TimelineEvent};
 
 use sampling_types::{ConversationItem, SamplingConfig};
@@ -31,8 +31,6 @@ use state::ChatState;
 pub struct ChatStateActor {
     /// Internal state — conversation, tokens, config, etc.
     state: ChatState,
-    /// Pruning configuration for tool-result trimming.
-    pruning_config: PruningConfig,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn TimelinePersistence>,
     /// Seed/recovery facts already present in `state`. The actor persists this
@@ -178,30 +176,10 @@ impl ChatStateActor {
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
-        Self::spawn_with_pruning(
-            initial_conversation,
-            sampling_config,
-            PruningConfig::default(),
-            persistence,
-            event_tx,
-            cancellation_token,
-        )
-    }
-
-    /// Spawn the actor with a custom pruning config.
-    pub fn spawn_with_pruning(
-        initial_conversation: Vec<ConversationItem>,
-        sampling_config: SamplingConfig,
-        pruning_config: PruningConfig,
-        persistence: Box<dyn TimelinePersistence>,
-        event_tx: mpsc::UnboundedSender<ChatStateEvent>,
-        cancellation_token: tokio_util::sync::CancellationToken,
-    ) -> ChatStateHandle {
         let state = ChatState::new(initial_conversation, sampling_config);
         let bootstrap_events = state.timeline.events().to_vec();
         Self::launch(
             state,
-            pruning_config,
             persistence,
             bootstrap_events,
             event_tx,
@@ -210,19 +188,17 @@ impl ChatStateActor {
     }
 
     /// Restore an actor from its durable append-only event stream.
-    pub async fn spawn_from_timeline_with_pruning(
+    pub async fn spawn_from_timeline(
         timeline_events: Vec<TimelineEvent>,
         sampling_config: SamplingConfig,
-        pruning_config: PruningConfig,
         persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
         let timeline = Timeline::from_events(timeline_events)?;
-        Self::spawn_from_validated_timeline_with_pruning(
+        Self::spawn_from_validated_timeline(
             timeline,
             sampling_config,
-            pruning_config,
             persistence,
             event_tx,
             cancellation_token,
@@ -233,10 +209,9 @@ impl ChatStateActor {
     /// Restore an actor from an already validated Timeline. This is the
     /// canonical handoff for callers that need the Surface during bootstrap:
     /// validation/materialization happens once, then ownership moves here.
-    pub async fn spawn_from_validated_timeline_with_pruning(
+    pub async fn spawn_from_validated_timeline(
         mut timeline: Timeline,
         sampling_config: SamplingConfig,
-        pruning_config: PruningConfig,
         persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
@@ -246,7 +221,6 @@ impl ChatStateActor {
         let state = ChatState::from_timeline(timeline, sampling_config);
         Ok(Self::launch(
             state,
-            pruning_config,
             persistence,
             recovery_events,
             event_tx,
@@ -256,7 +230,6 @@ impl ChatStateActor {
 
     fn launch(
         state: ChatState,
-        pruning_config: PruningConfig,
         persistence: Box<dyn TimelinePersistence>,
         bootstrap_events: Vec<TimelineEvent>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
@@ -267,7 +240,6 @@ impl ChatStateActor {
         let actor_cancellation = cancellation_token.child_token();
         let actor = ChatStateActor {
             state,
-            pruning_config,
             persistence,
             bootstrap_events,
             cmd_rx,

@@ -323,14 +323,6 @@ max_flush_write_chars = 8000
 # idle_timeout_secs = 1800            # 删除/注释则仅在压缩前 flush
 semantic_dedup_threshold = 0.92
 
-[compaction.pruning]
-enabled = true
-keep_last_n_turns = 3
-soft_trim_threshold = 4000
-soft_trim_head = 1500
-soft_trim_tail = 1500
-hard_clear_age_turns = 10
-
 [repo_changes_dedup]
 enabled = true
 include_inline_fallback = false

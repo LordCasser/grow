@@ -68,8 +68,8 @@ pre-compaction flush and **before** `run_compact_inner`. The ladder function is
 
 ### 2.1 Gate conservativeness (Task B residual risk)
 
-Pruning re-estimates chat-state `total_tokens` (clamped never to increase) but
-**leaves `estimated_tokens_since_model` untouched**, so
+Pruning subtracts the signed before/after Surface estimate from chat-state's
+latest provider anchor and **leaves `estimated_tokens_since_model` untouched**, so
 `get_estimated_total_tokens()` may over-count the pruned bytes. The gate
 therefore errs fail-safe: when the post-prune estimate is still at/over the
 threshold, the summary runs even though it might not have been needed. The code

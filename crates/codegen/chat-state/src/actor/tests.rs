@@ -561,10 +561,9 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
     let (mock, mut persistence_rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
-    let handle = ChatStateActor::spawn_from_timeline_with_pruning(
+    let handle = ChatStateActor::spawn_from_timeline(
         timeline.events().to_vec(),
         test_config(),
-        crate::PruningConfig::default(),
         Box::new(mock),
         event_tx,
         token,
@@ -604,10 +603,9 @@ async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
     .unwrap();
     let (mock, mut persistence_rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let handle = ChatStateActor::spawn_from_timeline_with_pruning(
+    let handle = ChatStateActor::spawn_from_timeline(
         timeline.events().to_vec(),
         test_config(),
-        crate::PruningConfig::default(),
         Box::new(mock),
         event_tx,
         tokio_util::sync::CancellationToken::new(),
@@ -1534,10 +1532,11 @@ async fn compaction_reseed_excludes_post_response_deltas_from_overhead() {
 }
 
 #[tokio::test]
-async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
+async fn pruning_projects_signed_surface_delta_from_provider_anchor() {
     let h = TestHarness::new();
 
-    // 12 turns of large tool results so default pruning (10-turn age) fires.
+    // A large retained conversation gives the model-free pre-prune planner
+    // enough oversized tool results to reduce the Surface materially.
     let mut conv = Vec::new();
     for i in 0..12 {
         conv.push(ConversationItem::user(format!("q{i}")));
@@ -1555,26 +1554,26 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
     let provider_total = estimate_at_response + estimate_at_response / 2;
     h.handle.record_token_usage(provider_total);
 
-    // Triggers pruning: old tool results are hard-cleared in place.
-    h.handle.push_user_message(ConversationItem::user("new q"));
+    let plan = compaction::plan_tool_result_pruning(
+        &conv,
+        &crate::actor::state::EstimatedItemTokenCounter,
+        100,
+        1_000,
+    );
+    h.handle
+        .prune_tool_results(plan)
+        .await
+        .expect("canonical pre-prune succeeds");
     let pruned_estimate = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
     assert!(
         pruned_estimate + 20_000 < estimate_at_response,
         "test setup must actually prune ({pruned_estimate} vs {estimate_at_response})"
     );
-
-    let compacted = vec![ConversationItem::user("z".repeat(8_000))];
-    let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
-    commit_compaction_range(&h.handle, compacted).await;
-
-    let total = h.handle.get_total_tokens().await;
-    let expected = (compacted_estimate as f64
-        * (provider_total as f64 / estimate_at_response as f64))
-        .round() as u64;
+    let expected = provider_total.saturating_sub(estimate_at_response - pruned_estimate);
     assert_eq!(
-        total, expected,
-        "overhead ratio must come from the snapshot at the last response, \
-         not be inflated by content pruned afterwards"
+        h.handle.get_total_tokens().await,
+        expected,
+        "pruning must subtract only its signed Surface delta from the provider anchor"
     );
 }
 
@@ -2227,7 +2226,7 @@ async fn build_request_with_multiple_tool_calls_and_results() {
 
     let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
-    // All items should pass through (no dangling calls, no pruning needed)
+    // All items should pass through because no repair or projection is needed.
     assert_eq!(request.items.len(), 6);
 }
 
@@ -3650,361 +3649,6 @@ async fn an_existing_timeline_rejects_system_head_replacement() {
     assert_eq!(conv.len(), 3);
 }
 
-// ============================================================================
-// In-memory retained pruning tests (PR3)
-// ============================================================================
-
-/// Helper: push N complete turns (user + assistant + tool-result) so the
-/// conversation grows to a predictable length.
-async fn push_turns(handle: &crate::handle::ChatStateHandle, turns: usize, content_len: usize) {
-    for i in 0..turns {
-        handle.push_user_message(marked_user(format!("q{i}"), i));
-        record_prompt(handle, format!("q{i}")).await;
-        handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
-        handle.push_tool_result(ConversationItem::tool_result(
-            format!("call_{i}"),
-            "x".repeat(content_len),
-        ));
-    }
-    // Sync point
-    let _ = handle.get_conversation_len().await;
-}
-
-/// After fewer turns than `hard_clear_age_turns` the retained conversation
-/// must not be touched (fast-exit path).
-#[tokio::test]
-async fn prune_retained_no_op_when_session_is_young() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    let (mock, _rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let config = PruningConfig {
-        hard_clear_age_turns: 10,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    // Push 5 turns — below the hard_clear_age_turns threshold of 10.
-    push_turns(&handle, 5, 10_000).await;
-
-    // All tool results must be untouched.
-    let conv = handle.get_conversation().await;
-    for item in &conv {
-        if let ConversationItem::ToolResult(tr) = item {
-            assert_eq!(
-                tr.content.len(),
-                10_000,
-                "young session: tool result must not be pruned"
-            );
-        }
-    }
-}
-
-/// After `hard_clear_age_turns + 1` turns, tool results from the oldest
-/// turns must be hard-cleared in the in-memory conversation.
-#[tokio::test]
-async fn prune_retained_hard_clears_old_tool_results() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    let (mock, _rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let config = PruningConfig {
-        hard_clear_age_turns: 5,
-        keep_last_n_turns: 2,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    // Push 8 turns — turns 0..2 will be older than hard_clear_age_turns=5.
-    push_turns(&handle, 8, 5_000).await;
-
-    let conv = handle.get_conversation().await;
-    // Turns are laid out as [User, Assistant, ToolResult] * 8.
-    // ToolResult for turn 0 is at index 2.
-    let oldest_tr = match &conv[2] {
-        ConversationItem::ToolResult(tr) => tr.content.clone(),
-        other => panic!("expected ToolResult at index 2, got {other:?}"),
-    };
-    assert_eq!(
-        oldest_tr.as_ref(),
-        "[Tool result omitted — too old]",
-        "oldest tool result must be hard-cleared"
-    );
-
-    // Recent turns (6, 7) must be untouched.
-    let recent_tr_6 = match &conv[6 * 3 + 2] {
-        ConversationItem::ToolResult(tr) => tr.content.clone(),
-        other => panic!("expected ToolResult, got {other:?}"),
-    };
-    assert_eq!(
-        recent_tr_6.len(),
-        5_000,
-        "recent tool result must NOT be pruned"
-    );
-}
-
-/// Pruning is a no-op when `enabled = false`.
-#[tokio::test]
-async fn prune_retained_disabled_is_noop() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    let (mock, _rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let config = PruningConfig {
-        enabled: false,
-        hard_clear_age_turns: 3,
-        keep_last_n_turns: 1,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    push_turns(&handle, 6, 10_000).await;
-
-    let conv = handle.get_conversation().await;
-    for item in &conv {
-        if let ConversationItem::ToolResult(tr) = item {
-            assert_eq!(
-                tr.content.len(),
-                10_000,
-                "disabled pruning: tool result must not be pruned"
-            );
-        }
-    }
-}
-
-/// Retained conversation size is bounded after many turns: old tool results
-/// are replaced with a short placeholder, not retained in full.
-#[tokio::test]
-async fn prune_retained_bounds_long_session_footprint() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    const TURNS: usize = 50; // enough turns to clear many old tool results
-    const CONTENT_LEN: usize = 50_000; // 50 KB per tool result
-    const PLACEHOLDER_LEN: usize = "[Tool result omitted — too old]".len();
-
-    let (mock, _rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let config = PruningConfig {
-        hard_clear_age_turns: 5,
-        keep_last_n_turns: 2,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    push_turns(&handle, TURNS, CONTENT_LEN).await;
-
-    let conv = handle.get_conversation().await;
-
-    // Count how many tool results are still at full size vs. cleared.
-    let (full, cleared) = conv.iter().fold((0usize, 0usize), |(f, c), item| {
-        if let ConversationItem::ToolResult(tr) = item {
-            if tr.content.len() == PLACEHOLDER_LEN {
-                (f, c + 1)
-            } else {
-                (f + 1, c)
-            }
-        } else {
-            (f, c)
-        }
-    });
-
-    // Most tool results must be cleared; only the very recent ones (≤ keep_last_n_turns) are kept.
-    assert!(
-        cleared > full,
-        "majority of old tool results must be hard-cleared (cleared={cleared}, full={full})"
-    );
-
-    // Approximate in-memory footprint of tool results should be much less than
-    // the naive uncompressed size.
-    let actual_tr_bytes: usize = conv
-        .iter()
-        .filter_map(|i| {
-            if let ConversationItem::ToolResult(tr) = i {
-                Some(tr.content.len())
-            } else {
-                None
-            }
-        })
-        .sum();
-    let naive_bytes = TURNS * CONTENT_LEN;
-    assert!(
-        actual_tr_bytes < naive_bytes / 5,
-        "retained tool-result bytes ({actual_tr_bytes}) must be << naive ({naive_bytes})"
-    );
-}
-
-/// Durable Timeline rewind still produces the correct item count
-/// after in-memory pruning has cleared some old tool results.
-#[tokio::test]
-async fn prune_retained_rewind_still_correct() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    let (mock, mut rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    // Aggressive pruning to make in-memory pruning fire quickly.
-    let config = PruningConfig {
-        hard_clear_age_turns: 3,
-        keep_last_n_turns: 1,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    // Push 6 turns: [User, Assistant, ToolResult] * 6 = 18 items.
-    push_turns(&handle, 6, 1_000).await;
-
-    // Rewind to prompt index 3 (keep turns 0..3 = 9 items).
-    handle.rewind_durably(3).await.unwrap();
-
-    let conv = handle.get_conversation().await;
-    assert_eq!(
-        conv.len(),
-        9,
-        "after rewind to prompt_index=3, should have 9 items (3 turns * 3 items)"
-    );
-    let idx = handle.get_prompt_index().await;
-    assert_eq!(idx, 3);
-
-    // Verify we have the right item types: (User, Assistant, ToolResult) * 3.
-    for turn in 0..3 {
-        assert!(
-            matches!(&conv[turn * 3], ConversationItem::User(_)),
-            "item[{turn}*3] should be User"
-        );
-        assert!(
-            matches!(&conv[turn * 3 + 1], ConversationItem::Assistant(_)),
-            "item[{turn}*3+1] should be Assistant"
-        );
-        assert!(
-            matches!(&conv[turn * 3 + 2], ConversationItem::ToolResult(_)),
-            "item[{turn}*3+2] should be ToolResult"
-        );
-    }
-
-    // Drain to avoid memory leak warning.
-    rx.drain();
-}
-
-/// Regression test: synthetic `User` items injected mid-turn (e.g. system
-/// warnings) must NOT cause old tool results to be cleared earlier than
-/// `hard_clear_age_turns` real turns.
-///
-/// Scenario: 3 real turns with tool results, then 2 synthetic User items
-/// injected without incrementing `prompt_index`, then a 4th real turn.
-/// With `hard_clear_age_turns = 5`, none of the 4 tool results should be
-/// cleared yet (the oldest is only 4 real turns old after the 4th real turn
-/// starts, since prompt_index is 4 at prune time).
-#[tokio::test]
-async fn prune_retained_synthetic_user_does_not_advance_age() {
-    use crate::actor::ChatStateActor;
-    use crate::persistence::MockTimelinePersistence;
-    use crate::types::PruningConfig;
-
-    let (mock, _rx) = MockTimelinePersistence::new();
-    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let config = PruningConfig {
-        hard_clear_age_turns: 5,
-        keep_last_n_turns: 1,
-        ..Default::default()
-    };
-    let handle = ChatStateActor::spawn_with_pruning(
-        vec![],
-        test_config(),
-        config,
-        Box::new(mock),
-        event_tx,
-        token,
-    );
-
-    // Three real turns, each with a large tool result.
-    for i in 0..3usize {
-        handle.push_user_message(ConversationItem::user(format!("real q{i}")));
-        record_prompt(&handle, format!("real q{i}")).await;
-        handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
-        handle.push_tool_result(ConversationItem::tool_result(
-            format!("call_{i}"),
-            "x".repeat(10_000),
-        ));
-    }
-
-    // Two synthetic User items injected mid-turn (e.g. doom-loop warnings).
-    // These do NOT call increment_prompt_index — prompt_index stays at 3.
-    handle.push_user_message(ConversationItem::user("⚠️ doom-loop warning 1"));
-    handle.push_user_message(ConversationItem::user("⚠️ doom-loop warning 2"));
-
-    // Fourth real turn starts: prompt_index → 4, pruning fires inside push_user_message.
-    handle.push_user_message(ConversationItem::user("real q3"));
-    record_prompt(&handle, "real q3").await;
-
-    // Sync
-    let conv = handle.get_conversation().await;
-
-    // None of the 3 original tool results should be cleared:
-    // oldest real age = 3 turns (turn 0 is 3 real turns ago), threshold = 5.
-    // Without the synthetic-count compensation, the 2 synthetic User items
-    // would make turn 0's TR appear age 5, causing premature clearing.
-    for item in &conv {
-        if let ConversationItem::ToolResult(tr) = item {
-            assert_ne!(
-                tr.content.as_ref(),
-                "[Tool result omitted — too old]",
-                "tool result must NOT be cleared: oldest is only 3 real turns old \
-                 (threshold is 5), synthetic user injections must not advance age"
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn get_last_model_metadata_returns_both_fields() {
     let h = TestHarness::with_conversation(vec![
@@ -4286,7 +3930,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
 // KV Cache Prefix Stability Tests
 //
 // These test `build_conversation_request()` output prefix stability through
-// the full pipeline -- pruning, memory injection, image pruning, snapshot
+// the full pipeline -- memory injection, image projection, snapshot
 // restore. Prefix stability within a compaction epoch is the invariant that
 // keeps the inference engine's prefix / KV cache hitting. The sibling-Reasoning refactor
 // deleted the placeholder/splice machinery these tests previously had to work
@@ -4772,74 +4416,6 @@ async fn build_request_preserves_small_old_images() {
     );
 }
 
-/// Prefix stability after tool result pruning. When context utilization
-/// exceeds 50%, old tool results are soft-trimmed or hard-cleared, but
-/// this happens on a clone -- items outside the pruned region must
-/// remain identical.
-#[tokio::test]
-async fn prefix_stable_after_tool_result_pruning() {
-    let h = TestHarness::with_context_window(10_000);
-
-    seed_test_system(&h.handle, "sys").await;
-    h.handle.push_user_message(ConversationItem::user("q1"));
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("a1"));
-    h.handle
-        .push_tool_result(ConversationItem::tool_result("c1", "x".repeat(500)));
-    h.handle.push_user_message(ConversationItem::user("q2"));
-
-    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
-
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("a2"));
-    h.handle
-        .push_tool_result(ConversationItem::tool_result("c2", "y".repeat(500)));
-    h.handle.push_user_message(ConversationItem::user("q3"));
-    h.handle.record_token_usage(6000); // > 50% of 10k context
-
-    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
-
-    let body1 = serialize_via_public_api(&req1);
-    let body2 = serialize_via_public_api(&req2);
-    let input1 = body1["input"].as_array().unwrap();
-    let input2 = body2["input"].as_array().unwrap();
-
-    assert_eq!(
-        input1[0], input2[0],
-        "system prompt must be stable after pruning"
-    );
-    assert!(
-        input2.len() >= input1.len(),
-        "pruned request should still have >= items"
-    );
-
-    let extract_user_texts = |input: &[serde_json::Value]| -> Vec<String> {
-        input
-            .iter()
-            .filter_map(|v| {
-                if v.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    v.get("content").and_then(|c| c.as_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-    let users1 = extract_user_texts(input1);
-    let users2 = extract_user_texts(input2);
-    let mut idx2 = 0;
-    for u1 in &users1 {
-        while idx2 < users2.len() && &users2[idx2] != u1 {
-            idx2 += 1;
-        }
-        assert!(
-            idx2 < users2.len(),
-            "user message {u1:?} from req1 must appear in req2 in same order"
-        );
-        idx2 += 1;
-    }
-}
-
 // ============================================================================
 // Out-of-band history repair (grow/session/repair)
 // ============================================================================
@@ -5122,7 +4698,7 @@ async fn prune_tool_results_is_idempotent() {
 /// appear to increase usage, even when the provider-reported total is far
 /// below the static byte estimate.
 #[tokio::test]
-async fn prune_tool_results_never_appears_to_increase_usage() {
+async fn prune_tool_results_clamps_signed_delta_at_zero() {
     use crate::actor::state::EstimatedItemTokenCounter;
     use compaction::plan_tool_result_pruning;
 
@@ -5142,8 +4718,8 @@ async fn prune_tool_results_never_appears_to_increase_usage() {
         .expect("prune succeeds");
     assert_eq!(report.pruned_count, 1, "content is still pruned");
     assert_eq!(report.tokens_before, 10);
-    assert_eq!(report.tokens_after, 10, "usage must not appear to increase");
-    assert_eq!(h.handle.get_total_tokens().await, 10);
+    assert_eq!(report.tokens_after, 0, "signed deltas clamp at zero");
+    assert_eq!(h.handle.get_total_tokens().await, 0);
     assert!(h.drain_events().is_empty());
 }
 

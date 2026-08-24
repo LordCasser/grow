@@ -67,16 +67,15 @@ impl ImageRewriteReport {
 /// Result of an actor-serialized tool-result prune.
 ///
 /// `tokens_before` / `tokens_after` are the actor's `total_tokens` before and
-/// after the command. `tokens_after` is the re-estimate clamped so pruning
-/// never appears to increase usage, so `tokens_after <= tokens_before` always
-/// holds.
+/// after the command. `tokens_after` is the provider anchor minus the signed
+/// Surface reduction, clamped at zero, so `tokens_after <= tokens_before`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PruneReport {
     /// Number of tool results actually trimmed in this execution.
     pub pruned_count: usize,
     /// `total_tokens` before pruning.
     pub tokens_before: u64,
-    /// `total_tokens` after re-estimation (never higher than `tokens_before`).
+    /// Provider-anchored `total_tokens` after applying the Surface delta.
     pub tokens_after: u64,
 }
 
@@ -295,8 +294,8 @@ pub enum ChatStateCommand {
 
     // ═══ Queries (request/response via oneshot) ═══
     /// Build a ConversationRequest ready to send to the API.
-    /// Clones the conversation, prunes old tool results, repairs dangling
-    /// tool calls, injects memory reminder, and assembles the request.
+    /// Repairs dangling tool calls, injects memory reminder, applies any
+    /// transport-only projection, and assembles the request.
     BuildConversationRequest {
         /// Stable identity of the Timeline lineage root. Rewind generation and
         /// model route are folded into the provider key by the actor.

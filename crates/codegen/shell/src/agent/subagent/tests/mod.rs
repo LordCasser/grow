@@ -738,10 +738,9 @@ async fn recovery_parent(
     .unwrap();
     let (persistence, receiver) = chat_state::MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let handle = chat_state::ChatStateActor::spawn_from_timeline_with_pruning(
+    let handle = chat_state::ChatStateActor::spawn_from_timeline(
         timeline.events().to_vec(),
         test_sampling_config("model"),
-        chat_state::PruningConfig::default(),
         Box::new(persistence),
         event_tx,
         tokio_util::sync::CancellationToken::new(),

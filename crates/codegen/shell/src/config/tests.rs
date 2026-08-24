@@ -337,12 +337,6 @@ fn memory_config_defaults_are_correct() {
         assert!(mem.flush.flush_model.is_none());
         assert_eq!(mem.flush.max_flush_write_chars, 8000);
         assert!(mem.flush.idle_timeout_secs.is_none());
-        assert!(mem.pruning.enabled);
-        assert_eq!(mem.pruning.keep_last_n_turns, 3);
-        assert_eq!(mem.pruning.soft_trim_threshold, 4000);
-        assert_eq!(mem.pruning.soft_trim_head, 1500);
-        assert_eq!(mem.pruning.soft_trim_tail, 1500);
-        assert_eq!(mem.pruning.hard_clear_age_turns, 10);
         assert!(mem.watcher.enabled);
         assert_eq!(mem.watcher.stale_claim_secs, 60);
         assert!(mem.dream.enabled);
@@ -404,13 +398,6 @@ max_flush_write_chars = 16000
 idle_timeout_secs = 300
 semantic_dedup_threshold = 0.85
 
-[compaction.pruning]
-enabled = false
-keep_last_n_turns = 5
-soft_trim_threshold = 8000
-soft_trim_head = 3000
-soft_trim_tail = 3000
-hard_clear_age_turns = 20
 "#;
         let config: toml::Value = toml::from_str(toml_str).unwrap();
         let mem = MemoryConfig::resolve(false, false, &config, None);
@@ -437,9 +424,6 @@ hard_clear_age_turns = 20
         assert_eq!(mem.flush.max_flush_write_chars, 16000);
         assert_eq!(mem.flush.idle_timeout_secs, Some(300));
         assert_eq!(mem.flush.semantic_dedup_threshold, Some(0.85));
-        assert!(!mem.pruning.enabled);
-        assert_eq!(mem.pruning.keep_last_n_turns, 5);
-        assert_eq!(mem.pruning.hard_clear_age_turns, 20);
     });
 }
 #[test]
@@ -460,7 +444,6 @@ max_chunk_chars = 3200
         assert_eq!(mem.embedding.dimensions, 1024);
         assert_eq!(mem.search.max_results, 6);
         assert!(mem.flush.enabled);
-        assert!(mem.pruning.enabled);
     });
 }
 #[test]
@@ -476,20 +459,6 @@ fn memory_config_remote_settings_enable() {
                 mem.enabled,
                 "remote memory_enabled=true should enable memory"
             );
-    });
-}
-#[test]
-fn memory_config_remote_settings_pruning() {
-    without_memory(|| {
-        let config = toml::Value::Table(toml::map::Map::new());
-        let remote = crate::util::config::RemoteSettings {
-            pruning_enabled: Some(true),
-            pruning_keep_last_n_turns: Some(5),
-            ..Default::default()
-        };
-        let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert!(mem.pruning.enabled);
-        assert_eq!(mem.pruning.keep_last_n_turns, 5);
     });
 }
 #[test]

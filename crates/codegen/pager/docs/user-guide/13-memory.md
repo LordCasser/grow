@@ -411,21 +411,6 @@ You configure flush under `[compaction]`, not `[memory]`, because it is a compac
 | `idle_timeout_secs` | unset | Idle seconds before a background flush. When unset, flush runs only before compaction. |
 | `semantic_dedup_threshold` | unset | Cosine-similarity threshold for de-duplicating flushed content. When unset, defaults to `0.92`. |
 
-### Pruning Settings (`[compaction.pruning]`)
-
-You configure pruning under `[compaction]`, not `[memory]`, because it is a compaction behavior.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `true` | Enable tool-result pruning |
-| `keep_last_n_turns` | `3` | Number of recent turns whose tool results are never pruned |
-| `soft_trim_threshold` | `4000` | Character threshold above which old tool results are soft-trimmed |
-| `soft_trim_head` | `1500` | Characters kept from the start of a soft-trimmed result |
-| `soft_trim_tail` | `1500` | Characters kept from the end of a soft-trimmed result |
-| `hard_clear_age_turns` | `10` | Turn age after which tool results are replaced with a placeholder |
-
----
-
 ## Memory Staleness
 
 When a session memory is old, Grow attaches a staleness note to it in search results. Older results get a stronger reminder to verify the current state before you rely on them. These notes help you spot stored facts that might no longer be accurate. Global and workspace memories never receive staleness notes, because they hold curated long-term knowledge.

@@ -4,7 +4,7 @@ use crate::bundle;
 pub use config_types::{
     MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig, MemoryGcConfig, MemoryIndexConfig,
     MemoryInitialInjectionConfig, MemorySearchConfig, MemorySessionConfig, MemoryWatcherConfig,
-    MmrConfig, PruningConfig, TemporalDecayConfig,
+    MmrConfig, TemporalDecayConfig,
 };
 use serde::Deserialize;
 /// Full configuration for the memory system.
@@ -14,9 +14,7 @@ use serde::Deserialize;
 /// `--experimental-memory` CLI flag or `GROW_MEMORY=1` env var.
 /// Force-disabled via `GROW_MEMORY=0` (overrides TOML and remote settings).
 ///
-/// All sub-configs are pre-populated with production-ready defaults so that
-/// later PRs (indexing, search, flush, pruning) can read them without any
-/// config migration.
+/// All sub-configs are pre-populated with production-ready defaults.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
@@ -44,12 +42,6 @@ pub struct MemoryConfig {
     /// not under `[memory]`. Flush is a compaction behavior.
     #[serde(skip)]
     pub flush: MemoryFlushConfig,
-    /// Tool-result pruning settings.
-    ///
-    /// **Note:** Configured under `[compaction.pruning]` in config.toml,
-    /// not under `[memory]`. Pruning is a compaction behavior.
-    #[serde(skip)]
-    pub pruning: PruningConfig,
     /// Per-agent memory root override (e.g. `~/.grow/agent-memory/<name>/`).
     #[serde(skip)]
     pub root_dir_override: Option<std::path::PathBuf>,
@@ -85,11 +77,6 @@ impl MemoryConfig {
                 && let Ok(f) = flush.clone().try_into()
             {
                 result.flush = f;
-            }
-            if let Some(pruning) = compaction.get("pruning")
-                && let Ok(p) = pruning.clone().try_into()
-            {
-                result.pruning = p;
             }
         }
         if let Some(remote) = remote {
@@ -136,21 +123,6 @@ impl MemoryConfig {
                 }
                 if let Some(v) = remote.memory_embedding_dimensions {
                     result.embedding.dimensions = v as usize;
-                }
-            }
-            let has_local_pruning = config
-                .get("compaction")
-                .and_then(|c| c.get("pruning"))
-                .is_some();
-            if !has_local_pruning {
-                if let Some(v) = remote.pruning_enabled {
-                    result.pruning.enabled = v;
-                }
-                if let Some(v) = remote.pruning_keep_last_n_turns {
-                    result.pruning.keep_last_n_turns = v as usize;
-                }
-                if let Some(v) = remote.pruning_soft_trim_threshold {
-                    result.pruning.soft_trim_threshold = v as usize;
                 }
             }
             let has_local_flush = config

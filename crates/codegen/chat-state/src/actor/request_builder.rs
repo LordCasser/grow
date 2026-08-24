@@ -1,28 +1,17 @@
-//! ConversationRequest assembly — image compaction, pruning, repair, memory projection.
+//! ConversationRequest assembly — image projection, repair, memory projection.
 
 use sampling_types::{ContentPart, ConversationItem, ConversationRequest, ToolSpec};
 
 use super::ChatStateActor;
 use crate::MessageCause;
 use crate::events::ChatStateEvent;
-use crate::types::PruningConfig;
-
-/// Placeholder inserted when a tool result is hard-cleared.
-///
-/// `pub(super)` so that `mutations.rs` can use the same string when it
-/// hard-clears tool results in the retained in-memory conversation.
-pub(super) const HARD_CLEAR_PLACEHOLDER: &str = "[Tool result omitted — too old]";
-
-/// Separator inserted between head and tail in soft-trimmed results.
-const SOFT_TRIM_SEPARATOR: &str = "\n\n[…trimmed…]\n\n";
 
 impl ChatStateActor {
     /// Build a `ConversationRequest` from the current actor state.
     ///
     /// 1. Evict oldest inline images when the inline-image bytes near 50 MB
-    /// 2. Prune old tool results if over 50% context utilization
-    /// 3. Append retrieved memory context to Timeline exactly once
-    /// 4. Assemble and return the `ConversationRequest`
+    /// 2. Append retrieved memory context to Timeline exactly once
+    /// 3. Assemble and return the `ConversationRequest`
     ///
     /// # Repair invariant
     ///
@@ -40,10 +29,6 @@ impl ChatStateActor {
             sampling_types::DanglingToolCallReason::UserCancelled,
         )
         .await?;
-        let needs_prune = should_prune(
-            self.state.total_tokens,
-            self.state.sampling_config.context_window,
-        );
         if let Some(reminder) = memory_reminder
             .as_deref()
             .map(str::trim)
@@ -79,11 +64,10 @@ impl ChatStateActor {
         let body_bytes = conversation_body_bytes(self.state.timeline.surface());
         let inline_images = inline_image_count(self.state.timeline.surface());
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
-        let needs_mutation = needs_prune || needs_image_compaction;
 
-        // Only allocate the mutable working copy when a mutation path is taken.
+        // Only allocate the mutable working copy when image eviction is needed.
         let mut eviction: Option<ImageEvictionOutcome> = None;
-        let items = if needs_mutation {
+        let items = if needs_image_compaction {
             let mut items = self.state.timeline.surface().to_vec();
 
             // Step 1: When the body nears the 50 MB ceiling, evict oldest
@@ -91,22 +75,15 @@ impl ChatStateActor {
             // Reclaiming a batch frees headroom for many subsequent image
             // turns, so the prefix is rewritten once and then stays cache-warm
             // — instead of re-triggering and re-busting the cache every turn.
-            if needs_image_compaction {
-                eviction = Some(compact_images_to_byte_budget(
-                    &mut items,
-                    body_bytes,
-                    IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
-                ));
-            }
-
-            // Step 2: Prune old tool results if context is > 50% utilized
-            if needs_prune {
-                prune_conversation(&mut items, &self.pruning_config);
-            }
+            eviction = Some(compact_images_to_byte_budget(
+                &mut items,
+                body_bytes,
+                IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
+            ));
 
             items
         } else {
-            // Hot path: no pruning and no old images —
+            // Hot path: no image eviction —
             // clone directly into the request without any intermediate mutation passes.
             self.state.timeline.surface().to_vec()
         };
@@ -127,7 +104,7 @@ impl ChatStateActor {
             });
         }
 
-        // Step 4: Assemble request
+        // Step 3: Assemble request
         Ok(ConversationRequest {
             items,
             tools: tool_definitions,
@@ -188,66 +165,6 @@ fn prompt_cache_key(
     }
     let digest = hasher.finalize().to_hex();
     format!("grow-{}", &digest.as_str()[..32])
-}
-
-// ============================================================================
-// Pruning (standalone functions, no actor state needed)
-// ============================================================================
-
-/// Check whether pruning should run based on context utilization.
-///
-/// Returns `true` when `total_tokens` exceeds 50% of `context_window`.
-pub(crate) fn should_prune(total_tokens: u64, context_window: std::num::NonZeroU64) -> bool {
-    total_tokens > context_window.get() / 2
-}
-
-/// Prune old, large tool results from the conversation in place.
-///
-/// Turn age is estimated by walking backward through the conversation and
-/// counting `User` items to determine which "turn" each tool result belongs to.
-pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: &PruningConfig) {
-    if !config.enabled {
-        return;
-    }
-
-    let mut turn_from_end: usize = 0;
-    let mut seen_first_user = false;
-
-    for i in (0..conversation.len()).rev() {
-        if matches!(&conversation[i], ConversationItem::User(_)) {
-            if seen_first_user {
-                turn_from_end += 1;
-            }
-            seen_first_user = true;
-            continue;
-        }
-
-        let ConversationItem::ToolResult(tool_result) = &mut conversation[i] else {
-            continue;
-        };
-
-        // Never prune recent turns.
-        if turn_from_end < config.keep_last_n_turns {
-            continue;
-        }
-
-        // Hard clear: very old tool results → replace entirely.
-        if turn_from_end >= config.hard_clear_age_turns {
-            if tool_result.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
-                tool_result.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
-            }
-            continue;
-        }
-
-        // Soft trim: large tool results → keep head + tail.
-        let content_len = tool_result.content.chars().count();
-        if content_len > config.soft_trim_threshold {
-            let head = safe_char_slice(&tool_result.content, 0, config.soft_trim_head);
-            let tail = safe_char_slice_tail(&tool_result.content, config.soft_trim_tail);
-            tool_result.content =
-                std::sync::Arc::<str>::from(format!("{head}{SOFT_TRIM_SEPARATOR}{tail}"));
-        }
-    }
 }
 
 // ============================================================================
@@ -492,47 +409,9 @@ pub(crate) fn compact_images_to_byte_budget(
     }
 }
 
-// ============================================================================
-// String helpers
-// ============================================================================
-
-fn safe_char_slice(s: &str, start: usize, count: usize) -> String {
-    s.chars().skip(start).take(count).collect()
-}
-
-fn safe_char_slice_tail(s: &str, count: usize) -> String {
-    let total = s.chars().count();
-    if count >= total {
-        return s.to_string();
-    }
-    s.chars().skip(total - count).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn should_prune_gating() {
-        use std::num::NonZeroU64;
-        let cw = NonZeroU64::new(10000).unwrap();
-        assert!(!should_prune(1000, cw)); // 10%
-        assert!(should_prune(6000, cw)); // 60%
-        assert!(!should_prune(5000, cw)); // 50% exact (> not >=)
-    }
-
-    #[test]
-    fn prune_disabled_is_noop() {
-        let mut conv = vec![ConversationItem::tool_result("c1", "x".repeat(10_000))];
-        let config = PruningConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        prune_conversation(&mut conv, &config);
-        if let ConversationItem::ToolResult(ref tr) = conv[0] {
-            assert_eq!(tr.content.len(), 10_000);
-        }
-    }
 
     // -- image size-gated compaction tests --
 

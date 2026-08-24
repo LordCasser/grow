@@ -57,39 +57,6 @@ pub struct NotificationMeta {
     pub turn_start_ms: Option<i64>,
 }
 
-/// Configuration for tool-result pruning.
-///
-/// Prunes old, large tool results from the conversation to reclaim context space.
-/// Two modes: soft trim (keep head + tail) and hard clear (replace entirely).
-#[derive(Debug, Clone)]
-pub struct PruningConfig {
-    /// Whether pruning is enabled.
-    pub enabled: bool,
-    /// Number of recent turns whose tool results are never pruned.
-    pub keep_last_n_turns: usize,
-    /// Character threshold above which old tool results are soft-trimmed.
-    pub soft_trim_threshold: usize,
-    /// Characters to keep from the start of a soft-trimmed result.
-    pub soft_trim_head: usize,
-    /// Characters to keep from the end of a soft-trimmed result.
-    pub soft_trim_tail: usize,
-    /// Turn age after which tool results are hard-cleared (replaced with placeholder).
-    pub hard_clear_age_turns: usize,
-}
-
-impl Default for PruningConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            keep_last_n_turns: 3,
-            soft_trim_threshold: 4000,
-            soft_trim_head: 1500,
-            soft_trim_tail: 1500,
-            hard_clear_age_turns: 10,
-        }
-    }
-}
-
 /// Credential/secret fields that the actor stores opaquely.
 ///
 /// These are fields from the shell's full `Config` that aren't part of

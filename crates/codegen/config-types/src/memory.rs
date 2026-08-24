@@ -336,37 +336,6 @@ impl Default for MemoryFlushConfig {
     }
 }
 
-/// Tool-result pruning configuration (`[compaction.pruning]`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PruningConfig {
-    /// Whether pruning is enabled.
-    pub enabled: bool,
-    /// Number of recent turns whose tool results are never pruned.
-    pub keep_last_n_turns: usize,
-    /// Character threshold above which old tool results are soft-trimmed.
-    pub soft_trim_threshold: usize,
-    /// Characters to keep from the start of a soft-trimmed result.
-    pub soft_trim_head: usize,
-    /// Characters to keep from the end of a soft-trimmed result.
-    pub soft_trim_tail: usize,
-    /// Turn age after which tool results are hard-cleared (replaced with placeholder).
-    pub hard_clear_age_turns: usize,
-}
-
-impl Default for PruningConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            keep_last_n_turns: 3,
-            soft_trim_threshold: 4000,
-            soft_trim_head: 1500,
-            soft_trim_tail: 1500,
-            hard_clear_age_turns: 10,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,7 +350,6 @@ mod tests {
         assert!(!s.mmr.enabled);
         assert!(MemorySessionConfig::default().save_on_end);
         assert_eq!(MemoryGcConfig::default().max_age_days, 30);
-        assert_eq!(PruningConfig::default().keep_last_n_turns, 3);
     }
 
     #[test]
