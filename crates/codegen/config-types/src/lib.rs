@@ -565,39 +565,6 @@ pub struct RemoteSettings {
     /// Absent ⇒ client default (enabled).
     #[serde(default)]
     pub goal_enabled: Option<bool>,
-    /// When `Some(true)`, enable the goal-completion classifier remotely.
-    /// When `Some(false)`, force-disable it.
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
-    #[serde(default)]
-    pub goal_classifier_enabled: Option<bool>,
-    /// When `Some(true)`, enable the goal planner remotely.
-    /// When `Some(false)`, force-disable it.
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
-    #[serde(default)]
-    pub goal_planner_enabled: Option<bool>,
-    /// When `Some(true)`, enable the goal summarizer remotely (the one-shot
-    /// closing "what was accomplished" summary on a verified achievement).
-    /// When `Some(false)`, force-disable it (kill-switch).
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
-    #[serde(default)]
-    pub goal_summary_enabled: Option<bool>,
-    /// Number of adversarial skeptics spawned per goal-verification
-    /// attempt (step ② of the staged gate). Clamped to `1..=5` at the
-    /// resolver. Absent ⇒ harness default of
-    /// `goal_classifier::GOAL_VERIFIER_SKEPTIC_COUNT` (3 today).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal_verifier_count: Option<u32>,
-    /// Maximum per-goal classifier runs before the goal auto-pauses
-    /// (BackOff). Clamped to `1..=10` at the resolver. Absent ⇒ harness
-    /// default of `goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT`
-    /// (3 today).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal_classifier_max_runs: Option<u32>,
-    /// Fire the stall-triggered strategist every N consecutive
-    /// `NotAchieved` verifications. Clamped to `>= 1` at the resolver.
-    /// Absent ⇒ default of `max(1, goal_classifier_max_runs / 2)`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal_strategist_every: Option<u32>,
     #[serde(default)]
     pub workflows_enabled: Option<bool>,
     /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
@@ -1092,42 +1059,6 @@ mod tests {
         let round: RemoteSettings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(round.workflows_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_present() {
-        let json = r#"{"goal_planner_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_false() {
-        let json = r#"{"goal_planner_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, None);
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_present() {
-        let json = r#"{"goal_summary_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_false() {
-        let json = r#"{"goal_summary_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, None);
     }
     #[test]
     fn remote_settings_folder_trust_enabled_present() {

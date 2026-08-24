@@ -63,10 +63,7 @@ impl ToolKind {
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalRead => "Read Goal",
-            ToolKind::GoalProgressUpdate => "Update Goal Progress",
-            ToolKind::GoalReplanRequest => "Request Goal Replan",
             ToolKind::GoalLifecycleUpdate => "Update Goal Lifecycle",
-            ToolKind::GoalPlanSubmit => "Submit Goal Plan",
             ToolKind::Workflow => "Workflow",
             ToolKind::CapabilityRequest => "Request Tool Access",
             ToolKind::Other => "Tool",
@@ -88,7 +85,6 @@ impl ToolKind {
             | ToolKind::ContextRecall
             | ToolKind::GoalRead
             | ToolKind::WebFetch
-            | ToolKind::GoalPlanSubmit
             | ToolKind::PlanControl
             | ToolKind::CapabilityRequest
             | ToolKind::AskUser => ToolScope::Read,
@@ -106,8 +102,6 @@ impl ToolKind {
             | ToolKind::SearchTool
             | ToolKind::UseTool
             | ToolKind::Monitor
-            | ToolKind::GoalProgressUpdate
-            | ToolKind::GoalReplanRequest
             | ToolKind::GoalLifecycleUpdate
             | ToolKind::Workflow
             | ToolKind::Other => ToolScope::Write,

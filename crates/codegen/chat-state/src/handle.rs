@@ -473,6 +473,13 @@ impl ChatStateHandle {
         .await
     }
 
+    pub async fn timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
+        self.query("GetTimelineEvents", |reply| {
+            ChatStateCommand::GetTimelineEvents { reply }
+        })
+        .await
+    }
+
     /// Freeze the reference and materialize exactly that committed Surface in
     /// one actor command, so auxiliary assembly cannot race a parent append.
     pub async fn materialize_timeline(

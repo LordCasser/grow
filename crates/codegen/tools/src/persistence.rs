@@ -4,12 +4,150 @@
 //! state domain. Empty session paths construct a no-op handle explicitly.
 
 use std::io;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-
 use crate::types::resources::Resources;
+
+const MAX_RESOURCES_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Identity-bound storage capability for the tool runtime's independent state
+/// domain. Implementations must never reopen `display_path` as authority.
+pub trait ResourcesStateStore: Send + Sync {
+    fn display_path(&self) -> &Path;
+    fn read(&self) -> io::Result<Option<Vec<u8>>>;
+    fn write_atomic(&self, bytes: &[u8], durable: bool) -> io::Result<()>;
+}
+
+/// Local capability used by non-session embedders and tests. The parent
+/// directory is opened once; every later operation is relative to that pinned
+/// handle and rejects a symlink/special-file target.
+pub struct LocalResourcesStateStore {
+    display_path: PathBuf,
+    directory: cap_std::fs::Dir,
+    name: std::ffi::OsString,
+}
+
+impl LocalResourcesStateStore {
+    pub fn open(state_path: PathBuf) -> io::Result<Self> {
+        let parent = state_path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
+        })?;
+        let name = state_path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no file name")
+        })?.to_os_string();
+        let directory = cap_std::fs::Dir::open_ambient_dir(
+            parent,
+            cap_std::ambient_authority(),
+        )?;
+        Ok(Self {
+            display_path: state_path,
+            directory,
+            name,
+        })
+    }
+
+    fn open_read(&self) -> io::Result<cap_std::fs::File> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = self.directory.open_with(&self.name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resources state is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+}
+
+impl ResourcesStateStore for LocalResourcesStateStore {
+    fn display_path(&self) -> &Path {
+        &self.display_path
+    }
+
+    fn read(&self) -> io::Result<Option<Vec<u8>>> {
+        let file = match self.open_read() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() > MAX_RESOURCES_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resources state exceeds the byte limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_RESOURCES_STATE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_RESOURCES_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resources state grew while reading",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    fn write_atomic(&self, bytes: &[u8], durable: bool) -> io::Result<()> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
+        if bytes.len() as u64 > MAX_RESOURCES_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resources state exceeds the byte limit",
+            ));
+        }
+        match self.directory.symlink_metadata(&self.name) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "resources state target is not a regular file",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let tmp_name = format!(
+            ".resources_state.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        );
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut file = self.directory.open_with(&tmp_name, &options)?;
+        let result = (|| {
+            file.write_all(bytes)?;
+            if durable {
+                file.sync_all()?;
+            }
+            drop(file);
+            self.directory
+                .rename(&tmp_name, &self.directory, &self.name)?;
+            if durable {
+                self.directory
+                    .try_clone()?
+                    .into_std_file()
+                    .sync_all()
+                    .map_err(published_persistence_error)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = self.directory.remove_file(&tmp_name);
+        }
+        result
+    }
+}
 
 #[derive(Debug)]
 struct PublishedPersistenceError(io::Error);
@@ -40,8 +178,9 @@ fn published_persistence_error(error: io::Error) -> io::Error {
 /// from `Resources::serialize()` and writes it to disk. On load, parses the
 /// JSON and feeds it to `Resources::load_from()`.
 pub struct ResourcesPersistence {
-    /// Path to the JSON file where Resources state is persisted
+    /// Display-only path for diagnostics.
     state_path: PathBuf,
+    store: Option<Arc<dyn ResourcesStateStore>>,
     /// Channel to send serialized state to the background writer
     tx: tokio::sync::mpsc::UnboundedSender<ResourcesPersistenceCommand>,
     noop: bool,
@@ -81,6 +220,7 @@ impl ResourcesPersistence {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             state_path: PathBuf::from("/dev/null"),
+            store: None,
             tx,
             noop: true,
         }
@@ -110,6 +250,7 @@ impl ResourcesPersistence {
         (
             Self {
                 state_path: PathBuf::from("/dev/null"),
+                store: None,
                 tx,
                 noop: false,
             },
@@ -117,20 +258,31 @@ impl ResourcesPersistence {
         )
     }
 
-    /// Create a new persistence handle and spawn the background writer task.
-    pub fn new(state_path: PathBuf) -> Self {
+    /// Create a persistence handle around an already established storage
+    /// capability and spawn its single background writer.
+    pub fn new(store: Arc<dyn ResourcesStateStore>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let writer_path = state_path.clone();
+        let state_path = store.display_path().to_path_buf();
+        let writer_store = store.clone();
 
         tokio::spawn(async move {
-            Self::writer_loop(rx, writer_path).await;
+            Self::writer_loop(rx, writer_store).await;
         });
 
         Self {
             state_path,
+            store: Some(store),
             tx,
             noop: false,
         }
+    }
+
+    /// Open a pinned local-file capability. Session runtimes should instead
+    /// pass their existing session-directory capability to [`Self::new`].
+    pub fn local(state_path: PathBuf) -> io::Result<Self> {
+        Ok(Self::new(Arc::new(LocalResourcesStateStore::open(
+            state_path,
+        )?)))
     }
 
     /// Load existing Resources state from disk, if the file exists.
@@ -140,12 +292,19 @@ impl ResourcesPersistence {
     ///
     /// Returns `true` if state was loaded, `false` if no file or parse error.
     pub fn load(&self, resources: &mut Resources) -> bool {
-        let json = match std::fs::read_to_string(&self.state_path) {
-            Ok(s) => s,
-            Err(_) => return false,
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let json = match store.read() {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(?error, path = ?self.state_path, "Failed to read resources state");
+                return false;
+            }
         };
 
-        let top: serde_json::Value = match serde_json::from_str(&json) {
+        let top: serde_json::Value = match serde_json::from_slice(&json) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -261,7 +420,7 @@ impl ResourcesPersistence {
 
     async fn writer_loop(
         mut rx: tokio::sync::mpsc::UnboundedReceiver<ResourcesPersistenceCommand>,
-        state_path: PathBuf,
+        store: Arc<dyn ResourcesStateStore>,
     ) {
         let mut pending: Option<serde_json::Value> = None;
         let mut debounce = tokio::time::interval(Duration::from_millis(500));
@@ -279,16 +438,16 @@ impl ResourcesPersistence {
                             respond_to,
                         }) => {
                             pending = None;
-                            let result = Self::write_json_durable(&state_path, &snapshot).await;
+                            let result = Self::write_json(store.clone(), &snapshot, true).await;
                             let _ = respond_to.send(result);
                         }
                         Some(ResourcesPersistenceCommand::Flush(done)) => {
                             if let Some(snapshot) = pending.take()
-                                && let Err(error) = Self::write_json(&state_path, &snapshot).await
+                                && let Err(error) = Self::write_json(store.clone(), &snapshot, false).await
                             {
                                 tracing::warn!(
                                     ?error,
-                                    ?state_path,
+                                    path = ?store.display_path(),
                                     "Failed to flush resources state"
                                 );
                             }
@@ -296,11 +455,11 @@ impl ResourcesPersistence {
                         }
                         None => {
                             if let Some(snapshot) = pending.take()
-                                && let Err(error) = Self::write_json(&state_path, &snapshot).await
+                                && let Err(error) = Self::write_json(store.clone(), &snapshot, false).await
                             {
                                 tracing::warn!(
                                     ?error,
-                                    ?state_path,
+                                    path = ?store.display_path(),
                                     "Failed to flush resources state"
                                 );
                             }
@@ -310,11 +469,11 @@ impl ResourcesPersistence {
                 }
                 _ = debounce.tick() => {
                     if let Some(snapshot) = pending.take()
-                        && let Err(error) = Self::write_json(&state_path, &snapshot).await
+                        && let Err(error) = Self::write_json(store.clone(), &snapshot, false).await
                     {
                         tracing::warn!(
                             ?error,
-                            ?state_path,
+                            path = ?store.display_path(),
                             "Failed to save resources state"
                         );
                     }
@@ -323,111 +482,16 @@ impl ResourcesPersistence {
         }
     }
 
-    async fn write_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
-        let (tmp_path, json) = Self::prepare_write(path, value)?;
-        tokio::fs::write(&tmp_path, json).await?;
-        Self::replace_state_path(path, &tmp_path).await
-    }
-
-    async fn write_json_durable(path: &Path, value: &serde_json::Value) -> io::Result<()> {
-        let (tmp_path, json) = Self::prepare_write(path, value)?;
-        let result = async {
-            let mut file = tokio::fs::File::create(&tmp_path).await?;
-            file.write_all(&json).await?;
-            file.sync_all().await?;
-            drop(file);
-            Self::publish_durable(path, &tmp_path).await
-        }
-        .await;
-        Self::cleanup_temp_on_error(&tmp_path, result).await
-    }
-
-    async fn cleanup_temp_on_error(tmp_path: &Path, result: io::Result<()>) -> io::Result<()> {
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(tmp_path).await;
-        }
-        result
-    }
-
-    fn prepare_write(path: &Path, value: &serde_json::Value) -> io::Result<(PathBuf, Vec<u8>)> {
+    async fn write_json(
+        store: Arc<dyn ResourcesStateStore>,
+        value: &serde_json::Value,
+        durable: bool,
+    ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(value)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok((path.with_extension("json.tmp"), json))
-    }
-
-    async fn replace_state_path(path: &Path, tmp_path: &Path) -> io::Result<()> {
-        if path.is_dir() {
-            tracing::warn!(
-                "Resources state path {:?} is a directory — removing before write",
-                path
-            );
-            tokio::fs::remove_dir_all(path).await?;
-        }
-        tokio::fs::rename(tmp_path, path).await
-    }
-
-    #[cfg(not(windows))]
-    async fn publish_durable(path: &Path, tmp_path: &Path) -> io::Result<()> {
-        Self::replace_state_path(path, tmp_path).await?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
-            })
-            .map_err(published_persistence_error)?;
-        let directory = tokio::fs::File::open(parent)
+        tokio::task::spawn_blocking(move || store.write_atomic(&json, durable))
             .await
-            .map_err(published_persistence_error)?;
-        directory
-            .sync_all()
-            .await
-            .map_err(published_persistence_error)
-    }
-
-    #[cfg(windows)]
-    async fn publish_durable(path: &Path, tmp_path: &Path) -> io::Result<()> {
-        use windows::Win32::Storage::FileSystem::MoveFileExW;
-        use windows::core::PCWSTR;
-        if path.is_dir() {
-            tokio::fs::remove_dir_all(path).await?;
-        }
-        let from = Self::windows_extended_path(tmp_path)?;
-        let to = Self::windows_extended_path(path)?;
-        unsafe {
-            MoveFileExW(
-                PCWSTR(from.as_ptr()),
-                PCWSTR(to.as_ptr()),
-                Self::WINDOWS_MOVE_FLAGS,
-            )
-        }
-        .map_err(io::Error::other)
-    }
-
-    #[cfg(windows)]
-    const WINDOWS_MOVE_FLAGS: windows::Win32::Storage::FileSystem::MOVE_FILE_FLAGS =
-        windows::Win32::Storage::FileSystem::MOVE_FILE_FLAGS(1 | 8);
-
-    #[cfg(windows)]
-    fn windows_extended_path(path: &Path) -> io::Result<Vec<u16>> {
-        use std::os::windows::ffi::OsStrExt;
-        let path = std::path::absolute(path)?;
-        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path contains NUL",
-            ));
-        }
-        let unc = wide.starts_with(&[92, 92]);
-        let mut result = if unc { r"\\?\UNC\" } else { r"\\?\" }
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        if unc {
-            wide.drain(..2);
-        }
-        result.extend(wide);
-        result.push(0);
-        Ok(result)
+            .map_err(|error| io::Error::other(format!("resources writer task failed: {error}")))?
     }
 }
 
@@ -447,7 +511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
 
-        let persistence = ResourcesPersistence::new(state_path);
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
 
         // Build resources with registered state types
         let mut resources = Resources::new();
@@ -477,7 +541,7 @@ mod tests {
     async fn model_image_input_state_roundtrips_per_runtime_identity() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        let persistence = ResourcesPersistence::new(state_path);
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
         let rejected = ModelImageInputKey::new("text-model", "messages", "endpoint-a");
 
         let mut resources = Resources::new();
@@ -517,7 +581,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("nonexistent.json");
 
-        let persistence = ResourcesPersistence::new(state_path);
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
         let mut resources = Resources::new();
         assert!(!persistence.load(&mut resources));
     }
@@ -528,7 +592,7 @@ mod tests {
         let state_path = dir.path().join("resources_state.json");
         std::fs::write(&state_path, "{ this is not valid json }").unwrap();
 
-        let persistence = ResourcesPersistence::new(state_path);
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
         let mut resources = Resources::new();
         assert!(!persistence.load(&mut resources));
     }
@@ -541,7 +605,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        let persistence = ResourcesPersistence::new(state_path.clone());
+        let persistence = ResourcesPersistence::local(state_path.clone()).unwrap();
 
         let mut resources = Resources::new();
         resources.register_state::<WebCitationCounter>();
@@ -584,7 +648,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
 
-        let persistence = ResourcesPersistence::new(state_path.clone());
+        let persistence = ResourcesPersistence::local(state_path.clone()).unwrap();
 
         let mut resources = Resources::new();
         resources.register_state::<WebCitationCounter>();
@@ -608,7 +672,7 @@ mod tests {
     async fn save_and_flush_supersedes_older_pending_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        let persistence = ResourcesPersistence::new(state_path.clone());
+        let persistence = ResourcesPersistence::local(state_path.clone()).unwrap();
         persistence.flush().await;
 
         let mut resources = Resources::new();
@@ -635,9 +699,9 @@ mod tests {
     #[tokio::test]
     async fn save_and_flush_error_can_be_retried() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join("missing");
-        let state_path = parent.join("resources_state.json");
-        let persistence = ResourcesPersistence::new(state_path.clone());
+        let state_path = dir.path().join("resources_state.json");
+        std::fs::create_dir(&state_path).unwrap();
+        let persistence = ResourcesPersistence::local(state_path.clone()).unwrap();
 
         let mut resources = Resources::new();
         resources.register_state::<WebCitationCounter>();
@@ -648,7 +712,7 @@ mod tests {
 
         assert!(persistence.save_and_flush(snapshot.clone()).await.is_err());
 
-        std::fs::create_dir(parent).unwrap();
+        std::fs::remove_dir(&state_path).unwrap();
         persistence.save_and_flush(snapshot).await.unwrap();
 
         let content = std::fs::read_to_string(state_path).unwrap();
@@ -660,7 +724,7 @@ mod tests {
     async fn enqueued_acknowledged_save_precedes_a_newer_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        let persistence = ResourcesPersistence::new(state_path.clone());
+        let persistence = ResourcesPersistence::local(state_path.clone()).unwrap();
         persistence.flush().await;
 
         let mut resources = Resources::new();
@@ -688,17 +752,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_create_failure_cleans_temp_and_allows_retry() {
+    async fn failed_publish_cleans_generated_temp() {
         let dir = tempfile::tempdir().unwrap();
-        let tmp_path = dir.path().join("resources_state.json.tmp");
-        std::fs::write(&tmp_path, "partial").unwrap();
-        let error = io::Error::other("publish failed");
-        let returned = ResourcesPersistence::cleanup_temp_on_error(&tmp_path, Err(error))
+        let state_path = dir.path().join("resources_state.json");
+        std::fs::create_dir(&state_path).unwrap();
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
+        assert!(persistence
+            .save_and_flush(serde_json::json!({"state": {}}))
             .await
-            .unwrap_err();
-        assert_eq!(returned.to_string(), "publish failed");
-        assert!(!tmp_path.exists());
-        std::fs::write(&tmp_path, "retry").unwrap();
+            .is_err());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        );
     }
 
     #[test]
@@ -711,34 +778,34 @@ mod tests {
         assert!(after.to_string().contains("state was published"));
     }
 
-    #[cfg(windows)]
     #[tokio::test]
-    async fn windows_publish_supports_long_paths_and_legacy_directory() {
-        use windows::Win32::Storage::FileSystem::{
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-        assert_eq!(
-            ResourcesPersistence::WINDOWS_MOVE_FLAGS.0,
-            MOVEFILE_REPLACE_EXISTING.0 | MOVEFILE_WRITE_THROUGH.0
-        );
-        let long = PathBuf::from(format!(r"C:\{}", "long\\".repeat(60)));
-        let wide = ResourcesPersistence::windows_extended_path(&long).unwrap();
-        assert!(wide.len() > 260 && String::from_utf16_lossy(&wide).starts_with(r"\\?\"));
-        let unc =
-            ResourcesPersistence::windows_extended_path(Path::new(r"\\server\share\state.json"))
-                .unwrap();
-        assert!(String::from_utf16_lossy(&unc).starts_with(r"\\?\UNC\"));
-        assert!(ResourcesPersistence::windows_extended_path(Path::new("bad\0path")).is_err());
+    #[cfg(unix)]
+    async fn pinned_parent_resists_path_replacement_and_rejects_target_symlink() {
+        use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("state.json");
-        std::fs::create_dir(&target).unwrap();
-        let temp = dir.path().join("state.json.tmp");
-        std::fs::write(&temp, "new").unwrap();
-        ResourcesPersistence::publish_durable(&target, &temp)
+        let session = dir.path().join("session");
+        let moved = dir.path().join("moved");
+        let external = dir.path().join("external");
+        std::fs::create_dir(&session).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let state_path = session.join("resources_state.json");
+        let persistence = ResourcesPersistence::local(state_path).unwrap();
+        std::fs::rename(&session, &moved).unwrap();
+        symlink(&external, &session).unwrap();
+        persistence
+            .save_and_flush(serde_json::json!({"state": {}}))
             .await
             .unwrap();
-        assert_eq!(std::fs::read_to_string(target).unwrap(), "new");
+        assert!(moved.join("resources_state.json").is_file());
+        assert!(!external.join("resources_state.json").exists());
+
+        std::fs::remove_file(moved.join("resources_state.json")).unwrap();
+        symlink(external.join("secret"), moved.join("resources_state.json")).unwrap();
+        assert!(persistence
+            .save_and_flush(serde_json::json!({"state": {}}))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

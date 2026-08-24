@@ -22,8 +22,6 @@ use sampling_types::ReasoningEffort;
 use workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
-#[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
-pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
 mod search_recovery;
@@ -135,6 +133,7 @@ fn contained_directory(
 /// previously validated path and replacing it with a symlink cannot redirect
 /// a canonical write outside the authority root.
 #[cfg(unix)]
+#[derive(Debug)]
 pub(crate) struct ContainedDirectory {
     path: PathBuf,
     handle: std::fs::File,
@@ -142,6 +141,34 @@ pub(crate) struct ContainedDirectory {
 
 #[cfg(unix)]
 impl ContainedDirectory {
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            path: self.path.clone(),
+            handle: self.handle.try_clone()?,
+        })
+    }
+
+    pub(crate) fn is_same_entity(&self, other: &Self) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let left = self.handle.metadata()?;
+        let right = other.handle.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+
+    /// Re-label an already pinned directory after its parent has atomically
+    /// renamed the directory entry. The capability itself is unchanged; the
+    /// path is display-only and must never be reopened as authority.
+    pub(crate) fn rebind_child_display_path(
+        mut self,
+        parent: &Self,
+        child_name: &std::ffi::OsStr,
+    ) -> Self {
+        debug_assert_eq!(Path::new(child_name).file_name(), Some(child_name));
+        self.path = parent.path.join(child_name);
+        self
+    }
+
     pub(crate) fn open(
         root: &Path,
         relative: &Path,
@@ -217,6 +244,167 @@ impl ContainedDirectory {
 
     pub(crate) fn display_path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn list_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let owned: std::os::fd::OwnedFd = self.handle.try_clone()?.into();
+        let mut directory = nix::dir::Dir::from_fd(owned).map_err(io::Error::from)?;
+        let mut names = Vec::new();
+        for entry in directory.iter() {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                names.push(std::ffi::OsString::from_vec(name.to_vec()));
+            }
+        }
+        Ok(names)
+    }
+
+    pub(crate) fn create_child(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let name_c = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "contained path contains NUL")
+        })?;
+        if unsafe { libc::mkdirat(self.handle.as_raw_fd(), name_c.as_ptr(), 0o700) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        self.sync()?;
+        let handle = Self::open_child_directory(&self.handle, name, description, false)?;
+        Ok(Self {
+            path: self.path.join(name),
+            handle,
+        })
+    }
+
+    pub(crate) fn sync_tree(&self) -> io::Result<()> {
+        for name in self.list_names()? {
+            match self.open_relative(Path::new(&name), "contained child directory", false) {
+                Ok(directory) => directory.sync_tree()?,
+                Err(directory_error) => match self.open_regular(&name, "contained child file") {
+                    Ok(file) => sync_file_durable(&file)?,
+                    Err(_) => return Err(directory_error),
+                },
+            }
+        }
+        self.sync()
+    }
+
+    pub(crate) fn remove_tree_child(&self, name: &std::ffi::OsStr) -> io::Result<()> {
+        match self.open_relative(Path::new(name), "contained child directory", false) {
+            Ok(directory) => {
+                directory.remove_all_contents()?;
+                self.remove_empty_child(name, true)
+            }
+            Err(_) => self.remove_file(name, true),
+        }
+    }
+
+    pub(crate) fn remove_all_contents(&self) -> io::Result<()> {
+        for child in self.list_names()? {
+            match self.open_relative(Path::new(&child), "contained child directory", false) {
+                Ok(_) => self.remove_tree_child(&child)?,
+                Err(_) => self.remove_file(&child, false)?,
+            }
+        }
+        self.sync()
+    }
+
+    pub(crate) fn remove_empty_child(
+        &self,
+        name: &std::ffi::OsStr,
+        durable: bool,
+    ) -> io::Result<()> {
+        let name = Self::component(name)?;
+        if unsafe {
+            libc::unlinkat(
+                self.handle.as_raw_fd(),
+                name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if durable && let Err(error) = self.sync() {
+            tracing::warn!(%error, "directory removal committed but parent sync failed");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rename_child_no_replace(
+        &self,
+        source: &std::ffi::OsStr,
+        target: &std::ffi::OsStr,
+    ) -> io::Result<()> {
+        Self::component(source)?;
+        Self::component(target)?;
+        #[cfg(target_os = "linux")]
+        {
+            use nix::fcntl::{RenameFlags, renameat2};
+            renameat2(
+                &self.handle,
+                Path::new(source),
+                &self.handle,
+                Path::new(target),
+                RenameFlags::RENAME_NOREPLACE,
+            )
+            .map_err(|error| match error {
+                nix::errno::Errno::EEXIST => io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    self.path.join(target).display().to_string(),
+                ),
+                other => io::Error::from(other),
+            })?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let source = std::ffi::CString::new(source.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL")
+            })?;
+            let target = std::ffi::CString::new(target.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL")
+            })?;
+            if unsafe {
+                libc::renameatx_np(
+                    self.handle.as_raw_fd(),
+                    source.as_ptr(),
+                    self.handle.as_raw_fd(),
+                    target.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } == -1
+            {
+                let error = io::Error::last_os_error();
+                return Err(if error.raw_os_error() == Some(libc::EEXIST) {
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        self.path.join(target.to_string_lossy().as_ref()).display().to_string(),
+                    )
+                } else {
+                    error
+                });
+            }
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos"
+        )))]
+        {
+            let _ = (source, target);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handle-relative no-replace rename is unsupported",
+            ));
+        }
+        Ok(())
     }
 
     fn open_child_directory(
@@ -515,7 +703,17 @@ impl ContainedDirectory {
                 return Err(io::Error::last_os_error());
             }
             if durable {
-                self.sync()?;
+                // The target name is already committed. Returning an ordinary
+                // error here would invite callers to retry a write that did in
+                // fact publish. Keep the committed entity authoritative and
+                // report the directory durability degradation separately.
+                if let Err(error) = self.sync() {
+                    tracing::warn!(
+                        path = %self.path.join(name).display(),
+                        %error,
+                        "atomic write committed but directory sync failed"
+                    );
+                }
             }
             Ok(())
         })();
@@ -529,6 +727,7 @@ impl ContainedDirectory {
 }
 
 #[cfg(windows)]
+#[derive(Debug)]
 pub(crate) struct ContainedDirectory {
     path: PathBuf,
     handle: cap_std::fs::Dir,
@@ -536,13 +735,55 @@ pub(crate) struct ContainedDirectory {
 
 #[cfg(windows)]
 impl ContainedDirectory {
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            path: self.path.clone(),
+            handle: self.handle.try_clone()?,
+        })
+    }
+
+    pub(crate) fn is_same_entity(&self, other: &Self) -> io::Result<bool> {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let left = self.handle.try_clone()?.into_std_file().metadata()?;
+        let right = other.handle.try_clone()?.into_std_file().metadata()?;
+        let Some(left_identity) = left.volume_serial_number().zip(left.file_index()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows filesystem did not expose a stable directory identity",
+            ));
+        };
+        let Some(right_identity) = right.volume_serial_number().zip(right.file_index()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows filesystem did not expose a stable directory identity",
+            ));
+        };
+        Ok(left_identity == right_identity)
+    }
+
+    /// Re-label an already pinned directory after its parent has atomically
+    /// renamed the directory entry. The capability itself is unchanged; the
+    /// path is display-only and must never be reopened as authority.
+    pub(crate) fn rebind_child_display_path(
+        mut self,
+        parent: &Self,
+        child_name: &std::ffi::OsStr,
+    ) -> Self {
+        debug_assert_eq!(Path::new(child_name).file_name(), Some(child_name));
+        self.path = parent.path.join(child_name);
+        self
+    }
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
     pub(crate) fn open(
         root: &Path,
         relative: &Path,
         description: &str,
         create_missing: bool,
     ) -> io::Result<Self> {
-        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
         // Open the authority itself without traversing a reparse point. The
         // capability therefore names the directory we validated, even if the
@@ -554,7 +795,9 @@ impl ContainedDirectory {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(root)?;
         let metadata = root_handle.metadata()?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{description} authority is not a regular directory"),
@@ -593,6 +836,148 @@ impl ContainedDirectory {
         &self.path
     }
 
+    pub(crate) fn list_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for entry in self.handle.entries()? {
+            names.push(entry?.file_name());
+        }
+        Ok(names)
+    }
+
+    pub(crate) fn create_child(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<Self> {
+        Self::component(name)?;
+        self.handle.create_dir(name)?;
+        self.sync()?;
+        let handle = Self::open_regular_child_directory(&self.handle, name, description)?;
+        Ok(Self {
+            path: self.path.join(name),
+            handle,
+        })
+    }
+
+    pub(crate) fn sync_tree(&self) -> io::Result<()> {
+        for name in self.list_names()? {
+            match self.open_relative(Path::new(&name), "contained child directory", false) {
+                Ok(directory) => directory.sync_tree()?,
+                Err(directory_error) => match self.open_regular(&name, "contained child file") {
+                    Ok(file) => sync_file_durable(&file)?,
+                    Err(_) => return Err(directory_error),
+                },
+            }
+        }
+        self.sync()
+    }
+
+    pub(crate) fn remove_tree_child(&self, name: &std::ffi::OsStr) -> io::Result<()> {
+        match self.open_relative(Path::new(name), "contained child directory", false) {
+            Ok(directory) => {
+                directory.remove_all_contents()?;
+                self.remove_empty_child(name, true)
+            }
+            Err(_) => {
+                use cap_fs_ext::DirExt as _;
+                self.handle.remove_file_or_symlink(name)?;
+                self.sync()
+            }
+        }
+    }
+
+    pub(crate) fn remove_all_contents(&self) -> io::Result<()> {
+        for child in self.list_names()? {
+            match self.open_relative(Path::new(&child), "contained child directory", false) {
+                Ok(_) => self.remove_tree_child(&child)?,
+                Err(_) => self.remove_file(&child, false)?,
+            }
+        }
+        self.sync()
+    }
+
+    pub(crate) fn remove_empty_child(
+        &self,
+        name: &std::ffi::OsStr,
+        durable: bool,
+    ) -> io::Result<()> {
+        Self::component(name)?;
+        self.handle.remove_dir(name)?;
+        if durable && let Err(error) = self.sync() {
+            tracing::warn!(%error, "directory removal committed but parent sync failed");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rename_child_no_replace(
+        &self,
+        source: &std::ffi::OsStr,
+        target: &std::ffi::OsStr,
+    ) -> io::Result<()> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+        use cap_std::fs::OpenOptionsExt as _;
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
+        };
+
+        Self::component(source)?;
+        Self::component(target)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.access_mode(DELETE.0);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0);
+        options.follow(FollowSymlinks::No);
+        let source_file = self.handle.open_with(source, &options)?.into_std();
+        let parent_file = self.handle.try_clone()?.into_std_file();
+        let target_display = self.path.join(target);
+        let target = target.encode_wide().collect::<Vec<_>>();
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let byte_len = header
+            .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long"))?;
+        let words = byte_len.div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0usize; words];
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous = FILE_RENAME_INFO_0 {
+                ReplaceIfExists: false,
+            };
+            (*info).RootDirectory = HANDLE(parent_file.as_raw_handle());
+            (*info).FileNameLength = u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
+            })?;
+            std::ptr::copy_nonoverlapping(
+                target.as_ptr(),
+                (*info).FileName.as_mut_ptr(),
+                target.len(),
+            );
+            SetFileInformationByHandle(
+                HANDLE(source_file.as_raw_handle()),
+                FileRenameInfo,
+                info.cast(),
+                u32::try_from(byte_len).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "rename buffer is too large")
+                })?,
+            )
+            .map_err(|error| {
+                if error.code() == ERROR_ALREADY_EXISTS.to_hresult()
+                    || error.code() == ERROR_FILE_EXISTS.to_hresult()
+                {
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        target_display,
+                    )
+                } else {
+                    io::Error::other(error)
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     fn open_child_directory(
         parent: &cap_std::fs::Dir,
         name: &std::ffi::OsStr,
@@ -600,7 +985,7 @@ impl ContainedDirectory {
         create_missing: bool,
     ) -> io::Result<cap_std::fs::Dir> {
         Self::component(name)?;
-        match parent.open_dir(name) {
+        match Self::open_regular_child_directory(parent, name, description) {
             Ok(directory) => Ok(directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
                 match parent.create_dir(name) {
@@ -608,18 +993,39 @@ impl ContainedDirectory {
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => return Err(error),
                 }
-                parent.open_dir(name).map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("{description} is not a contained regular directory: {error}"),
-                    )
-                })
+                Self::open_regular_child_directory(parent, name, description)
             }
             Err(error) => Err(io::Error::new(
                 error.kind(),
                 format!("{description} is not a contained regular directory: {error}"),
             )),
         }
+    }
+
+    fn open_regular_child_directory(
+        parent: &cap_std::fs::Dir,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<cap_std::fs::Dir> {
+        use cap_fs_ext::DirExt as _;
+        use std::os::windows::fs::MetadataExt as _;
+
+        let directory = parent.open_dir_nofollow(name).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("{description} is not a contained regular directory: {error}"),
+            )
+        })?;
+        let metadata = directory.try_clone()?.into_std_file().metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a contained regular directory"),
+            ));
+        }
+        Ok(directory)
     }
 
     fn component(name: &std::ffi::OsStr) -> io::Result<()> {
@@ -637,40 +1043,21 @@ impl ContainedDirectory {
         Ok(())
     }
 
-    fn reject_existing_reparse_or_non_file(
-        &self,
-        name: &std::ffi::OsStr,
-        description: &str,
-    ) -> io::Result<()> {
-        match self.handle.symlink_metadata(name) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{description} is not a regular file"),
-                ))
-            }
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
     pub(crate) fn open_read_write_create(
         &self,
         name: &std::ffi::OsStr,
     ) -> io::Result<std::fs::File> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
         Self::component(name)?;
-        self.reject_existing_reparse_or_non_file(name, "contained write target")?;
         let mut options = cap_std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .follow(FollowSymlinks::No);
         let file = self.handle.open_with(name, &options)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "contained write target is not a regular file",
-            ));
-        }
-        Ok(file.into_std())
+        Self::into_regular_file(file, "contained write target")
     }
 
     pub(crate) fn read_bounded(
@@ -704,16 +1091,29 @@ impl ContainedDirectory {
         name: &std::ffi::OsStr,
         description: &str,
     ) -> io::Result<std::fs::File> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
         Self::component(name)?;
-        self.reject_existing_reparse_or_non_file(name, description)?;
-        let file = self.handle.open(name)?;
-        if !file.metadata()?.is_file() {
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = self.handle.open_with(name, &options)?;
+        Self::into_regular_file(file, description)
+    }
+
+    fn into_regular_file(file: cap_std::fs::File, description: &str) -> io::Result<std::fs::File> {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let file = file.into_std();
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_file()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{description} is not a regular file"),
             ));
         }
-        Ok(file.into_std())
+        Ok(file)
     }
 
     pub(crate) fn sync(&self) -> io::Result<()> {
@@ -736,16 +1136,23 @@ impl ContainedDirectory {
         durable: bool,
         replace: bool,
     ) -> io::Result<()> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
         Self::component(name)?;
-        self.reject_existing_reparse_or_non_file(name, "contained write target")?;
         let tmp_name = format!(
             ".{}.{}.tmp",
             std::process::id(),
             uuid::Uuid::now_v7().simple()
         );
         let mut options = cap_std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = self.handle.open_with(&tmp_name, &options)?;
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut file = Self::into_regular_file(
+            self.handle.open_with(&tmp_name, &options)?,
+            "contained temporary file",
+        )?;
         let result = (|| {
             file.write_all(bytes)?;
             if durable {
@@ -756,10 +1163,26 @@ impl ContainedDirectory {
                 self.handle.rename(&tmp_name, &self.handle, name)?;
             } else {
                 self.handle.hard_link(&tmp_name, &self.handle, name)?;
-                self.handle.remove_file(&tmp_name)?;
+                if let Err(error) = self.handle.remove_file(&tmp_name) {
+                    tracing::warn!(
+                        path = %self.path.join(&tmp_name).display(),
+                        %error,
+                        "atomic create committed but temporary link cleanup failed"
+                    );
+                }
             }
             if durable {
-                self.sync()?;
+                // The target name is already committed. Returning an ordinary
+                // error here would invite callers to retry a write that did in
+                // fact publish. Keep the committed entity authoritative and
+                // report the directory durability degradation separately.
+                if let Err(error) = self.sync() {
+                    tracing::warn!(
+                        path = %self.path.join(name).display(),
+                        %error,
+                        "atomic write committed but directory sync failed"
+                    );
+                }
             }
             Ok(())
         })();
@@ -771,6 +1194,7 @@ impl ContainedDirectory {
 }
 
 #[cfg(not(any(unix, windows)))]
+#[derive(Debug)]
 pub(crate) struct ContainedDirectory;
 
 #[cfg(not(any(unix, windows)))]
@@ -895,33 +1319,194 @@ pub(crate) fn read_timeline_file(path: &Path) -> io::Result<Vec<chat_state::Time
     read_committed_jsonl_file(path, "mandatory Timeline ledger")
 }
 
-/// Read and validate the canonical Timeline for one explicit session
-/// directory. This is the only cross-crate disk projection entry point.
-pub fn read_timeline_in_session_dir(dir: &Path) -> io::Result<chat_state::Timeline> {
-    let directory = ContainedDirectory::open(
-        dir,
-        Path::new(""),
-        "mandatory Timeline session directory",
-        false,
-    )?;
-    let events = read_committed_jsonl_from_directory(
-        &directory,
-        std::ffi::OsStr::new(TIMELINE_FILE),
-        "mandatory Timeline ledger",
-        MAX_JSONL_ENTRY_BYTES,
-    )
-    .map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "mandatory Timeline ledger is missing",
-            )
-        } else {
-            error
+/// Resolve a session by its globally unique id and fold its canonical
+/// Timeline through the same pinned capability that validated Summary.
+pub fn load_timeline_by_id_at(
+    session_id: &str,
+    grow_home: &Path,
+) -> io::Result<Option<chat_state::Timeline>> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(opened) = storage.open_session_by_id(session_id)? else {
+        return Ok(None);
+    };
+    let timeline = chat_state::Timeline::from_events(opened.timeline_events()?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(Some(timeline))
+}
+
+pub fn load_timeline_by_id(session_id: &str) -> io::Result<Option<chat_state::Timeline>> {
+    load_timeline_by_id_at(session_id, &crate::util::grow_home::grow_home())
+}
+
+const MAX_SESSION_TRACE_FILES: usize = 4096;
+const MAX_SESSION_TRACE_DEPTH: usize = 32;
+const MAX_SESSION_TRACE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SESSION_TRACE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+
+const RESOURCES_STATE_FILE: &str = "resources_state.json";
+const MAX_RESOURCES_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+struct SessionResourcesStateStore {
+    directory: std::sync::Arc<ContainedDirectory>,
+    display_path: PathBuf,
+}
+
+impl tools::persistence::ResourcesStateStore for SessionResourcesStateStore {
+    fn display_path(&self) -> &Path {
+        &self.display_path
+    }
+
+    fn read(&self) -> io::Result<Option<Vec<u8>>> {
+        match self.directory.read_bounded(
+            std::ffi::OsStr::new(RESOURCES_STATE_FILE),
+            "resources state",
+            MAX_RESOURCES_STATE_BYTES,
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
-    })?;
-    chat_state::Timeline::from_events(events)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn write_atomic(&self, bytes: &[u8], durable: bool) -> io::Result<()> {
+        if bytes.len() as u64 > MAX_RESOURCES_STATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resources state exceeds the byte limit",
+            ));
+        }
+        self.directory.write_atomic(
+            std::ffi::OsStr::new(RESOURCES_STATE_FILE),
+            bytes,
+            durable,
+            true,
+        )
+    }
+}
+
+pub(crate) fn resources_persistence(
+    directory: std::sync::Arc<ContainedDirectory>,
+) -> std::sync::Arc<tools::persistence::ResourcesPersistence> {
+    let display_path = directory.display_path().join(RESOURCES_STATE_FILE);
+    std::sync::Arc::new(tools::persistence::ResourcesPersistence::new(
+        std::sync::Arc::new(SessionResourcesStateStore {
+            directory,
+            display_path,
+        }),
+    ))
+}
+
+/// One regular file captured through a pinned session-directory capability.
+#[derive(Debug)]
+pub struct SessionTraceFile {
+    pub relative_path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+/// Identity-checked, bounded input for the pager's diagnostic archive writer.
+#[derive(Debug)]
+pub struct SessionTraceSnapshot {
+    pub session_id: String,
+    pub files: Vec<SessionTraceFile>,
+}
+
+/// Resolve one canonical session and capture its regular files without ever
+/// reopening its ambient path. Symlinks, special files, excessive depth,
+/// excessive file count, and excessive byte volume fail the whole export.
+pub fn load_session_trace(session_id: &str) -> io::Result<Option<SessionTraceSnapshot>> {
+    load_session_trace_at(session_id, &crate::util::grow_home::grow_home())
+}
+
+pub fn load_session_trace_at(
+    session_id: &str,
+    grow_home: &Path,
+) -> io::Result<Option<SessionTraceSnapshot>> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(opened) = storage.open_session_by_id(session_id)? else {
+        return Ok(None);
+    };
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+    collect_session_trace_files(
+        opened.directory(),
+        Path::new(""),
+        0,
+        &mut files,
+        &mut total_bytes,
+    )?;
+    Ok(Some(SessionTraceSnapshot {
+        session_id: opened.summary().info.id.0.to_string(),
+        files,
+    }))
+}
+
+fn collect_session_trace_files(
+    directory: &ContainedDirectory,
+    relative: &Path,
+    depth: usize,
+    files: &mut Vec<SessionTraceFile>,
+    total_bytes: &mut u64,
+) -> io::Result<()> {
+    if depth > MAX_SESSION_TRACE_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session trace directory depth exceeds the limit",
+        ));
+    }
+    for name in directory.list_names()? {
+        let child_relative = relative.join(&name);
+        match directory.open_relative(&PathBuf::from(&name), "session trace directory", false) {
+            Ok(child) => collect_session_trace_files(
+                &child,
+                &child_relative,
+                depth.saturating_add(1),
+                files,
+                total_bytes,
+            )?,
+            Err(directory_error) => {
+                let bytes = directory
+                    .read_bounded(
+                        &name,
+                        "session trace regular file",
+                        MAX_SESSION_TRACE_FILE_BYTES,
+                    )
+                    .map_err(|file_error| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "session trace entry '{}' is neither a contained directory nor a regular file: directory={directory_error}; file={file_error}",
+                                child_relative.display()
+                            ),
+                        )
+                    })?;
+                *total_bytes = total_bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "session trace byte count overflow",
+                        )
+                    })?;
+                if *total_bytes > MAX_SESSION_TRACE_TOTAL_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "session trace exceeds the total byte limit",
+                    ));
+                }
+                if files.len() >= MAX_SESSION_TRACE_FILES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "session trace exceeds the file-count limit",
+                    ));
+                }
+                files.push(SessionTraceFile {
+                    relative_path: child_relative,
+                    bytes,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn read_committed_jsonl_from_directory<T: serde::de::DeserializeOwned>(
@@ -1021,6 +1606,25 @@ impl CommittedJsonlLines {
         lines.reader.seek(SeekFrom::Start(offset))?;
         lines.committed_position = offset;
         Ok(Some(lines))
+    }
+
+    /// Start a committed-record stream from an already-opened regular file.
+    /// `label` is diagnostic only; authority remains the pinned handle.
+    pub(crate) fn from_open_file_at(
+        file: std::fs::File,
+        label: PathBuf,
+        description: &str,
+        offset: u64,
+    ) -> io::Result<Self> {
+        let mut lines = Self::from_file(
+            file,
+            label,
+            description.to_owned(),
+            MAX_JSONL_ENTRY_BYTES,
+        );
+        lines.reader.seek(SeekFrom::Start(offset))?;
+        lines.committed_position = offset;
+        Ok(lines)
     }
 
     fn from_file(
@@ -1398,77 +2002,6 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
     ))
 }
 
-/// Atomically publish `source` at `target` without ever replacing an existing
-/// filesystem object.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
-    use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
-    renameat2(
-        AT_FDCWD,
-        source,
-        AT_FDCWD,
-        target,
-        RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|error| match error {
-        nix::errno::Errno::EEXIST => {
-            io::Error::new(io::ErrorKind::AlreadyExists, target.display().to_string())
-        }
-        nix::errno::Errno::EINVAL | nix::errno::Errno::ENOSYS | nix::errno::Errno::EOPNOTSUPP => {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "atomic no-replace rename is unsupported",
-            )
-        }
-        error => io::Error::from(error),
-    })
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let target_c = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    // SAFETY: both pointers remain live NUL-terminated path strings for this call.
-    if unsafe { libc::renamex_np(source.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) } == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::EEXIST) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            target_c.to_string_lossy().into_owned(),
-        )),
-        Some(code) if code == libc::EINVAL || code == libc::ENOTSUP => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "atomic no-replace rename is unsupported",
-        )),
-        _ => Err(error),
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
-    // Windows rename already refuses an existing destination.
-    std::fs::rename(source, target)
-}
-
-#[cfg(not(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    windows
-)))]
-pub(crate) fn rename_no_replace(_source: &Path, _target: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic no-replace rename is unsupported",
-    ))
-}
-
 /// Async sibling of [`write_bytes_atomic`].
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
     let path = path.to_path_buf();
@@ -1530,6 +2063,17 @@ pub struct UpdatesIterator {
 }
 
 impl UpdatesIterator {
+    pub(crate) fn from_file(file: std::fs::File, path: PathBuf) -> Self {
+        Self {
+            lines: CommittedJsonlLines::from_file(
+                file,
+                path,
+                "session updates ledger".to_owned(),
+                MAX_JSONL_ENTRY_BYTES,
+            ),
+        }
+    }
+
     /// Create a new iterator over updates in the given file.
     /// Returns None if the file doesn't exist.
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
@@ -2122,16 +2666,20 @@ pub trait StorageAdapter: Send + Sync {
     /// Load all rewind points for a session
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>>;
 
-    /// Truncate rewind points from a specific prompt index (inclusive)
-    /// Used when rewinding to remove future history
-    async fn truncate_rewind_points_from(&self, info: &Info, from_index: usize) -> io::Result<()>;
+    /// Atomically replace the complete typed rewind projection.
+    async fn replace_rewind_points(
+        &self,
+        info: &Info,
+        points: &[RewindPoint],
+    ) -> io::Result<()>;
 
-    /// Merge rewind points at indices `>= target_index` into the point at
-    /// `target_index - 1` and drop the folded points, as a read-modify-write on
-    /// disk (used after a ConversationOnly rewind). Reading the current on-disk
-    /// set makes this authoritative: it never relies on a (possibly partially
-    /// loaded) in-memory tracker, so historical points can't be lost.
-    async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()>;
+    async fn write_rewind_transaction(
+        &self,
+        info: &Info,
+        transaction: &crate::session::persistence::RewindTransaction,
+    ) -> io::Result<()>;
+
+    async fn clear_rewind_transaction(&self, info: &Info) -> io::Result<()>;
 
     /// Copy session data from source to target, transforming session IDs
     /// The `options` parameter allows setting parent session tracking and model overrides.
@@ -2145,22 +2693,66 @@ pub trait StorageAdapter: Send + Sync {
     /// Load the current branch's typed user-authored inputs from Timeline.
     async fn load_prompt_records(&self, info: &Info) -> io::Result<Vec<chat_state::PromptRecord>>;
 
-    /// Get the path to the canonical Timeline ledger for bounded background
-    /// reads. Returns None when the backend cannot expose a local path.
-    fn timeline_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
+    /// Pin the canonical Timeline ledger for a bounded background projection.
+    /// The returned reader owns the already-opened file handle, so callers
+    /// cannot be redirected to a replacement session directory after identity
+    /// validation.
+    fn open_timeline_reader(&self, info: &Info) -> io::Result<TimelineLedgerReader>;
 
-    /// Get the path to the updates file for streaming reads.
-    /// Returns None if the storage backend doesn't support streaming.
-    fn updates_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
-
-    /// Path to the rewind-points file for lazy/deferred loading, or None if the
-    /// backend doesn't persist them to a streamable file. The adapter owns the
-    /// on-disk layout, so callers must use this rather than recomputing the path
-    /// (it differs for non-default storage modes, e.g. subagent/fork sessions).
-    fn rewind_points_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
 }
 
 pub use jsonl::JsonlStorageAdapter;
+
+/// An identity-bound read capability for one canonical Timeline ledger.
+///
+/// `label` is diagnostic only. Authority is the pinned file handle and reads
+/// stop at the length observed when the capability was created, so a
+/// concurrent append cannot turn a bounded projection into an unbounded one.
+pub struct TimelineLedgerReader {
+    file: std::fs::File,
+    label: PathBuf,
+    snapshot_len: u64,
+}
+
+impl TimelineLedgerReader {
+    pub(crate) fn from_file(file: std::fs::File, label: PathBuf) -> io::Result<Self> {
+        let snapshot_len = file.metadata()?.len();
+        Ok(Self {
+            file,
+            label,
+            snapshot_len,
+        })
+    }
+
+    pub fn snapshot_len(&self) -> u64 {
+        self.snapshot_len
+    }
+
+    pub(crate) fn read_events(self) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        let mut lines = CommittedJsonlLines::from_file(
+            self.file,
+            self.label.clone(),
+            "mandatory Timeline ledger".to_owned(),
+            MAX_JSONL_ENTRY_BYTES,
+        );
+        let mut events = Vec::new();
+        while let Some(line) = lines.next() {
+            let line = line?;
+            if lines.stream_position()? > self.snapshot_len {
+                break;
+            }
+            let line_number = lines.line_number();
+            let event = serde_json::from_slice(&line).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{line_number}: {error}", self.label.display()),
+                )
+            })?;
+            events.push(event);
+        }
+        Ok(events)
+    }
+}
 
 /// Extracts `method` and raw `params` from an updates.jsonl envelope
 /// without parsing the notification payload.
@@ -2356,8 +2948,8 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
     acp::SessionUpdate::UserMessageChunk(chunk)
 }
 
-// Replay-loader family, all resolving through `replay_updates_path_in_dir` and
-// reading through `for_each_replay_update_in_file`. Pick by need:
+// Replay-loader family, all resolving an identity-checked session and reading
+// its pinned updates handle through `for_each_replay_update`. Pick by need:
 //   - production, current grow home:   `load_updates_for_replay`
 //   - production, streaming (bounded): `stream_replay_updates_at`
 //   - tests, explicit grow home:       `load_updates_for_replay_at` (typed reference)
@@ -2367,15 +2959,11 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(session_dir) =
-        crate::session::persistence::find_persisted_session_dir_by_id_result(session_id)?
+    let Some(reader) = open_replay_updates_reader(session_id, &crate::util::grow_home::grow_home())?
     else {
         return Ok(None);
     };
-    let Some(updates_path) = replay_updates_path_in_dir(&session_dir) else {
-        return Ok(None);
-    };
-    Ok(Some(collect_replay_updates(&updates_path)?))
+    Ok(Some(collect_replay_updates(reader)?))
 }
 
 /// Like [`load_updates_for_replay`], but resolves the session under a specific
@@ -2389,46 +2977,45 @@ pub fn load_updates_for_replay_at(
     session_id: &str,
     grow_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(updates_path) = resolve_replay_updates_path(session_id, grow_home)? else {
+    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
         return Ok(None);
     };
-    Ok(Some(collect_replay_updates(&updates_path)?))
+    Ok(Some(collect_replay_updates(reader)?))
 }
 
-/// The session dir's `updates.jsonl` path if it exists, else `None`. Sole owner
-/// of the "does this dir have a replayable updates file" gate.
-fn replay_updates_path_in_dir(session_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let updates_path = session_dir.join(UPDATES_FILE);
-    updates_path.exists().then_some(updates_path)
-}
-
-/// Collect every replay-ready ACP update from `updates_path` into a `Vec`, the
-/// materializing counterpart of the streaming [`for_each_replay_update_in_file`].
-fn collect_replay_updates(
-    updates_path: &std::path::Path,
-) -> std::io::Result<Vec<acp::SessionUpdate>> {
+/// Collect every replay-ready ACP update from a pinned ledger into a `Vec`, the
+/// materializing counterpart of the streaming [`for_each_replay_update`].
+fn collect_replay_updates(reader: CommittedJsonlLines) -> std::io::Result<Vec<acp::SessionUpdate>> {
     let mut acp_updates: Vec<acp::SessionUpdate> = Vec::new();
-    for_each_replay_update_in_file(updates_path, |u| acp_updates.push(u))?;
+    for_each_replay_update(reader, |u| acp_updates.push(u))?;
     Ok(acp_updates)
 }
 
-/// Resolve `updates.jsonl` for `session_id` under `grow_home`, or `None` when
-/// the session directory or the file is missing. Shared by the typed
-/// `load_updates_for_replay_at` and the streaming [`stream_replay_updates_at`].
-fn resolve_replay_updates_path(
+/// Resolve and pin `updates.jsonl` for `session_id` under `grow_home`.
+/// Summary identity and the file handle are selected by the same storage
+/// capability; no authoritative path escapes this boundary.
+fn open_replay_updates_reader(
     session_id: &str,
     grow_home: &std::path::Path,
-) -> std::io::Result<Option<std::path::PathBuf>> {
-    let sessions_root = grow_home.join("sessions");
-    let Some(session_dir) =
-        crate::session::persistence::find_persisted_session_dir_by_id_in_root_result(
-            session_id,
-            &sessions_root,
-        )?
-    else {
+) -> std::io::Result<Option<CommittedJsonlLines>> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(opened) = storage.open_session_by_id(session_id)? else {
         return Ok(None);
     };
-    Ok(replay_updates_path_in_dir(&session_dir))
+    let file = match opened
+        .directory()
+        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(CommittedJsonlLines::from_open_file_at(
+        file,
+        opened.directory().display_path().join(UPDATES_FILE),
+        "session updates ledger",
+        0,
+    )?))
 }
 
 /// Whether a replay stream forwarded any update. Gates the caller's
@@ -2464,10 +3051,10 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     grow_home: &std::path::Path,
     f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(updates_path) = resolve_replay_updates_path(session_id, grow_home)? else {
+    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
         return Ok(ReplayEmission::Empty);
     };
-    Ok(if for_each_replay_update_in_file(&updates_path, f)? {
+    Ok(if for_each_replay_update(reader, f)? {
         ReplayEmission::Emitted
     } else {
         ReplayEmission::Empty
@@ -2483,16 +3070,17 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
 /// The full notification is retained deliberately: its `_meta.eventId` is the
 /// source-session dedup identity shared by the persisted record and a live
 /// event buffered during an ancestor `session/load`.
-pub fn stream_replay_grow_notifications_in_dir<
+pub fn stream_replay_grow_notifications_at<
     F: FnMut(crate::extensions::notification::SessionNotification),
 >(
-    session_dir: &std::path::Path,
+    session_id: &str,
+    grow_home: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(updates_path) = replay_updates_path_in_dir(session_dir) else {
+    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
         return Ok(ReplayEmission::Empty);
     };
-    let lines = read_committed_jsonl_text_lines(&updates_path, "session updates ledger")?;
+    let lines = read_committed_jsonl_text_lines_from_reader(reader)?;
     let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let mut emitted = false;
     for line in live {
@@ -2518,11 +3106,11 @@ pub fn stream_replay_grow_notifications_in_dir<
 // the file. The reader allocates at most one bounded record at a time, while
 // this projection retains only decoded lines needed for branch filtering.
 // Output matches the typed load. Returns whether any ACP update was forwarded.
-fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
-    updates_path: &std::path::Path,
+fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
+    reader: CommittedJsonlLines,
     mut f: F,
 ) -> std::io::Result<bool> {
-    let lines = read_committed_jsonl_text_lines(updates_path, "session updates ledger")?;
+    let lines = read_committed_jsonl_text_lines_from_reader(reader)?;
     let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let mut forwarded = false;
     for line in live {
@@ -2551,6 +3139,12 @@ pub(crate) fn read_committed_jsonl_text_lines(
     let Some(lines) = CommittedJsonlLines::open(path, description)? else {
         return Ok(Vec::new());
     };
+    read_committed_jsonl_text_lines_from_reader(lines)
+}
+
+pub(crate) fn read_committed_jsonl_text_lines_from_reader(
+    lines: CommittedJsonlLines,
+) -> io::Result<Vec<String>> {
     let mut decoded = Vec::new();
     for line in lines {
         let line = line?;
@@ -2561,6 +3155,19 @@ pub(crate) fn read_committed_jsonl_text_lines(
         }
     }
     Ok(decoded)
+}
+
+pub(crate) fn read_committed_jsonl_text_lines_from_file(
+    file: std::fs::File,
+    label: PathBuf,
+    description: &str,
+) -> io::Result<Vec<String>> {
+    read_committed_jsonl_text_lines_from_reader(CommittedJsonlLines::from_open_file_at(
+        file,
+        label,
+        description,
+        0,
+    )?)
 }
 
 #[doc(hidden)]
@@ -2795,6 +3402,36 @@ pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn contained_no_replace_rename_preserves_both_existing_entities() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("source")).unwrap();
+        std::fs::create_dir(root.path().join("target")).unwrap();
+        std::fs::write(root.path().join("source/source-marker"), b"source").unwrap();
+        std::fs::write(root.path().join("target/target-marker"), b"target").unwrap();
+        let directory =
+            ContainedDirectory::open(root.path(), Path::new(""), "rename fixture", false)
+                .unwrap();
+
+        let error = directory
+            .rename_child_no_replace(
+                std::ffi::OsStr::new("source"),
+                std::ffi::OsStr::new("target"),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(root.path().join("source/source-marker")).unwrap(),
+            b"source"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("target/target-marker")).unwrap(),
+            b"target"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn pinned_contained_directory_resists_post_validation_symlink_swap() {
@@ -2960,33 +3597,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(path).unwrap(), b"new");
-    }
-
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        windows
-    ))]
-    #[test]
-    fn no_replace_publication_preserves_an_existing_target() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let target = root.path().join("target");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::create_dir(&target).unwrap();
-        std::fs::write(source.join("source-marker"), b"source").unwrap();
-        std::fs::write(target.join("target-marker"), b"target").unwrap();
-
-        let error = rename_no_replace(&source, &target).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(source.join("source-marker")).unwrap(),
-            b"source"
-        );
-        assert_eq!(
-            std::fs::read(target.join("target-marker")).unwrap(),
-            b"target"
-        );
     }
 
     /// Wrap an ACP notification as the envelope stored in updates.jsonl.
@@ -3493,7 +4103,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: the streaming core (`for_each_replay_update_in_file`, what
+    /// End-to-end: the streaming core (`for_each_replay_update`, what
     /// `stream_replay_updates_at` wraps) applies rewind over a real file and
     /// yields the same survivors as the typed parse-all path.
     #[test]
@@ -3520,8 +4130,15 @@ mod tests {
         let path = dir.path().join(UPDATES_FILE);
         std::fs::write(&path, &raw).unwrap();
 
+        let reader = CommittedJsonlLines::from_open_file_at(
+            std::fs::File::open(&path).unwrap(),
+            path,
+            "session updates ledger",
+            0,
+        )
+        .unwrap();
         let mut streamed = Vec::new();
-        let forwarded = for_each_replay_update_in_file(&path, |u| streamed.push(u)).unwrap();
+        let forwarded = for_each_replay_update(reader, |u| streamed.push(u)).unwrap();
         assert!(forwarded);
 
         // Typed reference: parse all, rewind-filter, map ACP survivors.

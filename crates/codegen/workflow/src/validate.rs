@@ -117,7 +117,7 @@ pub fn validate_script_with_agent_budget(
     let outcome = run_workflow(WorkflowRunParams {
         script: script.to_string(),
         args: args.unwrap_or_else(default_probe_args),
-        journal: Journal::new(None),
+        journal: Journal::memory(),
         host_tx,
         cancel: tokio_util::sync::CancellationToken::new(),
         max_ops: 10_000_000,

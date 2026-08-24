@@ -47,8 +47,8 @@ pub(crate) type InterjectionBuffer<Attachment> =
 
 impl SessionActor {
     /// Common same-turn steering buffer shared by direct and queued input.
-    /// Goal planner/verifier leases are intentionally independent: ordinary
-    /// supplemental user input does not revise the Goal definition or plan.
+    /// Supplemental user input joins the running turn; only explicit Goal
+    /// lifecycle commands can replace or stop the durable objective.
     pub(super) fn queue_mid_turn_interjection(
         &self,
         text: String,

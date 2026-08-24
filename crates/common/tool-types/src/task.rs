@@ -736,39 +736,13 @@ pub const EXPLORE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: EXPLORE_PROMPT,
 };
 
-/// Host-only Goal roles. They are resolvable by the subagent runtime but are
-/// intentionally absent from `BUILTIN_SUBAGENTS`, so the general `task` tool
-/// never advertises them as user-selectable roles.
-pub const GOAL_PLANNER_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
-    name: "goal-planner",
-    description: "Host-owned read-only Goal planning stage.",
-    tools_template: "Read-only workspace inspection (${{ tools.by_kind.read }}, \
-         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}) plus structured Goal plan \
-         submission via submit_goal_plan_section and finalize_goal_plan; the host derives \
-         task ids and board Markdown.",
-    prompt_template: EXPLORE_PROMPT,
-};
-
-pub const GOAL_VERIFIER_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
-    name: "goal-verifier",
-    description: "Host-owned isolated Goal verification stage.",
-    tools_template: "Read and execute verification commands only: \
-         ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, \
-         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}.",
-    prompt_template: GENERAL_PURPOSE_PROMPT,
-};
-
 /// The built-in subagent types advertised to the model, in display order.
 pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 2] = [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT];
 
 /// Look up a built-in subagent by its `subagent_type` name
 /// (e.g. `"explore"`), or `None` for user-defined / unknown types.
 pub fn builtin_subagent_by_name(name: &str) -> Option<&'static BuiltinSubagent> {
-    match name {
-        "goal-planner" => Some(&GOAL_PLANNER_SUBAGENT),
-        "goal-verifier" => Some(&GOAL_VERIFIER_SUBAGENT),
-        _ => BUILTIN_SUBAGENTS.iter().find(|b| b.name == name),
-    }
+    BUILTIN_SUBAGENTS.iter().find(|b| b.name == name)
 }
 
 /// Tool/parameter names (and optional features) that vary between products when
@@ -1225,6 +1199,8 @@ mod tests {
             Some(GENERAL_PURPOSE_PROMPT)
         );
         assert!(builtin_subagent_by_name("plan").is_none());
+        assert!(builtin_subagent_by_name("goal-planner").is_none());
+        assert!(builtin_subagent_by_name("goal-verifier").is_none());
         assert!(builtin_subagent_by_name("code-reviewer").is_none());
     }
 

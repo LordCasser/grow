@@ -420,7 +420,7 @@ impl acp::Agent for MvpAgent {
                         persistence,
                         session_title_route,
                         timeline_bootstrap: crate::session::TimelineBootstrap::Fresh,
-                        rewind_points_file_path: None,
+                        rewind_points_source: None,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,
                         client_terminal,
@@ -652,8 +652,8 @@ impl acp::Agent for MvpAgent {
             mut summary,
             timeline_events,
             mut control_snapshot,
-            updates_file_path,
-            rewind_points_file_path,
+            session_directory,
+            rewind_points_source,
             signals: persisted_signals,
             announcement_state: persisted_announcement_state,
             workflow_runs: persisted_workflow_runs,
@@ -832,7 +832,7 @@ impl acp::Agent for MvpAgent {
                 .replay_session_updates(
                     &session_id,
                     &cwd,
-                    &updates_file_path,
+                    &session_directory,
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),
@@ -844,7 +844,7 @@ impl acp::Agent for MvpAgent {
                 Ok(()) => {
                     self.replay_session_updates_from_offset_enqueue(
                         &session_id,
-                        &updates_file_path,
+                        &session_directory,
                         replay_end_offset,
                         persist_data.as_ref(),
                         target_client_id.as_ref(),
@@ -870,7 +870,7 @@ impl acp::Agent for MvpAgent {
         }
         let reconcile_completions = {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
-            self.repair_stale_background_task_projections(&session_id, &updates_file_path)
+            self.repair_stale_background_task_projections(&session_id, &session_directory)
         };
         for rx in reconcile_completions {
             let _ = rx.await;
@@ -923,7 +923,7 @@ impl acp::Agent for MvpAgent {
                         timeline_bootstrap: crate::session::TimelineBootstrap::Existing(
                             timeline_events,
                         ),
-                        rewind_points_file_path,
+                        rewind_points_source,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,
                         client_terminal,
@@ -1006,13 +1006,7 @@ impl acp::Agent for MvpAgent {
                     )
                 })
         };
-        if let Some((parent_cmd_tx, session_cwd, parent_chat_state)) = orphan_parent {
-            let session_dir = crate::session::persistence::session_dir(
-                &SessionInfo {
-                    id: session_id.clone(),
-                    cwd: session_cwd,
-                },
-            );
+        if let Some((parent_cmd_tx, _session_cwd, parent_chat_state)) = orphan_parent {
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
                     &subagent_projections,
                     !no_replay,
@@ -1020,7 +1014,6 @@ impl acp::Agent for MvpAgent {
                         self.subagent_event_tx.clone(),
                         session_id.0.clone(),
                     ),
-                    &session_dir,
                     session_id.0.as_ref(),
                     &parent_chat_state,
                     &self.gateway,

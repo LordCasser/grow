@@ -1083,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_row_has_no_goal_stage_gate_or_cue() {
+    fn queue_row_has_no_goal_lifecycle_gate_or_cue() {
         let styled = QueuedPromptEntry::build_styled(
             "additional context",
             1,

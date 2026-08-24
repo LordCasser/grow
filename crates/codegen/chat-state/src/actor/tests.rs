@@ -1216,7 +1216,7 @@ async fn bootstrap_persists_strictly_one_event_at_a_time() {
 }
 
 #[tokio::test]
-async fn dropping_last_handle_cancels_a_permanently_failing_pending_event() {
+async fn dropping_last_handle_cancels_an_unacknowledged_pending_event() {
     let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let handle = ChatStateActor::spawn(
@@ -1227,21 +1227,56 @@ async fn dropping_last_handle_cancels_a_permanently_failing_pending_event() {
         tokio_util::sync::CancellationToken::new(),
     );
     handle.push_assistant_response(ConversationItem::assistant("pending"));
-    persistence_rx
+    let acknowledgement = persistence_rx
         .next_timeline_ack()
         .await
-        .expect("pending acknowledgement")
-        .send(Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "persistence actor stopped",
-        )))
-        .unwrap();
+        .expect("pending acknowledgement");
 
     drop(handle);
     let closed = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
         .await
         .expect("actor must stop after its last handle is dropped");
     assert!(closed.is_none());
+    drop(acknowledgement);
+}
+
+#[tokio::test]
+async fn permanent_persistence_failure_poison_closes_the_actor_mailbox() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    handle.push_assistant_response(ConversationItem::assistant("first"));
+    handle.push_assistant_response(ConversationItem::assistant("must not reuse seq"));
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first pending acknowledgement")
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ledger identity conflict",
+        )))
+        .unwrap();
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("poisoned actor must close its event channel");
+    assert!(closed.is_none());
+    let second_ack = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        persistence_rx.next_timeline_ack(),
+    )
+    .await;
+    assert!(
+        !matches!(second_ack, Ok(Some(_))),
+        "queued commands must not persist after writer poison"
+    );
+    drop(handle);
 }
 
 #[tokio::test]

@@ -4,8 +4,6 @@
 //! It does not select an Agent role, grant tools, or own Workflow/Goal runtime
 //! state. The controller is synchronous and contains no SessionActor or I/O.
 
-use std::path::{Path, PathBuf};
-
 use tool_types::BehaviorId;
 use tool_types::{BehaviorAvailabilityDisposition, BehaviorAvailabilityEntry};
 
@@ -123,8 +121,6 @@ pub struct BehaviorCoordinator {
     selected: BehaviorId,
     plan: PlanRuntime,
     deep_research: DeepResearchRuntime,
-    plan_file_path: PathBuf,
-    approved_plan_file_path: PathBuf,
     pending_switch: Option<PendingBehaviorSwitch>,
 }
 
@@ -182,18 +178,16 @@ impl BehaviorSnapshot {
 }
 
 impl BehaviorCoordinator {
-    pub fn new(session_dir: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
             selected: BehaviorId::Normal,
             plan: PlanRuntime::default(),
             deep_research: DeepResearchRuntime::default(),
-            plan_file_path: session_dir.join("plan.md"),
-            approved_plan_file_path: session_dir.join("approved_plan.md"),
             pending_switch: None,
         }
     }
 
-    pub fn from_snapshot(session_dir: PathBuf, snapshot: BehaviorSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: BehaviorSnapshot) -> Self {
         let (selected, plan_phase, owned_run_id) = match snapshot.state {
             BehaviorState::Normal => (BehaviorId::Normal, PlanPhase::Drafting, None),
             BehaviorState::Clarify => (BehaviorId::Clarify, PlanPhase::Drafting, None),
@@ -214,8 +208,6 @@ impl BehaviorCoordinator {
                 artifact_hash: snapshot.plan_artifact_hash,
             },
             deep_research: DeepResearchRuntime { owned_run_id },
-            plan_file_path: session_dir.join("plan.md"),
-            approved_plan_file_path: session_dir.join("approved_plan.md"),
             pending_switch: None,
         }
     }
@@ -542,17 +534,20 @@ impl BehaviorCoordinator {
         self.plan.approval_pending
     }
 
-    pub fn plan_file_path(&self) -> &Path {
-        &self.plan_file_path
-    }
-
-    pub fn approved_plan_file_path(&self) -> &Path {
-        &self.approved_plan_file_path
-    }
-
     pub fn record_plan_artifact(&mut self, markdown: &str) {
         self.plan.artifact_revision = self.plan.artifact_revision.saturating_add(1);
         self.plan.artifact_hash = Some(blake3::hash(markdown.as_bytes()).to_hex().to_string());
+    }
+
+    pub fn plan_artifact_hash(&self) -> Option<&str> {
+        self.plan.artifact_hash.as_deref()
+    }
+
+    pub fn plan_artifact_ref(&self) -> Option<String> {
+        self.plan
+            .artifact_hash
+            .as_deref()
+            .map(|hash| format!("artifact:plan:blake3:{hash}"))
     }
 
     pub fn plan_artifact_is_valid(&self, markdown: &str) -> bool {
@@ -616,11 +611,55 @@ pub fn plan_execution_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/plan/executing.md")
 }
 
-pub(crate) async fn plan_file_has_content(path: &Path) -> bool {
-    tokio::fs::metadata(path)
-        .await
-        .map(|metadata| metadata.len() > 0)
-        .unwrap_or(false)
+pub(crate) const MAX_PLAN_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+
+pub(crate) fn write_plan_artifact(
+    session: &crate::session::storage::ContainedDirectory,
+    markdown: &str,
+) -> std::io::Result<String> {
+    if markdown.is_empty() || markdown.len() as u64 > MAX_PLAN_ARTIFACT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Plan artifact is empty or exceeds its byte limit",
+        ));
+    }
+    let hash = blake3::hash(markdown.as_bytes()).to_hex().to_string();
+    crate::session::persistence::write_immutable_blob_to_directory(
+        session,
+        &std::path::Path::new("artifacts/plan").join(format!("{hash}.md")),
+        markdown.as_bytes(),
+    )?;
+    Ok(hash)
+}
+
+pub(crate) fn read_plan_artifact(
+    session: &crate::session::storage::ContainedDirectory,
+    hash: &str,
+) -> std::io::Result<String> {
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Plan artifact hash is invalid",
+        ));
+    }
+    let directory = session.open_relative(
+        std::path::Path::new("artifacts/plan"),
+        "Plan artifact directory",
+        false,
+    )?;
+    let bytes = directory.read_bounded(
+        std::ffi::OsStr::new(&format!("{hash}.md")),
+        "Plan artifact",
+        MAX_PLAN_ARTIFACT_BYTES,
+    )?;
+    if blake3::hash(&bytes).to_hex().as_str() != hash {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Plan artifact hash mismatch",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 #[cfg(test)]
@@ -628,7 +667,7 @@ mod tests {
     use super::*;
 
     fn controller() -> BehaviorCoordinator {
-        BehaviorCoordinator::new(PathBuf::from("/tmp/grow-behavior-test"))
+        BehaviorCoordinator::new()
     }
 
     #[test]
@@ -680,10 +719,7 @@ mod tests {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
         controller.submit_initial_plan();
-        let restored = BehaviorCoordinator::from_snapshot(
-            PathBuf::from("/tmp/grow-behavior-test"),
-            controller.snapshot(),
-        );
+        let restored = BehaviorCoordinator::from_snapshot(controller.snapshot());
         assert_eq!(
             restored.state(),
             BehaviorState::Plan(PlanPhase::AwaitingApproval)

@@ -51,11 +51,8 @@ pub use task::TaskTool;
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool};
 pub use todo::TodoWriteTool;
 pub use update_goal::{
-    FINALIZE_GOAL_PLAN_TOOL_NAME, FinalizeGoalPlanInput, FinalizeGoalPlanTool, GET_GOAL_TOOL_NAME,
-    GetGoalInput, GetGoalTool, GoalPlanCommand, GoalStageSubmitHandle,
-    REQUEST_GOAL_REPLAN_TOOL_NAME, RequestGoalReplanTool, SUBMIT_GOAL_PLAN_SECTION_TOOL_NAME,
-    StageToken, SubmitGoalPlanSectionInput, SubmitGoalPlanSectionOutput, SubmitGoalPlanSectionTool,
-    UPDATE_GOAL_PROGRESS_TOOL_NAME, UPDATE_GOAL_TOOL_NAME, UpdateGoalProgressTool, UpdateGoalTool,
+    CREATE_GOAL_TOOL_NAME, CreateGoalInput, CreateGoalTool, GET_GOAL_TOOL_NAME, GetGoalInput,
+    GetGoalTool, UPDATE_GOAL_TOOL_NAME, UpdateGoalTool,
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};

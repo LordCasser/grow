@@ -46,7 +46,9 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::env::temp_dir().join("grow-test-fs/resources_state.json"),
+        resources_persistence: std::sync::Arc::new(
+            tools::persistence::ResourcesPersistence::noop(),
+        ),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,

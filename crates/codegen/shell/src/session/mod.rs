@@ -4,7 +4,6 @@ pub mod commands;
 pub mod compaction_config;
 pub(crate) mod context_recall;
 pub mod control;
-pub mod goal_board;
 pub mod handle;
 pub mod listing;
 pub mod memory_state;
@@ -71,12 +70,6 @@ pub enum PromptOrigin {
     /// Idle-admitted implementer continuation for an active Goal.
     GoalContinuation {
         goal_id: String,
-        stage_id: u64,
-    },
-    /// Idle-admitted main-agent final report after verifier achievement.
-    GoalFinalization {
-        goal_id: String,
-        stage_id: u64,
     },
     /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
     SchedulerFired,
@@ -97,10 +90,7 @@ pub enum TurnKind {
 impl PromptOrigin {
     pub fn turn_identity(&self, turn_kind: TurnKind) -> chat_state::TurnIdentity {
         let (goal_id, stage_id) = match self {
-            Self::GoalContinuation { goal_id, stage_id }
-            | Self::GoalFinalization { goal_id, stage_id } => {
-                (Some(goal_id.clone()), Some(*stage_id))
-            }
+            Self::GoalContinuation { goal_id } => (Some(goal_id.clone()), None),
             _ => (None, None),
         };
         chat_state::TurnIdentity {
@@ -120,7 +110,6 @@ impl PromptOrigin {
             Self::NotificationDrain => "notification_drain",
             Self::HostCommand => "host_command",
             Self::GoalContinuation { .. } => "goal_continuation",
-            Self::GoalFinalization { .. } => "goal_finalization",
             Self::SchedulerFired => "scheduler_fired",
             Self::PlanResume => "plan_resume",
         }
@@ -132,10 +121,7 @@ impl PromptOrigin {
     /// Whether this foreground turn is owned by the Goal runtime rather than
     /// merely occurring while Goal Behavior is selected.
     pub fn is_goal_internal(&self) -> bool {
-        matches!(
-            self,
-            Self::GoalContinuation { .. } | Self::GoalFinalization { .. }
-        )
+        matches!(self, Self::GoalContinuation { .. })
     }
     /// Synthetic wake work that a newer user prompt may replace.
     pub fn is_preemptible_wake(&self) -> bool {
@@ -161,8 +147,7 @@ impl PromptOrigin {
             | Self::WorkflowCompleted { .. }
             | Self::NotificationDrain
             | Self::HostCommand
-            | Self::GoalContinuation { .. }
-            | Self::GoalFinalization { .. } => true,
+            | Self::GoalContinuation { .. } => true,
         }
     }
     pub fn completion_id(&self) -> Option<&str> {
@@ -174,7 +159,6 @@ impl PromptOrigin {
             | Self::NotificationDrain
             | Self::HostCommand
             | Self::GoalContinuation { .. }
-            | Self::GoalFinalization { .. }
             | Self::SchedulerFired
             | Self::PlanResume => None,
         }
@@ -198,7 +182,6 @@ mod turn_identity_tests {
     fn origin_and_kind_are_structured_independently_of_prompt_id() {
         let origin = PromptOrigin::GoalContinuation {
             goal_id: "g1".into(),
-            stage_id: 7,
         };
         assert_eq!(origin.wire_name(), "goal_continuation");
         assert!(origin.is_synthetic());
@@ -212,7 +195,6 @@ mod turn_identity_tests {
         assert!(
             !PromptOrigin::GoalContinuation {
                 goal_id: "g1".into(),
-                stage_id: 1,
             }
             .is_preemptible_wake()
         );
@@ -245,7 +227,7 @@ pub(crate) mod events;
 pub mod file_system;
 pub mod fork;
 pub(crate) mod fs_watch;
-pub(crate) mod goal_orchestrator;
+pub(crate) mod goal_notification;
 pub mod goal_tracker;
 pub mod helpers;
 pub(crate) mod image_describe;

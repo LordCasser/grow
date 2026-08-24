@@ -224,10 +224,9 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
 }
 /// [`SessionContextFactory`] for local workspace sessions.
 ///
-/// Workspace-only sessions do not own a durable Resources store, so
-/// [`SessionContext::state_path`] is empty and the tool runtime explicitly
-/// installs no-op persistence. Grow sessions provide their canonical session
-/// directory through `AgentBuilder` instead.
+/// Workspace-only sessions do not own a durable Resources store, so they pass
+/// an explicit no-op persistence capability. Grow sessions provide their
+/// canonical session-directory capability through `AgentBuilder` instead.
 ///
 /// [`SessionContext::session_folder`] is `/tmp/sessions/<sanitized_id>/`
 /// (terminal logs and other tool artifacts — not the project `cwd`).
@@ -286,7 +285,9 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
-            state_path: PathBuf::new(),
+            resources_persistence: Arc::new(
+                tools::persistence::ResourcesPersistence::noop(),
+            ),
             memory_backend: None,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
@@ -377,7 +378,12 @@ pub mod test_support {
                 subagent: None,
                 parent_scheduler_handle: None,
                 skills: vec![],
-                state_path: session_root.join("resources_state.json"),
+                resources_persistence: Arc::new(
+                    tools::persistence::ResourcesPersistence::local(
+                        session_root.join("resources_state.json"),
+                    )
+                    .expect("pin resources state test store"),
+                ),
                 memory_backend: None,
                 web_fetch_config: Default::default(),
                 lsp: None,

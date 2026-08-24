@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
+#[cfg(test)]
 use std::io::{Read as _, Write as _};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 use sha2::Digest as _;
@@ -7,6 +11,13 @@ pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_JOURNAL_ENTRIES: usize = crate::MAX_HOST_CALLS as usize;
 
 pub const HOST_ERROR_KEY: &str = "__workflow_host_error";
+const HOST_OPERATION_KEY: &str = "__workflow_operation_pending";
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperationReplay {
+    Pending { operation_id: String },
+    Completed(serde_json::Value),
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,26 +55,80 @@ pub enum JournalError {
     Divergence { seq: u64, kind: String },
 }
 
-#[derive(Debug, Default)]
+/// Durable journal authority injected by the host. The workflow engine never
+/// owns an ambient filesystem path; the session layer decides how the bytes
+/// are contained and synchronized.
+pub trait JournalStorage: Send + Sync {
+    fn read_bounded(&self, max_bytes: u64) -> std::io::Result<Vec<u8>>;
+    fn append(&self, bytes: &[u8]) -> std::io::Result<()>;
+    fn truncate(&self, len: u64) -> std::io::Result<()>;
+}
+
 pub struct Journal {
     entries: Vec<JournalEntry>,
-    path: Option<PathBuf>,
+    operation_ids: Vec<Option<String>>,
+    storage: Option<Arc<dyn JournalStorage>>,
     bytes: u64,
     last_line_start: Option<u64>,
 }
 
+impl std::fmt::Debug for Journal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Journal")
+            .field("entries", &self.entries)
+            .field("durable", &self.storage.is_some())
+            .field("bytes", &self.bytes)
+            .field("last_line_start", &self.last_line_start)
+            .finish()
+    }
+}
+
+impl Default for Journal {
+    fn default() -> Self {
+        Self::memory()
+    }
+}
+
 impl Journal {
-    pub fn new(path: Option<PathBuf>) -> Self {
+    pub fn memory() -> Self {
         Self {
             entries: Vec::new(),
-            path,
+            operation_ids: Vec::new(),
+            storage: None,
             bytes: 0,
             last_line_start: None,
         }
     }
 
+    pub fn with_storage(storage: Arc<dyn JournalStorage>) -> Self {
+        Self {
+            entries: Vec::new(),
+            operation_ids: Vec::new(),
+            storage: Some(storage),
+            bytes: 0,
+            last_line_start: None,
+        }
+    }
+
+    pub fn load_storage(storage: Arc<dyn JournalStorage>) -> Result<Self, JournalError> {
+        Self::load_from_storage(storage)
+    }
+
+    #[cfg(test)]
+    pub fn new(path: Option<PathBuf>) -> Self {
+        path.map_or_else(Self::memory, |path| {
+            Self::with_storage(Arc::new(FileJournalStorage { path }))
+        })
+    }
+
+    #[cfg(test)]
     pub fn load(path: PathBuf) -> Result<Self, JournalError> {
-        let content = match read_journal_bounded(&path) {
+        Self::load_from_storage(Arc::new(FileJournalStorage { path }))
+    }
+
+    fn load_from_storage(storage: Arc<dyn JournalStorage>) -> Result<Self, JournalError> {
+        let content = match storage.read_bounded(MAX_JOURNAL_BYTES) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -75,6 +140,7 @@ impl Journal {
             Err(error) => return Err(error.into()),
         };
         let mut entries = Vec::new();
+        let mut operation_ids = Vec::new();
         let mut offset = 0usize;
         let mut line_number = 0usize;
         let mut bytes = content.len() as u64;
@@ -90,7 +156,7 @@ impl Journal {
                         "truncating unterminated workflow journal tail"
                     );
                 }
-                truncate_tail(&path, offset as u64)?;
+                storage.truncate(offset as u64)?;
                 bytes = offset as u64;
                 break;
             };
@@ -107,19 +173,36 @@ impl Journal {
                     error: error.to_string(),
                 }
             })?;
-            if entries.len() >= MAX_JOURNAL_ENTRIES {
-                return Err(JournalError::UnsafeRestore {
-                    limit: MAX_JOURNAL_ENTRIES as u64,
-                    reason: "too many journal entries".into(),
+            if entry.seq == entries.len() as u64 {
+                if entries.len() >= MAX_JOURNAL_ENTRIES {
+                    return Err(JournalError::UnsafeRestore {
+                        limit: MAX_JOURNAL_ENTRIES as u64,
+                        reason: "too many journal entries".into(),
+                    });
+                }
+                operation_ids.push(pending_operation_id(&entry.result));
+                entries.push(entry);
+            } else if let Some(index) = usize::try_from(entry.seq).ok()
+                && let Some(existing) = entries.get_mut(index)
+                && operation_ids.get(index).and_then(Option::as_ref).is_some()
+                && pending_operation_id(&entry.result).is_none()
+                && existing.kind == entry.kind
+                && existing.req_hash == entry.req_hash
+            {
+                *existing = entry;
+            } else {
+                return Err(JournalError::Sequence {
+                    index: entries.len(),
+                    expected: entries.len() as u64,
+                    actual: entry.seq,
                 });
             }
-            validate_sequence(&entries, &entry)?;
-            entries.push(entry);
             last_line_start = Some(line_start);
         }
         Ok(Self {
             entries,
-            path: Some(path),
+            operation_ids,
+            storage: Some(storage),
             bytes,
             last_line_start,
         })
@@ -165,7 +248,112 @@ impl Journal {
                 kind: kind.to_string(),
             });
         }
+        if self
+            .operation_ids
+            .get(usize::try_from(seq).unwrap_or(usize::MAX))
+            .and_then(Option::as_ref)
+            .is_some()
+            && pending_operation_id(&entry.result).is_some()
+        {
+            return Err(JournalError::Divergence {
+                seq,
+                kind: kind.to_string(),
+            });
+        }
         Ok(Some(entry.result.clone()))
+    }
+
+    pub fn replay_operation(
+        &self,
+        seq: u64,
+        kind: &str,
+        req_hash: &str,
+    ) -> Result<Option<OperationReplay>, JournalError> {
+        let Some(index) = usize::try_from(seq).ok() else {
+            return Ok(None);
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return Ok(None);
+        };
+        if entry.seq != seq || entry.kind != kind || entry.req_hash != req_hash {
+            return Err(JournalError::Divergence {
+                seq,
+                kind: kind.to_string(),
+            });
+        }
+        if let Some(operation_id) = self.operation_ids.get(index).and_then(Option::as_ref)
+            && pending_operation_id(&entry.result).is_some()
+        {
+            return Ok(Some(OperationReplay::Pending {
+                operation_id: operation_id.clone(),
+            }));
+        }
+        Ok(Some(OperationReplay::Completed(entry.result.clone())))
+    }
+
+    pub fn begin_operation(
+        &mut self,
+        seq: u64,
+        kind: &str,
+        req_hash: String,
+        operation_id: String,
+    ) -> Result<(), JournalError> {
+        if self.entries.get(usize::try_from(seq).unwrap_or(usize::MAX)).is_some() {
+            return Err(JournalError::Divergence {
+                seq,
+                kind: kind.to_string(),
+            });
+        }
+        self.append_logical_entry(JournalEntry {
+            seq,
+            kind: kind.to_string(),
+            req_hash,
+            result: serde_json::json!({ HOST_OPERATION_KEY: operation_id }),
+            at_ms: now_ms(),
+        })?;
+        self.operation_ids.push(Some(operation_id));
+        Ok(())
+    }
+
+    pub fn complete_operation(
+        &mut self,
+        seq: u64,
+        kind: &str,
+        req_hash: String,
+        result: serde_json::Value,
+    ) -> Result<(), JournalError> {
+        let index = usize::try_from(seq).map_err(|_| JournalError::Sequence {
+            index: self.entries.len(),
+            expected: self.entries.len() as u64,
+            actual: seq,
+        })?;
+        let Some(existing) = self.entries.get(index) else {
+            return Err(JournalError::Sequence {
+                index: self.entries.len(),
+                expected: self.entries.len() as u64,
+                actual: seq,
+            });
+        };
+        if existing.kind != kind
+            || existing.req_hash != req_hash
+            || self.operation_ids.get(index).and_then(Option::as_ref).is_none()
+            || pending_operation_id(&existing.result).is_none()
+        {
+            return Err(JournalError::Divergence {
+                seq,
+                kind: kind.to_string(),
+            });
+        }
+        let entry = JournalEntry {
+            seq,
+            kind: kind.to_string(),
+            req_hash,
+            result,
+            at_ms: now_ms(),
+        };
+        self.append_physical_entry(&entry)?;
+        self.entries[index] = entry;
+        Ok(())
     }
 
     pub fn record(
@@ -180,27 +368,36 @@ impl Journal {
             kind: kind.to_string(),
             req_hash,
             result,
-            at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+            at_ms: now_ms(),
         };
         validate_sequence(&self.entries, &entry)?;
+        self.append_logical_entry(entry)?;
+        self.operation_ids.push(None);
+        Ok(())
+    }
+
+    fn append_logical_entry(&mut self, entry: JournalEntry) -> Result<(), JournalError> {
+        validate_sequence(&self.entries, &entry)?;
+        self.append_physical_entry(&entry)?;
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    fn append_physical_entry(&mut self, entry: &JournalEntry) -> Result<(), JournalError> {
         let mut line = serde_json::to_string(&entry)
             .map_err(|error| JournalError::Io(std::io::Error::other(error)))?;
         line.push('\n');
         if self.bytes.saturating_add(line.len() as u64) > MAX_JOURNAL_BYTES {
             return Err(JournalError::Full {
-                seq,
+                seq: entry.seq,
                 limit: MAX_JOURNAL_BYTES,
             });
         }
-        if let Some(path) = &self.path {
-            append_line(path, &line)?;
+        if let Some(storage) = &self.storage {
+            storage.append(line.as_bytes())?;
         }
         self.last_line_start = Some(self.bytes);
         self.bytes = self.bytes.saturating_add(line.len() as u64);
-        self.entries.push(entry);
         Ok(())
     }
 
@@ -222,17 +419,59 @@ impl Journal {
                 "journal cannot locate the trailing entry's byte offset",
             )));
         };
-        if let Some(path) = &self.path {
-            truncate_tail(path, new_len)?;
+        if let Some(storage) = &self.storage {
+            storage.truncate(new_len)?;
         }
-        self.entries.pop();
+        let last_index = self.entries.len() - 1;
+        if let Some(operation_id) = self.operation_ids[last_index].as_ref() {
+            self.entries[last_index].result =
+                serde_json::json!({ HOST_OPERATION_KEY: operation_id });
+        } else {
+            self.entries.pop();
+            self.operation_ids.pop();
+        }
         self.bytes = new_len;
         self.last_line_start = None;
         Ok(true)
     }
 }
 
-fn read_journal_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+fn pending_operation_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get(HOST_OPERATION_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+struct FileJournalStorage {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl JournalStorage for FileJournalStorage {
+    fn read_bounded(&self, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+        read_journal_bounded(&self.path, max_bytes)
+    }
+
+    fn append(&self, bytes: &[u8]) -> std::io::Result<()> {
+        append_line(&self.path, bytes)
+    }
+
+    fn truncate(&self, len: u64) -> std::io::Result<()> {
+        truncate_tail(&self.path, len)
+    }
+}
+
+#[cfg(test)]
+fn read_journal_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -240,10 +479,10 @@ fn read_journal_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
             format!("journal is not a regular file: {}", path.display()),
         ));
     }
-    if metadata.len() > MAX_JOURNAL_BYTES {
+    if metadata.len() > max_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("journal exceeds {MAX_JOURNAL_BYTES} bytes"),
+            format!("journal exceeds {max_bytes} bytes"),
         ));
     }
     let mut options = std::fs::OpenOptions::new();
@@ -255,19 +494,19 @@ fn read_journal_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
     }
     let file = options.open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() > MAX_JOURNAL_BYTES {
+    if !opened.is_file() || opened.len() > max_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "journal changed during open",
         ));
     }
     let mut content = Vec::with_capacity(opened.len() as usize);
-    file.take(MAX_JOURNAL_BYTES.saturating_add(1))
+    file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut content)?;
-    if content.len() as u64 > MAX_JOURNAL_BYTES {
+    if content.len() as u64 > max_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("journal exceeds {MAX_JOURNAL_BYTES} bytes"),
+            format!("journal exceeds {max_bytes} bytes"),
         ));
     }
     Ok(content)
@@ -285,6 +524,7 @@ fn validate_sequence(entries: &[JournalEntry], entry: &JournalEntry) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 fn truncate_tail(path: &Path, len: u64) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
@@ -304,7 +544,8 @@ fn truncate_tail(path: &Path, len: u64) -> std::io::Result<()> {
     file.sync_data()
 }
 
-fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+#[cfg(test)]
+fn append_line(path: &Path, line: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -322,7 +563,7 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
             "journal is not a regular file",
         ));
     }
-    file.write_all(line.as_bytes())?;
+    file.write_all(line)?;
     file.sync_data()
 }
 
@@ -382,6 +623,49 @@ mod tests {
         let replayed = loaded.replay(0, "spawn_agent", &hash).unwrap();
         assert_eq!(replayed, Some(serde_json::json!({"ok": true})));
         assert!(loaded.replay(1, "spawn_agent", &hash).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_operation_survives_restart_and_resolves_without_a_second_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let operation_id = "018f0000-0000-7000-8000-000000000001".to_string();
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .begin_operation(0, "spawn_agent", hash.clone(), operation_id.clone())
+            .unwrap();
+        drop(journal);
+
+        let mut recovered = Journal::load(path.clone()).unwrap();
+        assert_eq!(
+            recovered
+                .replay_operation(0, "spawn_agent", &hash)
+                .unwrap(),
+            Some(OperationReplay::Pending {
+                operation_id: operation_id.clone(),
+            })
+        );
+        recovered
+            .complete_operation(
+                0,
+                "spawn_agent",
+                hash.clone(),
+                serde_json::json!({"agent_id": operation_id}),
+            )
+            .unwrap();
+        drop(recovered);
+
+        let completed = Journal::load(path.clone()).unwrap();
+        assert_eq!(
+            completed
+                .replay_operation(0, "spawn_agent", &hash)
+                .unwrap(),
+            Some(OperationReplay::Completed(serde_json::json!({
+                "agent_id": "018f0000-0000-7000-8000-000000000001"
+            })))
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
     }
 
     #[test]

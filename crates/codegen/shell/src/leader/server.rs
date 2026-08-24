@@ -5430,7 +5430,8 @@ mod tests {
     /// replayed on reconnect. A session with a pending interaction has a running
     /// turn (the tool awaits the answer), so the agent keeps it resident across
     /// the disconnect with the reverse-request still parked
-    /// (`session_has_live_work`). The leader must therefore NOT drop its
+    /// (the actor-owned `UnloadIfIdle` transaction). The leader must therefore
+    /// NOT drop its
     /// interaction cache on detach — otherwise the reconnecting client gets no
     /// modal while the agent is still waiting. Regression for the "modal vanishes
     /// on reconnect" bug.

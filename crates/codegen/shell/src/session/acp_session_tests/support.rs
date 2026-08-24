@@ -5,13 +5,6 @@ use super::*;
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
     crate::agent::auth_method::new_shared_auth_method_id(Some(acp::AuthMethodId::new(id)))
 }
-/// Harness contract sentence — both halves ("verifies what's complete" AND
-/// "tells you what's missing").
-pub(crate) const HARNESS_VERIFIES_SENTENCE: &str =
-    "verifies what's complete and tells you what's missing on the next nudge";
-/// Plan-aware seed-todos instruction (`goal_plan_block.md`).
-pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
-    "Seed todos from the plan's acceptance criteria via";
 /// Establish the causal scope that production creates before dispatching tools.
 ///
 /// Tests that invoke `execute_tool_calls` directly deliberately bypass the
@@ -187,7 +180,10 @@ async fn test_agent_from_config(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path,
+        resources_persistence: std::sync::Arc::new(
+            tools::persistence::ResourcesPersistence::local(state_path)
+                .expect("pin resources state test store"),
+        ),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
@@ -255,6 +251,13 @@ pub(crate) async fn create_test_actor_ex(
                     });
                     let _ = respond_to.send(Ok(()));
                 }
+                PersistenceMsg::ReplaceRewindPointsAndAck { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::WriteRewindTransactionAndAck { respond_to, .. }
+                | PersistenceMsg::ClearRewindTransactionAndAck { respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                }
                 other => {
                     let _ = persistence_tx.send(other);
                 }
@@ -316,12 +319,28 @@ pub(crate) async fn create_test_actor_ex(
     chat_state_handle.record_token_usage(total_tokens);
     let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let session_dir = cwd.as_path().join(".grow-test-session");
+    std::fs::create_dir_all(&session_dir).expect("create test session directory");
+    // macOS exposes `/tmp` as a symlink to `/private/tmp`; production
+    // capabilities intentionally reject symlink authorities, so pin the test
+    // fixture through the resolved root while preserving `/tmp` as the model
+    // workspace path.
+    let session_root = std::fs::canonicalize(cwd.as_path()).expect("resolve test session root");
     let actor = SessionActor {
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),
         },
-        session_dir: cwd.as_path().join(".grow-test-session"),
+        session_dir,
+        session_directory: std::sync::Arc::new(
+            crate::session::storage::ContainedDirectory::open(
+                &session_root,
+                std::path::Path::new(".grow-test-session"),
+                "test session directory",
+                false,
+            )
+            .expect("pin test session directory"),
+        ),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -413,19 +432,15 @@ pub(crate) async fn create_test_actor_ex(
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(tool_types::BehaviorId::Normal)),
         behavior: Arc::new(parking_lot::Mutex::new(
-            crate::session::behavior::BehaviorCoordinator::new(std::path::PathBuf::from(
-                "/tmp/test-session",
-            )),
+            crate::session::behavior::BehaviorCoordinator::new(),
         )),
         control_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         goal_enabled: false,
         background_workflows_enabled: false,
-        goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
+        goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
         goal_tracker: Arc::new(parking_lot::Mutex::new(
             crate::session::goal_tracker::GoalTracker::new(),
         )),
-        goal_stage_cancel: parking_lot::Mutex::new(None),
-        goal_plan_staging: std::sync::Mutex::new(None),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
@@ -612,61 +627,4 @@ pub(crate) fn test_image_content() -> acp::ImageContent {
         base64::engine::general_purpose::STANDARD.encode(&buf),
         "image/png".to_string(),
     )
-}
-#[cfg(test)]
-pub(crate) fn set_goal_harness_for_tests(actor: &SessionActor) {
-    actor
-        .goal_harness_enabled
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-}
-#[cfg(test)]
-pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
-    let discipline_idx = reminder
-        .find("<task_completion_discipline>")
-        .unwrap_or_else(|| panic!("{site} must include <task_completion_discipline>:\n{reminder}"));
-    let tracking_idx = reminder
-        .find("TRACKING:")
-        .unwrap_or_else(|| panic!("{site} must include TRACKING:\n{reminder}"));
-    assert!(
-        discipline_idx < tracking_idx,
-        "{site} must place discipline before TRACKING (discipline={discipline_idx} tracking={tracking_idx}):\n{reminder}"
-    );
-    assert!(
-        reminder.contains("</task_completion_discipline>\nTRACKING:"),
-        "{site} must glue discipline directly before TRACKING:\n{reminder}"
-    );
-    for phrase in [
-        "Tool-call first",
-        "Don't ask permission to continue a task in flight",
-        "Track multi-step work with a",
-        "Don't stop with easy work left undone",
-    ] {
-        assert!(
-            reminder.contains(phrase),
-            "{site} must include discipline phrase `{phrase}`:\n{reminder}"
-        );
-    }
-    assert_eq!(
-        reminder.matches("</task_completion_discipline>").count(),
-        1,
-        "{site} must contain exactly one discipline closing tag:\n{reminder}"
-    );
-    assert!(
-        !reminder.contains("{DISCIPLINE_BLOCK}"),
-        "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
-    );
-}
-#[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
-    });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
-    );
 }

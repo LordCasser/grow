@@ -3736,9 +3736,9 @@ impl AppView {
     /// - the idle "still running" watcher cue and the status-bar
     ///   running-count chip (`watchers()` — live data, NOT the tasks pane's
     ///   synced entries, which minimal mode never syncs),
-    /// - the goal chip's spinner + live elapsed clock
-    ///   (`GoalDisplayStatus::Active` — goal stages run shell-side while
-    ///   the pager session is Idle, so this must NOT derive from `is_idle`).
+    /// - the Goal chip's spinner + live elapsed clock
+    ///   (`GoalDisplayStatus::Active` owns idle continuation even while the
+    ///   pager session is Idle, so this must NOT derive from `is_idle`).
     ///
     /// Shared by every visible status surface through the read-only activity
     /// projection. Lifecycle recovery is deliberately not part of this test.
@@ -3898,11 +3898,9 @@ impl AppView {
                 } else {
                     agent.turn_elapsed_at(frame.now())
                 };
-                // Goal stages (planning / verifying / inter-round gaps) run
-                // while the session is Idle but the goal stays Active — the
-                // tab-title spinner and OSC 9;4 progress must keep running so
-                // the "still working" chrome matches the status-bar goal chip
-                // (same Active predicate as `agent_surface_animating`).
+                // An Active Goal may be between continuation turns while the
+                // session is Idle. Keep the tab-title spinner and OSC 9;4
+                // progress aligned with the status-bar Goal chip.
                 let is_busy =
                     crate::app::activity::AgentActivityProjection::from_agent(agent).animates();
                 (name, model, activity, has_perms, elapsed, is_busy)
@@ -4217,10 +4215,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn visible_frame_interval_is_fast_while_goal_active_on_idle_session() {
-        // Goal stages (planning / verifying / inter-round classifier gaps)
-        // run shell-side while the pager session is Idle, but the status-bar
-        // goal chip keeps its spinner + live elapsed clock for the whole
-        // Active goal — so Active must arm ticks independently of `is_idle`.
+        // An Active Goal may be waiting for its next idle continuation while
+        // the pager session is Idle, so the Goal chip's spinner and elapsed
+        // clock must arm ticks independently of `is_idle`.
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);

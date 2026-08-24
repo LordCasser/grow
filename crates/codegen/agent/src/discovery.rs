@@ -933,7 +933,7 @@ mod tests {
         fs::create_dir_all(&agents).unwrap();
         fs::write(
             agents.join("security.md"),
-            "---\ndescription: Security reviewer\n---\nReview carefully.\n",
+            "---\ndescription: Security reviewer\ncolor: cyan\n---\nReview carefully.\n",
         )
         .unwrap();
 
@@ -943,6 +943,7 @@ mod tests {
             .find(|def| def.name == "review/security")
             .unwrap();
         assert_eq!(def.description, "Security reviewer");
+        assert_eq!(def.color, Some(crate::config::AgentColor::Cyan));
         assert_eq!(def.prompt_body.as_deref(), Some("Review carefully."));
     }
 

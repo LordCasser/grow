@@ -179,6 +179,15 @@ pub(crate) fn apply_patch_locked(
             .map_err(|error| {
                 io::Error::new(error.kind(), format!("open summary directory: {error}"))
             })?;
+    apply_patch_locked_in_directory(&directory, summary_name, lock_name, patch)
+}
+
+pub(crate) fn apply_patch_locked_in_directory(
+    directory: &super::ContainedDirectory,
+    summary_name: &std::ffi::OsStr,
+    lock_name: &std::ffi::OsStr,
+    patch: &SummaryPatch,
+) -> io::Result<bool> {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (directory, summary_name, lock_name, patch);

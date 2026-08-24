@@ -539,7 +539,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
-    fn finish_child(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
+    fn finish_child(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
         let record = if let Some(child) = self.active.remove(id) {
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
@@ -566,7 +566,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child.spawn_reply,
                     child.handle_only,
                 ),
-            };
+        };
+
+        if !self.runner.terminal_committed(&output.completion_data) {
+            output.result.success = false;
+            output.result.cancelled = false;
+            output.result.output = Arc::from("");
+            output.result.error.get_or_insert_with(|| {
+                "subagent completion is unavailable because its canonical terminal did not commit"
+                    .to_owned()
+            });
+        }
 
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
         let mut completed = CompletedChild {

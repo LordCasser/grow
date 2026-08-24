@@ -297,17 +297,13 @@ pub struct ScheduledTaskInfo {
     pub tag: String,
     pub last_subagent_id: Option<String>,
 }
-/// Parsed goal status from `GoalUpdated` session notifications.
-///
-/// The six paused variants encode the *cause* of the pause directly (no
-/// separate `pause_reason` field) so renderers can fan-out on a single
-/// `match`. See [`Self::pause_label`] for the user-facing labels and
-/// [`Self::is_paused`] for a cause-agnostic check.
+/// Parsed status of the session's long-lived Goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayStatus {
     Active,
     Paused,
     Blocked,
+    UsageLimited,
     BudgetLimited,
     Complete,
 }
@@ -317,81 +313,38 @@ impl GoalDisplayStatus {
             "active" => Self::Active,
             "paused" => Self::Paused,
             "blocked" => Self::Blocked,
+            "usage_limited" => Self::UsageLimited,
             "budget_limited" => Self::BudgetLimited,
             "complete" => Self::Complete,
             _ => return None,
         })
     }
 
-    pub fn pause_label(&self) -> &'static str {
+    pub fn stopped_label(&self) -> &'static str {
         match self {
             Self::Paused => "Paused",
             Self::Blocked => "Blocked",
+            Self::UsageLimited => "Usage limited",
             Self::Active | Self::BudgetLimited | Self::Complete => "",
         }
     }
 
-    pub fn is_paused(&self) -> bool {
-        matches!(self, Self::Paused | Self::Blocked)
+    pub fn uses_warning_chip(&self) -> bool {
+        matches!(self, Self::Paused | Self::Blocked | Self::UsageLimited)
     }
 }
-/// Parsed goal phase from `GoalUpdated` session notifications.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GoalDisplayPhase {
-    Planning,
-    Executing,
-    Verifying,
-    Summarizing,
-}
-impl GoalDisplayPhase {
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "planning" => Self::Planning,
-            "executing" => Self::Executing,
-            "verifying" => Self::Verifying,
-            "summarizing" => Self::Summarizing,
-            _ => return None,
-        })
-    }
-}
-/// Display state for an active goal, populated from `GoalUpdated`
-/// session notifications emitted by the goal orchestrator.
+/// Display projection of the durable Goal snapshot.
 #[derive(Debug, Clone)]
 pub struct GoalDisplayState {
     pub goal_id: String,
     pub objective: String,
-    pub objective_revision: u64,
     pub status: GoalDisplayStatus,
-    pub phase: GoalDisplayPhase,
-    pub plan_revision: u64,
-    pub board_revision: u64,
-    pub tasks: Vec<tool_types::GoalTaskProjection>,
-    pub plan_markdown: String,
-    pub verifier_feedback: Option<String>,
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
     pub elapsed_ms: u64,
-    pub current_subagent_role: Option<String>,
-    pub total_worker_rounds: u32,
-    pub total_verify_rounds: u32,
-    pub live_subagent_tokens: Option<u64>,
-    /// Per-model marginal-token breakdown `(model_id, tokens)`, sorted by
-    /// tokens descending. Mirror of the `GoalUpdated` wire field; the modal
-    /// renders it under the active-subagent metrics block.
-    pub live_tokens_by_model: Vec<(String, u64)>,
-    pub live_context_pct: Option<u8>,
-    pub live_turn_count: Option<u32>,
-    pub live_tool_call_count: Option<u32>,
-    pub last_event: Option<String>,
-    pub last_event_detail: Option<String>,
-    pub last_event_timestamp: Option<String>,
-    /// Token baseline at goal creation time. Used with the pager's
-    /// `context_state.used` to compute real-time token usage at render
-    /// frequency, instead of waiting for `GoalUpdated` notifications.
-    pub token_baseline: i64,
-    /// Tokens from completed subagents (not in context_state.used).
-    pub finished_subagent_tokens: i64,
-    pub pause_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status_message: Option<String>,
     /// Wall-clock instant when this state was last updated from a GoalUpdated
     /// notification. Used to compute local elapsed delta between notifications
     /// so the pager can tick elapsed_ms at render frequency.
@@ -423,54 +376,15 @@ impl GoalDisplayState {
         Self {
             goal_id: "g-test".into(),
             objective: "test goal".into(),
-            objective_revision: 0,
             status: GoalDisplayStatus::Active,
-            phase: GoalDisplayPhase::Executing,
-            plan_revision: 1,
-            board_revision: 1,
-            tasks: vec![tool_types::GoalTaskProjection {
-                id: "T1".into(),
-                parent_id: None,
-                depth: 1,
-                status: tool_types::GoalTaskStatus::InProgress,
-                summary: "test".into(),
-                completed_descendants: 0,
-                total_descendants: 0,
-            }],
-            plan_markdown: "# Goal\n\n> test goal\n\n## Plan\n\n- [ ] **T1** `in_progress` — test\n\n## Goal acceptance\n\n- test\n\n## Verification evidence\n\n- pending\n\n## Open gaps\n\n- none".into(),
-            verifier_feedback: None,
             token_budget: None,
             tokens_used: 0,
             elapsed_ms: 0,
-            current_subagent_role: None,
-            total_worker_rounds: 0,
-            total_verify_rounds: 0,
-            live_subagent_tokens: None,
-            live_tokens_by_model: Vec::new(),
-            live_context_pct: None,
-            live_turn_count: None,
-            live_tool_call_count: None,
-            last_event: None,
-            last_event_detail: None,
-            last_event_timestamp: None,
-            token_baseline: 0,
-            finished_subagent_tokens: 0,
-            pause_message: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            status_message: None,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
-        }
-    }
-    pub fn live_tokens_used(&self, context_used: Option<u64>, active_subagent_tokens: u64) -> i64 {
-        if self.status == GoalDisplayStatus::Active {
-            let parent_delta = context_used
-                .map(|u| (u as i64).saturating_sub(self.token_baseline).max(0))
-                .unwrap_or(self.tokens_used);
-            let candidate = parent_delta
-                .saturating_add(self.finished_subagent_tokens)
-                .saturating_add(active_subagent_tokens as i64);
-            candidate.max(self.tokens_used)
-        } else {
-            self.tokens_used
         }
     }
     /// Return elapsed_ms adjusted with local wall-clock delta since the last
@@ -1176,37 +1090,19 @@ mod tests {
     }
 
     #[test]
-    fn pause_label_is_consistent_across_renderers() {
-        assert_eq!(GoalDisplayStatus::Paused.pause_label(), "Paused");
-        assert_eq!(GoalDisplayStatus::Blocked.pause_label(), "Blocked");
-        assert_eq!(GoalDisplayStatus::Active.pause_label(), "");
-        assert_eq!(GoalDisplayStatus::BudgetLimited.pause_label(), "");
-        assert_eq!(GoalDisplayStatus::Complete.pause_label(), "");
-        assert!(GoalDisplayStatus::Paused.is_paused());
-        assert!(GoalDisplayStatus::Blocked.is_paused());
-        assert!(!GoalDisplayStatus::Active.is_paused());
-        assert!(!GoalDisplayStatus::BudgetLimited.is_paused());
-        assert!(!GoalDisplayStatus::Complete.is_paused());
-    }
-    #[test]
-    fn goal_display_phase_parse_known_values() {
-        assert_eq!(
-            GoalDisplayPhase::parse("planning"),
-            Some(GoalDisplayPhase::Planning)
-        );
-        assert_eq!(
-            GoalDisplayPhase::parse("executing"),
-            Some(GoalDisplayPhase::Executing)
-        );
-        assert_eq!(
-            GoalDisplayPhase::parse("verifying"),
-            Some(GoalDisplayPhase::Verifying)
-        );
-        assert_eq!(
-            GoalDisplayPhase::parse("summarizing"),
-            Some(GoalDisplayPhase::Summarizing)
-        );
-        assert_eq!(GoalDisplayPhase::parse("idle"), None);
+    fn stopped_label_is_consistent_across_renderers() {
+        assert_eq!(GoalDisplayStatus::Paused.stopped_label(), "Paused");
+        assert_eq!(GoalDisplayStatus::Blocked.stopped_label(), "Blocked");
+        assert_eq!(GoalDisplayStatus::UsageLimited.stopped_label(), "Usage limited");
+        assert_eq!(GoalDisplayStatus::Active.stopped_label(), "");
+        assert_eq!(GoalDisplayStatus::BudgetLimited.stopped_label(), "");
+        assert_eq!(GoalDisplayStatus::Complete.stopped_label(), "");
+        assert!(GoalDisplayStatus::Paused.uses_warning_chip());
+        assert!(GoalDisplayStatus::Blocked.uses_warning_chip());
+        assert!(GoalDisplayStatus::UsageLimited.uses_warning_chip());
+        assert!(!GoalDisplayStatus::Active.uses_warning_chip());
+        assert!(!GoalDisplayStatus::BudgetLimited.uses_warning_chip());
+        assert!(!GoalDisplayStatus::Complete.uses_warning_chip());
     }
     #[test]
     fn enqueue_assigns_monotonic_ids() {

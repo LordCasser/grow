@@ -334,6 +334,11 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<TrajectorySnapshot>,
     },
 
+    /// Clone the canonical event ledger for recovery/reconciliation logic.
+    GetTimelineEvents {
+        reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
+    },
+
     /// Atomically freeze a Timeline range and materialize its current Surface.
     MaterializeTimeline {
         timeline_id: String,

@@ -372,69 +372,25 @@ impl MvpAgent {
             }
         });
     }
-    /// Coarse "any work pending" check for the idle-unload stub.
-    /// Returns `true` while the session has work in flight.
-    ///
-    /// Three layers:
-    /// 1. **Fast path (sync):** the shared `current_prompt_id` slot, which the
-    ///    actor sets while a turn is running (`maybe_start_running_task`) and
-    ///    clears via its RAII guard. A poisoned lock is treated as busy → never
-    ///    unload.
-    /// 1b. **Parked plan-approval (sync):** the shared `pending_interactions`
-    ///    slot. The parked plan-approval resume re-park is the one outstanding work with no
-    ///    running turn, so it needs its own sync check (the same shared-`Arc`
-    ///    idiom as `current_prompt_id`) rather than the async round-trip below.
-    /// 2. **Actor check (async):** when no turn is running, the actor is between
-    ///    turns and responsive, so we ask it whether `pending_inputs` is
-    ///    non-empty or an Active Goal still owns autonomous work. This closes the
-    ///    sub-tick window where `current_prompt_id` is momentarily `None` but a
-    ///    queued input is about to be drained. On timeout we keep the session
-    ///    resident (conservative).
-    ///
-    /// TODO(PR-4): once the aggregate `SessionActivity` signal exists, also
-    /// consult the remaining autonomous background sources so a detached session is never
-    /// idle-unloaded (→ `Shutdown` → `KillOnDrop`) while they are live:
-    /// `monitor_event_buffer`, pending scheduler fires,
-    /// `ToolContext.background_tasks`, and background subagent sessions. Until
-    /// then those background-only sessions rely on the keep-resident default and
-    /// the `current_prompt_id` auto-wake turn being active.
-    ///
-    /// TODO(PR-4): this is also inherently a *check-then-act* across the
-    /// actor-thread boundary — work can arrive (a new `Prompt`/auto-wake) in the
-    /// gap between this `IsBusy` answer and the caller's subsequent `Shutdown`,
-    /// so an idle-unload can still race a just-arrived turn. The actor processes
-    /// its mailbox in order, so the lost work is bounded and recoverable on
-    /// reload; PR-4 closes the gap properly by gating the unload inside the
-    /// actor (a single `Unload`-if-idle command) rather than check-then-send.
-    pub(super) async fn session_has_live_work(&self, id: &acp::SessionId) -> bool {
-        let Some(handle) = self.sessions.borrow().get(id).cloned() else {
-            return false;
-        };
-        let turn_running = handle
-            .current_prompt_id
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(true);
-        if turn_running {
-            return true;
-        }
-        if crate::session::pending_interaction::has_parked_plan_approval(
-            &handle.pending_interactions,
-        ) {
-            return true;
-        }
-        tokio::time::timeout(IDLE_QUERY_TIMEOUT, handle.is_busy())
-            .await
-            .unwrap_or(true)
-    }
     /// Entry counts for every collection [`Self::remove_session`] drains,
     /// plus workspace bindings and shared coordinator state.
     pub(crate) async fn registry_snapshot(&self) -> RegistrySnapshot {
-        let subagents = tools::implementations::grow_build::task::backend::ChannelBackend::new(
-            self.subagent_event_tx.clone(),
-        )
-        .registry_counts()
-        .await;
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        let subagents = if self
+            .subagent_event_tx
+            .send(
+                tools::implementations::grow_build::task::types::SubagentEvent::RegistryCounts(
+                    tools::implementations::grow_build::task::types::SubagentRegistryCountsRequest {
+                        respond_to,
+                    },
+                ),
+            )
+            .is_ok()
+        {
+            response.await.unwrap_or_default()
+        } else {
+            Default::default()
+        };
         let (resident_resources, session_index_claims, require_gateway_sessions) = {
             let resident = self.resident_resources.borrow();
             (

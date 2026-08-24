@@ -798,9 +798,7 @@ mod tests {
             persistence: PersistenceHandle::from_sender_for_test(persistence_tx),
             incremental_bash_output: false,
             behavior: Arc::new(parking_lot::Mutex::new(
-                crate::session::behavior::BehaviorCoordinator::new(PathBuf::from(
-                    "/tmp/test-session",
-                )),
+                crate::session::behavior::BehaviorCoordinator::new(),
             )),
             session_cmd_tx,
             task_completion_reservations:

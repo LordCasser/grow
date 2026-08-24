@@ -589,14 +589,12 @@ impl MvpAgent {
     ///   driver/subscriber maps don't exist yet), so for now we only mark the
     ///   live state.
     /// - **Fully idle sessions are unloaded to disk** to bound memory (the
-    ///   `sessions`/`session_threads` maps are uncapped). This preserves the
-    ///   legacy unload path — `Shutdown` the actor, drop the `SessionHandle`,
-    ///   but KEEP the `SessionThread` so `drain_old_session_thread` can drain it
-    ///   on reconnect — and crucially does **not** finalize the cloud replica
-    ///   (the session remains resumable via `session/load`).
-    ///
-    /// The "live work" check is the coarse PR-2 stub (`session_has_live_work`);
-    /// the full `SessionActivity` signal lands in PR-4.
+    ///   `sessions`/`session_threads` maps are uncapped). The actor owns the
+    ///   atomic idle decision and closes its mailbox before acknowledging the
+    ///   unload. The leader then drops the `SessionHandle`, but KEEP the
+    ///   `SessionThread` so `drain_old_session_thread` can drain it on
+    ///   reconnect. This does **not** finalize the cloud replica (the session
+    ///   remains resumable via `session/load`).
     pub(super) async fn handle_evict_sessions(
         &self,
         params: &serde_json::value::RawValue,
@@ -618,35 +616,41 @@ impl MvpAgent {
             sessions = ?p.session_ids,
             "Client disconnected; detaching sessions (no-evict keystone)"
         );
-        let checks = p
+        let unloads = p
             .session_ids
             .iter()
             .map(|sid| {
                 let id = acp::SessionId::new(sid.clone());
+                let handle = self.sessions.borrow().get(&id).cloned();
                 async move {
-                    let busy = self.session_has_live_work(&id).await;
-                    (id, busy)
+                    let unloaded = match handle {
+                        Some(handle) => tokio::time::timeout(
+                            IDLE_UNLOAD_TIMEOUT,
+                            handle.unload_if_idle(),
+                        )
+                        .await
+                        .unwrap_or(false),
+                        None => false,
+                    };
+                    (id, unloaded)
                 }
             });
-        let resolved = futures::future::join_all(checks).await;
+        let resolved = futures::future::join_all(unloads).await;
         let mut kept_resident: usize = 0;
         let mut unloaded: usize = 0;
-        for (id, busy) in resolved {
-            if busy {
+        for (id, actor_unloaded) in resolved {
+            if actor_unloaded && self.take_session(&id).is_some() {
+                self.resident_resources.borrow_mut().remove(&id);
+                self.set_session_live_state(&id, SessionLiveState::Dormant);
+                unloaded += 1;
+                tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
+            } else if self.sessions.borrow().contains_key(&id) {
                 self.set_session_live_state(&id, SessionLiveState::Working);
                 kept_resident += 1;
                 tracing::info!(
                     session_id = %id.0,
                     "kept session resident across client disconnect (live work)"
                 );
-                continue;
-            }
-            self.request_session_shutdown(&id);
-            if self.take_session(&id).is_some() {
-                self.resident_resources.borrow_mut().remove(&id);
-                self.set_session_live_state(&id, SessionLiveState::Dormant);
-                unloaded += 1;
-                tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
             }
         }
         tracing::info!(kept_resident, unloaded, "client-disconnect detach complete");
@@ -655,9 +659,9 @@ impl MvpAgent {
     /// Wait for an old session thread to finish before reloading the same session.
     ///
     /// When a client disconnects and a session is *idle*, `handle_evict_sessions`
-    /// unloads it: sends `Shutdown`, drops the `SessionHandle`, and keeps the
-    /// `SessionThread`. (Sessions with live work stay fully resident and skip
-    /// this path.) If the client reconnects and loads the same session, we must
+    /// unloads it atomically, drops the `SessionHandle`, and keeps the
+    /// `SessionThread`. Sessions with live work stay fully resident. If the
+    /// client reconnects and loads the same session, we must
     /// wait for the old actor to finish flushing to disk before replaying
     /// `updates.jsonl`.
     ///
@@ -823,11 +827,13 @@ impl MvpAgent {
     /// already-finished → its terminal status; unknown id → `NotFound`.
     pub async fn cancel_subagent(
         &self,
+        parent_session_id: &str,
         subagent_id: &str,
     ) -> tools::implementations::grow_build::task::types::SubagentCancelOutcome {
-        tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+            self.subagent_event_tx.clone(),
+            parent_session_id.to_owned(),
+        )
             .cancel(subagent_id)
             .await
     }
@@ -837,35 +843,40 @@ impl MvpAgent {
     ) -> Vec<
         tools::implementations::grow_build::task::types::SubagentInspection,
     > {
-        tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+            self.subagent_event_tx.clone(),
+            parent_session_id.to_owned(),
+        )
             .list_running(parent_session_id)
             .await
     }
     pub(crate) async fn inspect_subagent(
         &self,
+        parent_session_id: &str,
         subagent_id: &str,
     ) -> Option<
         tools::implementations::grow_build::task::types::SubagentInspection,
     > {
-        tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+            self.subagent_event_tx.clone(),
+            parent_session_id.to_owned(),
+        )
             .inspect(subagent_id)
             .await
     }
     pub(crate) async fn query_subagent(
         &self,
+        parent_session_id: &str,
         subagent_id: &str,
         block: bool,
         timeout_ms: Option<u64>,
     ) -> Option<
         tools::implementations::grow_build::task::types::SubagentSnapshot,
     > {
-        tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+            self.subagent_event_tx.clone(),
+            parent_session_id.to_owned(),
+        )
             .query(subagent_id, block, timeout_ms)
             .await
     }
@@ -1261,7 +1272,7 @@ impl MvpAgent {
             persistence,
             session_title_route,
             timeline_bootstrap,
-            rewind_points_file_path,
+            rewind_points_source,
             origin_client: _origin_client,
             client_code_nav_enabled,
             client_terminal,
@@ -1770,7 +1781,7 @@ impl MvpAgent {
                     persistence,
                     session_title_route,
                     timeline_bootstrap,
-                    rewind_points_file_path,
+                    rewind_points_source,
                     fs_notify_config,
                     startup_hints,
                     client_type,

@@ -157,8 +157,6 @@ fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
         ("grow-build", default_grow_build_toolset()),
         ("grow-build-concise", grow_build_concise_toolset()),
         ("explore", explore_toolset()),
-        ("goal-planner", goal_planner_toolset()),
-        ("goal-verifier", goal_verifier_toolset()),
         ("grow-computer", grow_computer_toolset()),
     ]
 }
@@ -214,9 +212,8 @@ fn default_grow_build_toolset() -> ToolServerConfig {
             (&tools::implementations::context_recall::ContextRecallImpl).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&grow_build::CreateGoalTool).into(),
             (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalProgressTool).into(),
-            (&grow_build::RequestGoalReplanTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
@@ -238,9 +235,8 @@ fn grow_build_concise_toolset() -> ToolServerConfig {
             (&grow_build::SchedulerListTool).into(),
             (&grow_build::MonitorTool).into(),
             (&tools::implementations::context_recall::ContextRecallImpl).into(),
+            (&grow_build::CreateGoalTool).into(),
             (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalProgressTool).into(),
-            (&grow_build::RequestGoalReplanTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
@@ -269,9 +265,8 @@ pub fn grow_build_hashline_toolset(
         (&tools::implementations::context_recall::ContextRecallImpl).into(),
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
+        (&grow_build::CreateGoalTool).into(),
         (&grow_build::GetGoalTool).into(),
-        (&grow_build::UpdateGoalProgressTool).into(),
-        (&grow_build::RequestGoalReplanTool).into(),
         (&grow_build::UpdateGoalTool).into(),
         (&grow_build::WorkflowTool).into(),
     ]);
@@ -298,37 +293,6 @@ fn explore_toolset() -> ToolServerConfig {
     }
 }
 
-/// Exact host-only toolset for the Goal planner. The planner receives the
-/// immutable Goal snapshot in its prompt and may re-read it, but has no shell,
-/// mutation, workflow, or delegation surface. Plan submission flows through
-/// the structured section tools; the host owns ids and Markdown.
-fn goal_planner_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            (&grow_build::GetGoalTool).into(),
-            (&grow_build::SubmitGoalPlanSectionTool).into(),
-            (&grow_build::FinalizeGoalPlanTool).into(),
-        ],
-    }
-}
-
-/// Exact host-only toolset for the Goal verifier. Its workspace is an
-/// isolated worktree; execution is available for evidence collection while
-/// every persistent or object-level mutation tool is absent by construction.
-fn goal_verifier_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            (&grow_build::GetGoalTool).into(),
-        ],
-    }
-}
 /// Per-Agent restriction on which peer definitions may be launched through
 /// the task tool. This is a tool capability, not an Agent hierarchy: the same
 /// definition may be launched anywhere another Agent permits it; primary
@@ -533,6 +497,11 @@ pub struct AgentDefinition {
     pub isolation: Option<IsolationMode>,
     #[serde(default)]
     pub background: Option<bool>,
+    /// Optional picker/accent color. This is presentation metadata only: it
+    /// never participates in prompt composition, capability resolution, or
+    /// session policy.
+    #[serde(default, deserialize_with = "deserialize_agent_color")]
+    pub color: Option<AgentColor>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerRef>,
     #[serde(default)]
@@ -630,6 +599,60 @@ pub enum AgentScope {
     /// Built-in agent (e.g., default_grow_build(), browser_use()).
     #[default]
     BuiltIn,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    serde::Serialize,
+    EnumString,
+    strum::EnumCount,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum AgentColor {
+    Red,
+    Blue,
+    Green,
+    Yellow,
+    Purple,
+    Orange,
+    Pink,
+    Cyan,
+}
+
+impl AgentColor {
+    pub const VALID_VALUES: &[&str] = &[
+        "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
+    ];
+}
+
+const _: () = assert!(AgentColor::VALID_VALUES.len() == <AgentColor as strum::EnumCount>::COUNT);
+
+/// Decorative metadata must not make an otherwise valid Agent undiscoverable.
+fn deserialize_agent_color<'de, D>(deserializer: D) -> Result<Option<AgentColor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::str::FromStr;
+    let Some(value) = Option::<serde_yaml::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let parsed = value
+        .as_str()
+        .and_then(|name| AgentColor::from_str(name.trim()).ok());
+    if parsed.is_none() {
+        tracing::warn!(
+            color = ?value,
+            valid = ?AgentColor::VALID_VALUES,
+            "unrecognized agent color, ignoring"
+        );
+    }
+    Ok(parsed)
 }
 impl AgentScope {
     pub fn label(self) -> &'static str {
@@ -1260,6 +1283,7 @@ impl AgentDefinition {
             max_turns: None,
             isolation: None,
             background: None,
+            color: None,
             mcp_servers: vec![],
             mcp_inheritance: McpInheritance::All,
             hooks: None,
@@ -1296,16 +1320,6 @@ impl AgentDefinition {
             .expect("embedded explore Agent definition must be valid");
         definition.scope = AgentScope::BuiltIn;
         definition
-    }
-    /// Host-only Goal planning stage. This profile is intentionally not a
-    /// `BuiltinAgentName`, so discovery and the general Task catalog cannot
-    /// expose or resolve it.
-    pub fn goal_planner() -> Self {
-        Self::embedded_builtin(include_str!("../prompts/agents/goal-planner.md"))
-    }
-    /// Host-only Goal verification stage; see [`Self::goal_planner`].
-    pub fn goal_verifier() -> Self {
-        Self::embedded_builtin(include_str!("../prompts/agents/goal-verifier.md"))
     }
     /// Browser Use agent definition.
     pub fn browser_use() -> Self {

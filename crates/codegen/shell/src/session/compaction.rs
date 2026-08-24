@@ -1201,22 +1201,37 @@ impl SessionActor {
                 match controller.state() {
                     BehaviorState::Plan(PlanPhase::Executing) => Some((
                         crate::session::behavior::plan_execution_reminder_template(),
-                        controller.approved_plan_file_path().to_path_buf(),
+                        controller.plan_artifact_hash().map(str::to_owned),
                     )),
                     BehaviorState::Plan(_) => Some((
                         crate::session::behavior::plan_mode_reminder_full_template(),
-                        controller.plan_file_path().to_path_buf(),
+                        controller.plan_artifact_hash().map(str::to_owned),
                     )),
                     _ => None,
                 }
             };
-            if let Some((template, plan_path)) = plan {
-                let plan_has_content =
-                    crate::session::behavior::plan_file_has_content(&plan_path).await;
+            if let Some((template, artifact_hash)) = plan {
+                let plan_content = match artifact_hash {
+                    Some(hash) => {
+                        let session = self.session_directory.clone();
+                        tokio::task::spawn_blocking(move || {
+                            crate::session::behavior::read_plan_artifact(&session, &hash)
+                        })
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error()
+                                .data(format!("failed to join Plan artifact read: {error}"))
+                        })?
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "active Plan artifact failed validation during compaction: {error}"
+                            ))
+                        })?
+                    }
+                    None => String::new(),
+                };
                 let wrapper = self.reminder_wrapper_tag();
-                let rendered = self
-                    .render_plan_template(template, &plan_path, plan_has_content)
-                    .await;
+                let rendered = self.render_plan_template(template, &plan_content).await;
                 match (system_reminder, rendered) {
                     (Some(mut existing), Some(plan_section)) => {
                         if let Some(pos) = existing.rfind("</system-reminder>") {

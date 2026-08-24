@@ -632,12 +632,14 @@ pub async fn handle(
                 return Err(acp::Error::invalid_request()
                     .data("checkout_session_head is not supported in jj repositories"));
             }
-            let summary =
-                crate::session::persistence::find_summary_by_session_id(&req.session_id.0)
-                    .ok_or_else(|| {
-                        acp::Error::invalid_params()
-                            .data(format!("session {} not found", req.session_id.0))
-                    })?;
+            let opened = crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                .open_session_by_id(&req.session_id.0)
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+                .ok_or_else(|| {
+                    acp::Error::invalid_params()
+                        .data(format!("session {} not found", req.session_id.0))
+                })?;
+            let summary = opened.summary().clone();
             let head_commit = summary.head_commit.ok_or_else(|| {
                 acp::Error::invalid_params().data(format!(
                     "session {} has no persisted HEAD commit",

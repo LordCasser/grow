@@ -21,6 +21,8 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 anydoc = "0.1.7"
 base64 = { workspace = true }
+cap-fs-ext = { workspace = true }
+cap-std = { workspace = true }
 crc32fast = { workspace = true }
 ignore = { workspace = true }
 infer = { workspace = true }

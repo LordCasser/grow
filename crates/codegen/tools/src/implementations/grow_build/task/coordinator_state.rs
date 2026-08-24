@@ -114,7 +114,18 @@ pub trait ChildRunner: 'static {
         None
     }
 
-    fn load_persisted_output(&self, _reference: &str) -> Option<Arc<str>> {
+    /// Whether the host committed the canonical child-result → parent-terminal
+    /// chain. A false result is never eligible for successful waiter delivery.
+    fn terminal_committed(&self, _completion_data: &Self::CompletionData) -> bool {
+        true
+    }
+
+    fn load_persisted_output(
+        &self,
+        _request: &SubagentRequest,
+        _child_session_id: &str,
+        _reference: &str,
+    ) -> Option<Arc<str>> {
         None
     }
 }

@@ -107,7 +107,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let Some(reference) = child.persisted_output_ref.as_deref() else {
             return (None, false);
         };
-        match self.runner.load_persisted_output(reference) {
+        match self.runner.load_persisted_output(
+            &child.request,
+            &child.child_session_id,
+            reference,
+        ) {
             Some(output) => (Some(output), false),
             None => (None, true),
         }

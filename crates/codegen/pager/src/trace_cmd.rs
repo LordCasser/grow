@@ -30,13 +30,16 @@ pub async fn run(args: TraceArgs) -> Result<()> {
 // Archive construction
 // ---------------------------------------------------------------------------
 
-pub fn build_session_tar(session_dir: &Path, session_id: &str) -> Result<Vec<u8>> {
+const MAX_TRACE_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
+
+pub fn build_session_tar(snapshot: shell::session::storage::SessionTraceSnapshot) -> Result<Vec<u8>> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
+    let session_id = snapshot.session_id;
+
     tracing::info!(
         session_id = %session_id,
-        session_dir = %session_dir.display(),
         "trace_cmd: building session tar.gz archive"
     );
 
@@ -46,10 +49,14 @@ pub fn build_session_tar(session_dir: &Path, session_id: &str) -> Result<Vec<u8>
         let encoder = GzEncoder::new(&mut archive_data, Compression::default());
         let mut archive = tar::Builder::new(encoder);
 
-        file_count += add_directory_to_tar(&mut archive, session_dir, session_id)?;
+        for file in snapshot.files {
+            let archive_path = Path::new(&session_id).join(file.relative_path);
+            append_bytes(&mut archive, &archive_path, &file.bytes)?;
+            file_count = file_count.saturating_add(1);
+        }
 
         let metadata = ExportMetadata {
-            session_id: session_id.to_owned(),
+            session_id: session_id.clone(),
             version: env!("VERSION_WITH_COMMIT").to_owned(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
@@ -58,15 +65,19 @@ pub fn build_session_tar(session_dir: &Path, session_id: &str) -> Result<Vec<u8>
         let meta_bytes = serde_json::to_vec_pretty(&metadata)?;
         append_bytes(
             &mut archive,
-            &format!("{session_id}/export_metadata.json"),
+            &Path::new(&session_id).join("export_metadata.json"),
             &meta_bytes,
-        );
+        )?;
         file_count += 1;
 
         archive
             .into_inner()
             .and_then(|encoder| encoder.finish())
             .context("Failed to finalize tar.gz archive")?;
+    }
+
+    if archive_data.len() > MAX_TRACE_ARCHIVE_BYTES {
+        anyhow::bail!("Session trace archive exceeds the output byte limit");
     }
 
     tracing::info!(
@@ -88,15 +99,19 @@ struct ExportMetadata {
     exported_at: String,
 }
 
-fn append_bytes<W: std::io::Write>(archive: &mut tar::Builder<W>, path: &str, data: &[u8]) {
+fn append_bytes<W: std::io::Write>(
+    archive: &mut tar::Builder<W>,
+    path: &Path,
+    data: &[u8],
+) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);
     header.set_mode(0o644);
     set_mtime(&mut header);
-    if let Err(e) = archive.append_data(&mut header, path, data) {
-        tracing::warn!(error = %e, "trace_cmd: failed to add file to archive");
-        eprintln!("  Warning: failed to add {path}: {e}");
-    }
+    archive
+        .append_data(&mut header, path, data)
+        .with_context(|| format!("Failed to add {} to trace archive", path.display()))?;
+    Ok(())
 }
 
 fn set_mtime(header: &mut tar::Header) {
@@ -108,57 +123,9 @@ fn set_mtime(header: &mut tar::Header) {
     );
 }
 
-/// Returns the number of files added.
-fn add_directory_to_tar<W: std::io::Write>(
-    archive: &mut tar::Builder<W>,
-    dir: &Path,
-    prefix: &str,
-) -> Result<u32> {
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
-
-    let mut count: u32 = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let archive_path = format!("{prefix}/{name_str}");
-
-        if path.is_dir() {
-            count += add_directory_to_tar(archive, &path, &archive_path)?;
-        } else if path.is_file() {
-            match std::fs::read(&path) {
-                Ok(data) => {
-                    append_bytes(archive, &archive_path, &data);
-                    count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "trace_cmd: failed to read file for archive"
-                    );
-                    eprintln!("  Warning: failed to read {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-
-    Ok(count)
-}
-
 // ---------------------------------------------------------------------------
 // Local export
 // ---------------------------------------------------------------------------
-
-pub(crate) fn find_session_dir(session_id: &str) -> Result<PathBuf> {
-    shell::session::persistence::find_session_dir_by_id(session_id).with_context(|| {
-        format!(
-            "Session '{session_id}' not found under {}",
-            crate::util::display_user_grow_path("sessions")
-        )
-    })
-}
 
 pub fn traces_dir() -> PathBuf {
     grow_home().join("traces")
@@ -194,18 +161,20 @@ pub fn save_local_bundle(
 }
 
 async fn run_save(session_id: &str, output: Option<&Path>, json: bool) -> Result<()> {
-    let session_dir = find_session_dir(session_id)?;
+    let snapshot = shell::session::storage::load_session_trace(session_id)?
+        .with_context(|| format!("Session '{session_id}' not found"))?;
+    let canonical_session_id = snapshot.session_id.clone();
     if !json {
-        eprintln!("Found session at: {}", session_dir.display());
+        eprintln!("Found session: {canonical_session_id}");
         eprintln!("Building local session trace archive...");
     }
 
-    let archive = build_session_tar(&session_dir, session_id)?;
-    let output_path = save_local_bundle(&archive, session_id, output)?;
+    let archive = build_session_tar(snapshot)?;
+    let output_path = save_local_bundle(&archive, &canonical_session_id, output)?;
 
     if json {
         let result = TraceResult {
-            session_id: session_id.to_owned(),
+            session_id: canonical_session_id,
             status: "saved",
             path: output_path.display().to_string(),
         };

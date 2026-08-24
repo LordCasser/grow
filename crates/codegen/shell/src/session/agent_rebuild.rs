@@ -77,7 +77,7 @@ pub(crate) struct AgentRebuildSpec {
     pub terminal_backend: Arc<dyn TerminalBackend>,
     pub fs_backend: Arc<dyn AsyncFileSystem>,
     pub tools_notification_handle: ToolNotificationHandle,
-    pub resource_state_path: PathBuf,
+    pub resources_persistence: Arc<tools::persistence::ResourcesPersistence>,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
     pub compaction_policy: CompactionPolicy,
@@ -161,7 +161,7 @@ impl AgentRebuildSpec {
             terminal_backend,
             fs_backend,
             tools_notification_handle,
-            resource_state_path,
+            resources_persistence,
             session_env,
             models_manager,
             compaction_policy,
@@ -209,7 +209,7 @@ impl AgentRebuildSpec {
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
-        .with_state_path(resource_state_path.clone())
+        .with_resources_persistence(resources_persistence.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
@@ -347,7 +347,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         )),
         fs_backend: Arc::new(tools::computer::local::LocalFs),
         tools_notification_handle: ToolNotificationHandle::noop(),
-        resource_state_path: std::env::temp_dir().join("test_resources_state.json"),
+        resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
         compaction_policy: CompactionPolicy::default(),

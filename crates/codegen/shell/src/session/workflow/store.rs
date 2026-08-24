@@ -16,7 +16,7 @@ pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
 pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRunManifest {
     pub version: u8,
@@ -40,30 +40,30 @@ struct RunSource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowRunStore {
-    session_dir: Option<PathBuf>,
+    session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     sources: Arc<parking_lot::Mutex<HashMap<String, RunSource>>>,
 }
 
 impl WorkflowRunStore {
     pub(crate) fn new(
-        session_dir: Option<PathBuf>,
+        session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     ) -> Self {
         Self {
-            session_dir,
+            session_directory,
             persistence_tx,
             sources: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
     pub(crate) fn from_restored(
-        session_dir: Option<PathBuf>,
+        session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
         restored: Vec<RestoredWorkflowRun>,
         timeline: Option<&chat_state::Timeline>,
     ) -> (Self, Vec<WorkflowRunState>) {
-        let store = Self::new(session_dir, persistence_tx);
+        let store = Self::new(session_directory, persistence_tx);
         let mut states = Vec::with_capacity(restored.len());
         let mut repaired = Vec::new();
         {
@@ -131,11 +131,11 @@ impl WorkflowRunStore {
             }
         }
         for state in repaired {
-            if let Err(error) = store.persist_now(&state) {
+            if let Err(error) = store.persist(&state) {
                 tracing::warn!(
                     run_id = %state.run_id,
                     %error,
-                    "failed to persist repaired workflow restore state"
+                    "failed to queue repaired workflow restore state"
                 );
             }
         }
@@ -176,10 +176,9 @@ impl WorkflowRunStore {
             ));
         }
 
-        if let Some(session_dir) = self.session_dir.as_deref() {
+        if let Some(session) = self.session_directory.as_deref() {
             let run_relative = Path::new("workflows").join(run_id);
-            crate::session::storage::ContainedDirectory::open(
-                session_dir,
+            session.open_relative(
                 &run_relative.join("scripts"),
                 "Workflow scripts directory",
                 true,
@@ -200,20 +199,28 @@ impl WorkflowRunStore {
                     ),
                 ));
             }
-            crate::session::storage::write_contained_new_durable(
-                session_dir,
-                &run_relative.join("args.json"),
-                &args_json,
+            let run_dir = session.open_relative(
+                &run_relative,
+                "Workflow run directory",
+                false,
             )?;
-            crate::session::storage::write_contained_new_durable(
-                session_dir,
-                &run_relative.join("scripts/0000.rhai"),
-                script.as_bytes(),
+            let scripts = run_dir.open_relative(
+                Path::new("scripts"),
+                "Workflow scripts directory",
+                false,
             )?;
-            crate::session::storage::write_contained_atomic_durable(
-                session_dir,
-                &run_relative.join("script.rhai"),
+            run_dir.write_atomic(std::ffi::OsStr::new("args.json"), &args_json, true, false)?;
+            scripts.write_atomic(
+                std::ffi::OsStr::new("0000.rhai"),
                 script.as_bytes(),
+                true,
+                false,
+            )?;
+            run_dir.write_atomic(
+                std::ffi::OsStr::new("script.rhai"),
+                script.as_bytes(),
+                true,
+                true,
             )?;
         }
 
@@ -239,19 +246,6 @@ impl WorkflowRunStore {
             state: state.clone(),
             script_revision: revision,
         })
-    }
-
-    pub(crate) fn persist_now(&self, state: &WorkflowRunState) -> io::Result<()> {
-        let Some(manifest) = self.manifest_for(state) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "workflow state has no registered resume source",
-            ));
-        };
-        let Some(session_dir) = self.session_dir.as_deref() else {
-            return Ok(());
-        };
-        write_workflow_run_manifest(session_dir, &manifest)
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -300,11 +294,6 @@ impl WorkflowRunStore {
 
     pub(crate) fn remove(&self, run_id: &str) {
         self.sources.lock().remove(run_id);
-        if let Some(session_dir) = self.session_dir.as_deref() {
-            if let Err(error) = tombstone_workflow_run(session_dir, run_id) {
-                tracing::warn!(run_id, %error, "failed to tombstone cleared workflow run");
-            }
-        }
         if self
             .persistence_tx
             .send(PersistenceMsg::DeleteWorkflowRunState(run_id.to_owned()))
@@ -328,17 +317,6 @@ impl WorkflowRunStore {
             .map(|source| source.args.clone())
     }
 
-    pub(crate) fn script_copy_path(&self, run_id: &str) -> Option<PathBuf> {
-        validate_run_id(run_id).ok()?;
-        self.sources.lock().contains_key(run_id).then_some(())?;
-        Some(self.run_dir(run_id)?.join("script.rhai"))
-    }
-
-    fn run_dir(&self, run_id: &str) -> Option<PathBuf> {
-        self.session_dir
-            .as_ref()
-            .map(|dir| dir.join("workflows").join(run_id))
-    }
 }
 
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
@@ -360,15 +338,28 @@ pub(crate) fn script_revision_path(run_dir: &Path, revision: u32) -> PathBuf {
     run_dir.join("scripts").join(format!("{revision:04}.rhai"))
 }
 
+#[cfg(test)]
 pub(crate) fn write_workflow_run_manifest(
     session_dir: &Path,
+    manifest: &WorkflowRunManifest,
+) -> io::Result<()> {
+    let session = crate::session::storage::ContainedDirectory::open(
+        session_dir,
+        Path::new(""),
+        "Workflow session directory",
+        false,
+    )?;
+    write_workflow_run_manifest_in_directory(&session, manifest)
+}
+
+pub(crate) fn write_workflow_run_manifest_in_directory(
+    session: &crate::session::storage::ContainedDirectory,
     manifest: &WorkflowRunManifest,
 ) -> io::Result<()> {
     let run_id = &manifest.state.run_id;
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
-    let run_dir = crate::session::storage::ContainedDirectory::open(
-        session_dir,
+    let run_dir = session.open_relative(
         &run_relative,
         "Workflow run directory",
         true,
@@ -405,14 +396,27 @@ pub(crate) fn write_workflow_run_manifest(
                     "Workflow manifest run id does not match its directory",
                 ));
             }
-            if on_disk.state.revision > manifest.state.revision {
-                tracing::debug!(
-                    %run_id,
-                    on_disk_revision = on_disk.state.revision,
-                    incoming_revision = manifest.state.revision,
-                    "skipping stale Workflow manifest write"
-                );
-                return Ok(());
+            match on_disk.state.revision.cmp(&manifest.state.revision) {
+                std::cmp::Ordering::Greater => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "stale Workflow manifest revision for {run_id}: persisted {}, incoming {}",
+                            on_disk.state.revision, manifest.state.revision
+                        ),
+                    ));
+                }
+                std::cmp::Ordering::Equal if on_disk == *manifest => return Ok(()),
+                std::cmp::Ordering::Equal => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "conflicting Workflow manifest content at revision {} for {run_id}",
+                            manifest.state.revision
+                        ),
+                    ));
+                }
+                std::cmp::Ordering::Less => {}
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -442,11 +446,24 @@ pub(crate) fn write_workflow_run_manifest(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn tombstone_workflow_run(session_dir: &Path, run_id: &str) -> io::Result<()> {
+    let session = crate::session::storage::ContainedDirectory::open(
+        session_dir,
+        Path::new(""),
+        "Workflow session directory",
+        false,
+    )?;
+    tombstone_workflow_run_in_directory(&session, run_id)
+}
+
+pub(crate) fn tombstone_workflow_run_in_directory(
+    session: &crate::session::storage::ContainedDirectory,
+    run_id: &str,
+) -> io::Result<()> {
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
-    let run_dir = crate::session::storage::ContainedDirectory::open(
-        session_dir,
+    let run_dir = session.open_relative(
         &run_relative,
         "Workflow run directory",
         true,
@@ -504,6 +521,18 @@ mod tests {
     use super::*;
     use crate::session::workflow::tracker::WorkflowTracker;
 
+    fn test_session(path: &Path) -> Arc<crate::session::storage::ContainedDirectory> {
+        Arc::new(
+            crate::session::storage::ContainedDirectory::open(
+                path,
+                Path::new(""),
+                "Workflow store test session",
+                false,
+            )
+            .unwrap(),
+        )
+    }
+
     fn timeline_with_workflow(run_id: &str, name: &str, objective: &str) -> chat_state::Timeline {
         let mut timeline = chat_state::Timeline::default();
         timeline
@@ -524,7 +553,7 @@ mod tests {
     fn script_and_args_are_immutable() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+        let store = WorkflowRunStore::new(Some(test_session(dir.path())), tx);
         let args = serde_json::json!({"objective": "ship"});
 
         store.register("wf_1", "complete(1);", &args).unwrap();
@@ -553,7 +582,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), dir.path().join("workflows")).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+        let store = WorkflowRunStore::new(Some(test_session(dir.path())), tx);
 
         let error = store
             .register("wf_1", "complete(1);", &serde_json::json!({}))
@@ -615,10 +644,61 @@ mod tests {
         let newer = manifest("wf_revision", 7);
         let stale = manifest("wf_revision", 6);
         write_workflow_run_manifest(dir.path(), &newer).unwrap();
-        write_workflow_run_manifest(dir.path(), &stale).unwrap();
+        let error = write_workflow_run_manifest(dir.path(), &stale).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 
         let persisted: WorkflowRunManifest = serde_json::from_slice(
             &std::fs::read(dir.path().join("workflows/wf_revision/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.state.revision, 7);
+    }
+
+    #[test]
+    fn equal_workflow_revision_is_idempotent_only_for_identical_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest("wf_equal_revision", 4);
+        write_workflow_run_manifest(dir.path(), &manifest).unwrap();
+        write_workflow_run_manifest(dir.path(), &manifest).unwrap();
+
+        let mut conflicting = manifest.clone();
+        conflicting.state.save_prompt = true;
+        let error = write_workflow_run_manifest(dir.path(), &conflicting).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let persisted: WorkflowRunManifest = serde_json::from_slice(
+            &std::fs::read(dir.path().join("workflows/wf_equal_revision/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted, manifest);
+    }
+
+    #[test]
+    fn concurrent_workflow_manifest_writes_converge_on_highest_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_dir = dir.path().to_path_buf();
+        let higher_dir = lower_dir.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let lower_barrier = barrier.clone();
+        let higher_barrier = barrier;
+        let (lower_result, higher_result) = std::thread::scope(|scope| {
+            let lower = scope.spawn(move || {
+                lower_barrier.wait();
+                write_workflow_run_manifest(&lower_dir, &manifest("wf_concurrent", 6))
+            });
+            let higher = scope.spawn(move || {
+                higher_barrier.wait();
+                write_workflow_run_manifest(&higher_dir, &manifest("wf_concurrent", 7))
+            });
+            (lower.join().unwrap(), higher.join().unwrap())
+        });
+        higher_result.unwrap();
+        if let Err(error) = lower_result {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+
+        let persisted: WorkflowRunManifest = serde_json::from_slice(
+            &std::fs::read(dir.path().join("workflows/wf_concurrent/state.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(persisted.state.revision, 7);

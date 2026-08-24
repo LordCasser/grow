@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::io;
+use std::path::{Path, PathBuf};
 
 use tools::implementations::grow_build::workflow::{
     WorkflowDefinitionId, WorkflowDiagnostic, WorkflowScope,
@@ -128,9 +128,16 @@ impl WorkflowRegistry {
 
         let mut dirs = Vec::new();
         if let Some(cwd) = session_cwd {
-            let project_dir = project_root(cwd).join(".grow").join("workflows");
+            let project_root = project_root(cwd);
+            let project_relative = PathBuf::from(".grow").join("workflows");
+            let project_dir = project_root.join(&project_relative);
             if crate::agent::folder_trust::project_scope_allowed(cwd) {
-                dirs.push((project_dir, "project", WorkflowScope::Project));
+                dirs.push((
+                    project_root,
+                    project_relative,
+                    "project",
+                    WorkflowScope::Project,
+                ));
             } else if project_dir.exists() {
                 diagnostics.push(WorkflowDiagnostic {
                     scope: WorkflowScope::Project,
@@ -141,10 +148,16 @@ impl WorkflowRegistry {
                 });
             }
         }
-        dirs.push((user_workflow_dir(), "user", WorkflowScope::User));
+        dirs.push((
+            crate::util::grow_home::grow_home(),
+            PathBuf::from("workflows"),
+            "user",
+            WorkflowScope::User,
+        ));
 
-        for (dir, source_label, scope) in dirs {
-            let (mut scoped, mut scoped_diagnostics) = scan_directory(&dir, source_label, scope);
+        for (root, relative, source_label, scope) in dirs {
+            let (mut scoped, mut scoped_diagnostics) =
+                scan_directory(&root, &relative, source_label, scope);
             reject_same_scope_duplicates(
                 &mut scoped,
                 source_label,
@@ -272,47 +285,56 @@ fn reject_same_scope_duplicates(
 }
 
 fn scan_directory(
-    dir: &Path,
+    root: &Path,
+    relative: &Path,
     source_label: &'static str,
     scope: WorkflowScope,
 ) -> (Vec<RegistryEntry>, Vec<WorkflowDiagnostic>) {
-    let Ok(dir_meta) = std::fs::symlink_metadata(dir) else {
-        return (Vec::new(), Vec::new());
+    let display_dir = root.join(relative);
+    let directory = match crate::session::storage::ContainedDirectory::open(
+        root,
+        relative,
+        "Workflow Definition directory",
+        false,
+    ) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (Vec::new(), Vec::new());
+        }
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![WorkflowDiagnostic {
+                    scope,
+                    path: Some(display_dir.display().to_string()),
+                    code: "untrusted_directory".into(),
+                    message: error.to_string(),
+                }],
+            );
+        }
     };
-    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
-        return (
-            Vec::new(),
-            vec![WorkflowDiagnostic {
-                scope,
-                path: Some(dir.display().to_string()),
-                code: "untrusted_directory".into(),
-                message: "workflow directory must be a real directory, not a symlink".into(),
-            }],
-        );
-    }
-
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return (
-            Vec::new(),
-            vec![WorkflowDiagnostic {
-                scope,
-                path: Some(dir.display().to_string()),
-                code: "read_directory_failed".into(),
-                message: "workflow directory could not be read".into(),
-            }],
-        );
+    let mut names = match directory.list_names() {
+        Ok(names) => names,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![WorkflowDiagnostic {
+                    scope,
+                    path: Some(display_dir.display().to_string()),
+                    code: "read_directory_failed".into(),
+                    message: error.to_string(),
+                }],
+            );
+        }
     };
-    let mut paths: Vec<PathBuf> = read_dir
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rhai"))
-        .collect();
-    paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    names.retain(|name| Path::new(name).extension().and_then(|ext| ext.to_str()) == Some("rhai"));
+    names.sort();
 
     let mut entries = Vec::new();
     let mut diagnostics = Vec::new();
-    for path in paths {
-        let result = read_trusted_source(&path)
+    for name in names {
+        let path = display_dir.join(&name);
+        let result = read_source(&directory, &name, &path)
             .and_then(|script| parse_workflow(&script, Some(&path)).map(|meta| (script, meta)));
         match result {
             Ok((script, meta)) => entries.push(RegistryEntry {
@@ -384,10 +406,16 @@ pub(crate) fn resolve_by_path(
     })?;
 
     let project = dunce::canonicalize(project_root(session_cwd)).ok();
-    let user_workflows = dunce::canonicalize(user_workflow_dir()).ok();
-    let session_runs = session_dir
-        .map(|dir| dir.join("workflows"))
-        .and_then(|dir| dunce::canonicalize(dir).ok());
+    let user_root = dunce::canonicalize(crate::util::grow_home::grow_home()).ok();
+    let user_workflows = user_root
+        .as_ref()
+        .map(|root| root.join("workflows"))
+        .filter(|dir| dir.is_dir());
+    let session_root = session_dir.and_then(|dir| dunce::canonicalize(dir).ok());
+    let session_runs = session_root
+        .as_ref()
+        .map(|root| root.join("workflows"))
+        .filter(|dir| dir.is_dir());
     let in_user_or_session = user_workflows
         .as_ref()
         .is_some_and(|root| canonical.starts_with(root))
@@ -413,22 +441,38 @@ pub(crate) fn resolve_by_path(
         });
     }
 
-    let script = read_trusted_source(&canonical)?;
-    let in_session_runs = session_runs
+    let (scope, authority_root) = if session_runs
         .as_ref()
-        .is_some_and(|root| canonical.starts_with(root));
-    let filename_path = (!in_session_runs).then_some(canonical.as_path());
-    let meta = parse_workflow(&script, filename_path)?;
-    let scope = if in_session_runs {
-        WorkflowScope::Session
+        .is_some_and(|root| canonical.starts_with(root))
+    {
+        (
+            WorkflowScope::Session,
+            session_root.expect("session runs require a session root"),
+        )
     } else if user_workflows
         .as_ref()
         .is_some_and(|root| canonical.starts_with(root))
     {
-        WorkflowScope::User
+        (
+            WorkflowScope::User,
+            user_root.expect("user workflows require a user root"),
+        )
     } else {
-        WorkflowScope::Project
+        (
+            WorkflowScope::Project,
+            project.expect("trusted project path requires a project root"),
+        )
     };
+    let relative =
+        canonical
+            .strip_prefix(&authority_root)
+            .map_err(|_| ResolveError::UntrustedPath {
+                path: canonical.display().to_string(),
+                reason: "workflow source escaped its authority root".into(),
+            })?;
+    let script = read_source_at(&authority_root, relative, &canonical)?;
+    let filename_path = (scope != WorkflowScope::Session).then_some(canonical.as_path());
+    let meta = parse_workflow(&script, filename_path)?;
     Ok(ResolvedWorkflow {
         definition_id: definition_id(scope, &meta.name),
         scope,
@@ -538,69 +582,57 @@ fn is_valid_workflow_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-pub(crate) fn read_trusted_source(path: &Path) -> Result<String, ResolveError> {
-    let path_display = path.display().to_string();
-    let meta = std::fs::symlink_metadata(path).map_err(|error| ResolveError::Io {
-        path: path_display.clone(),
-        error: error.to_string(),
-    })?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err(ResolveError::UntrustedPath {
-            path: path_display,
-            reason: "expected a non-symlink regular file".into(),
-        });
-    }
-    if meta.len() > MAX_WORKFLOW_SOURCE_BYTES {
-        return Err(ResolveError::SourceTooLarge {
-            path: path_display,
-            limit: MAX_WORKFLOW_SOURCE_BYTES,
-        });
-    }
-
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path).map_err(|error| ResolveError::Io {
-        path: path.display().to_string(),
-        error: error.to_string(),
-    })?;
-    let opened_meta = file.metadata().map_err(|error| ResolveError::Io {
-        path: path.display().to_string(),
-        error: error.to_string(),
-    })?;
-    if !opened_meta.is_file() || opened_meta.len() > MAX_WORKFLOW_SOURCE_BYTES {
-        return Err(if opened_meta.len() > MAX_WORKFLOW_SOURCE_BYTES {
-            ResolveError::SourceTooLarge {
-                path: path.display().to_string(),
-                limit: MAX_WORKFLOW_SOURCE_BYTES,
-            }
-        } else {
-            ResolveError::UntrustedPath {
-                path: path.display().to_string(),
-                reason: "expected a regular file".into(),
-            }
-        });
-    }
-
-    let mut bytes = Vec::with_capacity(opened_meta.len() as usize);
-    file.take(MAX_WORKFLOW_SOURCE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| ResolveError::Io {
-            path: path.display().to_string(),
-            error: error.to_string(),
+fn read_source_at(
+    root: &Path,
+    relative: &Path,
+    display_path: &Path,
+) -> Result<String, ResolveError> {
+    let name = relative
+        .file_name()
+        .ok_or_else(|| ResolveError::UntrustedPath {
+            path: display_path.display().to_string(),
+            reason: "workflow source has no filename".into(),
         })?;
-    if bytes.len() as u64 > MAX_WORKFLOW_SOURCE_BYTES {
-        return Err(ResolveError::SourceTooLarge {
-            path: path.display().to_string(),
-            limit: MAX_WORKFLOW_SOURCE_BYTES,
-        });
-    }
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let directory = crate::session::storage::ContainedDirectory::open(
+        root,
+        parent,
+        "Workflow source directory",
+        false,
+    )
+    .map_err(|error| ResolveError::Io {
+        path: display_path.display().to_string(),
+        error: error.to_string(),
+    })?;
+    read_source(&directory, name, display_path)
+}
+
+fn read_source(
+    directory: &crate::session::storage::ContainedDirectory,
+    name: &std::ffi::OsStr,
+    path: &Path,
+) -> Result<String, ResolveError> {
+    let path_display = path.display().to_string();
+    let bytes = directory
+        .read_bounded(name, "Workflow source", MAX_WORKFLOW_SOURCE_BYTES)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidData if error.to_string().contains("byte limit") => {
+                ResolveError::SourceTooLarge {
+                    path: path_display.clone(),
+                    limit: MAX_WORKFLOW_SOURCE_BYTES,
+                }
+            }
+            io::ErrorKind::InvalidData => ResolveError::UntrustedPath {
+                path: path_display.clone(),
+                reason: error.to_string(),
+            },
+            _ => ResolveError::Io {
+                path: path_display.clone(),
+                error: error.to_string(),
+            },
+        })?;
     String::from_utf8(bytes).map_err(|error| ResolveError::Io {
-        path: path.display().to_string(),
+        path: path_display,
         error: error.to_string(),
     })
 }
@@ -641,14 +673,38 @@ pub(crate) fn publish_workflow(
         });
     }
 
-    let canonical_target = publish_target_path(session_cwd, scope, requested_name)?;
-    match expected_base_hash {
+    let directory = open_publish_directory(session_cwd, scope, true)?;
+    let file_name = format!("{requested_name}.rhai");
+    let canonical_target = directory.display_path().join(&file_name);
+    let lock_name = format!(".{requested_name}.lock");
+    let lock = directory
+        .open_read_write_create(std::ffi::OsStr::new(&lock_name))
+        .map_err(|error| ResolveError::Io {
+            path: directory
+                .display_path()
+                .join(&lock_name)
+                .display()
+                .to_string(),
+            error: error.to_string(),
+        })?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(|error| ResolveError::Io {
+        path: directory
+            .display_path()
+            .join(&lock_name)
+            .display()
+            .to_string(),
+        error: error.to_string(),
+    })?;
+    let result = match expected_base_hash {
         Some(expected) => {
-            let current = read_trusted_source(&canonical_target).map_err(|error| {
-                ResolveError::PublishConflict {
-                    path: canonical_target.display().to_string(),
-                    reason: error.to_string(),
-                }
+            let current = read_source(
+                &directory,
+                std::ffi::OsStr::new(&file_name),
+                &canonical_target,
+            )
+            .map_err(|error| ResolveError::PublishConflict {
+                path: canonical_target.display().to_string(),
+                reason: error.to_string(),
             })?;
             let actual = content_hash(&current);
             if actual != expected {
@@ -657,28 +713,42 @@ pub(crate) fn publish_workflow(
                     reason: "the saved Definition changed after this draft was derived".into(),
                 });
             }
-            atomic_replace(&canonical_target, script.as_bytes()).map_err(|error| {
-                ResolveError::Io {
+            directory
+                .write_atomic(
+                    std::ffi::OsStr::new(&file_name),
+                    script.as_bytes(),
+                    true,
+                    true,
+                )
+                .map_err(|error| ResolveError::Io {
                     path: canonical_target.display().to_string(),
                     error: error.to_string(),
-                }
-            })?;
+                })
         }
-        None => atomic_create_new(&canonical_target, script.as_bytes()).map_err(|error| {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                ResolveError::PublishConflict {
-                    path: canonical_target.display().to_string(),
-                    reason: "a Definition with this name already exists in the selected scope"
-                        .into(),
+        None => directory
+            .write_atomic(
+                std::ffi::OsStr::new(&file_name),
+                script.as_bytes(),
+                true,
+                false,
+            )
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    ResolveError::PublishConflict {
+                        path: canonical_target.display().to_string(),
+                        reason: "a Definition with this name already exists in the selected scope"
+                            .into(),
+                    }
+                } else {
+                    ResolveError::Io {
+                        path: canonical_target.display().to_string(),
+                        error: error.to_string(),
+                    }
                 }
-            } else {
-                ResolveError::Io {
-                    path: canonical_target.display().to_string(),
-                    error: error.to_string(),
-                }
-            }
-        })?,
-    }
+            }),
+    };
+    let _ = fs2::FileExt::unlock(&lock);
+    result?;
     Ok(canonical_target)
 }
 
@@ -706,33 +776,10 @@ pub(crate) fn publish_target_path(
         });
     }
 
-    let root = match scope {
-        WorkflowScope::Project => project_root(session_cwd),
-        WorkflowScope::User => crate::util::grow_home::grow_home(),
-        WorkflowScope::Session | WorkflowScope::Builtin => unreachable!(),
-    };
-    if scope == WorkflowScope::User && !root.exists() {
-        std::fs::create_dir_all(&root).map_err(|error| ResolveError::Io {
-            path: root.display().to_string(),
-            error: error.to_string(),
-        })?;
-    }
-    let canonical_root = dunce::canonicalize(&root).map_err(|error| ResolveError::Io {
-        path: root.display().to_string(),
-        error: error.to_string(),
-    })?;
-    let dir = match scope {
-        WorkflowScope::Project => canonical_root.join(".grow").join("workflows"),
-        WorkflowScope::User => canonical_root.join("workflows"),
-        WorkflowScope::Session | WorkflowScope::Builtin => unreachable!(),
-    };
-    create_contained_workflow_dir(&canonical_root, &dir)?;
-    let canonical_dir = dunce::canonicalize(&dir).map_err(|error| ResolveError::Io {
-        path: dir.display().to_string(),
-        error: error.to_string(),
-    })?;
-    let canonical_target = canonical_dir.join(format!("{requested_name}.rhai"));
-    Ok(canonical_target)
+    let directory = open_publish_directory(session_cwd, scope, true)?;
+    Ok(directory
+        .display_path()
+        .join(format!("{requested_name}.rhai")))
 }
 
 /// Re-resolve a persisted publish target through the current trusted roots.
@@ -753,127 +800,88 @@ pub(crate) fn validate_publish_target_path(
     Ok(expected)
 }
 
-fn create_contained_workflow_dir(root: &Path, dir: &Path) -> Result<(), ResolveError> {
-    let root = dunce::canonicalize(root).map_err(|error| ResolveError::Io {
-        path: root.display().to_string(),
-        error: error.to_string(),
-    })?;
-    let relative = dir
-        .strip_prefix(&root)
-        .map_err(|_| ResolveError::UntrustedPath {
-            path: dir.display().to_string(),
-            reason: "save directory escaped project root".into(),
-        })?;
-
-    let mut current = root.clone();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            return Err(ResolveError::UntrustedPath {
-                path: dir.display().to_string(),
-                reason: "save directory contains a non-normal component".into(),
+pub(crate) fn read_publish_target(
+    session_cwd: &Path,
+    scope: WorkflowScope,
+    requested_name: &str,
+) -> Result<Option<String>, ResolveError> {
+    validate_workflow_name(requested_name)?;
+    let directory = open_publish_directory(session_cwd, scope, true)?;
+    let file_name = format!("{requested_name}.rhai");
+    let display = directory.display_path().join(&file_name);
+    let bytes = match directory.read_bounded(
+        std::ffi::OsStr::new(&file_name),
+        "Workflow source",
+        MAX_WORKFLOW_SOURCE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ResolveError::Io {
+                path: display.display().to_string(),
+                error: error.to_string(),
             });
-        };
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
-                return Err(ResolveError::UntrustedPath {
-                    path: current.display().to_string(),
-                    reason: "save directory component is not a real directory".into(),
-                });
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|error| ResolveError::Io {
-                    path: current.display().to_string(),
-                    error: error.to_string(),
-                })?;
-            }
-            Err(error) => {
-                return Err(ResolveError::Io {
-                    path: current.display().to_string(),
-                    error: error.to_string(),
-                });
-            }
         }
-    }
+    };
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| ResolveError::Io {
+            path: display.display().to_string(),
+            error: error.to_string(),
+        })
+}
 
-    let canonical = dunce::canonicalize(dir).map_err(|error| ResolveError::Io {
-        path: dir.display().to_string(),
-        error: error.to_string(),
-    })?;
-    if !canonical.starts_with(&root) {
+fn open_publish_directory(
+    session_cwd: &Path,
+    scope: WorkflowScope,
+    create_missing: bool,
+) -> Result<crate::session::storage::ContainedDirectory, ResolveError> {
+    let (root, relative) = match scope {
+        WorkflowScope::Project => (
+            project_root(session_cwd),
+            PathBuf::from(".grow").join("workflows"),
+        ),
+        WorkflowScope::User => (
+            crate::util::grow_home::grow_home(),
+            PathBuf::from("workflows"),
+        ),
+        WorkflowScope::Session | WorkflowScope::Builtin => {
+            return Err(ResolveError::PublishConflict {
+                path: scope.as_str().into(),
+                reason: "only project and user scopes are publishable".into(),
+            });
+        }
+    };
+    if scope == WorkflowScope::Project
+        && !crate::agent::folder_trust::project_scope_allowed(session_cwd)
+    {
         return Err(ResolveError::UntrustedPath {
-            path: dir.display().to_string(),
-            reason: "save directory escaped project root".into(),
+            path: root.display().to_string(),
+            reason: "project workflows require folder trust".into(),
         });
     }
-    Ok(())
-}
-
-fn atomic_create_new(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
-    let temp = parent.join(format!(".workflow-{}.tmp", uuid::Uuid::now_v7().simple()));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        std::fs::hard_link(&temp, target)?;
-        #[cfg(windows)]
-        atomic_rename_noreplace_windows(&temp, target)?;
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&temp);
-    result
-}
-
-fn atomic_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
-    let temp = parent.join(format!(".workflow-{}.tmp", uuid::Uuid::now_v7().simple()));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, target)?;
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&temp);
-    result
-}
-
-#[cfg(windows)]
-fn atomic_rename_noreplace_windows(source: &Path, target: &Path) -> io::Result<()> {
-    if target.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "destination already exists",
-        ));
+    if scope == WorkflowScope::User && create_missing && !root.exists() {
+        std::fs::create_dir_all(&root).map_err(|error| ResolveError::Io {
+            path: root.display().to_string(),
+            error: error.to_string(),
+        })?;
     }
-    std::fs::rename(source, target)
+    crate::session::storage::ContainedDirectory::open(
+        &root,
+        &relative,
+        "Workflow Definition directory",
+        create_missing,
+    )
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::InvalidData => ResolveError::UntrustedPath {
+            path: root.join(relative).display().to_string(),
+            reason: error.to_string(),
+        },
+        _ => ResolveError::Io {
+            path: root.join(relative).display().to_string(),
+            error: error.to_string(),
+        },
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

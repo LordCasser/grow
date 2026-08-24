@@ -13,12 +13,78 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+const MAX_TRAJECTORY_DEPTH: usize = 32;
+const MAX_TRAJECTORY_ENTITIES: usize = 512;
+const MAX_TRAJECTORY_FILES: usize = 1_536;
+const MAX_TRAJECTORY_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_TRAJECTORY_EVENTS: usize = 250_000;
+
+#[derive(Default)]
+struct TrajectoryReadBudget {
+    entities: usize,
+    files: usize,
+    source_bytes: u64,
+    events: usize,
+}
+
+impl TrajectoryReadBudget {
+    fn enter_entity(&mut self, description: &str, depth: usize) -> anyhow::Result<()> {
+        if depth > MAX_TRAJECTORY_DEPTH {
+            anyhow::bail!("Trajectory exceeds the nesting depth limit at {description}");
+        }
+        self.entities = self.entities.saturating_add(1);
+        if self.entities > MAX_TRAJECTORY_ENTITIES {
+            anyhow::bail!("Trajectory exceeds the entity limit");
+        }
+        Ok(())
+    }
+
+    fn admit_file(&mut self, file: &std::fs::File, description: &str) -> anyhow::Result<()> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            anyhow::bail!("Trajectory {description} is not a regular file");
+        }
+        self.files = self.files.saturating_add(1);
+        if self.files > MAX_TRAJECTORY_FILES {
+            anyhow::bail!("Trajectory exceeds the source-file limit");
+        }
+        self.source_bytes = self
+            .source_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| anyhow::anyhow!("Trajectory source-byte count overflowed"))?;
+        if self.source_bytes > MAX_TRAJECTORY_SOURCE_BYTES {
+            anyhow::bail!("Trajectory exceeds the source-byte limit");
+        }
+        Ok(())
+    }
+
+    fn remaining_events(&self) -> usize {
+        MAX_TRAJECTORY_EVENTS.saturating_sub(self.events)
+    }
+
+    fn admit_events(&mut self, count: usize) -> anyhow::Result<()> {
+        self.events = self
+            .events
+            .checked_add(count)
+            .ok_or_else(|| anyhow::anyhow!("Trajectory event count overflowed"))?;
+        if self.events > MAX_TRAJECTORY_EVENTS {
+            anyhow::bail!("Trajectory exceeds the event limit");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     session_id: String,
     actor_ref: String,
     #[cfg(test)]
     session_dir: PathBuf,
+    #[cfg(not(test))]
+    storage: super::storage::jsonl::JsonlStorageAdapter,
+    #[cfg(not(test))]
+    session: super::storage::jsonl::OpenedSession,
+    #[cfg(test)]
     sessions_root: PathBuf,
     cache: Arc<Mutex<SessionTrajectoryCache>>,
 }
@@ -86,28 +152,28 @@ struct TrajectoryResponse {
 pub async fn serve(
     session_id: &str,
     bind: SocketAddr,
-    on_ready: impl FnOnce(&str),
+    on_ready: impl FnOnce(&str, &str),
 ) -> anyhow::Result<()> {
     if !bind.ip().is_loopback() {
         anyhow::bail!("Trajectory server only accepts loopback bind addresses, got {bind}");
     }
-    let session_dir = super::persistence::find_session_dir_by_id(session_id)
+    let storage = super::storage::jsonl::JsonlStorageAdapter::new();
+    let session = storage
+        .open_session_by_id(session_id)?
         .ok_or_else(|| anyhow::anyhow!("session '{session_id}' was not found"))?;
-    let session = super::storage::ContainedDirectory::open(
-        &session_dir,
-        Path::new(""),
-        "Trajectory session directory",
-        false,
-    )?;
+    let canonical_session_id = session.summary().info.id.to_string();
+    let session_dir = session.directory().display_path().to_path_buf();
     session
+        .directory()
         .open_regular(
             std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
             "Trajectory Timeline ledger",
         )
         .map_err(|error| {
             anyhow::anyhow!(
-                "session '{}' has no readable Timeline v7 ledger at {}: {error}",
-                session_id,
+                "session '{}' has no readable Timeline v{} ledger at {}: {error}",
+                canonical_session_id,
+                chat_state::TIMELINE_SCHEMA_VERSION,
                 session_dir.join(super::storage::TIMELINE_FILE).display()
             )
         })?;
@@ -115,25 +181,39 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
     let token = uuid::Uuid::now_v7().simple().to_string();
+    let actor_ref = match session.summary().session_kind.as_deref() {
+        Some(kind) if kind.starts_with("subagent") => {
+            format!("subagent:{canonical_session_id}")
+        }
+        _ => "main".into(),
+    };
     let state = AppState {
-        session_id: session_id.to_owned(),
-        actor_ref: session_actor_ref(&session_dir, session_id)?,
+        session_id: canonical_session_id.clone(),
+        actor_ref,
         #[cfg(test)]
         session_dir: session_dir.clone(),
+        #[cfg(not(test))]
+        storage,
+        #[cfg(not(test))]
+        session,
+        #[cfg(test)]
         sessions_root: crate::util::grow_home::grow_home().join("sessions"),
         cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
     };
-    let app = Router::new().nest(
-        &format!("/{token}"),
-        Router::new()
-            .route("/", get(index))
-            .route("/api/trajectory", get(query_trajectory))
-            .with_state(state),
-    );
+    let app = trajectory_router(&token, state);
     let url = format!("http://{local}/{token}/");
-    on_ready(&url);
+    on_ready(&canonical_session_id, &url);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn trajectory_router(token: &str, state: AppState) -> Router {
+    let root = format!("/{token}");
+    Router::new()
+        .route(&root, get(index))
+        .route(&format!("{root}/"), get(index))
+        .route(&format!("{root}/api/trajectory"), get(query_trajectory))
+        .with_state(state)
 }
 
 async fn index(
@@ -172,26 +252,35 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .cache
         .lock()
         .map_err(|_| anyhow::anyhow!("Trajectory cache lock was poisoned"))?;
-    let resolver =
-        super::storage::relocation::RelocationView::load_for_sessions_root(&state.sessions_root)?;
-    let session_dir = match resolver.find_persisted_session_dir(&state.session_id)? {
-        Some(path) => path,
-        None => {
-            #[cfg(test)]
-            {
-                state.session_dir.clone()
-            }
-            #[cfg(not(test))]
-            {
-                anyhow::bail!(
-                    "session '{}' disappeared from local storage",
-                    state.session_id
-                )
-            }
-        }
-    };
     let mut visited = BTreeSet::from([state.session_id.clone()]);
-    cache.refresh_tree(&session_dir, &state.session_id, &resolver, &mut visited)?;
+    let mut budget = TrajectoryReadBudget::default();
+    #[cfg(not(test))]
+    {
+        let resolver = TrajectorySessionResolver::Storage(&state.storage);
+        cache.refresh_tree_from_directory(
+            state.session.directory().display_path(),
+            state.session.directory(),
+            &state.session_id,
+            &resolver,
+            &mut visited,
+            0,
+            &mut budget,
+        )?;
+    }
+    #[cfg(test)]
+    {
+        let resolver = TrajectorySessionResolver::TestRoot(&state.sessions_root);
+        let session_dir = find_test_session_dir(&state.sessions_root, &state.session_id)?
+            .unwrap_or_else(|| state.session_dir.clone());
+        cache.refresh_tree(
+            &session_dir,
+            &state.session_id,
+            &resolver,
+            &mut visited,
+            0,
+            &mut budget,
+        )?;
+    }
     let mut all_rows = Vec::new();
     cache.collect_rows(
         &state.session_id,
@@ -327,21 +416,6 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
     })
 }
 
-fn session_actor_ref(session_dir: &Path, session_id: &str) -> anyhow::Result<String> {
-    let directory = super::storage::ContainedDirectory::open(
-        session_dir,
-        Path::new(""),
-        "Trajectory session directory",
-        false,
-    )?;
-    let summary = read_summary_from_directory(&directory)?;
-    let actor = match summary.session_kind.as_deref() {
-        Some(kind) if kind.starts_with("subagent") => format!("subagent:{session_id}"),
-        _ => "main".into(),
-    };
-    Ok(actor)
-}
-
 fn read_summary_from_directory(
     directory: &super::storage::ContainedDirectory,
 ) -> anyhow::Result<super::persistence::Summary> {
@@ -368,13 +442,70 @@ fn root_seq(row: &chat_state::TrajectoryRow) -> u64 {
         .expect("Trajectory rows always have a non-empty nesting path")
 }
 
+enum TrajectorySessionResolver<'a> {
+    Storage(&'a super::storage::jsonl::JsonlStorageAdapter),
+    #[cfg(test)]
+    TestRoot(&'a Path),
+}
+
+impl TrajectorySessionResolver<'_> {
+    fn open(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<(PathBuf, super::storage::ContainedDirectory, super::persistence::Summary)>> {
+        match self {
+            Self::Storage(storage) => {
+                let Some(opened) = storage.open_session_by_id(session_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    opened.directory().display_path().to_path_buf(),
+                    opened.directory().try_clone()?,
+                    opened.summary().clone(),
+                )))
+            }
+            #[cfg(test)]
+            Self::TestRoot(sessions_root) => {
+                let Some(path) = find_test_session_dir(sessions_root, session_id)? else {
+                    return Ok(None);
+                };
+                let directory = super::storage::ContainedDirectory::open(
+                    &path,
+                    Path::new(""),
+                    "Trajectory child session directory",
+                    false,
+                )?;
+                let summary = read_summary_from_directory(&directory)?;
+                Ok(Some((path, directory, summary)))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn find_test_session_dir(sessions_root: &Path, session_id: &str) -> anyhow::Result<Option<PathBuf>> {
+    if !sessions_root.is_dir() {
+        return Ok(None);
+    }
+    for cwd in std::fs::read_dir(sessions_root)? {
+        let path = cwd?.path().join(session_id);
+        if path.is_dir() {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 impl SessionTrajectoryCache {
+    #[cfg(test)]
     fn refresh_tree(
         &mut self,
         session_dir: &Path,
         timeline_id: &str,
-        resolver: &super::storage::relocation::RelocationView,
+        resolver: &TrajectorySessionResolver<'_>,
         visited: &mut BTreeSet<String>,
+        depth: usize,
+        budget: &mut TrajectoryReadBudget,
     ) -> anyhow::Result<()> {
         let directory = super::storage::ContainedDirectory::open(
             session_dir,
@@ -382,7 +513,15 @@ impl SessionTrajectoryCache {
             "Trajectory session directory",
             false,
         )?;
-        self.refresh_tree_from_directory(session_dir, &directory, timeline_id, resolver, visited)
+        self.refresh_tree_from_directory(
+            session_dir,
+            &directory,
+            timeline_id,
+            resolver,
+            visited,
+            depth,
+            budget,
+        )
     }
 
     fn refresh_tree_from_directory(
@@ -390,15 +529,24 @@ impl SessionTrajectoryCache {
         session_dir: &Path,
         directory: &super::storage::ContainedDirectory,
         timeline_id: &str,
-        resolver: &super::storage::relocation::RelocationView,
+        resolver: &TrajectorySessionResolver<'_>,
         visited: &mut BTreeSet<String>,
+        depth: usize,
+        budget: &mut TrajectoryReadBudget,
     ) -> anyhow::Result<()> {
+        budget.enter_entity(&format!("session {timeline_id}"), depth)?;
         if !self.session_dir.as_os_str().is_empty() && self.session_dir != session_dir {
             *self = Self::default();
         }
         self.session_dir = session_dir.to_owned();
-        self.refresh_from_directory(directory)?;
-        self.refresh_sidebands(directory)?;
+        let timeline_file = directory.open_regular(
+            std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+            "Trajectory Timeline ledger",
+        )?;
+        budget.admit_file(&timeline_file, "Timeline ledger")?;
+        self.refresh_from_directory(directory, budget.remaining_events())?;
+        budget.admit_events(self.timeline.events().len())?;
+        self.refresh_sidebands(directory, depth, budget)?;
         for sideband_id in self.sidebands.keys() {
             if !visited.insert(sideband_id.clone()) {
                 anyhow::bail!(
@@ -406,7 +554,7 @@ impl SessionTrajectoryCache {
                 );
             }
         }
-        self.refresh_workflows(directory, timeline_id, visited)?;
+        self.refresh_workflows(directory, timeline_id, visited, depth, budget)?;
 
         let terminals = self
             .timeline
@@ -439,8 +587,9 @@ impl SessionTrajectoryCache {
                 );
             }
             let terminal = terminals.get(&spawn.subagent_id);
-            let child_dir = resolver.find_persisted_session_dir(&spawn.child_session_id)?;
-            let Some(child_dir) = child_dir else {
+            let Some((child_dir, child_directory, summary)) =
+                resolver.open(&spawn.child_session_id)?
+            else {
                 if terminal.is_some_and(terminal_requires_child) {
                     anyhow::bail!(
                         "terminal subagent '{}' requires missing child Timeline '{}'",
@@ -450,13 +599,6 @@ impl SessionTrajectoryCache {
                 }
                 continue;
             };
-            let child_directory = super::storage::ContainedDirectory::open(
-                &child_dir,
-                Path::new(""),
-                "Trajectory child session directory",
-                false,
-            )?;
-            let summary = read_summary_from_directory(&child_directory)?;
             if summary.info.id.to_string() != spawn.child_session_id
                 || summary.parent_session_id.as_deref() != Some(timeline_id)
                 || !summary
@@ -497,6 +639,8 @@ impl SessionTrajectoryCache {
                 &spawn.child_session_id,
                 resolver,
                 visited,
+                depth.saturating_add(1),
+                budget,
             )?;
             if child.timeline.events().is_empty() && terminal.is_none() {
                 seen.insert(spawn.child_session_id.clone());
@@ -523,6 +667,7 @@ impl SessionTrajectoryCache {
     fn refresh_from_directory(
         &mut self,
         directory: &super::storage::ContainedDirectory,
+        event_limit: usize,
     ) -> anyhow::Result<()> {
         let path = directory.display_path().join(super::storage::TIMELINE_FILE);
         let mut file = directory.open_regular(
@@ -546,6 +691,9 @@ impl SessionTrajectoryCache {
         for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
             if line.is_empty() {
                 continue;
+            }
+            if timeline.events().len() >= event_limit {
+                anyhow::bail!("Trajectory exceeds the event limit");
             }
             let event =
                 serde_json::from_slice::<chat_state::TimelineEvent>(line).map_err(|error| {
@@ -574,12 +722,14 @@ impl SessionTrajectoryCache {
             "Trajectory test directory",
             false,
         )?;
-        self.refresh_from_directory(&directory)
+        self.refresh_from_directory(&directory, MAX_TRAJECTORY_EVENTS)
     }
 
     fn refresh_sidebands(
         &mut self,
         directory: &super::storage::ContainedDirectory,
+        depth: usize,
+        budget: &mut TrajectoryReadBudget,
     ) -> anyhow::Result<()> {
         let sideband_ids = self
             .timeline
@@ -603,7 +753,20 @@ impl SessionTrajectoryCache {
                 Err(error) => return Err(error.into()),
             };
             let sideband = self.sidebands.entry(sideband_id.clone()).or_default();
-            match sideband.refresh_from_directory(&sideband_dir) {
+            let ledger = match sideband_dir.open_regular(
+                std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+                "Trajectory sideband ledger",
+            ) {
+                Ok(ledger) => ledger,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            budget.enter_entity(
+                &format!("sideband {sideband_id}"),
+                depth.saturating_add(1),
+            )?;
+            budget.admit_file(&ledger, "sideband Timeline ledger")?;
+            match sideband.refresh_from_directory(&sideband_dir, budget.remaining_events()) {
                 Ok(()) => {}
                 Err(error)
                     if error
@@ -615,6 +778,7 @@ impl SessionTrajectoryCache {
                 Err(error) => return Err(error),
             }
             if !sideband.events.is_empty() {
+                budget.admit_events(sideband.events.len())?;
                 seen.insert(sideband_id.clone());
             }
         }
@@ -627,6 +791,8 @@ impl SessionTrajectoryCache {
         directory: &super::storage::ContainedDirectory,
         timeline_id: &str,
         visited: &mut BTreeSet<String>,
+        depth: usize,
+        budget: &mut TrajectoryReadBudget,
     ) -> anyhow::Result<()> {
         let spawns = self
             .timeline
@@ -678,6 +844,15 @@ impl SessionTrajectoryCache {
                 super::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES,
             ) {
                 Ok(bytes) => {
+                    budget.enter_entity(
+                        &format!("Workflow {run_id}"),
+                        depth.saturating_add(1),
+                    )?;
+                    let manifest_file = run_dir.open_regular(
+                        std::ffi::OsStr::new("state.json"),
+                        "Trajectory Workflow manifest",
+                    )?;
+                    budget.admit_file(&manifest_file, "Workflow manifest")?;
                     serde_json::from_slice::<super::workflow::store::WorkflowRunManifest>(&bytes)?
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -710,8 +885,10 @@ impl SessionTrajectoryCache {
                 std::ffi::OsStr::new("journal.jsonl"),
                 "Trajectory Workflow journal",
             ) {
-                Ok(_) => {
-                    journal.refresh_from_directory(&run_dir)?;
+                Ok(journal_file) => {
+                    budget.admit_file(&journal_file, "Workflow journal")?;
+                    journal.refresh_from_directory(&run_dir, budget.remaining_events())?;
+                    budget.admit_events(journal.entries.len())?;
                     validate_workflow_journal_links(&self.timeline, run_id, journal)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1079,6 +1256,7 @@ impl SidebandCache {
     fn refresh_from_directory(
         &mut self,
         directory: &super::storage::ContainedDirectory,
+        event_limit: usize,
     ) -> anyhow::Result<()> {
         let path = directory.display_path().join(super::storage::TIMELINE_FILE);
         let mut file = directory.open_regular(
@@ -1099,6 +1277,9 @@ impl SidebandCache {
         for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
             if line.is_empty() {
                 continue;
+            }
+            if events.len() >= event_limit {
+                anyhow::bail!("Trajectory exceeds the event limit");
             }
             let event =
                 serde_json::from_slice::<chat_state::SidebandEvent>(line).map_err(|error| {
@@ -1124,7 +1305,7 @@ impl SidebandCache {
             "Trajectory sideband test directory",
             false,
         )?;
-        self.refresh_from_directory(&directory)
+        self.refresh_from_directory(&directory, MAX_TRAJECTORY_EVENTS)
     }
 }
 
@@ -1132,6 +1313,7 @@ impl WorkflowJournalCache {
     fn refresh_from_directory(
         &mut self,
         directory: &super::storage::ContainedDirectory,
+        event_limit: usize,
     ) -> anyhow::Result<()> {
         let path = directory.display_path().join("journal.jsonl");
         let mut file = directory.open_regular(
@@ -1166,6 +1348,9 @@ impl WorkflowJournalCache {
             if entries.len() >= workflow::journal::MAX_JOURNAL_ENTRIES {
                 anyhow::bail!("Workflow journal exceeds the entry limit");
             }
+            if entries.len() >= event_limit {
+                anyhow::bail!("Trajectory exceeds the event limit");
+            }
             let entry = serde_json::from_slice::<workflow::JournalEntry>(line)?;
             let expected = u64::try_from(entries.len())?;
             if entry.seq != expected {
@@ -1194,7 +1379,7 @@ impl WorkflowJournalCache {
             "Trajectory Workflow test directory",
             false,
         )?;
-        self.refresh_from_directory(&directory)
+        self.refresh_from_directory(&directory, MAX_TRAJECTORY_EVENTS)
     }
 
     fn prefix_matches(&self, file: &mut std::fs::File) -> anyhow::Result<bool> {
@@ -1473,7 +1658,7 @@ function selector(entry){return `[data-entry="${CSS.escape(entry)}"]`}function i
 function focusEvent(entry,scroll=true){const index=displayRows.findIndex(row=>row.entry_id===entry);if(index<0)return;follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused';if(scroll){ledger.scrollTop=Math.max(0,index*ROW_HEIGHT-ledger.clientHeight/2);renderLedger()}inspect(entry,rows.querySelector(selector(entry)))}
 function queryParams(){const p=new URLSearchParams({limit:'5000'});if(deepLinkPending&&selected)p.set('entry',selected);if($('search').value)p.set('search',$('search').value);for(const id of ['layer','actor','class','producer','visibility'])if($(id).value)p.set(id,$(id).value);return p}
 function rootSeq(r){return r.nesting_path[0]}function comparePath(a,b){for(let i=0;i<Math.min(a.length,b.length);i++)if(a[i]!==b[i])return a[i]-b[i];return a.length-b.length}function mergeRows(...groups){const byId=new Map;for(const group of groups)for(const row of group)byId.set(row.entry_id,row);return [...byId.values()].sort((a,b)=>comparePath(a.nesting_path,b.nesting_path))}
-async function fetchPage(params){const endpoint=new URL('api/trajectory',window.location.href);endpoint.search=params;const res=await fetch(endpoint);if(!res.ok)throw Error(await res.text());return await res.json()}
+async function fetchPage(params){const base=window.location.pathname.replace(/\/?$/,'/');const endpoint=new URL(base+'api/trajectory',window.location.origin);endpoint.search=params;const res=await fetch(endpoint);if(!res.ok)throw Error(await res.text());return await res.json()}
 async function load(){clearTimeout(timer);try{const focusing=deepLinkPending&&selected!=null,data=await fetchPage(queryParams());if(focusing)olderRows=mergeRows(data.rows,olderRows);latestData=data;if(!olderRows.length||focusing)hasEarlier=data.hasEarlier;data.rows=mergeRows(olderRows,data.rows);draw(data);$('health').textContent='● live';$('health').style.color='var(--green)'}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}timer=setTimeout(load,1000)}
 async function loadEarlier(){const visible=window.__trajectory??[];if(!visible.length||!hasEarlier)return;const oldHeight=ledger.scrollHeight,oldTop=ledger.scrollTop,p=queryParams();p.set('before',String(rootSeq(visible[0])));$('older').disabled=true;try{const page=await fetchPage(p);olderRows=mergeRows(page.rows,olderRows);hasEarlier=page.hasEarlier;if(latestData){latestData.rows=mergeRows(olderRows,latestData.rows);draw(latestData);ledger.scrollTop=oldTop+(ledger.scrollHeight-oldHeight)}}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}$('older').disabled=!hasEarlier}
 function resetWindow(){olderRows=[];hasEarlier=false;load()}
@@ -1485,6 +1670,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trajectory_read_budget_is_global_across_the_tree() {
+        let mut depth = TrajectoryReadBudget::default();
+        assert!(
+            depth
+                .enter_entity("too-deep", MAX_TRAJECTORY_DEPTH + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("depth")
+        );
+
+        let mut entities = TrajectoryReadBudget {
+            entities: MAX_TRAJECTORY_ENTITIES,
+            ..Default::default()
+        };
+        assert!(entities.enter_entity("one-too-many", 0).is_err());
+
+        let mut events = TrajectoryReadBudget {
+            events: MAX_TRAJECTORY_EVENTS,
+            ..Default::default()
+        };
+        assert!(events.admit_events(1).is_err());
+    }
+
+    #[test]
     fn trajectory_responses_are_private_and_non_embeddable() {
         let headers = response_security_headers();
         assert_eq!(headers[header::CACHE_CONTROL], "no-store");
@@ -1494,6 +1703,55 @@ mod tests {
         let csp = headers["content-security-policy"].to_str().unwrap();
         assert!(csp.contains("connect-src 'self'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn token_routes_serve_both_page_forms_and_the_api() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        write_timeline(
+            &session_dir.join(super::super::storage::TIMELINE_FILE),
+            &chat_state::Timeline::default(),
+        );
+        let state = AppState {
+            session_id: "canonical-session".into(),
+            actor_ref: "main".into(),
+            session_dir,
+            sessions_root: temp.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, trajectory_router("secret", state))
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        for path in ["/secret", "/secret/"] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "path {path}");
+            assert!(response.text().await.unwrap().contains("Grow Trajectory"));
+        }
+        let response = client
+            .get(format!("http://{address}/secret/api/trajectory"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["sessionId"], "canonical-session");
+
+        server.abort();
+        let _ = server.await;
     }
 
     fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
@@ -2267,7 +2525,7 @@ mod tests {
                     model: "model".into(),
                     backend: "responses".into(),
                 },
-                initiator_ref: "t:session/1".into(),
+                initiator_ref: format!("t:session/sideband:{sideband_id}"),
                 executor: "main".into(),
                 output_schema: Some(serde_json::json!({"type": "object"})),
             }),
@@ -2701,7 +2959,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_rejects_non_loopback_bind_addresses() {
-        let error = serve("missing", "0.0.0.0:0".parse().unwrap(), |_| {})
+        let error = serve("missing", "0.0.0.0:0".parse().unwrap(), |_, _| {})
             .await
             .unwrap_err();
         assert!(error.to_string().contains("loopback"));

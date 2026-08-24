@@ -70,6 +70,7 @@ pub enum WorkflowHostRequest {
         reply: oneshot::Sender<Result<(), HostError>>,
     },
     SpawnAgent {
+        operation_id: String,
         opts: AgentOpts,
         reply: oneshot::Sender<Result<AgentResult, HostError>>,
     },

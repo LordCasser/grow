@@ -70,37 +70,15 @@ impl EventTracker {
         }
     }
 
-    /// Convert the shell producer vocabulary into either a typed causal
-    /// fact or a log-only Timeline observation. The vocabulary remains useful
-    /// at producer sites, but it no longer owns a second persistence rail.
+    /// Convert the shell producer vocabulary into either a typed causal fact
+    /// or a log-only Timeline observation. Tool and request lifecycle facts
+    /// use their dedicated methods instead of passing through this vocabulary.
     pub fn emit(&self, event: Event) {
         match &event {
             Event::TurnStarted { .. } => {
                 tracing::error!("TurnStarted must go through the durable start_turn boundary")
             }
             Event::LoopStarted { loop_index } => self.start_step(*loop_index),
-            Event::ToolCompleted {
-                tool_name,
-                duration_ms,
-                outcome,
-                tool_call_id,
-                ..
-            } if self
-                .active_tools
-                .borrow_mut()
-                .remove(tool_call_id)
-                .is_some() =>
-            {
-                self.timeline.record_timeline_event(TimelineEventKind::Tool(
-                    ToolEvent::Completed {
-                        call_id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        outcome: json_string(outcome),
-                        duration_ms: *duration_ms,
-                        details: None,
-                    },
-                ));
-            }
             _ => self.record_observation(event),
         }
     }
@@ -275,6 +253,30 @@ impl EventTracker {
         Ok(())
     }
 
+    /// Persist the terminal fact for a tool whose external effect has already
+    /// returned. The caller must not begin the next model step or declare the
+    /// tool loop complete until this acknowledgement completes.
+    pub async fn tool_completed_durably(
+        &self,
+        call_id: &str,
+        outcome: String,
+        details: Option<serde_json::Value>,
+    ) -> Result<(), TimelineWriteError> {
+        let Some(tool) = self.active_tools.borrow_mut().remove(call_id) else {
+            return Err(missing_boundary("tool completion has no durable start"));
+        };
+        self.timeline
+            .record_timeline_event_durably(TimelineEventKind::Tool(ToolEvent::Completed {
+                call_id: call_id.to_owned(),
+                name: tool.name,
+                outcome,
+                duration_ms: tool.started_at.elapsed().as_millis() as u64,
+                details,
+            }))
+            .await?;
+        Ok(())
+    }
+
     pub async fn request_started(
         &self,
         id: String,
@@ -308,13 +310,10 @@ impl EventTracker {
         Ok(())
     }
 
-    pub fn request_event(&self, event: RequestEvent) {
-        let id = match &event {
-            RequestEvent::FirstToken { id } | RequestEvent::Retrying { id, .. } => id,
-            _ => {
-                tracing::error!("request_event only accepts non-terminal request events");
-                return;
-            }
+    pub fn request_retrying(&self, event: RequestEvent) {
+        let RequestEvent::Retrying { id, .. } = &event else {
+            tracing::error!("request_retrying only accepts retry events");
+            return;
         };
         if !self.active_requests.borrow().contains_key(id) {
             tracing::debug!(request_id = id, "ignored late request progress event");
@@ -446,9 +445,6 @@ impl EventTracker {
     }
 
     pub fn permission_requested(&self, tool_name: &str) -> Instant {
-        self.emit(Event::PhaseChanged {
-            phase: super::event_types::Phase::PermissionPrompt,
-        });
         self.emit(Event::PermissionRequested {
             tool_name: tool_name.to_string(),
         });
@@ -465,9 +461,6 @@ impl EventTracker {
             tool_name: tool_name.to_string(),
             decision,
             wait_ms: start.elapsed().as_millis() as u64,
-        });
-        self.emit(Event::PhaseChanged {
-            phase: super::event_types::Phase::ToolExecution,
         });
     }
 }
@@ -582,10 +575,7 @@ mod tests {
             .request_started("request".into(), "model".into(), 0, 0)
             .await
             .unwrap();
-        tracker.request_event(RequestEvent::FirstToken {
-            id: "request".into(),
-        });
-        tracker.request_event(RequestEvent::Retrying {
+        tracker.request_retrying(RequestEvent::Retrying {
             id: "request".into(),
             attempt: 1,
             max_retries: 2,
@@ -608,10 +598,106 @@ mod tests {
             .iter()
             .filter(|row| row.kind.starts_with("request."))
             .collect::<Vec<_>>();
-        assert_eq!(request_rows.len(), 4);
+        assert_eq!(request_rows.len(), 3);
         assert!(request_rows.iter().all(|row| row.turn_id.is_some()));
         assert!(request_rows.iter().all(|row| row.step_index == Some(0)));
         assert_eq!(request_rows.last().unwrap().state, "completed");
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .all(|row| row.kind != "observation.phase_changed"
+                    && row.kind != "observation.first_token"),
+            "stream progress belongs to live updates, not Timeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_completion_waits_for_durable_terminal_ack() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Turn start, step start, and tool start form the admitted prefix. Keep
+        // the tool terminal acknowledgement under explicit test control.
+        let (persistence, mut persisted) =
+            chat_state::MockTimelinePersistence::new_with_manual_timeline_ack_after(3);
+        let handle = chat_state::ChatStateActor::spawn(
+            vec![],
+            sampling_types::SamplingConfig {
+                base_url: "http://localhost".into(),
+                model: "model".into(),
+                output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
+                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            },
+            Box::new(persistence),
+            event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let tracker = EventTracker::new(handle.clone());
+        tracker.begin_turn();
+        tracker
+            .start_turn(Event::TurnStarted {
+                session_id: "session".into(),
+                turn_number: 1,
+                identity: test_identity(),
+                model_id: "model".into(),
+                permission_mode: diagnostics::enums::PermissionMode::Ask,
+                conversation_message_count: 0,
+                prompt_index: Some(0),
+                prompt_text: Some("prompt".into()),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                session_relationship: super::super::event_types::SessionRelationship::Primary,
+                schema_version: super::super::event_types::EVENT_SCHEMA_VERSION.into(),
+                redirect_kind: None,
+            })
+            .await
+            .unwrap();
+        tracker.emit(Event::LoopStarted { loop_index: 0 });
+        tracker
+            .tool_started(
+                "read_file".into(),
+                "call-1".into(),
+                Some(serde_json::json!({ "path": "README.md" })),
+            )
+            .await
+            .unwrap();
+
+        let completion = tracker.tool_completed_durably("call-1", "success".into(), None);
+        let acknowledge_terminal = async {
+            persisted
+                .next_timeline_ack()
+                .await
+                .expect("tool terminal must request a durable acknowledgement")
+                .send(Ok(()))
+                .unwrap();
+        };
+        let (completed, ()) = tokio::join!(completion, acknowledge_terminal);
+        completed.unwrap();
+        assert!(!tracker.has_active_tool());
+
+        let snapshot = handle.trajectory().await.unwrap();
+        let tool_rows = snapshot
+            .rows
+            .iter()
+            .filter(|row| row.kind.starts_with("tool."))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_rows.len(), 2);
+        assert_eq!(tool_rows[0].kind, "tool.call");
+        assert_eq!(tool_rows[1].kind, "tool.result");
+        assert_eq!(tool_rows[1].state, "completed");
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .all(|row| !row.kind.starts_with("observation.tool_")),
+            "tool lifecycle has one typed Timeline rail"
+        );
     }
 
     #[tokio::test]

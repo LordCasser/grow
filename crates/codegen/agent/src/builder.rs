@@ -68,7 +68,7 @@ pub struct AgentBuilder {
     is_non_interactive: bool,
     system_prompt_label: String,
     session_env: Option<Arc<HashMap<String, String>>>,
-    state_path: Option<PathBuf>,
+    resources_persistence: Arc<tools::persistence::ResourcesPersistence>,
     memory_backend: Option<Arc<dyn tools::types::memory_backend::MemoryBackend>>,
     web_fetch_config: tools::implementations::grow_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn tools::implementations::lsp::LspBackend>>,
@@ -191,7 +191,7 @@ impl AgentBuilder {
             is_non_interactive: false,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             session_env: None,
-            state_path: None,
+            resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
             memory_backend: None,
             web_fetch_config: Default::default(),
             lsp: None,
@@ -318,8 +318,11 @@ impl AgentBuilder {
         self.mcp_max_output_bytes = bytes;
         self
     }
-    pub fn with_state_path(mut self, path: PathBuf) -> Self {
-        self.state_path = Some(path);
+    pub fn with_resources_persistence(
+        mut self,
+        persistence: Arc<tools::persistence::ResourcesPersistence>,
+    ) -> Self {
+        self.resources_persistence = persistence;
         self
     }
     /// Set the memory backend for cross-session knowledge retrieval.
@@ -536,7 +539,7 @@ impl AgentBuilder {
             std::collections::HashSet::new()
         };
         let tool_bridge_builder = ToolBridge::get_builder();
-        let state_path = self.state_path.clone().unwrap_or_default();
+        let state_path = self.resources_persistence.state_path().to_path_buf();
         let mut tool_config = definition.tool_config.clone();
         if !definition.inject_default_tools && tool_config.tools.is_empty() {
             return Err(AgentBuildError::InvalidConfig(format!(
@@ -772,7 +775,7 @@ impl AgentBuilder {
                 subagent: None,
                 parent_scheduler_handle: self.parent_scheduler_handle.take(),
                 skills: skill_info.clone(),
-                state_path,
+                resources_persistence: self.resources_persistence,
                 memory_backend: self.memory_backend,
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,

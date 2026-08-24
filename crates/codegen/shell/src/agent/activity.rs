@@ -118,7 +118,7 @@ impl AgentActivity {
     /// Known sub-tick window: queued-but-not-started prompts
     /// (`pending_inputs` in the actor) are not mirrored here, so a prompt
     /// submitted exactly at a turn boundary can read as idle (the same
-    /// window `session_has_live_work` closes with an actor round-trip,
+    /// window the actor-owned idle-unload transaction closes,
     /// which a sync `Send` probe cannot do). The flush's quiesce loop
     /// re-snapshots and still ends such an actor via its Shutdown arm.
     pub fn is_busy(&self) -> bool {

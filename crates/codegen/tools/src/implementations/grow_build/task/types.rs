@@ -33,37 +33,16 @@ pub enum SubagentOwner {
     Task,
     Goal {
         goal_id: String,
-        objective_revision: u64,
-        plan_revision: u64,
-        board_revision: u64,
-        role: GoalSubagentRole,
     },
     Workflow {
         run_id: String,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GoalSubagentRole {
-    Planner,
-    Verifier,
-    Worker,
-}
-
 impl SubagentOwner {
-    pub fn goal(
-        goal_id: impl Into<String>,
-        objective_revision: u64,
-        plan_revision: u64,
-        board_revision: u64,
-        role: GoalSubagentRole,
-    ) -> Self {
+    pub fn goal(goal_id: impl Into<String>) -> Self {
         Self::Goal {
             goal_id: goal_id.into(),
-            objective_revision,
-            plan_revision,
-            board_revision,
-            role,
         }
     }
 
@@ -91,12 +70,6 @@ impl SubagentOwner {
         matches!(self, Self::Workflow { .. })
     }
 
-    pub fn goal_role(&self) -> Option<GoalSubagentRole> {
-        match self {
-            Self::Goal { role, .. } => Some(*role),
-            Self::Task | Self::Workflow { .. } => None,
-        }
-    }
 }
 
 // Request / Response
@@ -141,27 +114,10 @@ pub struct SubagentRequest {
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
     pub owner: SubagentOwner,
-    /// Immutable blackboard snapshot available to a Goal-owned child through
-    /// `get_goal`. It is captured at spawn and never follows later revisions.
+    /// Immutable Goal snapshot available to a Goal-owned child through
+    /// `get_goal`. It is captured at spawn and never follows later edits.
     pub goal_context: Option<crate::implementations::grow_build::update_goal::GoalContextSnapshot>,
-    /// Planner-stage-only submit channel into the host staging state machine.
-    /// The host injects it only into Goal planner children; the tool layer
-    /// additionally gates submission on a Planner context snapshot.
-    pub goal_stage_submit:
-        Option<crate::implementations::grow_build::update_goal::GoalStageSubmitHandle>,
-    /// Host record of the prior planner subagent this stage resumes. The
-    /// shell's Goal admission validator requires it to agree with
-    /// `resume_from` for Planner stages and rejects it for every other role.
-    pub goal_stage_resume: Option<GoalStageResume>,
     pub cancel_token: CancellationToken,
-}
-
-/// Host-side record of the previous planner subagent that ended without
-/// finalizing its plan. Carried on the resuming planner request next to
-/// `SubagentRequest::resume_from`; the two fields must name the same id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoalStageResume {
-    pub prior_subagent_id: String,
 }
 
 /// Spawn command envelope owned by the coordinator mailbox.
@@ -339,7 +295,6 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
-                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -366,7 +321,6 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
-                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -391,7 +345,6 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
-                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -1163,13 +1116,10 @@ mod tests {
     }
 
     #[test]
-    fn restricted_modes_keep_stage_bound_goal_tools_and_reject_goal_mutations() {
+    fn restricted_modes_keep_goal_read_and_reject_goal_mutation() {
         let mut opaque = ToolConfig::from_id("custom:opaque");
         opaque.kind = None;
         let goal_read = tc("Grow:get_goal", ToolKind::GoalRead);
-        let goal_plan_submit = tc("Grow:submit_goal_plan_section", ToolKind::GoalPlanSubmit);
-        let goal_progress = tc("Grow:update_goal_progress", ToolKind::GoalProgressUpdate);
-        let goal_replan = tc("Grow:request_goal_replan", ToolKind::GoalReplanRequest);
         let goal_lifecycle = tc("Grow:update_goal", ToolKind::GoalLifecycleUpdate);
 
         for mode in [
@@ -1181,9 +1131,6 @@ mod tests {
                 tools: vec![
                     opaque.clone(),
                     goal_read.clone(),
-                    goal_plan_submit.clone(),
-                    goal_progress.clone(),
-                    goal_replan.clone(),
                     goal_lifecycle.clone(),
                 ],
             };
@@ -1191,24 +1138,17 @@ mod tests {
             let kinds: Vec<_> = config.tools.iter().filter_map(|tool| tool.kind).collect();
             assert_eq!(
                 kinds,
-                [ToolKind::GoalRead, ToolKind::GoalPlanSubmit],
+                [ToolKind::GoalRead],
                 "mode={mode:?}"
             );
         }
 
         let mut all = ToolServerConfig {
-            tools: vec![
-                opaque,
-                goal_read,
-                goal_plan_submit,
-                goal_progress,
-                goal_replan,
-                goal_lifecycle,
-            ],
+            tools: vec![opaque, goal_read, goal_lifecycle],
         };
         SubagentCapabilityMode::All.filter_tool_config(&mut all);
         assert!(all.tools.iter().all(|tool| tool.kind.is_some()));
-        assert_eq!(all.tools.len(), 5, "All keeps every classified capability");
+        assert_eq!(all.tools.len(), 2, "All keeps every classified capability");
     }
 
     #[test]

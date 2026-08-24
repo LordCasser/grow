@@ -1,13 +1,14 @@
-//! Persisted Goal state and its pure transition rules.
+//! Persisted thread Goal state and pure transitions.
 //!
-//! The tracker owns no tasks and performs no I/O. `SessionActor` is the sole
-//! scheduler; background stages commit only through a matching [`StageLease`].
+//! A Goal is a long-lived objective, not a plan executor. The durable state
+//! records only what the user asked for, whether automatic continuation is
+//! armed, and the usage charged while it was active. Foreground ownership,
+//! idle admission, cancellation and continuation turns remain SessionActor
+//! runtime state and are never persisted here.
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 5;
-pub const IDENTICAL_GAP_BLOCK_THRESHOLD: u32 = 3;
-pub const INFRA_FAILURE_PAUSE_THRESHOLD: u8 = 3;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,132 +16,51 @@ pub enum GoalStatus {
     Active,
     Paused,
     Blocked,
+    UsageLimited,
     BudgetLimited,
     Complete,
 }
 
 impl GoalStatus {
-    pub fn is_paused(self) -> bool {
-        matches!(self, Self::Paused | Self::Blocked | Self::BudgetLimited)
+    pub fn continues_automatically(self) -> bool {
+        self == Self::Active
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalPhase {
-    Planning,
-    Executing,
-    Verifying,
-    Summarizing,
+    pub fn can_restart(self) -> bool {
+        matches!(self, Self::Paused | Self::Blocked | Self::UsageLimited)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalPauseReason {
     User,
-    BackOff,
-    NoProgress,
-    Verification,
-    Infra,
+    TurnError,
+    UsageLimit,
+    RuntimeUnavailable,
 }
 
 impl GoalPauseReason {
-    pub fn history_detail(self) -> &'static str {
+    pub fn default_message(self) -> &'static str {
         match self {
-            Self::User => "user",
-            Self::BackOff => "back_off",
-            Self::NoProgress => "no_progress",
-            Self::Verification => "verification",
-            Self::Infra => "infra",
+            Self::User => "Paused by the user.",
+            Self::TurnError => "Paused after a terminal turn error.",
+            Self::UsageLimit => "Paused because the model usage limit was reached.",
+            Self::RuntimeUnavailable => "Paused because Goal runtime tools are unavailable.",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GoalBoard {
-    /// Structural planning intent. Advanced only by create/edit/replan.
-    pub plan_revision: u64,
-    /// Any accepted planner, primary-Agent progress, or runtime feedback write.
-    pub board_revision: u64,
-    pub markdown: String,
-    pub updated_at: String,
-}
-
-impl GoalBoard {
-    fn empty(created_at: String, plan_revision: u64) -> Self {
-        Self {
-            plan_revision,
-            board_revision: 0,
-            markdown: String::new(),
-            updated_at: created_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StageLease {
-    pub goal_id: String,
-    pub objective_revision: u64,
-    pub plan_revision: u64,
-    pub board_revision: u64,
-    pub stage_id: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalEvent {
-    GoalCreated,
-    GoalRevised,
-    PlanningStarted,
-    PlanningCompleted,
-    ReplanRequested,
-    ProgressUpdated,
-    PlanningFailed,
-    WorkerStarted,
-    WorkerCompleted,
-    WorkerFailed,
-    GoalPaused,
-    GoalResumed,
-    VerificationRejected,
-    VerificationAccepted,
-    GoalCompleted,
-    GoalCleared,
-    BudgetExceeded,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoalHistoryEntry {
-    pub event: GoalEvent,
-    pub timestamp: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl GoalHistoryEntry {
-    pub fn new(event: GoalEvent, detail: Option<String>) -> Self {
-        Self {
-            event,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            detail,
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoalOrchestration {
+#[serde(deny_unknown_fields)]
+pub struct GoalState {
     pub architecture_version: u8,
     pub goal_id: String,
     pub objective: String,
-    pub objective_revision: u64,
     pub status: GoalStatus,
-    pub phase: GoalPhase,
-    pub board: GoalBoard,
     pub token_budget: Option<i64>,
     pub token_baseline: i64,
     #[serde(default)]
     pub parent_tokens_spent: i64,
-    /// Tokens durably charged by Goal-owned subagents that have finished.
-    /// Live subagent deltas remain transient until their terminal event (or a
-    /// graceful session shutdown) settles them into this counter.
     #[serde(default)]
     pub subagent_tokens_spent: i64,
     #[serde(default)]
@@ -148,48 +68,15 @@ pub struct GoalOrchestration {
     #[serde(default)]
     pub elapsed_ms: u64,
     pub created_at: String,
-    #[serde(default)]
-    pub history: Vec<GoalHistoryEntry>,
+    pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verifier_feedback: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_gap_fingerprint: Option<String>,
-    #[serde(default)]
-    pub repeated_gap_count: u32,
-    #[serde(default)]
-    pub planner_failures: u8,
-    #[serde(default)]
-    pub total_worker_rounds: u32,
-    #[serde(default)]
-    pub total_verify_rounds: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes_baseline_commit: Option<String>,
-
-    #[serde(skip)]
-    pub in_flight_stage: Option<StageLease>,
-    #[serde(skip)]
-    pub current_subagent_role: Option<String>,
-    #[serde(skip)]
-    pub live_subagent_tokens: u64,
-    #[serde(skip)]
-    pub live_tokens_by_model: Vec<(String, u64)>,
-    #[serde(skip)]
-    pub live_context_pct: u8,
-    #[serde(skip)]
-    pub live_turn_count: u32,
-    #[serde(skip)]
-    pub live_tool_call_count: u32,
+    pub status_message: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct GoalTracker {
-    orchestration: Option<GoalOrchestration>,
+    goal: Option<GoalState>,
     active_since: Option<Instant>,
-    next_stage_id: u64,
 }
 
 impl Default for GoalTracker {
@@ -199,183 +86,60 @@ impl Default for GoalTracker {
 }
 
 impl GoalTracker {
-    fn clear_stage(goal: &mut GoalOrchestration) {
-        goal.in_flight_stage = None;
-        goal.current_subagent_role = None;
-    }
-
-    fn commit_runtime_feedback(
-        goal: &mut GoalOrchestration,
-        board: crate::session::goal_board::ParsedGoalBoard,
-    ) {
-        goal.board.markdown = board.markdown().to_string();
-        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
-        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
-    }
-
     pub fn new() -> Self {
         Self {
-            orchestration: None,
+            goal: None,
             active_since: None,
-            next_stage_id: 0,
         }
     }
 
-    /// Obsolete Goal architectures are discarded. A current snapshot whose
-    /// identity is intact but whose phase/board invariants are inconsistent is
-    /// recovered fail-closed as Paused/Planning: the user can inspect, edit or
-    /// clear it, but no autonomous work can run against untrusted state.
-    /// Valid active snapshots keep their phase and are re-driven by the idle
-    /// hook with a fresh lease.
-    pub fn from_snapshot(mut snapshot: GoalOrchestration) -> Option<Self> {
-        if snapshot.architecture_version != GOAL_ARCHITECTURE_VERSION {
-            tracing::warn!(
-                found = snapshot.architecture_version,
-                expected = GOAL_ARCHITECTURE_VERSION,
-                "discarding incompatible Goal state"
-            );
-            return None;
-        }
-        if !Self::snapshot_invariants_hold(&snapshot) {
-            tracing::warn!(
-                goal_id = snapshot.goal_id,
-                status = ?snapshot.status,
-                phase = ?snapshot.phase,
-                "recovering internally inconsistent Goal state as paused"
-            );
-            if snapshot.goal_id.trim().is_empty() || snapshot.objective.trim().is_empty() {
-                return None;
-            }
-            snapshot.status = GoalStatus::Paused;
-            snapshot.phase = GoalPhase::Planning;
-            snapshot.board = GoalBoard::empty(
-                chrono::Utc::now().to_rfc3339(),
-                snapshot.board.plan_revision.max(1),
-            );
-            snapshot.parent_tokens_spent = snapshot.parent_tokens_spent.max(0);
-            snapshot.subagent_tokens_spent = snapshot.subagent_tokens_spent.max(0);
-            snapshot.pause_message = Some(
-                "Recovered inconsistent Goal control state. Use /goal edit to replan or /goal clear."
-                    .into(),
-            );
-            snapshot.verifier_feedback = None;
-            snapshot.candidate_summary = None;
-            snapshot.last_gap_fingerprint = None;
-            snapshot.repeated_gap_count = 0;
-            snapshot.planner_failures = 0;
-        }
-        Self::clear_stage(&mut snapshot);
-        snapshot.live_subagent_tokens = 0;
-        snapshot.live_tokens_by_model.clear();
-        snapshot.live_context_pct = 0;
-        snapshot.live_turn_count = 0;
-        snapshot.live_tool_call_count = 0;
-        let active_since = (snapshot.status == GoalStatus::Active).then(Instant::now);
-        Some(Self {
-            orchestration: Some(snapshot),
-            active_since,
-            next_stage_id: 0,
-        })
-    }
-
-    /// Restore a snapshot captured by the same live tracker after a durable
-    /// control write failed.
-    ///
-    /// Unlike [`Self::from_snapshot`], this is an in-process transaction
-    /// rollback: transient stage ownership is still real and must be retained
-    /// so the running planner/verifier remains paired with its cancellation
-    /// handle. Stage ids stay monotonic across the failed mutation.
-    pub fn restore_runtime_snapshot(&mut self, snapshot: GoalOrchestration) {
-        debug_assert_eq!(snapshot.architecture_version, GOAL_ARCHITECTURE_VERSION);
-        if let Some(stage_id) = snapshot
-            .in_flight_stage
-            .as_ref()
-            .map(|lease| lease.stage_id)
-        {
-            self.next_stage_id = self.next_stage_id.max(stage_id);
-        }
-        self.active_since = if snapshot.status == GoalStatus::Active {
-            self.active_since.or_else(|| Some(Instant::now()))
-        } else {
-            None
-        };
-        self.orchestration = Some(snapshot);
-    }
-
-    fn snapshot_invariants_hold(snapshot: &GoalOrchestration) -> bool {
-        if snapshot.goal_id.trim().is_empty()
+    /// Goal v6 intentionally has no compatibility projection. Old
+    /// planner/blackboard snapshots are rejected instead of reviving two
+    /// lifecycle models in one session.
+    pub fn from_snapshot(snapshot: GoalState) -> Option<Self> {
+        if snapshot.architecture_version != GOAL_ARCHITECTURE_VERSION
+            || snapshot.goal_id.trim().is_empty()
             || snapshot.objective.trim().is_empty()
+            || snapshot.token_budget.is_some_and(|budget| budget <= 0)
+            || snapshot.token_baseline < 0
             || snapshot.parent_tokens_spent < 0
             || snapshot.subagent_tokens_spent < 0
         {
-            return false;
+            return None;
         }
-        if snapshot.phase != GoalPhase::Planning && snapshot.board.markdown.trim().is_empty() {
-            return false;
-        }
-        if !snapshot.board.markdown.trim().is_empty()
-            && crate::session::goal_board::parse_goal_board(
-                &snapshot.objective,
-                snapshot.board.markdown.clone(),
-            )
-            .is_err()
-        {
-            return false;
-        }
-        if matches!(
-            snapshot.phase,
-            GoalPhase::Verifying | GoalPhase::Summarizing
-        ) && snapshot
-            .candidate_summary
-            .as_deref()
-            .is_none_or(|summary| summary.trim().is_empty())
-        {
-            return false;
-        }
-        snapshot.status != GoalStatus::Complete || snapshot.phase == GoalPhase::Summarizing
+        let active_since = snapshot.status.continues_automatically().then(Instant::now);
+        Some(Self {
+            goal: Some(snapshot),
+            active_since,
+        })
     }
 
-    pub fn snapshot(&self) -> Option<&GoalOrchestration> {
-        self.orchestration.as_ref()
+    pub fn restore_runtime_snapshot(&mut self, snapshot: GoalState) {
+        self.active_since = snapshot
+            .status
+            .continues_automatically()
+            .then(Instant::now);
+        self.goal = Some(snapshot);
     }
 
-    pub fn snapshot_mut(&mut self) -> Option<&mut GoalOrchestration> {
-        self.orchestration.as_mut()
+    pub fn snapshot(&self) -> Option<&GoalState> {
+        self.goal.as_ref()
+    }
+
+    pub fn snapshot_mut(&mut self) -> Option<&mut GoalState> {
+        self.goal.as_mut()
     }
 
     pub fn status(&self) -> Option<GoalStatus> {
-        self.orchestration.as_ref().map(|goal| goal.status)
-    }
-
-    pub fn phase(&self) -> Option<GoalPhase> {
-        self.orchestration.as_ref().map(|goal| goal.phase)
+        self.goal.as_ref().map(|goal| goal.status)
     }
 
     pub fn objective(&self) -> Option<&str> {
-        self.orchestration
-            .as_ref()
-            .map(|goal| goal.objective.as_str())
+        self.goal.as_ref().map(|goal| goal.objective.as_str())
     }
 
     pub fn token_budget(&self) -> Option<i64> {
-        self.orchestration
-            .as_ref()
-            .and_then(|goal| goal.token_budget)
-    }
-
-    pub fn task_projection(&self) -> Vec<tool_types::GoalTaskProjection> {
-        self.orchestration
-            .as_ref()
-            .filter(|goal| !goal.board.markdown.is_empty())
-            .and_then(|goal| {
-                crate::session::goal_board::parse_goal_board(
-                    &goal.objective,
-                    goal.board.markdown.clone(),
-                )
-                .ok()
-            })
-            .map(|board| board.task_projection())
-            .unwrap_or_default()
+        self.goal.as_ref().and_then(|goal| goal.token_budget)
     }
 
     pub fn create_goal(
@@ -385,847 +149,279 @@ impl GoalTracker {
         token_budget: Option<i64>,
         token_baseline: i64,
         created_at: String,
-        baseline_commit: Option<String>,
-    ) {
-        let mut goal = GoalOrchestration {
+    ) -> Result<(), String> {
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return Err("Goal objective must not be empty.".to_string());
+        }
+        if token_budget.is_some_and(|budget| budget <= 0) {
+            return Err("Goal token budget must be positive.".to_string());
+        }
+        if self
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status != GoalStatus::Complete)
+        {
+            return Err(
+                "An unfinished Goal already exists; edit, pause, complete, or clear it first."
+                    .to_string(),
+            );
+        }
+        self.goal = Some(GoalState {
             architecture_version: GOAL_ARCHITECTURE_VERSION,
             goal_id,
-            objective,
-            objective_revision: 0,
+            objective: objective.to_string(),
             status: GoalStatus::Active,
-            phase: GoalPhase::Planning,
-            board: GoalBoard::empty(created_at.clone(), 1),
             token_budget,
-            token_baseline,
+            token_baseline: token_baseline.max(0),
             parent_tokens_spent: 0,
             subagent_tokens_spent: 0,
-            last_session_tokens_seen: Some(token_baseline),
+            last_session_tokens_seen: Some(token_baseline.max(0)),
             elapsed_ms: 0,
-            created_at,
-            history: Vec::new(),
-            pause_message: None,
-            verifier_feedback: None,
-            candidate_summary: None,
-            last_gap_fingerprint: None,
-            repeated_gap_count: 0,
-            planner_failures: 0,
-            total_worker_rounds: 0,
-            total_verify_rounds: 0,
-            changes_baseline_commit: baseline_commit,
-            in_flight_stage: None,
-            current_subagent_role: None,
-            live_subagent_tokens: 0,
-            live_tokens_by_model: Vec::new(),
-            live_context_pct: 0,
-            live_turn_count: 0,
-            live_tool_call_count: 0,
-        };
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalCreated, None));
-        self.orchestration = Some(goal);
+            created_at: created_at.clone(),
+            updated_at: created_at,
+            status_message: None,
+        });
         self.active_since = Some(Instant::now());
-        self.next_stage_id = 0;
-    }
-
-    /// Explicit `/goal edit`; ordinary user messages never call this.
-    pub fn revise_goal(&mut self, objective: String, token_budget: Option<i64>) -> bool {
-        // An edit starts a new objective revision, not a new Goal accounting
-        // lifetime. Settle the current active interval before resetting the
-        // stage clock below.
-        self.account_elapsed();
-        let Some(goal) = self.orchestration.as_mut() else {
-            return false;
-        };
-        if goal.status == GoalStatus::Complete {
-            return false;
-        }
-        goal.objective = objective;
-        goal.objective_revision = goal.objective_revision.saturating_add(1);
-        if token_budget.is_some() {
-            goal.token_budget = token_budget;
-        }
-        goal.status = GoalStatus::Active;
-        goal.phase = GoalPhase::Planning;
-        let next_plan_revision = goal.board.plan_revision.saturating_add(1);
-        goal.board = GoalBoard::empty(chrono::Utc::now().to_rfc3339(), next_plan_revision);
-        goal.pause_message = None;
-        goal.verifier_feedback = None;
-        goal.candidate_summary = None;
-        goal.last_gap_fingerprint = None;
-        goal.repeated_gap_count = 0;
-        goal.planner_failures = 0;
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalRevised, None));
-        self.active_since = Some(Instant::now());
-        true
-    }
-
-    fn commit_planner_board(
-        &mut self,
-        markdown: String,
-        reason: Option<String>,
-    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return Ok(false);
-        };
-        if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Planning {
-            return Ok(false);
-        }
-        let parsed = crate::session::goal_board::parse_goal_board(&goal.objective, markdown)?;
-        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
-        goal.board.markdown = parsed.markdown().to_string();
-        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
-        goal.phase = GoalPhase::Executing;
-        Self::clear_stage(goal);
-        goal.candidate_summary = None;
-        goal.planner_failures = 0;
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::PlanningCompleted, reason));
-        Ok(true)
-    }
-
-    pub fn apply_planner_result(
-        &mut self,
-        lease: &StageLease,
-        markdown: String,
-    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
-        if !self.lease_is_current(lease, GoalPhase::Planning) {
-            return Ok(false);
-        }
-        // Keep the lease current on error so the caller can account it through
-        // the normal planner retry/backoff transition.
-        self.commit_planner_board(markdown, Some("background planner".into()))
-    }
-
-    pub fn request_replan(
-        &mut self,
-        expected_plan_revision: u64,
-        expected_board_revision: u64,
-        guidance: String,
-    ) -> Result<bool, String> {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return Ok(false);
-        };
-        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
-        if goal.status != GoalStatus::Active || goal.phase == GoalPhase::Summarizing {
-            return Ok(false);
-        }
-        goal.board.plan_revision = goal.board.plan_revision.saturating_add(1);
-        goal.phase = GoalPhase::Planning;
-        Self::clear_stage(goal);
-        goal.candidate_summary = None;
-        goal.verifier_feedback = None;
-        goal.planner_failures = 0;
-        goal.history.push(GoalHistoryEntry::new(
-            GoalEvent::ReplanRequested,
-            Some(guidance),
-        ));
-        Ok(true)
-    }
-
-    pub fn update_progress(
-        &mut self,
-        expected_plan_revision: u64,
-        expected_board_revision: u64,
-        updates: &[tool_types::GoalProgressUpdate],
-        reason: String,
-    ) -> Result<bool, String> {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return Ok(false);
-        };
-        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
-        if goal.status != GoalStatus::Active
-            || !matches!(goal.phase, GoalPhase::Executing | GoalPhase::Verifying)
-        {
-            return Ok(false);
-        }
-        let parsed = crate::session::goal_board::apply_progress_updates(
-            &goal.objective,
-            &goal.board.markdown,
-            updates,
-        )
-        .map_err(|error| error.to_string())?;
-        goal.board.markdown = parsed.markdown().to_string();
-        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
-        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
-        if goal.phase == GoalPhase::Verifying {
-            goal.phase = GoalPhase::Executing;
-            goal.candidate_summary = None;
-            Self::clear_stage(goal);
-        }
-        goal.history.push(GoalHistoryEntry::new(
-            GoalEvent::ProgressUpdated,
-            Some(reason),
-        ));
-        Ok(true)
-    }
-
-    fn check_revisions(
-        goal: &GoalOrchestration,
-        expected_plan_revision: u64,
-        expected_board_revision: u64,
-    ) -> Result<(), String> {
-        if goal.board.plan_revision != expected_plan_revision
-            || goal.board.board_revision != expected_board_revision
-        {
-            return Err(format!(
-                "stale Goal update: expected plan/board r{expected_plan_revision}/r{expected_board_revision}, current r{}/r{}",
-                goal.board.plan_revision, goal.board.board_revision
-            ));
-        }
         Ok(())
     }
 
-    pub fn claim_stage(&mut self, phase: GoalPhase) -> Option<StageLease> {
-        if !matches!(phase, GoalPhase::Planning | GoalPhase::Verifying) {
-            return None;
-        }
-        let goal = self.orchestration.as_mut()?;
-        if goal.status != GoalStatus::Active
-            || goal.phase != phase
-            || goal.in_flight_stage.is_some()
-        {
-            return None;
-        }
-        self.next_stage_id = self.next_stage_id.saturating_add(1);
-        let lease = StageLease {
-            goal_id: goal.goal_id.clone(),
-            objective_revision: goal.objective_revision,
-            plan_revision: goal.board.plan_revision,
-            board_revision: goal.board.board_revision,
-            stage_id: self.next_stage_id,
-        };
-        goal.in_flight_stage = Some(lease.clone());
-        goal.current_subagent_role = Some(
-            match phase {
-                GoalPhase::Planning => "planner",
-                GoalPhase::Verifying => "verifier",
-                GoalPhase::Executing | GoalPhase::Summarizing => unreachable!(),
-            }
-            .to_string(),
-        );
-        Some(lease)
-    }
-
-    pub fn lease_is_current(&self, lease: &StageLease, phase: GoalPhase) -> bool {
-        self.orchestration.as_ref().is_some_and(|goal| {
-            goal.status == GoalStatus::Active
-                && goal.phase == phase
-                && goal.in_flight_stage.as_ref() == Some(lease)
-        })
-    }
-
-    pub fn release_stage(&mut self, lease: &StageLease) -> bool {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return false;
-        };
-        if goal.in_flight_stage.as_ref() != Some(lease) {
+    /// Explicit user edit. Usage belongs to the same long-running Goal and is
+    /// preserved; editing a stopped Goal re-arms it, matching Codex's Goal UI.
+    pub fn revise_goal(&mut self, objective: String, token_budget: Option<i64>) -> bool {
+        let objective = objective.trim();
+        if objective.is_empty() || token_budget.is_some_and(|budget| budget <= 0) {
             return false;
         }
-        Self::clear_stage(goal);
-        true
-    }
-
-    pub fn planner_failed(&mut self, lease: &StageLease, message: String) -> bool {
-        if !self.release_stage(lease) {
-            return false;
-        }
-        self.account_elapsed();
-        let goal = self.orchestration.as_mut().expect("lease had a goal");
-        goal.planner_failures = goal.planner_failures.saturating_add(1);
-        goal.history.push(GoalHistoryEntry::new(
-            GoalEvent::PlanningFailed,
-            Some(message.clone()),
-        ));
-        if goal.planner_failures >= INFRA_FAILURE_PAUSE_THRESHOLD {
-            goal.status = GoalStatus::Paused;
-            goal.pause_message = Some(message);
-            self.active_since = None;
-        }
-        true
-    }
-
-    pub fn candidate_complete(
-        &mut self,
-        expected_plan_revision: u64,
-        expected_board_revision: u64,
-        message: String,
-    ) -> Result<bool, String> {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return Ok(false);
-        };
-        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
-        if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Executing {
-            return Ok(false);
-        }
-        goal.candidate_summary = Some(message);
-        goal.phase = GoalPhase::Verifying;
-        Self::clear_stage(goal);
-        Ok(true)
-    }
-
-    pub fn verification_not_achieved(
-        &mut self,
-        lease: &StageLease,
-        feedback: String,
-        fingerprint: String,
-    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
-        if !self.lease_is_current(lease, GoalPhase::Verifying) {
-            return Ok(false);
-        }
-        let board = {
-            let goal = self
-                .orchestration
-                .as_ref()
-                .expect("current lease has a goal");
-            crate::session::goal_board::apply_runtime_feedback(
-                &goal.objective,
-                &goal.board.markdown,
-                None,
-                Some(&feedback),
-            )?
-        };
-        debug_assert!(self.release_stage(lease));
-        self.account_elapsed();
-        let goal = self.orchestration.as_mut().expect("lease had a goal");
-        goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
-        if goal.last_gap_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-            goal.repeated_gap_count = goal.repeated_gap_count.saturating_add(1);
-        } else {
-            goal.last_gap_fingerprint = Some(fingerprint);
-            goal.repeated_gap_count = 1;
-        }
-        goal.verifier_feedback = Some(feedback.clone());
-        goal.candidate_summary = None;
-        Self::commit_runtime_feedback(goal, board);
-        goal.history.push(GoalHistoryEntry::new(
-            GoalEvent::VerificationRejected,
-            Some(feedback.clone()),
-        ));
-        if goal.repeated_gap_count >= IDENTICAL_GAP_BLOCK_THRESHOLD {
-            goal.status = GoalStatus::Blocked;
-            goal.pause_message = Some(feedback);
-            self.active_since = None;
-        } else {
-            goal.phase = GoalPhase::Executing;
-        }
-        Ok(true)
-    }
-
-    pub fn verification_blocked(
-        &mut self,
-        lease: &StageLease,
-        message: String,
-    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
-        if !self.lease_is_current(lease, GoalPhase::Verifying) {
-            return Ok(false);
-        }
-        let board = {
-            let goal = self
-                .orchestration
-                .as_ref()
-                .expect("current lease has a goal");
-            crate::session::goal_board::apply_runtime_feedback(
-                &goal.objective,
-                &goal.board.markdown,
-                None,
-                Some(&message),
-            )?
-        };
-        debug_assert!(self.release_stage(lease));
-        self.account_elapsed();
-        let goal = self.orchestration.as_mut().expect("lease had a goal");
-        goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
-        goal.verifier_feedback = Some(message.clone());
-        goal.candidate_summary = None;
-        Self::commit_runtime_feedback(goal, board);
-        goal.status = GoalStatus::Blocked;
-        goal.pause_message = Some(message.clone());
-        goal.history.push(GoalHistoryEntry::new(
-            GoalEvent::VerificationRejected,
-            Some(message),
-        ));
-        self.active_since = None;
-        Ok(true)
-    }
-
-    pub fn report_blocked(
-        &mut self,
-        expected_plan_revision: u64,
-        expected_board_revision: u64,
-        message: String,
-    ) -> Result<bool, String> {
-        let board = {
-            let Some(goal) = self.orchestration.as_ref() else {
-                return Ok(false);
-            };
-            Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
-            if goal.status != GoalStatus::Active {
-                return Ok(false);
-            }
-            crate::session::goal_board::apply_runtime_feedback(
-                &goal.objective,
-                &goal.board.markdown,
-                None,
-                Some(&message),
-            )
-            .map_err(|error| error.to_string())?
-        };
-        self.account_elapsed();
-        let goal = self
-            .orchestration
-            .as_mut()
-            .expect("validated Goal still exists");
-        Self::commit_runtime_feedback(goal, board);
-        goal.status = GoalStatus::Blocked;
-        goal.pause_message = Some(message.clone());
-        goal.verifier_feedback = Some(message.clone());
-        goal.candidate_summary = None;
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalPaused, Some(message)));
-        self.active_since = None;
-        Ok(true)
-    }
-
-    pub fn verification_achieved(
-        &mut self,
-        lease: &StageLease,
-    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
-        if !self.lease_is_current(lease, GoalPhase::Verifying) {
-            return Ok(false);
-        }
-        let board = {
-            let goal = self
-                .orchestration
-                .as_ref()
-                .expect("current lease has a goal");
-            crate::session::goal_board::apply_runtime_feedback(
-                &goal.objective,
-                &goal.board.markdown,
-                Some("Independent verifier accepted the latest candidate and workspace evidence."),
-                Some("None."),
-            )?
-        };
-        debug_assert!(self.release_stage(lease));
-        let goal = self.orchestration.as_mut().expect("lease had a goal");
-        goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
-        Self::commit_runtime_feedback(goal, board);
-        goal.phase = GoalPhase::Summarizing;
-        goal.verifier_feedback = None;
-        goal.last_gap_fingerprint = None;
-        goal.repeated_gap_count = 0;
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::VerificationAccepted, None));
-        Ok(true)
-    }
-
-    pub fn worker_started(&mut self) -> bool {
-        let Some(goal) = self.orchestration.as_mut() else {
+        let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Executing {
+        let changed = goal.objective != objective
+            || goal.token_budget != token_budget
+            || goal.status != GoalStatus::Active;
+        if !changed {
             return false;
         }
-        goal.total_worker_rounds = goal.total_worker_rounds.saturating_add(1);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::WorkerStarted, None));
-        true
-    }
-
-    pub fn complete_verified(&mut self) -> bool {
-        self.account_elapsed();
-        let Some(goal) = self.orchestration.as_mut() else {
-            return false;
-        };
-        if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Summarizing {
-            return false;
-        }
-        goal.status = GoalStatus::Complete;
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalCompleted, None));
-        self.active_since = None;
+        goal.objective = objective.to_string();
+        goal.token_budget = token_budget;
+        goal.status = GoalStatus::Active;
+        goal.status_message = None;
+        goal.updated_at = now();
+        self.active_since = Some(Instant::now());
         true
     }
 
     pub fn pause(&mut self, reason: GoalPauseReason) -> bool {
-        self.pause_with_message(reason, reason.history_detail().to_string())
+        self.pause_with_message(reason, reason.default_message().to_string())
     }
 
     pub fn pause_with_message(&mut self, reason: GoalPauseReason, message: String) -> bool {
+        let status = match reason {
+            GoalPauseReason::User | GoalPauseReason::RuntimeUnavailable => GoalStatus::Paused,
+            GoalPauseReason::TurnError => GoalStatus::Blocked,
+            GoalPauseReason::UsageLimit => GoalStatus::UsageLimited,
+        };
+        self.set_stopped_status(status, message)
+    }
+
+    pub fn report_blocked(&mut self, message: String) -> bool {
+        self.set_stopped_status(GoalStatus::Blocked, message)
+    }
+
+    fn set_stopped_status(&mut self, status: GoalStatus, message: String) -> bool {
         self.account_elapsed();
-        let Some(goal) = self.orchestration.as_mut() else {
+        let Some(goal) = self.goal.as_mut() else {
             return false;
         };
         if goal.status != GoalStatus::Active {
             return false;
         }
-        goal.status = if reason == GoalPauseReason::Verification {
-            GoalStatus::Blocked
-        } else {
-            GoalStatus::Paused
-        };
-        goal.pause_message = Some(message.clone());
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalPaused, Some(message)));
+        goal.status = status;
+        goal.status_message = (!message.trim().is_empty()).then(|| message.trim().to_string());
+        goal.updated_at = now();
         self.active_since = None;
         true
     }
 
-    pub fn resume(&mut self) -> bool {
-        let Some(goal) = self.orchestration.as_mut() else {
+    pub fn restart(&mut self) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if !matches!(goal.status, GoalStatus::Paused | GoalStatus::Blocked) {
+        if !goal.status.can_restart() {
             return false;
         }
         goal.status = GoalStatus::Active;
-        goal.pause_message = None;
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::GoalResumed, None));
+        goal.status_message = None;
+        goal.updated_at = now();
         self.active_since = Some(Instant::now());
         true
     }
 
     pub fn budget_limit(&mut self) -> bool {
         self.account_elapsed();
-        let Some(goal) = self.orchestration.as_mut() else {
+        let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if goal.status == GoalStatus::Complete || goal.status == GoalStatus::BudgetLimited {
+        if goal.status != GoalStatus::Active {
             return false;
         }
         goal.status = GoalStatus::BudgetLimited;
-        Self::clear_stage(goal);
-        goal.history
-            .push(GoalHistoryEntry::new(GoalEvent::BudgetExceeded, None));
+        goal.status_message = Some("Goal token budget reached.".to_string());
+        goal.updated_at = now();
         self.active_since = None;
         true
     }
 
-    pub fn set_token_budget(&mut self, budget: Option<i64>) -> bool {
-        let Some(goal) = self.orchestration.as_mut() else {
+    pub fn complete(&mut self) -> bool {
+        self.account_elapsed();
+        let Some(goal) = self.goal.as_mut() else {
             return false;
         };
         if goal.status == GoalStatus::Complete {
             return false;
         }
+        goal.status = GoalStatus::Complete;
+        goal.status_message = None;
+        goal.updated_at = now();
+        self.active_since = None;
+        true
+    }
+
+    pub fn set_token_budget(&mut self, budget: Option<i64>) -> bool {
+        if budget.is_some_and(|budget| budget <= 0) {
+            return false;
+        }
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        if goal.status == GoalStatus::Complete || goal.token_budget == budget {
+            return false;
+        }
         goal.token_budget = budget;
         if goal.status == GoalStatus::BudgetLimited {
             goal.status = GoalStatus::Paused;
+            goal.status_message = Some(
+                "Budget updated. Restart the Goal when you are ready to continue.".to_string(),
+            );
         }
+        goal.updated_at = now();
         true
     }
 
     pub fn clear(&mut self) {
-        self.orchestration = None;
+        self.goal = None;
         self.active_since = None;
     }
 
     pub fn account_elapsed(&mut self) {
-        if let (Some(goal), Some(since)) = (self.orchestration.as_mut(), self.active_since) {
-            goal.elapsed_ms = goal
-                .elapsed_ms
-                .saturating_add(since.elapsed().as_millis() as u64);
-            self.active_since = Some(Instant::now());
+        let Some(started) = self.active_since.replace(Instant::now()) else {
+            return;
+        };
+        let Some(goal) = self.goal.as_mut() else {
+            self.active_since = None;
+            return;
+        };
+        goal.elapsed_ms = goal
+            .elapsed_ms
+            .saturating_add(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+        if !goal.status.continues_automatically() {
+            self.active_since = None;
         }
     }
 
-    /// Charge parent-session tokens monotonically while the Goal is unfinished.
-    /// A completed Goal is a frozen receipt: later Normal turns must not change
-    /// its accounting when the session is reloaded.
+    pub fn elapsed_ms(&self) -> u64 {
+        let persisted = self.goal.as_ref().map_or(0, |goal| goal.elapsed_ms);
+        persisted.saturating_add(
+            self.active_since
+                .map(|started| started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                .unwrap_or(0),
+        )
+    }
+
     pub fn account_parent_tokens(&mut self, current_session_tokens: i64) -> i64 {
-        let Some(goal) = self.orchestration.as_mut() else {
+        let Some(goal) = self.goal.as_mut() else {
             return 0;
         };
-        if goal.status != GoalStatus::Complete {
-            let last = goal.last_session_tokens_seen.unwrap_or(goal.token_baseline);
-            if current_session_tokens > last {
-                goal.parent_tokens_spent = goal
-                    .parent_tokens_spent
-                    .saturating_add(current_session_tokens - last);
-            }
-            goal.last_session_tokens_seen = Some(current_session_tokens);
+        let current = current_session_tokens.max(0);
+        let previous = goal
+            .last_session_tokens_seen
+            .unwrap_or(goal.token_baseline)
+            .max(0);
+        if goal.status == GoalStatus::Active {
+            goal.parent_tokens_spent = goal
+                .parent_tokens_spent
+                .saturating_add(current.saturating_sub(previous));
         }
+        goal.last_session_tokens_seen = Some(current);
         goal.parent_tokens_spent
     }
 
     pub fn settle_subagent_tokens(&mut self, tokens: i64) -> bool {
-        let Some(goal) = self.orchestration.as_mut() else {
-            return false;
-        };
-        if goal.status == GoalStatus::Complete || tokens <= 0 {
+        if tokens <= 0 {
             return false;
         }
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
         goal.subagent_tokens_spent = goal.subagent_tokens_spent.saturating_add(tokens);
         true
     }
 
     pub fn subagent_tokens_spent(&self) -> i64 {
-        self.orchestration
+        self.goal
             .as_ref()
-            .map(|goal| goal.subagent_tokens_spent)
-            .unwrap_or(0)
+            .map_or(0, |goal| goal.subagent_tokens_spent)
     }
 
-    pub fn update_live_progress(
-        &mut self,
-        subagent_tokens: u64,
-        tokens_by_model: Vec<(String, u64)>,
-        _context_window: u64,
-        context_pct: u8,
-        turn_count: u32,
-        tool_call_count: u32,
-    ) {
-        if let Some(goal) = self.orchestration.as_mut() {
-            goal.live_subagent_tokens = subagent_tokens;
-            goal.live_tokens_by_model = tokens_by_model;
-            goal.live_context_pct = context_pct;
-            goal.live_turn_count = turn_count;
-            goal.live_tool_call_count = tool_call_count;
-        }
+
+    pub fn tokens_used(&self) -> i64 {
+        self.goal.as_ref().map_or(0, |goal| {
+            goal.parent_tokens_spent
+                .saturating_add(goal.subagent_tokens_spent)
+        })
     }
+}
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn canonical_board(objective: &str) -> String {
-        format!(
-            "# Goal\n\n> {objective}\n\n## Plan\n\n- [ ] **T1** `in_progress` — Implement safely\n  - Scope: runtime\n  - Acceptance: tests pass\n  - [ ] **T1.1** `pending` — Add regression coverage\n\n## Goal acceptance\n\n- Tests pass\n\n## Verification evidence\n\n- Pending\n\n## Open gaps\n\n- None"
-        )
-    }
-
-    fn executing_tracker() -> GoalTracker {
+    fn tracker() -> GoalTracker {
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
-        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-        assert!(
-            tracker
-                .apply_planner_result(&lease, canonical_board("ship it"))
-                .unwrap()
-        );
         tracker
-    }
-
-    #[test]
-    fn inconsistent_current_snapshot_recovers_paused_without_autonomous_work() {
-        let tracker = executing_tracker();
-        let mut snapshot = tracker.snapshot().unwrap().clone();
-        snapshot.board.markdown = "not a canonical board".into();
-        snapshot.in_flight_stage = Some(StageLease {
-            goal_id: snapshot.goal_id.clone(),
-            objective_revision: snapshot.objective_revision,
-            plan_revision: snapshot.board.plan_revision,
-            board_revision: snapshot.board.board_revision,
-            stage_id: 9,
-        });
-
-        let restored = GoalTracker::from_snapshot(snapshot).expect("identity is recoverable");
-        let goal = restored.snapshot().unwrap();
-        assert_eq!(goal.status, GoalStatus::Paused);
-        assert_eq!(goal.phase, GoalPhase::Planning);
-        assert!(goal.board.markdown.is_empty());
-        assert!(goal.in_flight_stage.is_none());
-        assert!(
-            goal.pause_message
-                .as_deref()
-                .is_some_and(|message| { message.contains("inconsistent Goal control state") })
-        );
-    }
-
-    #[test]
-    fn runtime_rollback_preserves_a_live_stage_lease() {
-        let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
-        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-        let before = tracker.snapshot().unwrap().clone();
-
-        assert!(tracker.request_replan(1, 0, "new guidance".into()).unwrap());
-        tracker.restore_runtime_snapshot(before);
-
-        assert!(tracker.lease_is_current(&lease, GoalPhase::Planning));
-        assert!(
-            tracker.claim_stage(GoalPhase::Planning).is_none(),
-            "rollback must not admit a duplicate stage"
-        );
-    }
-
-    #[test]
-    fn incompatible_snapshot_architecture_is_not_migrated() {
-        let tracker = executing_tracker();
-        let mut snapshot = tracker.snapshot().unwrap().clone();
-        snapshot.architecture_version = GOAL_ARCHITECTURE_VERSION.saturating_sub(1);
-        assert!(GoalTracker::from_snapshot(snapshot).is_none());
-    }
-
-    #[test]
-    fn planner_commit_advances_only_board_revision() {
-        let tracker = executing_tracker();
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.board.plan_revision, 1);
-        assert_eq!(goal.board.board_revision, 1);
-        assert_eq!(goal.phase, GoalPhase::Executing);
-    }
-
-    #[test]
-    fn progress_patch_invalidates_verifier_and_stale_result() {
-        let mut tracker = executing_tracker();
-        assert!(
-            tracker
-                .candidate_complete(1, 1, "candidate".into())
-                .unwrap()
-        );
-        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        let updates = [tool_types::GoalProgressUpdate {
-            task_id: "T1.1".into(),
-            status: Some(tool_types::GoalTaskStatus::Done),
-            progress: None,
-            evidence: Some("regression test passes".into()),
-            gap: None,
-        }];
-        assert!(
-            tracker
-                .update_progress(1, 1, &updates, "new evidence".into())
-                .unwrap()
-        );
-        assert_eq!(tracker.snapshot().unwrap().phase, GoalPhase::Executing);
-        assert!(!tracker.verification_achieved(&verifier).unwrap());
-    }
-
-    #[test]
-    fn replan_advances_plan_revision_and_invalidates_verifier() {
-        let mut tracker = executing_tracker();
-        assert!(
-            tracker
-                .candidate_complete(1, 1, "candidate".into())
-                .unwrap()
-        );
-        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(
-            tracker
-                .request_replan(1, 1, "revise structure".into())
-                .unwrap()
-        );
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.board.plan_revision, 2);
-        assert_eq!(goal.board.board_revision, 1);
-        assert_eq!(goal.phase, GoalPhase::Planning);
-        assert!(!tracker.lease_is_current(&verifier, GoalPhase::Verifying));
-    }
-
-    #[test]
-    fn replan_during_planning_invalidates_the_old_planner_lease() {
-        let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
-        let planner = tracker.claim_stage(GoalPhase::Planning).unwrap();
-
-        assert!(
-            tracker
-                .request_replan(1, 0, "incorporate new structural guidance".into())
-                .unwrap()
-        );
-
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.board.plan_revision, 2);
-        assert_eq!(goal.board.board_revision, 0);
-        assert_eq!(goal.phase, GoalPhase::Planning);
-        assert!(!tracker.lease_is_current(&planner, GoalPhase::Planning));
-        assert!(tracker.claim_stage(GoalPhase::Planning).is_some());
-    }
-
-    #[test]
-    fn repeated_identical_gap_blocks_on_third_round() {
-        let mut tracker = executing_tracker();
-        for round in 1..=3 {
-            let goal = tracker.snapshot().unwrap();
-            assert!(
-                tracker
-                    .candidate_complete(
-                        goal.board.plan_revision,
-                        goal.board.board_revision,
-                        format!("candidate {round}"),
-                    )
-                    .unwrap()
-            );
-            let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-            assert!(
-                tracker
-                    .verification_not_achieved(
-                        &lease,
-                        "same missing evidence".into(),
-                        "same-gap".into(),
-                    )
-                    .unwrap()
-            );
-        }
-        assert_eq!(tracker.status(), Some(GoalStatus::Blocked));
-    }
-
-    #[test]
-    fn verifier_role_and_blocked_feedback_share_the_committed_board_revision() {
-        let mut tracker = executing_tracker();
-        assert!(
-            tracker
-                .candidate_complete(1, 1, "candidate".into())
-                .unwrap()
-        );
-        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert_eq!(
-            tracker.snapshot().unwrap().current_subagent_role.as_deref(),
-            Some("verifier")
-        );
-        assert!(
-            tracker
-                .verification_blocked(&verifier, "missing external fixture".into())
-                .unwrap()
-        );
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.status, GoalStatus::Blocked);
-        assert_eq!(goal.board.board_revision, 2);
-        assert!(goal.board.markdown.contains("missing external fixture"));
-        assert!(goal.current_subagent_role.is_none());
-        assert_eq!(goal.total_verify_rounds, 1);
-    }
-
-    #[test]
-    fn primary_agent_blocker_updates_open_gaps_and_invalidates_the_stage() {
-        let mut tracker = executing_tracker();
-        assert!(
-            tracker
-                .candidate_complete(1, 1, "candidate".into())
-                .unwrap()
-        );
-        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(
-            tracker
-                .report_blocked(1, 1, "waiting for user credentials".into())
-                .unwrap()
-        );
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.status, GoalStatus::Blocked);
-        assert_eq!(goal.board.board_revision, 2);
-        assert!(goal.board.markdown.contains("waiting for user credentials"));
-        assert!(goal.current_subagent_role.is_none());
-        assert!(!tracker.lease_is_current(&verifier, GoalPhase::Verifying));
-    }
-
-    #[test]
-    fn restore_drops_transient_lease_and_rejects_old_architecture() {
-        let mut tracker = executing_tracker();
-        tracker
-            .candidate_complete(1, 1, "candidate".into())
+            .create_goal("g1".into(), "ship it".into(), Some(100), 10, "now".into())
             .unwrap();
-        let _ = tracker.claim_stage(GoalPhase::Verifying);
-        let mut snapshot = tracker.snapshot().unwrap().clone();
-        let restored = GoalTracker::from_snapshot(snapshot.clone()).unwrap();
-        assert!(restored.snapshot().unwrap().in_flight_stage.is_none());
-        snapshot.architecture_version -= 1;
-        assert!(GoalTracker::from_snapshot(snapshot).is_none());
+        tracker
+    }
+
+    #[test]
+    fn goal_is_long_lived_without_plan_phase() {
+        let tracker = tracker();
+        assert_eq!(tracker.status(), Some(GoalStatus::Active));
+        assert_eq!(tracker.objective(), Some("ship it"));
+        assert_eq!(tracker.snapshot().unwrap().token_budget, Some(100));
+    }
+
+    #[test]
+    fn pause_restart_edit_and_complete_are_explicit() {
+        let mut tracker = tracker();
+        assert!(tracker.pause(GoalPauseReason::User));
+        assert_eq!(tracker.status(), Some(GoalStatus::Paused));
+        assert!(tracker.restart());
+        assert!(tracker.revise_goal("ship safely".into(), Some(200)));
+        assert_eq!(tracker.objective(), Some("ship safely"));
+        assert!(tracker.complete());
+        assert_eq!(tracker.status(), Some(GoalStatus::Complete));
+    }
+
+    #[test]
+    fn old_goal_architecture_is_rejected() {
+        let mut state = tracker().snapshot().unwrap().clone();
+        state.architecture_version = GOAL_ARCHITECTURE_VERSION - 1;
+        assert!(GoalTracker::from_snapshot(state).is_none());
     }
 }

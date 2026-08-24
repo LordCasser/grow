@@ -801,13 +801,11 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<shell::session::ContextInfo>,
-    /// Current goal orchestration state. Set by `GoalUpdated` session
+    /// Current long-lived Goal state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,
-    /// Width/theme-aware Markdown projection of `goal_state.plan_markdown`.
-    /// This is view-only cache state and never participates in ACP replay or
-    /// Goal persistence.
-    pub(crate) goal_board_renderer: crate::views::goal_detail::GoalBoardRenderer,
+    /// View-only scroll state for the Goal detail overlay.
+    pub(crate) goal_detail_renderer: crate::views::goal_detail::GoalDetailRenderer,
     pub workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
     pub workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
     /// Active private workflow runs (deep research). These are deliberately
@@ -1013,7 +1011,6 @@ pub struct AgentView {
     pub hit_goal_status: HitArea,
     pub hit_goal_close: HitArea,
     /// Compact/full-board projection toggle in the Goal detail footer.
-    pub hit_goal_projection_toggle: HitArea,
     pub hit_bg_button: HitArea,
     #[allow(dead_code)]
     pub(crate) last_bg_click: Option<Instant>,

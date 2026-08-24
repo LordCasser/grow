@@ -710,19 +710,6 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
             None,
             model_id.clone(),
         ),
-        RequestEvent::FirstToken { id } => {
-            let (turn, step) = scope(scopes, id);
-            tuple(
-                "request",
-                "model_request",
-                "first_token",
-                turn,
-                step,
-                Some(id.clone()),
-                None,
-                "first content token".into(),
-            )
-        }
         RequestEvent::Retrying {
             id,
             attempt,

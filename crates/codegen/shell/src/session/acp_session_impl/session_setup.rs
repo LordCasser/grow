@@ -100,9 +100,11 @@ impl SessionActor {
     }
     /// Await the background prefix and inject at conversation index 1.
     /// Falls back to synchronous build on timeout (10s) or panic.
-    pub(super) async fn ensure_prefix_ready(&self) {
+    pub(super) async fn ensure_prefix_ready(
+        &self,
+    ) -> Result<(), chat_state::TimelineWriteError> {
         let Some(mut handle) = self.deferred_prefix.take() else {
-            return;
+            return Ok(());
         };
         let start = std::time::Instant::now();
         const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -132,7 +134,7 @@ impl SessionActor {
             .await
         else {
             tracing::error!("failed to publish deferred context: chat-state actor stopped");
-            return;
+            return Err(chat_state::TimelineWriteError::AcknowledgementLost);
         };
         let insert_at = conversation.len().min(1);
         conversation.insert(insert_at, ConversationItem::user(prefix));
@@ -146,19 +148,16 @@ impl SessionActor {
                 ConversationItem::project_instructions(agents_md_reminder),
             );
         }
-        if let Err(error) = self
-            .chat_state_handle
+        self.chat_state_handle
             .replace_context_durably(conversation, source_surface_revision)
-            .await
-        {
-            tracing::error!(%error, "failed to durably publish deferred session context");
-        }
+            .await?;
         tracing::info!(
             session_id = %self.session_info.id.0,
             source,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "ensure_prefix_ready: done"
         );
+        Ok(())
     }
     /// Re-discover skills from disk, update the SkillManager baseline,
     /// and re-advertise slash commands to the client. Returns the number

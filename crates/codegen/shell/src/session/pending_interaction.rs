@@ -46,12 +46,13 @@ pub enum PendingKind {
 ///
 /// The resume re-park issues `grow/plan_approval` from a detached task
 /// with no running turn, making it the one parked interaction that also carries a
-/// persisted transport gate (`approval_pending`). `session_has_live_work` consults
-/// this to keep such a session resident until the decision is answered or a real
-/// disconnect `Err`s the reverse-request — otherwise an idle-unload drops the
-/// parked future and its guard clears the on-disk gate. Permission/question parks
-/// carry no persisted gate, so they are intentionally not counted here. Poisoned
-/// lock → recover the map (module idiom) and read it.
+/// persisted transport gate (`approval_pending`). The actor's atomic
+/// `UnloadIfIdle` decision consults this to keep such a session resident until
+/// the decision is answered or a real disconnect `Err`s the reverse-request —
+/// otherwise an idle-unload drops the parked future and its guard clears the
+/// on-disk gate. Permission/question parks carry no persisted gate, so they are
+/// intentionally not counted here. Poisoned lock → recover the map (module
+/// idiom) and read it.
 pub(crate) fn has_parked_plan_approval(pending: &PendingInteractions) -> bool {
     pending
         .lock()

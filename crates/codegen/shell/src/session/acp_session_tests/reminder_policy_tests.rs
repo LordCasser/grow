@@ -129,7 +129,7 @@ use crate::session::goal_tracker::GoalStatus;
 fn laziness_injection_active_predicate_matrix() {
     let def = def_with_template(TemplateOverride::None);
     let policy_on = policy_with_gate(true);
-    for (goal_harness_enabled, goal_status, expect) in [
+    for (goal_runtime_available, goal_status, expect) in [
         (false, None, false),
         (false, Some(GoalStatus::Active), false),
         (true, None, false),
@@ -138,16 +138,16 @@ fn laziness_injection_active_predicate_matrix() {
         (true, Some(GoalStatus::Paused), false),
     ] {
         assert_eq!(
-            laziness_injection_active(goal_harness_enabled, goal_status),
+            laziness_injection_active(goal_runtime_available, goal_status),
             expect,
-            "goal_harness_enabled={goal_harness_enabled} status={goal_status:?}",
+            "goal_runtime_available={goal_runtime_available} status={goal_status:?}",
         );
         assert!(
             !todo_gate_active(
                 &policy_on,
                 PromptAudience::Primary,
                 &def,
-                goal_harness_enabled,
+                goal_runtime_available,
                 goal_status,
             ),
             "todo gate must be suppressed during the active goal loop",
@@ -159,7 +159,7 @@ fn todo_gate_active_predicate_matrix() {
     let def = def_with_template(TemplateOverride::None);
     let policy_off = policy_with_gate(false);
     let policy_on = policy_with_gate(true);
-    for (policy, audience, goal_harness_enabled, goal_status, expect) in [
+    for (policy, audience, goal_runtime_available, goal_status, expect) in [
         (&policy_off, PromptAudience::Primary, true, None, false),
         (&policy_off, PromptAudience::Subagent, true, None, false),
         (
@@ -194,9 +194,9 @@ fn todo_gate_active_predicate_matrix() {
         (&policy_on, PromptAudience::Primary, true, None, false),
     ] {
         assert_eq!(
-            todo_gate_active(policy, audience, &def, goal_harness_enabled, goal_status),
+            todo_gate_active(policy, audience, &def, goal_runtime_available, goal_status),
             expect,
-            "gate.enabled={} audience={audience:?} goal_harness_enabled={goal_harness_enabled} status={goal_status:?}",
+            "gate.enabled={} audience={audience:?} goal_runtime_available={goal_runtime_available} status={goal_status:?}",
             policy.todo_gate.enabled
         );
     }

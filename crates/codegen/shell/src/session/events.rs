@@ -6,8 +6,8 @@
 // Re-exports from the shell-owned local event modules.
 pub(crate) use crate::session::event_tracker::EventTracker;
 pub(crate) use crate::session::event_types::{
-    CancellationCategory, EVENT_SCHEMA_VERSION, Event, InterjectionSource, Phase, RedirectKind,
-    SessionRelationship, ToolCompletedSource, ToolOutcome, TurnOutcomeLabel,
+    CancellationCategory, EVENT_SCHEMA_VERSION, Event, InterjectionSource, RedirectKind,
+    SessionRelationship, ToolOutcome, TurnOutcomeLabel,
 };
 
 // ── Laziness detector (Layer 3) discriminator vocabulary ─────────────

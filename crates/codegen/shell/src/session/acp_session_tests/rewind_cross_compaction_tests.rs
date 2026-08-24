@@ -260,6 +260,154 @@ async fn run_file_counts_scenario() {
     assert_eq!(counts.get(&2).copied(), None);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_persistence_failure_rolls_back_files_and_keeps_tracker() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use std::path::Path;
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            let path = paths::RelPathBuf::new("a.rs").unwrap();
+            actor
+                .tool_context
+                .fs
+                .write_file(&path, b"after")
+                .await
+                .unwrap();
+            actor
+                .file_state_tracker
+                .add_before_snapshot_for_prompt(
+                    0,
+                    Path::new("/tmp/a.rs"),
+                    Path::new("/tmp"),
+                    Some("before".into()),
+                )
+                .await;
+
+            let (reject_tx, mut reject_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.notifications.persistence_tx = reject_tx;
+            tokio::spawn(async move {
+                while let Some(message) = reject_rx.recv().await {
+                    match message {
+                        crate::session::persistence::PersistenceMsg::WriteRewindTransactionAndAck {
+                            respond_to,
+                            ..
+                        } => {
+                            let _ = respond_to.send(Ok(()));
+                        }
+                        crate::session::persistence::PersistenceMsg::ReplaceRewindPointsAndAck {
+                            respond_to,
+                            ..
+                        } => {
+                            let _ = respond_to
+                                .send(Err(std::io::Error::other("injected rewind failure")));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let error = actor
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 0,
+                    force: true,
+                    mode: RewindMode::FilesOnly,
+                })
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected rewind failure"));
+            assert_eq!(
+                actor
+                    .tool_context
+                    .fs
+                    .read_to_string(&path)
+                    .await
+                    .unwrap(),
+                "after"
+            );
+            assert_eq!(actor.file_state_tracker.get_rewind_points().await.len(), 1);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_rewind_transaction_rolls_forward_before_session_use() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use std::path::Path;
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            seed_test_timeline(
+                &actor,
+                vec![
+                    ConversationItem::system("SYS"),
+                    prompt("P0", 0),
+                    ConversationItem::assistant("A0"),
+                    prompt("P1", 1),
+                    ConversationItem::assistant("A1"),
+                ],
+                &["P0", "P1"],
+            )
+            .await;
+            let path = paths::RelPathBuf::new("recover.rs").unwrap();
+            actor
+                .tool_context
+                .fs
+                .write_file(&path, b"after")
+                .await
+                .unwrap();
+            actor
+                .file_state_tracker
+                .add_before_snapshot_for_prompt(
+                    1,
+                    Path::new("/tmp/recover.rs"),
+                    Path::new("/tmp"),
+                    Some("before".into()),
+                )
+                .await;
+            let transaction = crate::session::persistence::RewindTransaction {
+                version: crate::session::persistence::REWIND_TRANSACTION_VERSION,
+                target_prompt_index: 1,
+                pre_prompt_index: 2,
+                mode: RewindMode::All,
+            };
+            actor
+                .session_directory
+                .write_atomic(
+                    std::ffi::OsStr::new(
+                        crate::session::persistence::REWIND_TRANSACTION_FILE,
+                    ),
+                    &serde_json::to_vec(&transaction).unwrap(),
+                    true,
+                    true,
+                )
+                .unwrap();
+
+            actor.recover_pending_rewind().await.unwrap();
+
+            assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
+            assert_eq!(
+                actor
+                    .tool_context
+                    .fs
+                    .read_to_string(&path)
+                    .await
+                    .unwrap(),
+                "before"
+            );
+            assert!(actor.file_state_tracker.get_rewind_points().await.is_empty());
+        })
+        .await;
+}
+
 /// A cross-compaction rewind to BEFORE the compaction point rebuilds the
 /// conversation without a summary, so the stale `last_compaction_prompt_index`
 /// must be cleared — otherwise the per-model `x-compactions-remaining` header

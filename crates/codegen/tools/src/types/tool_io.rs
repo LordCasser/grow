@@ -75,14 +75,9 @@ pub enum ToolInput {
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
+    CreateGoal(crate::implementations::grow_build::update_goal::CreateGoalInput),
     GetGoal(crate::implementations::grow_build::update_goal::GetGoalInput),
     UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalInput),
-    UpdateGoalProgress(crate::implementations::grow_build::update_goal::UpdateGoalProgressInput),
-    RequestGoalReplan(crate::implementations::grow_build::update_goal::RequestGoalReplanInput),
-    SubmitGoalPlanSection(
-        crate::implementations::grow_build::update_goal::SubmitGoalPlanSectionInput,
-    ),
-    FinalizeGoalPlan(crate::implementations::grow_build::update_goal::FinalizeGoalPlanInput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolInput),
     RequestToolAccess(RequestToolAccessInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)

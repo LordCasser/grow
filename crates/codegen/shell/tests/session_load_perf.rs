@@ -222,12 +222,18 @@ async fn phase_breakdown_real_functions() {
     // Both read the same file that `load_light` no longer touches.
     use workspace::session::file_state::FileStateTracker;
     let t = Instant::now();
-    let lazy_metas = FileStateTracker::with_lazy_source(rewind_path.clone())
+    let lazy_metas = FileStateTracker::with_lazy_file(
+        std::fs::File::open(&rewind_path).expect("open rewind fixture"),
+        rewind_path.clone(),
+    )
         .get_rewind_point_metas()
         .await;
     let lazy_metas_scan = t.elapsed();
     let t = Instant::now();
-    let lazy_points = FileStateTracker::with_lazy_source(rewind_path.clone())
+    let lazy_points = FileStateTracker::with_lazy_file(
+        std::fs::File::open(&rewind_path).expect("open rewind fixture"),
+        rewind_path.clone(),
+    )
         .get_rewind_points()
         .await;
     let lazy_full_load = t.elapsed();

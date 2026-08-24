@@ -51,6 +51,54 @@ async fn session_init_creates_a_missing_storage_root() {
 }
 
 #[tokio::test]
+async fn session_trace_uses_canonical_identity_and_bounded_capability_reads() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let nested = adapter.session_dir(&info).join("artifacts");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("proof.txt"), b"canonical").unwrap();
+
+    let snapshot = crate::session::storage::load_session_trace_at(
+        info.id.0.as_ref(),
+        root.path(),
+    )
+    .unwrap()
+    .expect("session exists");
+    assert_eq!(snapshot.session_id, info.id.0.as_ref());
+    assert!(snapshot.files.iter().any(|file| {
+        file.relative_path == std::path::Path::new("artifacts/proof.txt")
+            && file.bytes == b"canonical"
+    }));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_trace_rejects_a_symlink_instead_of_exporting_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    std::fs::write(outside.path().join("secret"), b"must-not-export").unwrap();
+    symlink(
+        outside.path().join("secret"),
+        adapter.session_dir(&info).join("leak"),
+    )
+    .unwrap();
+
+    let error = crate::session::storage::load_session_trace_at(
+        info.id.0.as_ref(),
+        root.path(),
+    )
+    .expect_err("trace must reject symlink entries");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
 async fn session_init_publishes_long_cwd_marker_once() {
     let root = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
@@ -477,7 +525,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
                 model: "test-model".into(),
                 backend: "responses".into(),
             },
-            initiator_ref: format!("t:{}/{}", info.id, spawn.seq.get()),
+            initiator_ref: format!("t:{}/sideband:{sideband_id}", info.id),
             executor: "main".into(),
             output_schema: None,
         }),
@@ -877,13 +925,12 @@ async fn load_session_without_updates_defers_rewind_points() {
     let full = adapter.load_session(&info).await.unwrap();
     assert_eq!(full.rewind_points.len(), 2);
     assert_eq!(adapter.load_rewind_points(&info).await.unwrap().len(), 2);
-    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let path = adapter.rewind_points_file(&info);
     assert!(path.ends_with("rewind_points.jsonl"));
 }
-/// The disk-authoritative ConversationOnly merge persists the correct
-/// merged/truncated set.
+/// The acknowledged rewrite persists exactly the caller's complete typed set.
 #[tokio::test]
-async fn merge_rewind_points_from_persists_merged_set() {
+async fn replace_rewind_points_persists_exact_set() {
     use workspace::session::file_state::RewindPoint;
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
@@ -892,34 +939,59 @@ async fn merge_rewind_points_from_persists_merged_set() {
     for i in 0..3 {
         adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
     }
-    adapter.merge_rewind_points_from(&info, 1).await.unwrap();
+    adapter
+        .replace_rewind_points(&info, &[RewindPoint::new(0), RewindPoint::new(4)])
+        .await
+        .unwrap();
     let after = adapter.load_rewind_points(&info).await.unwrap();
-    assert_eq!(after.len(), 1);
-    assert_eq!(after[0].prompt_index, 0);
+    assert_eq!(
+        after.iter().map(|point| point.prompt_index).collect::<Vec<_>>(),
+        [0, 4]
+    );
 }
-/// A malformed on-disk line makes the STRICT merge read abort BEFORE writing,
-/// leaving `rewind_points.jsonl` untouched (never drop the line).
+
 #[tokio::test]
-async fn merge_rewind_points_from_aborts_on_malformed_without_writing() {
+async fn rewind_transaction_is_durable_and_clear_is_idempotent() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let path = adapter.rewind_points_file_path(&info).unwrap();
-    let original = "garbage{not json\n";
-    tokio::fs::write(&path, original).await.unwrap();
-    let res = adapter.merge_rewind_points_from(&info, 1).await;
-    assert!(res.is_err(), "malformed read must abort the merge");
+    let transaction = crate::session::persistence::RewindTransaction {
+        version: crate::session::persistence::REWIND_TRANSACTION_VERSION,
+        target_prompt_index: 1,
+        pre_prompt_index: 3,
+        mode: crate::session::RewindMode::All,
+    };
+    adapter
+        .write_rewind_transaction(&info, &transaction)
+        .await
+        .unwrap();
+    let opened = adapter.open_session(&info).unwrap();
+    let bytes = opened
+        .directory()
+        .read_bounded(
+            std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
+            "rewind transaction test",
+            crate::session::persistence::MAX_REWIND_TRANSACTION_BYTES,
+        )
+        .unwrap();
     assert_eq!(
-            tokio::fs::read_to_string(&path).await.unwrap(),
-            original,
-            "rewind_points.jsonl must be preserved when the merge aborts"
-        );
+        serde_json::from_slice::<crate::session::persistence::RewindTransaction>(&bytes).unwrap(),
+        transaction
+    );
+    adapter.clear_rewind_transaction(&info).await.unwrap();
+    adapter.clear_rewind_transaction(&info).await.unwrap();
+    assert!(
+        !opened
+            .directory()
+            .display_path()
+            .join(crate::session::persistence::REWIND_TRANSACTION_FILE)
+            .exists()
+    );
 }
-/// File-content `file_snapshots` must round-trip through the on-disk
-/// read-modify-write merge (not just index/count).
+/// File-content snapshots round-trip through the exact replacement.
 #[tokio::test]
-async fn merge_rewind_points_from_round_trips_file_snapshots() {
+async fn replace_rewind_points_round_trips_file_snapshots() {
     use paths::RelPathBuf;
     use workspace::session::file_state::{FileSnapshot, RewindPoint};
     let temp_dir = TempDir::new().unwrap();
@@ -934,9 +1006,8 @@ async fn merge_rewind_points_from_round_trips_file_snapshots() {
     p1.add_snapshot(
         FileSnapshot::new(RelPathBuf::new("b.rs").unwrap(), Some("b-v1".into())),
     );
-    adapter.append_rewind_point(&info, &p0).await.unwrap();
-    adapter.append_rewind_point(&info, &p1).await.unwrap();
-    adapter.merge_rewind_points_from(&info, 1).await.unwrap();
+    let merged = workspace::session::file_state::merge_rewind_points_from(vec![p0, p1], 1);
+    adapter.replace_rewind_points(&info, &merged).await.unwrap();
     let after = adapter.load_rewind_points(&info).await.unwrap();
     assert_eq!(after.len(), 1);
     let m0 = &after[0];
@@ -954,7 +1025,7 @@ async fn merge_rewind_points_from_round_trips_file_snapshots() {
             Some("b-v1".into())
         );
 }
-/// A `write_jsonl`-backed rewrite (here `truncate_rewind_points_from`) renames
+/// A rewind-point replacement renames
 /// the target into place and leaves NO `*.jsonl.tmp` behind.
 #[tokio::test]
 async fn write_jsonl_leaves_no_temp_and_renames_target() {
@@ -966,13 +1037,16 @@ async fn write_jsonl_leaves_no_temp_and_renames_target() {
     for i in 0..3 {
         adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
     }
-    adapter.truncate_rewind_points_from(&info, 2).await.unwrap();
+    adapter
+        .replace_rewind_points(&info, &[RewindPoint::new(0), RewindPoint::new(1)])
+        .await
+        .unwrap();
     let kept = adapter.load_rewind_points(&info).await.unwrap();
     assert_eq!(
             kept.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
             vec![0, 1]
         );
-    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let path = adapter.rewind_points_file(&info);
     let leftover_tmps: Vec<String> = std::fs::read_dir(path.parent().unwrap())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -995,14 +1069,23 @@ async fn reads_never_modify_rewind_or_updates_files() {
     adapter.init_session(&info, default_model_id()).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(0)).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(1)).await.unwrap();
-    let updates_path = adapter.updates_file_path(&info).unwrap();
+    let updates_path = adapter.updates_file(&info);
     let acu = r#"{"timestamp":0,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}"#;
     tokio::fs::write(&updates_path, format!("{acu}\n")).await.unwrap();
-    let rewind_path = adapter.rewind_points_file_path(&info).unwrap();
+    let rewind_path = adapter.rewind_points_file(&info);
     let rewind_before = std::fs::read(&rewind_path).unwrap();
     let updates_before = std::fs::read(&updates_path).unwrap();
     adapter.load_session_without_updates(&info).await.unwrap();
-    let tracker = FileStateTracker::with_lazy_source(rewind_path.clone());
+    let rewind_file = adapter
+        .open_session(&info)
+        .unwrap()
+        .directory()
+        .open_regular(
+            std::ffi::OsStr::new("rewind_points.jsonl"),
+            "rewind points ledger",
+        )
+        .unwrap();
+    let tracker = FileStateTracker::with_lazy_file(rewind_file, rewind_path.clone());
     assert_eq!(tracker.get_rewind_points().await.len(), 2);
     assert_eq!(
             std::fs::read(&rewind_path).unwrap(),
@@ -2034,8 +2117,8 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         None,
         0,
         "2026-01-01T00:00:00Z".into(),
-        None,
-    );
+    )
+    .unwrap();
     append_control_snapshot(
         &adapter,
         &source_info,
@@ -2063,6 +2146,53 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         forked.behavior.state,
         crate::session::behavior::BehaviorState::Normal
     );
+}
+
+#[tokio::test]
+async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("src-plan"),
+        cwd: "/src".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("tgt-plan"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let mut plan = crate::session::behavior::BehaviorSnapshot::selected(
+        tool_types::BehaviorId::Plan,
+    );
+    plan.state = crate::session::behavior::BehaviorState::Plan(
+        crate::session::behavior::PlanPhase::AwaitingApproval,
+    );
+    plan.approval_pending = true;
+    plan.reminder_count = 3;
+    plan.plan_artifact_revision = 4;
+    plan.plan_artifact_hash = Some("orphaned-plan-artifact".into());
+    append_control_snapshot(
+        &adapter,
+        &source_info,
+        &crate::session::control::SessionControlSnapshot::new(8, plan, None),
+    )
+    .await;
+
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let forked = adapter
+        .load_session_without_updates(&target_info)
+        .await
+        .unwrap()
+        .control_snapshot
+        .expect("fork emits an explicit child control fact");
+    assert_eq!(
+        forked.behavior.state,
+        crate::session::behavior::BehaviorState::Normal
+    );
+    assert!(forked.behavior.runtime_fields_match_selection());
 }
 
 #[test]
@@ -2516,9 +2646,9 @@ fn write_test_summary(
     session_dir
 }
 #[test]
-fn scan_session_dirs_returns_empty_for_explicit_mode() {
+fn scan_opened_sessions_returns_empty_for_explicit_mode() {
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(PathBuf::from("/fake"));
-    assert!(adapter.scan_session_dirs(None).unwrap().is_empty());
+    assert!(adapter.scan_opened_sessions(None).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2610,24 +2740,24 @@ async fn load_rejects_a_conflicting_title_projection_at_canonical_seq() {
     assert!(error.to_string().contains("conflicts"));
 }
 #[test]
-fn scan_session_dirs_returns_empty_when_no_sessions_dir() {
+fn scan_opened_sessions_returns_empty_when_no_sessions_dir() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    assert!(adapter.scan_session_dirs(None).unwrap().is_empty());
+    assert!(adapter.scan_opened_sessions(None).unwrap().is_empty());
 }
 #[test]
-fn scan_session_dirs_finds_all_sessions() {
+fn scan_opened_sessions_finds_all_identity_checked_sessions() {
     let tmp = TempDir::new().unwrap();
     let now = chrono::Utc::now();
     let cwd = crate::util::grow_home::encode_cwd_dirname("/home/user/project");
     write_test_summary(tmp.path(), &cwd, "s1", now, None, None, None);
     write_test_summary(tmp.path(), &cwd, "s2", now, None, None, None);
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let dirs = adapter.scan_session_dirs(None).unwrap();
-    assert_eq!(dirs.len(), 2);
+    let sessions = adapter.scan_opened_sessions(None).unwrap();
+    assert_eq!(sessions.len(), 2);
 }
 #[test]
-fn scan_session_dirs_filters_by_cwd() {
+fn scan_opened_sessions_filters_by_cwd() {
     let tmp = TempDir::new().unwrap();
     let now = chrono::Utc::now();
     let cwd_a = crate::util::grow_home::encode_cwd_dirname("/home/user/project-a");
@@ -2635,14 +2765,16 @@ fn scan_session_dirs_filters_by_cwd() {
     write_test_summary(tmp.path(), &cwd_a, "s1", now, None, None, None);
     write_test_summary(tmp.path(), &cwd_b, "s2", now, None, None, None);
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let a_dirs = adapter.scan_session_dirs(Some("/home/user/project-a")).unwrap();
-    assert_eq!(a_dirs.len(), 1);
-    assert!(a_dirs[0].ends_with("s1"));
-    let all_dirs = adapter.scan_session_dirs(None).unwrap();
-    assert_eq!(all_dirs.len(), 2);
+    let a_sessions = adapter
+        .scan_opened_sessions(Some("/home/user/project-a"))
+        .unwrap();
+    assert_eq!(a_sessions.len(), 1);
+    assert_eq!(a_sessions[0].summary().info.id, acp::SessionId::new("s1"));
+    let all_sessions = adapter.scan_opened_sessions(None).unwrap();
+    assert_eq!(all_sessions.len(), 2);
 }
 #[test]
-fn scan_session_dirs_skips_non_directory_entries() {
+fn scan_opened_sessions_skips_non_sessions_and_invalid_summaries() {
     let tmp = TempDir::new().unwrap();
     let cwd = crate::util::grow_home::encode_cwd_dirname("/project");
     let cwd_dir = tmp.path().join("sessions").join(&cwd);
@@ -2651,9 +2783,8 @@ fn scan_session_dirs_skips_non_directory_entries() {
     std::fs::create_dir(cwd_dir.join("real-session")).unwrap();
     std::fs::write(cwd_dir.join("real-session/summary.json"), b"{}").unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let dirs = adapter.scan_session_dirs(None).unwrap();
-    assert_eq!(dirs.len(), 1);
-    assert!(dirs[0].ends_with("real-session"));
+    let sessions = adapter.scan_opened_sessions(None).unwrap();
+    assert!(sessions.is_empty());
 }
 #[tokio::test]
 async fn list_sessions_recent_returns_most_recent_by_mtime() {
@@ -2881,8 +3012,8 @@ async fn timeline_control_roundtrips_goal_through_light_session_load() {
         Some(10_000),
         50,
         "now".into(),
-        None,
-    );
+    )
+    .unwrap();
     let snapshot = crate::session::control::SessionControlSnapshot::new(
         7,
         crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
@@ -3041,8 +3172,8 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         None,
         0,
         "now".into(),
-        None,
-    );
+    )
+    .unwrap();
     append_control_snapshot(
         &adapter,
         &source,
@@ -3085,7 +3216,7 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
                     model: "test-model".into(),
                     backend: "responses".into(),
                 },
-                initiator_ref: "t:test-session-123/0".into(),
+                initiator_ref: format!("t:test-session-123/sideband:{id}"),
                 executor: "main".into(),
                 output_schema: None,
             },
@@ -3107,4 +3238,70 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect::<Vec<chat_state::SidebandEvent>>();
     chat_state::SidebandTimeline::from_events(stored).unwrap();
+}
+
+#[tokio::test]
+async fn session_load_closes_an_interrupted_sideband_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+
+    let mut parent = chat_state::Timeline::default();
+    let spawn = parent
+        .record(chat_state::TimelineEventKind::Sideband(
+            chat_state::SidebandSpawnEvent {
+                sideband_id: id.clone(),
+                purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                source_refs: Vec::new(),
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_timeline_event(&info, &spawn)
+        .await
+        .unwrap();
+
+    let mut sideband = chat_state::SidebandTimeline::new(id.clone()).unwrap();
+    let request = sideband
+        .prepare(chat_state::SidebandEventKind::Request(
+            chat_state::SidebandRequest {
+                purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                prompt: "judge".into(),
+                source_refs: Vec::new(),
+                route: chat_state::SidebandRoute {
+                    model: "test-model".into(),
+                    backend: "responses".into(),
+                },
+                initiator_ref: format!("t:{}/sideband:{id}", info.id),
+                executor: "main".into(),
+                output_schema: None,
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_sideband_event_durable(&info, &request)
+        .await
+        .unwrap();
+
+    adapter.load_session_without_updates(&info).await.unwrap();
+    adapter.load_session_without_updates(&info).await.unwrap();
+
+    let path = adapter.sideband_timeline_file(&info, &id).unwrap();
+    let stored = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect::<Vec<chat_state::SidebandEvent>>();
+    assert_eq!(stored.len(), 2, "recovery must append one terminal only");
+    let recovered = chat_state::SidebandTimeline::from_events(stored).unwrap();
+    assert!(recovered.is_ended());
+    assert!(matches!(
+        recovered.events().last().map(|event| &event.kind),
+        Some(chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+            outcome: chat_state::SidebandOutcome::Cancelled,
+            ..
+        }))
+    ));
 }

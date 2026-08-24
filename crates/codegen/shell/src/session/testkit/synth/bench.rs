@@ -54,7 +54,6 @@ pub fn synthesize_to_target_bytes(root: &Path, target_bytes: u64) -> Info {
             .init_session(&info, acp::ModelId::new("bench-model"))
             .await
             .expect("init session");
-        let updates_path = adapter.updates_file_path(&info).expect("updates path");
         let mut turn = 0usize;
         loop {
             for update in turn_updates(&info, turn) {
@@ -64,9 +63,9 @@ pub fn synthesize_to_target_bytes(root: &Path, target_bytes: u64) -> Info {
             // Stat every 32 turns; sizes only grow. A persistent stat failure
             // panics here rather than spinning the append loop forever.
             if turn.is_multiple_of(32)
-                && std::fs::metadata(&updates_path)
-                    .expect("stat updates.jsonl")
-                    .len()
+                && adapter
+                    .updates_snapshot_len(&info)
+                    .expect("read updates ledger metadata")
                     >= target_bytes
             {
                 break;

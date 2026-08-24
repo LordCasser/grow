@@ -286,10 +286,9 @@ pub(super) fn count_timeline_stats(info: &shell::session::info::Info) -> (usize,
 }
 
 fn load_timeline(info: &shell::session::info::Info) -> Option<chat_state::Timeline> {
-    shell::session::storage::read_timeline_in_session_dir(
-        &shell::session::persistence::session_dir(info),
-    )
-    .ok()
+    shell::session::storage::load_timeline_by_id(info.id.0.as_ref())
+        .ok()
+        .flatten()
 }
 /// Reads `_meta["grow/listScope"]` from a session-list payload.
 pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {

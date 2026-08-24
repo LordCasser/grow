@@ -10,7 +10,7 @@ The shell session actor owns both the only foreground slot and the explicit FIFO
 ForegroundState = Idle | RegularTurn(AgentTask) | Compaction
 ```
 
-Goal planner/verifier stages, watchers, and background tasks do not occupy this slot. Every regular turn has a structured origin/kind and exactly one durable `TurnCompleted`. A stale completion whose prompt id does not match the foreground owner cannot clear a newer turn.
+Goal's future continuation right, watchers, and background tasks do not occupy this slot. Every regular turn has a structured origin/kind and exactly one durable `TurnCompleted`. A stale completion whose prompt id does not match the foreground owner cannot clear a newer turn.
 
 The pager mirrors shell state. It does not infer ownership from Goal status, prompt text, token count, or prompt-id prefixes.
 
@@ -22,7 +22,7 @@ The pager mirrors shell state. It does not infer ownership from Goal status, pro
 4. Queue-row “Send now” invokes the same steer request.
 5. Leading slash input is a Grow command and runs through the command plane. Control commands mutate state synchronously and never wait for model work or their own actor mailbox.
 
-A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/resume/budget), and rejected mutations, leave it running.
+A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/restart/budget), and rejected mutations, leave it running.
 
 Steering includes `expected_turn_id`. The shell accepts it only if the identified regular turn is still foreground, then moves the queued payload into that same turn's input buffer. It never creates a replacement turn or another terminal. Compaction and idle state are not steerable.
 
@@ -37,9 +37,7 @@ All regular work shares one admission sequence:
 3. promote the oldest user FIFO entry;
 4. only if still idle, run Goal `on_idle` work.
 
-Goal Executing/Summarizing rechecks foreground and FIFO while holding the same state lock before reserving a turn. This closes the race where a continuation and user input arrive together: the user wins.
-
-Planning/Verifying may run concurrently as background stages because neither owns foreground. Their results commit only through a matching revisioned `StageLease`.
+An Active Goal rechecks foreground and FIFO while holding the same state lock before reserving its continuation turn. This closes the race where a continuation and user input arrive together: the user wins.
 
 Background completion delivery follows the same ownership rule. A completion that satisfies an explicitly displaced wait is delivered exactly once; otherwise it enters the idle notification drain. The drain suppresses only task ids stamped as Goal-owned and continues to surface unrelated user/watcher work even while Goal is Active or after its Complete receipt remains loaded.
 
@@ -58,26 +56,24 @@ No `skip_next_user_echo`, text matching, or adoption stash participates in routi
 
 Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 
-- Active Planning/Verifying keeps the Goal chip active while the session may be idle or run a user turn;
-- ordinary messages add context without changing objective/plan revision;
-- `/goal edit` revises the objective and returns the Goal to Planning;
+- Active Goal keeps the Goal chip active while the session may be idle or run a user turn;
+- ordinary messages add context without replacing the objective;
+- `/goal edit` revises and reactivates the same long-lived Goal while preserving usage;
 - outside Goal Behavior, `/goal set` switches to Goal and creates the objective; inside Goal it is hidden and rejected;
 - after selecting Goal with no objective, the next ordinary message is captured directly as the objective without a Pager-generated hidden command;
-- an accepted `request_goal_replan` during Verifying advances the plan revision, cancels that lease's verifier, and enters Planning; an accepted `update_goal_progress` cancels it and returns to Executing; rejected/stale updates leave the verifier untouched;
 - pause keeps Goal Behavior but stops autonomous admission;
+- restart re-arms paused, blocked, or usage-limited Goals;
 - complete or clear returns to Normal;
 - an unfinished Goal rejects switching to another Behavior.
 
 Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
 
-The persisted Markdown blackboard contains only shared human/Agent task state. Agent-only execution and tool policy is assembled in private runtime prompts. Goal detail opens on a compact checkbox/progress projection; `Enter`/`Space` opens the scrollable full Markdown board, `Esc` first returns to the summary and then closes the overlay. Pager never persists either display cache or navigation state.
+Goal does not persist a plan or task graph. Each continuation audits the full objective, then uses ordinary `todo_write` and `task` execution context for the next small slice. Goal detail renders only the durable objective, lifecycle status, usage, elapsed time, and status message; Pager never persists its display cache or navigation state.
 
 Turn failure ownership follows the same structured-origin rule. A provider or
 tool-definition error in a user turn remains that user's terminal and cannot
-pause an otherwise healthy Goal planner/verifier. Only a
-`GoalContinuation`/`GoalFinalization` failure enters the foreground Goal
-degradation path; background stage failures are handled by their own lease and
-retry counters.
+pause an otherwise healthy Goal. Only a structured `GoalContinuation` failure
+enters the Goal degradation path.
 
 ## Compaction
 
@@ -130,4 +126,4 @@ rewrite is shared by the session. `ImageDropped` reports whether images were
 all converted, all removed, or mixed. No OCR backend participates in this
 recovery path.
 
-An Active Goal reload keeps its v5 persistent phase/plan/board revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. An obsolete control/Goal architecture is diagnosed and discarded without migration. A current architecture with an internally inconsistent Goal identity-preserving snapshot is recovered fail-closed as Paused/Planning so it cannot resume autonomously.
+An Active Goal reload restores the v6 objective, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v6 snapshots are rejected without migration instead of reviving a second lifecycle model.

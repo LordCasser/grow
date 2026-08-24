@@ -112,7 +112,7 @@ impl SlashCommand for AcpSlashCommand {
                 display: "edit".into(),
                 match_text: "edit".into(),
                 insert_text: "edit ".into(),
-                description: "Revise the current objective and replan".into(),
+                description: "Revise and reactivate the current objective".into(),
             });
             items.push(ArgItem {
                 display: "budget".into(),
@@ -133,10 +133,10 @@ impl SlashCommand for AcpSlashCommand {
                 description: "Pause the goal".into(),
             });
             items.push(ArgItem {
-                display: "resume".into(),
-                match_text: "resume".into(),
-                insert_text: "resume".into(),
-                description: "Resume the goal".into(),
+                display: "restart".into(),
+                match_text: "restart".into(),
+                insert_text: "restart".into(),
+                description: "Restart automatic Goal continuation".into(),
             });
             items.push(ArgItem {
                 display: "clear".into(),
@@ -717,7 +717,7 @@ mod tests {
         let display: Vec<&str> = items.iter().map(|item| item.display.as_str()).collect();
         assert_eq!(
             display,
-            ["edit", "budget", "status", "pause", "resume", "clear"]
+            ["edit", "budget", "status", "pause", "restart", "clear"]
         );
         assert!(!display.contains(&"set"));
     }

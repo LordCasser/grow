@@ -5,6 +5,77 @@
 //! this crate and `shell` can share them without duplication.
 use sampling_types::{ContentPart, ConversationItem};
 use std::collections::BTreeSet;
+
+/// Return the exclusive end index of every causally complete user turn.
+///
+/// A turn begins with one or more consecutive User items and is complete only
+/// after at least one Assistant item and every tool call emitted by each
+/// Assistant has a matching ToolResult before the next Assistant or User.
+/// Reasoning, backend-tool projections, and unmatched historical ToolResults
+/// are transparent. Once a malformed or incomplete turn is reached, later
+/// items are not considered independently complete.
+///
+/// This is the single turn-boundary definition used by fork truncation and
+/// child-context summarization.
+pub fn complete_turn_ends<'a>(
+    items: impl IntoIterator<Item = &'a ConversationItem>,
+) -> Vec<usize> {
+    let items = items.into_iter().collect::<Vec<_>>();
+    let mut turn_ends = Vec::new();
+    let mut index = 0;
+
+    while index < items.len() {
+        while index < items.len() && !matches!(items[index], ConversationItem::User(_)) {
+            index += 1;
+        }
+        if index == items.len() {
+            break;
+        }
+        while index < items.len() && matches!(items[index], ConversationItem::User(_)) {
+            index += 1;
+        }
+
+        let mut saw_assistant = false;
+        let mut pending_tool_calls = std::collections::HashSet::<&str>::new();
+        let mut malformed = false;
+        while index < items.len()
+            && !matches!(
+                items[index],
+                ConversationItem::User(_) | ConversationItem::System(_)
+            )
+        {
+            match items[index] {
+                ConversationItem::Assistant(assistant) => {
+                    if !pending_tool_calls.is_empty() {
+                        malformed = true;
+                        break;
+                    }
+                    saw_assistant = true;
+                    pending_tool_calls.extend(
+                        assistant
+                            .tool_calls
+                            .iter()
+                            .map(|tool_call| tool_call.id.as_ref()),
+                    );
+                }
+                ConversationItem::ToolResult(result) => {
+                    pending_tool_calls.remove(result.tool_call_id.as_str());
+                }
+                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
+                ConversationItem::User(_) | ConversationItem::System(_) => unreachable!(),
+            }
+            index += 1;
+        }
+
+        if malformed || !saw_assistant || !pending_tool_calls.is_empty() {
+            break;
+        }
+        turn_ends.push(index);
+    }
+
+    turn_ends
+}
+
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
 ///

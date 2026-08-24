@@ -355,7 +355,7 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`. `per
 
 ### Goal Behavior and workflow engine
 
-Goal is exposed only when goal orchestration and the independent verifier are configured. An agent's `update_goal { action: candidate_complete, message }` call requests verification; only an `Achieved` verdict from that verifier completes the goal. Missing, failed, timed-out, or exhausted verification pauses the Goal Behavior instead of accepting self-reported completion.
+Goal is exposed when Goal mode is enabled and `create_goal`, `get_goal`, and `update_goal` are registered. Goal has no separate planner, verifier, blackboard, or summarizer configuration. An active Goal continues whenever the session becomes idle; each continuation audits the entire objective before either completing it or planning the next short-lived task/todo slice.
 
 The workflow engine powers the Workflow Workspace, named `.grow/workflows/*.rhai` and `~/.grow/workflows/*.rhai` Definitions, immutable Runs, and the private Deep Research runner. It is **on by default**. Disable it with config, environment, or remote settings; Workflow and Deep Research then disappear from the Behavior picker.
 

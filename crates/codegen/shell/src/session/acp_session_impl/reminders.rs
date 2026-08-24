@@ -508,13 +508,13 @@ pub(super) fn todo_gate_active(
     policy: &agent::system_reminder::ReminderPolicy,
     audience: agent::prompt::context::PromptAudience,
     definition: &AgentDefinition,
-    goal_harness_enabled: bool,
+    goal_runtime_available: bool,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
 ) -> bool {
     if !policy.todo_gate.enabled {
         return false;
     }
-    if laziness_injection_active(goal_harness_enabled, goal_status) {
+    if laziness_injection_active(goal_runtime_available, goal_status) {
         return false;
     }
     definition.carries_task_completion_discipline(audience)
@@ -782,12 +782,12 @@ impl SessionActor {
             policy,
             agent.prompt_audience(),
             agent.definition(),
-            self.goal_harness_enabled(),
+            self.goal_runtime_available(),
             goal_status,
         );
         tracing::debug!(
             enabled = policy.todo_gate.enabled,
-            goal_harness_enabled = self.goal_harness_enabled(),
+            goal_runtime_available = self.goal_runtime_available(),
             ?goal_status,
             active,
             "todo_gate_policy"

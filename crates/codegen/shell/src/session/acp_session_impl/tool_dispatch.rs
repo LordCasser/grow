@@ -138,6 +138,7 @@ impl SessionActor {
 
         // Run the bash command with streaming enabled
         let tool_call_id = acp::ToolCallId::from(format!("bash-mode-{}", uuid::Uuid::new_v4()));
+        let tool_call_id_string = tool_call_id.to_string();
 
         // Send initial ToolCall to register with TUI
 
@@ -166,6 +167,19 @@ impl SessionActor {
             Some(wire) => self.stamp_tool_meta(bash_marker.clone(), &wire, Some(&tool_input)),
             None => bash_marker,
         };
+        self.events
+            .emit(crate::session::events::Event::LoopStarted { loop_index: 0 });
+        self.events
+            .tool_started(
+                "direct_bash".to_owned(),
+                tool_call_id_string.clone(),
+                serde_json::to_value(&tool_input).ok(),
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("direct command intent was not durably recorded: {error}"))
+            })?;
         self.send_update(
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(tool_call_id.clone(), format!("Execute `{title_command}`"))
@@ -229,6 +243,36 @@ impl SessionActor {
         } else {
             response_text.push_str(&format!("\n\n[exit code: {}]", exit_code));
         }
+
+        let outcome = if is_backgrounded {
+            "backgrounded"
+        } else if timed_out {
+            "timed_out"
+        } else if signal.is_some() {
+            "signalled"
+        } else if exit_code == 0 {
+            "completed"
+        } else {
+            "failed"
+        };
+        self.events
+            .tool_completed_durably(
+                &tool_call_id_string,
+                outcome.to_owned(),
+                Some(serde_json::json!({
+                    "command": command.clone(),
+                    "output": displayed_output.clone(),
+                    "exit_code": exit_code,
+                    "timed_out": timed_out,
+                    "signal": signal.clone(),
+                })),
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "direct command outcome was not durably recorded: {error}"
+                ))
+            })?;
 
         // Send final tool call update
         // For backgrounded commands, don't mark as completed/failed - let the background task do that

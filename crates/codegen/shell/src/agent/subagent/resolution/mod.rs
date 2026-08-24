@@ -18,7 +18,7 @@ pub(crate) use definition::{
     DefinitionResolutionContext, DefinitionValidationContext, HarnessToolsetContext,
     apply_child_tool_policy, apply_goal_object_tool_policy, apply_harness_toolset,
     available_agent_names, discover_agent_definition, gate_agent_definition,
-    resolve_agent_definition, resolve_goal_stage_definition, resolve_runtime_config,
+    resolve_agent_definition, resolve_runtime_config,
     subagent_harness_flavor_is_representable, validate_agent_name,
 };
 pub(crate) use resume::validate_resume_identity;

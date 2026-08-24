@@ -629,35 +629,10 @@ impl SessionActor {
             .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
             .await
             .and_then(|resource| resource.0);
-        if let Some(context) = delegated_goal_context.as_ref() {
-            use tools::implementations::grow_build::task::types::GoalSubagentRole;
-            use tools::types::tool::ToolKind;
-            let stage_leaf = matches!(
-                context.role,
-                GoalSubagentRole::Planner | GoalSubagentRole::Verifier
-            );
+        if delegated_goal_context.is_some() {
             defs.retain(|definition| {
                 let kind = bridge.tool_kind(&definition.function.name);
-                let goal_mutation = matches!(
-                    kind,
-                    Some(
-                        ToolKind::GoalProgressUpdate
-                            | ToolKind::GoalReplanRequest
-                            | ToolKind::GoalLifecycleUpdate
-                    )
-                );
-                let stage_owned_work = stage_leaf
-                    && matches!(
-                        kind,
-                        Some(
-                            ToolKind::Task
-                                | ToolKind::BackgroundTaskAction
-                                | ToolKind::KillTaskAction
-                                | ToolKind::Monitor
-                                | ToolKind::Workflow
-                        )
-                    );
-                !goal_mutation && !stage_owned_work
+                kind != Some(tools::types::tool::ToolKind::GoalLifecycleUpdate)
             });
         }
         // A Behavior picker change may land while a regular turn is still
@@ -673,20 +648,6 @@ impl SessionActor {
         } else {
             self.behavior.lock().behavior()
         };
-        let goal_behavior = tool_behavior == tool_types::BehaviorId::Goal;
-        if !goal_behavior && delegated_goal_context.is_none() {
-            defs.retain(|definition| {
-                !matches!(
-                    bridge.tool_kind(&definition.function.name),
-                    Some(
-                        tools::types::tool::ToolKind::GoalRead
-                            | tools::types::tool::ToolKind::GoalProgressUpdate
-                            | tools::types::tool::ToolKind::GoalReplanRequest
-                            | tools::types::tool::ToolKind::GoalLifecycleUpdate
-                    )
-                )
-            });
-        }
         if tool_behavior == tool_types::BehaviorId::DeepResearch {
             // Deep Research foreground turns answer follow-up questions while
             // its private workflow runs, but they are as read-only as the
@@ -1760,9 +1721,10 @@ impl SessionActor {
         self: &Arc<Self>,
         mut request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
-        crate::session::persistence::materialize_prompt_blob_refs(
+        let _prompt_blob_export =
+            crate::session::persistence::materialize_prompt_blob_refs_from_directory(
             &mut request.items,
-            &self.session_dir,
+            &self.session_directory,
         )
         .map_err(|error| {
             acp::Error::internal_error().data(format!("failed to resolve prompt artifact: {error}"))

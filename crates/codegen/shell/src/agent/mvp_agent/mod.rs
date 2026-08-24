@@ -116,7 +116,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub persistence: PersistenceHandle,
     pub session_title_route: Option<crate::session::summary::SessionTitleRoute>,
     pub timeline_bootstrap: crate::session::TimelineBootstrap,
-    pub rewind_points_file_path: Option<std::path::PathBuf>,
+    pub rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     pub origin_client: Option<crate::http::OriginClientInfo>,
     pub client_code_nav_enabled: bool,
     pub client_terminal: bool,
@@ -125,7 +125,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
-    pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalState>,
     pub persisted_control_revision: u64,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,
@@ -374,11 +374,9 @@ pub enum CodeNavEligibility {
 const SESSION_SUPERVISOR_TICK: std::time::Duration = std::time::Duration::from_millis(
     200,
 );
-/// Upper bound on the `SessionHandle::is_busy` round-trip used by the
-/// idle-unload decision (PR-2). Only consulted when no turn is running (so the
-/// actor is between turns and responsive); on timeout we conservatively treat
-/// the session as busy and keep it resident.
-const IDLE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Upper bound on the actor-owned idle-unload transaction. On timeout the
+/// leader conservatively keeps the session resident.
+const IDLE_UNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// Per-session state freed on removal or idle-unload (but kept across a reload
 /// rebuild); retained state instead survives an unload and is freed only at
 /// removal.
@@ -825,16 +823,17 @@ pub(crate) struct OrphanedTask {
 /// immediately after the last complete record. A concurrent append may leave
 /// a partial UTF-8/JSON tail; delta replay must restart at that record's first
 /// byte after the writer flushes, rather than seek into its middle and lose it.
-fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(String, u64)> {
-    let Some(mut lines) = crate::session::storage::CommittedJsonlLines::open(
-        path,
+fn read_complete_jsonl_snapshot_from_file(
+    file: std::fs::File,
+    label: std::path::PathBuf,
+) -> std::io::Result<(String, u64, u64)> {
+    let file_size = file.metadata()?.len();
+    let mut lines = crate::session::storage::CommittedJsonlLines::from_open_file_at(
+        file,
+        label,
         "session updates ledger",
-    )? else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("session updates ledger is missing: {}", path.display()),
-        ));
-    };
+        0,
+    )?;
     let mut contents = String::new();
     while let Some(line) = lines.next() {
         let line = String::from_utf8(line?)
@@ -843,7 +842,16 @@ fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(Stri
         contents.push('\n');
     }
     let committed_end = lines.stream_position()?;
-    Ok((contents, committed_end))
+    Ok((contents, committed_end, file_size))
+}
+
+#[cfg(test)]
+fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(String, u64)> {
+    let (contents, end, _) = read_complete_jsonl_snapshot_from_file(
+        std::fs::File::open(path)?,
+        path.to_path_buf(),
+    )?;
+    Ok((contents, end))
 }
 
 impl MvpAgent {
@@ -998,7 +1006,7 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
         cwd: &AbsPathBuf,
-        updates_file_path: &Option<PathBuf>,
+        session_directory: &crate::session::storage::ContainedDirectory,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
@@ -1006,13 +1014,23 @@ impl MvpAgent {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
-        let Some(updates_path) = updates_file_path.clone() else {
-            tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, Default::default()));
+        let updates_file = match session_directory.open_regular(
+            std::ffi::OsStr::new("updates.jsonl"),
+            "session updates ledger",
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((0, Default::default()));
+            }
+            Err(error) => return Err(crate::session::persistence::io_error_to_acp(&error)),
         };
-        let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
-        let (raw_contents, end_offset) = match read_complete_jsonl_snapshot(&updates_path) {
-            Ok((contents, end_offset)) if !contents.is_empty() => (contents, end_offset),
+        let (raw_contents, end_offset, file_size) = match read_complete_jsonl_snapshot_from_file(
+            updates_file,
+            session_directory.display_path().join("updates.jsonl"),
+        ) {
+            Ok((contents, end_offset, file_size)) if !contents.is_empty() => {
+                (contents, end_offset, file_size)
+            }
             _ => return Ok((0, Default::default())),
         };
         let mut prepared = {
@@ -1091,22 +1109,27 @@ impl MvpAgent {
     pub(super) fn replay_session_updates_from_offset_enqueue(
         &self,
         session_id: &acp::SessionId,
-        updates_file_path: &Option<PathBuf>,
+        session_directory: &crate::session::storage::ContainedDirectory,
         from_offset: u64,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         mark_replay: bool,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let Some(updates_path) = updates_file_path.clone() else {
-            return Vec::new();
+        let file = match session_directory.open_regular(
+            std::ffi::OsStr::new("updates.jsonl"),
+            "session updates ledger",
+        ) {
+            Ok(file) => file,
+            Err(_) => return Vec::new(),
         };
-        let reader = match crate::session::storage::CommittedJsonlLines::open_at(
-            &updates_path,
+        let reader = match crate::session::storage::CommittedJsonlLines::from_open_file_at(
+            file,
+            session_directory.display_path().join("updates.jsonl"),
             "session updates ledger",
             from_offset,
         ) {
-            Ok(Some(reader)) => reader,
-            Ok(None) | Err(_) => return Vec::new(),
+            Ok(reader) => reader,
+            Err(_) => return Vec::new(),
         };
         let mut lines = Vec::new();
         for line in reader {
@@ -1161,14 +1184,19 @@ impl MvpAgent {
     /// a false "Running" state. This projection never restores task runtime
     /// ownership; the process registry remains authoritative.
     pub(super) fn find_stale_background_task_projections(
-        updates_file_path: &Option<PathBuf>,
+        session_directory: &crate::session::storage::ContainedDirectory,
     ) -> Vec<OrphanedTask> {
         use crate::session::wire_tags::{TASK_BACKGROUNDED, TASK_COMPLETED};
-        let Some(updates_path) = updates_file_path else {
-            return Vec::new();
+        let file = match session_directory.open_regular(
+            std::ffi::OsStr::new("updates.jsonl"),
+            "session updates ledger",
+        ) {
+            Ok(file) => file,
+            Err(_) => return Vec::new(),
         };
-        let lines = match crate::session::storage::read_committed_jsonl_text_lines(
-            updates_path,
+        let lines = match crate::session::storage::read_committed_jsonl_text_lines_from_file(
+            file,
+            session_directory.display_path().join("updates.jsonl"),
             "session updates ledger",
         ) {
             Ok(lines) => lines,
@@ -1220,9 +1248,9 @@ impl MvpAgent {
     pub(super) fn repair_stale_background_task_projections(
         &self,
         session_id: &acp::SessionId,
-        updates_file_path: &Option<PathBuf>,
+        session_directory: &crate::session::storage::ContainedDirectory,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let orphaned = Self::find_stale_background_task_projections(updates_file_path);
+        let orphaned = Self::find_stale_background_task_projections(session_directory);
         if orphaned.is_empty() {
             return Vec::new();
         }

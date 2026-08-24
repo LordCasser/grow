@@ -272,7 +272,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "goal",
         description: "[behavior] Set, manage, or check an autonomous goal",
         argument_hint: Some(
-            "set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | resume | clear",
+            "set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | restart | clear",
         ),
         aliases: &[],
         gate: BuiltinGate::Goal,
@@ -282,7 +282,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 "" => BuiltinAction::GoalEnter,
                 "status" => BuiltinAction::GoalStatus,
                 "pause" => BuiltinAction::GoalPause,
-                "resume" => BuiltinAction::GoalResume,
+                "restart" => BuiltinAction::GoalRestart,
                 "clear" => BuiltinAction::GoalClear,
                 _ => {
                     let lower = trimmed.to_lowercase();
@@ -912,7 +912,7 @@ pub(super) enum BuiltinAction {
     GoalUsage,
     GoalStatus,
     GoalPause,
-    GoalResume,
+    GoalRestart,
     GoalClear,
     GoalBudget {
         token_budget: Option<i64>,
@@ -960,7 +960,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalUsage
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
-            | BuiltinAction::GoalResume
+            | BuiltinAction::GoalRestart
             | BuiltinAction::GoalClear
             | BuiltinAction::GoalBudget { .. } => "goal",
             BuiltinAction::DeepResearch { .. } => "deep-research",
@@ -998,7 +998,7 @@ impl BuiltinAction {
             BuiltinAction::GoalEnter
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
-            | BuiltinAction::GoalResume
+            | BuiltinAction::GoalRestart
             | BuiltinAction::GoalClear => false,
             BuiltinAction::GoalBudget { token_budget } => token_budget.is_some(),
             BuiltinAction::DeepResearch { .. } => true,
@@ -2684,8 +2684,8 @@ mod tests {
         assert!(matches!(resolve_goal("PAUSE"), BuiltinAction::GoalPause));
     }
     #[test]
-    fn goal_resume_resolves_to_resume() {
-        assert!(matches!(resolve_goal("resume"), BuiltinAction::GoalResume));
+    fn goal_restart_resolves_to_restart() {
+        assert!(matches!(resolve_goal("restart"), BuiltinAction::GoalRestart));
     }
     #[test]
     fn goal_clear_resolves_to_clear() {
@@ -2874,7 +2874,7 @@ mod tests {
     fn goal_command_name_is_goal() {
         assert_eq!(BuiltinAction::GoalStatus.command_name(), "goal");
         assert_eq!(BuiltinAction::GoalPause.command_name(), "goal");
-        assert_eq!(BuiltinAction::GoalResume.command_name(), "goal");
+        assert_eq!(BuiltinAction::GoalRestart.command_name(), "goal");
         assert_eq!(BuiltinAction::GoalClear.command_name(), "goal");
         assert_eq!(
             BuiltinAction::GoalSet {
@@ -2907,7 +2907,7 @@ mod tests {
         );
         assert!(!BuiltinAction::GoalStatus.args_provided());
         assert!(!BuiltinAction::GoalPause.args_provided());
-        assert!(!BuiltinAction::GoalResume.args_provided());
+        assert!(!BuiltinAction::GoalRestart.args_provided());
         assert!(!BuiltinAction::GoalClear.args_provided());
         assert!(
             BuiltinAction::GoalBudget {
@@ -2928,7 +2928,9 @@ mod tests {
     fn goal_tracker_create_sets_active() {
         use crate::session::goal_tracker::{GoalStatus, GoalTracker};
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
+        tracker
+            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .unwrap();
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
         assert_eq!(tracker.objective(), Some("obj"));
     }
@@ -2937,43 +2939,57 @@ mod tests {
         use crate::session::goal_tracker::{GoalPauseReason, GoalStatus, GoalTracker};
         let mut tracker = GoalTracker::new();
         assert!(!tracker.pause(GoalPauseReason::User));
-        tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
+        tracker
+            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .unwrap();
         assert!(tracker.pause(GoalPauseReason::User));
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
         assert!(!tracker.pause(GoalPauseReason::User));
     }
     #[test]
-    fn goal_tracker_resume_only_when_paused() {
+    fn goal_tracker_restart_only_when_stopped() {
         use crate::session::goal_tracker::{GoalPauseReason, GoalStatus, GoalTracker};
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
-        assert!(!tracker.resume());
+        tracker
+            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .unwrap();
+        assert!(!tracker.restart());
         tracker.pause(GoalPauseReason::User);
-        assert!(tracker.resume());
+        assert!(tracker.restart());
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
     }
     #[test]
     fn goal_tracker_clear_removes_orchestration() {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
+        tracker
+            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .unwrap();
         assert!(tracker.snapshot().is_some());
         tracker.clear();
         assert!(tracker.snapshot().is_none());
     }
     #[test]
-    fn goal_tracker_create_replaces_existing() {
+    fn goal_tracker_refuses_to_replace_unfinished_goal() {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "first".into(), None, 0, "now".into(), None);
-        tracker.create_goal("g2".into(), "second".into(), None, 0, "now".into(), None);
-        assert_eq!(tracker.objective(), Some("second"));
+        tracker
+            .create_goal("g1".into(), "first".into(), None, 0, "now".into())
+            .unwrap();
+        assert!(
+            tracker
+                .create_goal("g2".into(), "second".into(), None, 0, "now".into())
+                .is_err()
+        );
+        assert_eq!(tracker.objective(), Some("first"));
     }
     #[test]
     fn goal_tracker_account_elapsed_flushes_delta() {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
-        tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
+        tracker
+            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .unwrap();
         let before = tracker.snapshot().unwrap().elapsed_ms;
         assert_eq!(before, 0);
         std::thread::sleep(std::time::Duration::from_millis(5));

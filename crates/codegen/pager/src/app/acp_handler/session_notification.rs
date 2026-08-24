@@ -52,24 +52,19 @@ pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
     view.session.note_context_used(used);
 }
 
-/// Project a real Goal lifecycle transition into scrollback. `GoalUpdated`
-/// also carries live counters, so comparing only the structured state keeps
-/// recurring progress ticks from producing duplicate messages.
+/// Project a durable Goal transition into scrollback.
 fn goal_transition_event(
     previous: Option<&GoalDisplayState>,
     goal_id: &str,
-    objective_revision: u64,
+    objective: &str,
     status: GoalDisplayStatus,
-    phase: GoalDisplayPhase,
     elapsed_ms: u64,
 ) -> Option<SessionEvent> {
     let previous = previous.filter(|goal| goal.goal_id == goal_id);
     let Some(previous) = previous else {
-        return match (status, phase) {
-            (GoalDisplayStatus::Active, GoalDisplayPhase::Planning) => {
-                Some(SessionEvent::GoalAccepted)
-            }
-            (GoalDisplayStatus::Complete, _) => Some(SessionEvent::GoalCompleted {
+        return match status {
+            GoalDisplayStatus::Active => Some(SessionEvent::GoalCreated),
+            GoalDisplayStatus::Complete => Some(SessionEvent::GoalCompleted {
                 elapsed: std::time::Duration::from_millis(elapsed_ms),
             }),
             _ => None,
@@ -81,36 +76,20 @@ fn goal_transition_event(
             elapsed: std::time::Duration::from_millis(elapsed_ms),
         });
     }
-    if objective_revision != previous.objective_revision {
-        return Some(SessionEvent::GoalPlanningRestarted);
+    if objective != previous.objective {
+        return Some(SessionEvent::GoalObjectiveUpdated);
     }
     if status != previous.status {
         return match status {
-            GoalDisplayStatus::Active => Some(SessionEvent::GoalResumed),
+            GoalDisplayStatus::Active => Some(SessionEvent::GoalRestarted),
             GoalDisplayStatus::Paused => Some(SessionEvent::GoalPaused),
             GoalDisplayStatus::Blocked => Some(SessionEvent::GoalBlocked),
+            GoalDisplayStatus::UsageLimited => Some(SessionEvent::GoalUsageLimited),
             GoalDisplayStatus::BudgetLimited => Some(SessionEvent::GoalBudgetLimited),
             GoalDisplayStatus::Complete => None,
         };
     }
-    if phase == previous.phase {
-        return None;
-    }
-
-    match (previous.phase, phase) {
-        (GoalDisplayPhase::Planning, GoalDisplayPhase::Executing) => {
-            Some(SessionEvent::GoalExecutionStarted)
-        }
-        (GoalDisplayPhase::Executing, GoalDisplayPhase::Verifying) => {
-            Some(SessionEvent::GoalVerificationStarted)
-        }
-        (GoalDisplayPhase::Verifying, GoalDisplayPhase::Executing) => {
-            Some(SessionEvent::GoalExecutionResumed)
-        }
-        (_, GoalDisplayPhase::Summarizing) => Some(SessionEvent::GoalFinalizationStarted),
-        (_, GoalDisplayPhase::Planning) => Some(SessionEvent::GoalPlanningRestarted),
-        _ => None,
-    }
+    None
 }
 /// Replay gate shared by the ACP and Grow session-update paths. Returns `true`
 /// when the update must be dropped.
@@ -977,31 +956,13 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::GoalUpdated {
             goal_id,
             objective,
-            objective_revision,
             status,
-            phase,
-            plan_revision,
-            board_revision,
-            tasks,
-            plan_markdown,
-            verifier_feedback,
             token_budget,
             tokens_used,
             elapsed_ms,
-            current_subagent_role,
-            total_worker_rounds,
-            total_verify_rounds,
-            token_baseline,
-            finished_subagent_tokens,
-            live_subagent_tokens,
-            live_tokens_by_model,
-            live_context_pct,
-            live_turn_count,
-            live_tool_call_count,
-            last_event,
-            last_event_detail,
-            last_event_timestamp,
-            pause_message,
+            created_at,
+            updated_at,
+            status_message,
         } => {
             if status == "cleared" {
                 if let Some(g) = agent.goal_state.take() {
@@ -1015,11 +976,8 @@ fn handle_session_notification_inner(
             } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false
             } else {
-                let (Some(new_status), Some(new_phase)) = (
-                    GoalDisplayStatus::parse(&status),
-                    GoalDisplayPhase::parse(&phase),
-                ) else {
-                    tracing::warn!(status, phase, "ignored malformed GoalUpdated state");
+                let Some(new_status) = GoalDisplayStatus::parse(&status) else {
+                    tracing::warn!(status, "ignored malformed GoalUpdated state");
                     return false;
                 };
                 let elapsed_floor_ms = agent
@@ -1032,9 +990,8 @@ fn handle_session_notification_inner(
                 if let Some(event) = goal_transition_event(
                     agent.goal_state.as_ref(),
                     &goal_id,
-                    objective_revision,
+                    &objective,
                     new_status,
-                    new_phase,
                     elapsed_floor_ms,
                 ) {
                     agent
@@ -1044,31 +1001,13 @@ fn handle_session_notification_inner(
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
-                    objective_revision,
                     status: new_status,
-                    phase: new_phase,
-                    plan_revision,
-                    board_revision,
-                    tasks,
-                    plan_markdown,
-                    verifier_feedback,
                     token_budget,
                     tokens_used,
                     elapsed_ms,
-                    current_subagent_role,
-                    total_worker_rounds,
-                    total_verify_rounds,
-                    live_subagent_tokens,
-                    live_tokens_by_model,
-                    live_context_pct,
-                    live_turn_count,
-                    live_tool_call_count,
-                    last_event,
-                    last_event_detail,
-                    last_event_timestamp,
-                    token_baseline,
-                    finished_subagent_tokens,
-                    pause_message,
+                    created_at,
+                    updated_at,
+                    status_message,
                     received_at: std::time::Instant::now(),
                     elapsed_floor_ms,
                 });

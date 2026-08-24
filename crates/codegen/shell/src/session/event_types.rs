@@ -31,26 +31,8 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         redirect_kind: Option<RedirectKind>,
     },
-    PhaseChanged {
-        phase: Phase,
-    },
-    FirstToken,
     LoopStarted {
         loop_index: u32,
-    },
-    ToolStarted {
-        tool_name: String,
-    },
-    ToolCompleted {
-        tool_name: String,
-        /// Dispatch wall time; a cancel row reuses the duration measured at dispatch.
-        duration_ms: u64,
-        outcome: ToolOutcome,
-        /// Model/ACP tool call id; matches the conversation's `tool_result`.
-        tool_call_id: String,
-        /// Which emitter wrote this row. Shell rows time dispatch; workspace
-        /// rows time the hub/proxy hop for the same call.
-        source: ToolCompletedSource,
     },
     PermissionRequested {
         tool_name: String,
@@ -205,8 +187,7 @@ pub enum Event {
     /// transport. Surfaces the otherwise-invisible "connector shows but
     /// doesn't work" case (a server logging to stdout, a JSON-RPC batch
     /// array, or an off-spec response). Distinct from `McpTransportError`,
-    /// environment; either the orchestrator called
-    /// which is a per-tool-call transport failure.
+    /// which is a per-tool-call transport failure after decoding succeeded.
     McpTransportDecodeError {
         server_name: String,
         error: String,
@@ -234,17 +215,6 @@ pub enum Event {
         server_name: String,
         enabled: bool,
     },
-}
-
-/// Who emitted a [`Event::ToolCompleted`] row.
-///
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCompletedSource {
-    /// Shell dispatch clock — join against these.
-    Shell,
-    /// Workspace hub/proxy hop clock.
-    Workspace,
 }
 
 /// Where a mid-turn interjection originated. Drives the `source` field on
@@ -340,16 +310,6 @@ impl From<ToolOutcome> for ::diagnostics::events::ToolOutcome {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Phase {
-    WaitingForModel,
-    StreamingText,
-    StreamingReasoning,
-    ToolExecution,
-    PermissionPrompt,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SessionRelationship {
     Primary,
     #[allow(dead_code)]
@@ -396,29 +356,6 @@ mod tests {
             goal_id: None,
             stage_id: None,
         }
-    }
-
-    #[test]
-    fn tool_completed_source_is_always_explicit() {
-        let shell = serde_json::to_value(Event::ToolCompleted {
-            tool_name: "bash".into(),
-            duration_ms: 10,
-            outcome: ToolOutcome::Success,
-            tool_call_id: "c1".into(),
-            source: ToolCompletedSource::Shell,
-        })
-        .unwrap();
-        assert_eq!(shell["source"], "shell");
-
-        let workspace = serde_json::to_value(Event::ToolCompleted {
-            tool_name: "bash".into(),
-            duration_ms: 10,
-            outcome: ToolOutcome::Success,
-            tool_call_id: "c1".into(),
-            source: ToolCompletedSource::Workspace,
-        })
-        .unwrap();
-        assert_eq!(workspace["source"], "workspace");
     }
 
     #[test]

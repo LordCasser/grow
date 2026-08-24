@@ -518,7 +518,7 @@ impl ToolBridge {
 
     /// Persist a fresh snapshot of all session resources before returning.
     pub async fn save_and_flush_persistence(&self) -> std::io::Result<()> {
-        self.registry.save_and_flush_persistence().await.map(|_| ())
+        self.registry.save_and_flush_persistence().await
     }
 
     /// Atomically expose and durably queue a model image-input rejection.

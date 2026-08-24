@@ -41,17 +41,15 @@ impl AgentView {
     }
 
     /// Open or close the Goal overlay as one UI state transition. Navigation
-    /// belongs to the overlay lifetime, so reopening always starts at the
-    /// compact task summary rather than reviving a stale document offset.
+    /// belongs to the overlay lifetime, so reopening starts at the top.
     pub(crate) fn set_goal_detail_visible(&mut self, visible: bool) {
         let visible = visible && self.goal_state.is_some();
         if self.show_goal_detail != visible {
-            self.goal_board_renderer.reset_navigation();
+            self.goal_detail_renderer.reset_navigation();
         }
         self.show_goal_detail = visible;
         if !visible {
             self.hit_goal_close = Default::default();
-            self.hit_goal_projection_toggle = Default::default();
         }
     }
 
@@ -611,20 +609,12 @@ impl AgentView {
                 && key.kind != KeyEventKind::Release
             {
                 match key.code {
-                    KeyCode::Esc if self.goal_board_renderer.is_full_board() => {
-                        self.goal_board_renderer.show_task_summary();
-                        return InputOutcome::Changed;
-                    }
                     KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
                         self.set_goal_detail_visible(false);
                         return InputOutcome::Changed;
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') if key.modifiers.is_empty() => {
-                        self.goal_board_renderer.toggle_projection();
-                        return InputOutcome::Changed;
-                    }
                     code if key.modifiers.is_empty()
-                        && self.goal_board_renderer.apply_scroll_key(code) =>
+                        && self.goal_detail_renderer.apply_scroll_key(code) =>
                     {
                         return InputOutcome::Changed;
                     }
@@ -641,27 +631,15 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
-                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                && self
-                    .hit_goal_projection_toggle
-                    .contains(mouse.column, mouse.row)
-            {
-                self.goal_board_renderer.toggle_projection();
-                return InputOutcome::Changed;
-            }
-            if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Moved)
             {
                 let close_changed = self.hit_goal_close.update_hover(mouse.column, mouse.row);
-                let toggle_changed = self
-                    .hit_goal_projection_toggle
-                    .update_hover(mouse.column, mouse.row);
-                if close_changed || toggle_changed {
+                if close_changed {
                     return InputOutcome::Changed;
                 }
             }
             if let Event::Mouse(mouse) = ev
-                && self.goal_board_renderer.apply_mouse_scroll(mouse.kind)
+                && self.goal_detail_renderer.apply_mouse_scroll(mouse.kind)
             {
                 return InputOutcome::Changed;
             }
@@ -2183,43 +2161,6 @@ mod btw_focus_tests {
         goal.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert!(!goal.show_goal_detail, "goal detail handled Esc");
         assert_minimal_btw_active(&goal, "goal detail");
-    }
-    #[test]
-    fn goal_full_board_esc_returns_to_summary_before_closing_overlay() {
-        let reg = ActionRegistry::defaults();
-        let mut agent = minimal_btw_agent();
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        agent.set_goal_detail_visible(true);
-
-        agent.handle_minimal_input(&key(KeyCode::Enter), &reg);
-        assert!(agent.show_goal_detail);
-        assert!(agent.goal_board_renderer.is_full_board());
-
-        agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(agent.show_goal_detail, "first Esc returns to task summary");
-        assert!(!agent.goal_board_renderer.is_full_board());
-
-        agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(!agent.show_goal_detail, "second Esc closes the overlay");
-    }
-    #[test]
-    fn goal_projection_footer_click_opens_the_full_board() {
-        let reg = ActionRegistry::defaults();
-        let mut agent = minimal_btw_agent();
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        agent.set_goal_detail_visible(true);
-        agent.hit_goal_projection_toggle.rect = Some(ratatui::layout::Rect::new(10, 10, 12, 1));
-        let click = Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 12,
-            row: 10,
-            modifiers: KeyModifiers::NONE,
-        });
-
-        agent.handle_minimal_input(&click, &reg);
-
-        assert!(agent.show_goal_detail);
-        assert!(agent.goal_board_renderer.is_full_board());
     }
     #[test]
     fn minimal_btw_surface_owner_covers_shared_modal_cascade() {

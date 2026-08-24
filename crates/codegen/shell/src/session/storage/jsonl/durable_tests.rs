@@ -33,6 +33,88 @@ fn timeline_event(name: &str, timeline: &mut chat_state::Timeline) -> chat_state
         .unwrap()
 }
 
+fn append_timeline_with_prefix_state(
+    directory: &crate::session::storage::ContainedDirectory,
+    path: &Path,
+    prefix_state: &std::sync::Mutex<Option<LedgerPrefix>>,
+    event: &chat_state::TimelineEvent,
+) -> io::Result<()> {
+    let mut line = serde_json::to_vec(event).unwrap();
+    line.push(b'\n');
+    JsonlStorageAdapter::append_timeline_line_in_directory_sync(
+        directory,
+        prefix_state,
+        path,
+        line,
+        event.seq.get(),
+        AppendDurability::Buffered,
+    )
+}
+
+#[test]
+fn timeline_append_rejects_same_length_interior_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = crate::session::storage::ContainedDirectory::open(
+        dir.path(),
+        Path::new(""),
+        "Timeline prefix integrity test",
+        false,
+    )
+    .unwrap();
+    let path = dir.path().join("timeline.jsonl");
+    let prefix_state = std::sync::Mutex::new(None);
+    let mut timeline = chat_state::Timeline::default();
+    let first = timeline_event("first", &mut timeline);
+    let second = timeline_event("second", &mut timeline);
+    let third = timeline_event("third", &mut timeline);
+    append_timeline_with_prefix_state(&directory, &path, &prefix_state, &first).unwrap();
+    append_timeline_with_prefix_state(&directory, &path, &prefix_state, &second).unwrap();
+
+    let original_len = std::fs::metadata(&path).unwrap().len();
+    let mut replacement_timeline = chat_state::Timeline::default();
+    let replacement = timeline_event("other", &mut replacement_timeline);
+    let original_line = serde_json::to_vec(&first).unwrap();
+    let replacement_line = serde_json::to_vec(&replacement).unwrap();
+    assert_eq!(original_line.len(), replacement_line.len());
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[..replacement_line.len()].copy_from_slice(&replacement_line);
+    std::fs::write(&path, bytes).unwrap();
+
+    let error = append_timeline_with_prefix_state(&directory, &path, &prefix_state, &third)
+        .expect_err("interior replacement must invalidate the committed prefix");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), original_len);
+}
+
+#[test]
+fn timeline_append_rejects_interior_json_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = crate::session::storage::ContainedDirectory::open(
+        dir.path(),
+        Path::new(""),
+        "Timeline prefix corruption test",
+        false,
+    )
+    .unwrap();
+    let path = dir.path().join("timeline.jsonl");
+    let prefix_state = std::sync::Mutex::new(None);
+    let mut timeline = chat_state::Timeline::default();
+    let first = timeline_event("first", &mut timeline);
+    let second = timeline_event("second", &mut timeline);
+    let third = timeline_event("third", &mut timeline);
+    append_timeline_with_prefix_state(&directory, &path, &prefix_state, &first).unwrap();
+    append_timeline_with_prefix_state(&directory, &path, &prefix_state, &second).unwrap();
+
+    let original_len = std::fs::metadata(&path).unwrap().len();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] = b'[';
+    std::fs::write(&path, bytes).unwrap();
+    let error = append_timeline_with_prefix_state(&directory, &path, &prefix_state, &third)
+        .expect_err("interior JSON corruption must invalidate the committed prefix");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), original_len);
+}
+
 #[test]
 fn timeline_append_retries_are_idempotent_and_truncate_only_an_incomplete_tail() {
     let dir = tempfile::tempdir().unwrap();

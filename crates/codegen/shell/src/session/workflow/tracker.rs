@@ -136,7 +136,7 @@ fn default_label_for(agents: &[WorkflowAgentRow], phase: Option<&str>) -> String
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentRow {
     pub agent_id: String,
@@ -152,7 +152,7 @@ pub struct WorkflowAgentRow {
 
 pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRunState {
     pub run_id: String,
@@ -314,10 +314,17 @@ impl WorkflowTracker {
             .runs
             .iter_mut()
             .find(|run| run.state.run_id == run_id)?;
-        run.state.definition_id = Some(definition_id);
-        run.state.definition_scope = Some(definition_scope);
-        run.state.definition_hash = Some(definition_hash);
-        run.state.private = private;
+        if run.state.definition_id.as_ref() != Some(&definition_id)
+            || run.state.definition_scope != Some(definition_scope)
+            || run.state.definition_hash.as_deref() != Some(definition_hash.as_str())
+            || run.state.private != private
+        {
+            run.state.definition_id = Some(definition_id);
+            run.state.definition_scope = Some(definition_scope);
+            run.state.definition_hash = Some(definition_hash);
+            run.state.private = private;
+            run.state.advance_revision();
+        }
         Some(run.state.clone())
     }
 
@@ -326,7 +333,10 @@ impl WorkflowTracker {
             .runs
             .iter_mut()
             .find(|run| run.state.run_id == run_id)?;
-        run.state.save_prompt = save_prompt;
+        if run.state.save_prompt != save_prompt {
+            run.state.save_prompt = save_prompt;
+            run.state.advance_revision();
+        }
         Some(run.state.clone())
     }
 
@@ -1376,6 +1386,33 @@ mod tests {
         assert!(phase > started);
         assert_eq!(t.set_phase(&id, "Scan").unwrap().revision, phase);
 
+        let provenance = t
+            .set_definition_provenance(
+                &id,
+                WorkflowDefinitionId::new("project:scan"),
+                WorkflowScope::Project,
+                "definition-hash".into(),
+                false,
+            )
+            .unwrap()
+            .revision;
+        assert!(provenance > phase);
+        assert_eq!(
+            t.set_definition_provenance(
+                &id,
+                WorkflowDefinitionId::new("project:scan"),
+                WorkflowScope::Project,
+                "definition-hash".into(),
+                false,
+            )
+            .unwrap()
+            .revision,
+            provenance
+        );
+        let save_prompt = t.set_save_prompt(&id, true).unwrap().revision;
+        assert!(save_prompt > provenance);
+        assert_eq!(t.set_save_prompt(&id, true).unwrap().revision, save_prompt);
+
         t.agent_started(
             &id,
             WorkflowAgentRow {
@@ -1389,7 +1426,7 @@ mod tests {
             },
         );
         let spawned = t.get(&id).unwrap().revision;
-        assert!(spawned > phase);
+        assert!(spawned > save_prompt);
         t.agent_finished(&id, "child-1", "done", 12, 34);
         assert!(t.get(&id).unwrap().revision > spawned);
     }

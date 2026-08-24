@@ -110,30 +110,16 @@ impl SubagentInfo {
         }
     }
 }
-fn session_dir_at(
-    grow_home: &std::path::Path,
-    cwd: &std::path::Path,
-    session_id: &str,
-) -> std::path::PathBuf {
-    grow_home
-        .join("sessions")
-        .join(shell::util::grow_home::encode_cwd_dirname(
-            cwd.to_string_lossy().as_ref(),
-        ))
-        .join(session_id)
-}
-
 /// Resolve the immediate durable children owned by `parent_session_id`.
-/// Ownership and child location come exclusively from parent Timeline spawn
-/// facts; child transcripts live in their normal cwd/session directory.
-fn durable_child_session_dirs(
+/// Ownership comes exclusively from the identity-bound parent Timeline.
+fn durable_child_session_ids(
     grow_home: &std::path::Path,
     parent_session_id: &str,
-    parent_session_dir: &std::path::Path,
-) -> std::collections::BTreeMap<String, std::path::PathBuf> {
-    let Ok(timeline) = shell::session::storage::read_timeline_in_session_dir(parent_session_dir)
+) -> std::collections::BTreeSet<String> {
+    let Ok(Some(timeline)) =
+        shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
     else {
-        return std::collections::BTreeMap::new();
+        return std::collections::BTreeSet::new();
     };
     let mut children = std::collections::BTreeMap::new();
     for event in timeline.events() {
@@ -142,19 +128,14 @@ fn durable_child_session_dirs(
         else {
             continue;
         };
-        let child_dir = session_dir_at(
-            grow_home,
-            std::path::Path::new(&spawn.child_cwd),
-            &spawn.child_session_id,
-        );
-        children.insert(spawn.child_session_id.clone(), child_dir);
+        children.insert(spawn.child_session_id.clone(), ());
     }
     tracing::trace!(
         parent_session_id,
         children = children.len(),
         "projected durable child ownership from Timeline"
     );
-    children
+    children.into_keys().collect()
 }
 /// Grow home for the replay path. In production this is just `grow_home()`; the
 /// whole test override below is `#[cfg(test)]`, so no thread-local or dead
@@ -183,19 +164,19 @@ fn effective_grow_home() -> std::path::PathBuf {
 /// Best-effort enrichment from the parent's canonical spawn fact.
 pub(crate) fn enrich_from_timeline(
     info: &mut SubagentInfo,
-    parent_cwd: &std::path::Path,
+    _parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    enrich_from_timeline_with_home(info, &effective_grow_home(), parent_cwd, parent_session_id);
+    enrich_from_timeline_with_home(info, &effective_grow_home(), parent_session_id);
 }
 fn enrich_from_timeline_with_home(
     info: &mut SubagentInfo,
     grow_home: &std::path::Path,
-    parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    let parent_dir = session_dir_at(grow_home, parent_cwd, parent_session_id);
-    let Ok(timeline) = shell::session::storage::read_timeline_in_session_dir(&parent_dir) else {
+    let Ok(Some(timeline)) =
+        shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
+    else {
         return;
     };
     let Some(spawn) =
@@ -262,15 +243,14 @@ pub(crate) fn restore_descendant_lifecycle(
     let Some(root_session_id) = root.session.session_id.as_ref().map(|id| id.0.to_string()) else {
         return;
     };
-    let root_session_dir = session_dir_at(&grow_home, &root.session.cwd, &root_session_id);
     let replayed_direct_children = root
         .subagent_sessions
         .keys()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut queue = durable_child_session_dirs(&grow_home, &root_session_id, &root_session_dir)
+    let mut queue = durable_child_session_ids(&grow_home, &root_session_id)
         .into_iter()
-        .filter(|(child_session_id, _)| replayed_direct_children.contains(child_session_id))
+        .filter(|child_session_id| replayed_direct_children.contains(child_session_id))
         .collect::<std::collections::VecDeque<_>>();
     let mut visited = std::collections::HashSet::new();
     let previous_loading_replay = root.session.loading_replay;
@@ -283,15 +263,15 @@ pub(crate) fn restore_descendant_lifecycle(
         root.session.loading_replay = true;
     }
 
-    while let Some((parent_session_id, parent_session_dir)) = queue.pop_front() {
+    while let Some(parent_session_id) = queue.pop_front() {
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let mut durable_children =
-            durable_child_session_dirs(&grow_home, &parent_session_id, &parent_session_dir);
+        let mut durable_children = durable_child_session_ids(&grow_home, &parent_session_id);
         let mut lifecycle = Vec::new();
-        if let Err(error) = shell::session::storage::stream_replay_grow_notifications_in_dir(
-            &parent_session_dir,
+        if let Err(error) = shell::session::storage::stream_replay_grow_notifications_at(
+            &parent_session_id,
+            &grow_home,
             |notification| {
                 if matches!(
                     &notification.update,
@@ -305,7 +285,6 @@ pub(crate) fn restore_descendant_lifecycle(
         ) {
             tracing::debug!(
                 session_id = parent_session_id,
-                session_dir = %parent_session_dir.display(),
                 ?error,
                 "failed to replay descendant lifecycle"
             );
@@ -337,9 +316,9 @@ pub(crate) fn restore_descendant_lifecycle(
             );
             crate::app::acp_handler::handle_descendant_lifecycle_replay(&ext, app, root_agent_id);
             if let Some(child) = discovered_child
-                && let Some(child_dir) = durable_children.remove(&child)
+                && durable_children.remove(&child)
             {
-                queue.push_back((child, child_dir));
+                queue.push_back(child);
             }
         }
     }
@@ -950,9 +929,25 @@ mod tests {
     ) -> std::path::PathBuf {
         let sessions_dir = grow_home
             .join("sessions")
-            .join(urlencoding::encode(&cwd.to_string_lossy()).as_ref())
+            .join(shell::util::grow_home::encode_cwd_dirname(
+                cwd.to_string_lossy().as_ref(),
+            ))
             .join(session_id);
         std::fs::create_dir_all(&sessions_dir).unwrap();
+        let info = shell::session::info::Info {
+            id: agent_client_protocol::SessionId::new(session_id),
+            cwd: cwd.to_string_lossy().into_owned(),
+        };
+        let summary = shell::session::persistence::Summary::new(
+            &info,
+            agent_client_protocol::ModelId::new("test-model"),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions_dir.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
         sessions_dir
     }
     #[test]
@@ -970,7 +965,7 @@ mod tests {
             Some("/tmp/wt"),
         );
         let mut info = make_info();
-        enrich_from_timeline_with_home(&mut info, tmp.path(), cwd, session_id);
+        enrich_from_timeline_with_home(&mut info, tmp.path(), session_id);
         assert_eq!(info.prompt.as_deref(), Some("do stuff"));
         assert_eq!(info.child_cwd.as_deref(), Some("/tmp/work"));
         assert_eq!(info.worktree_path.as_deref(), Some("/tmp/wt"));
@@ -979,12 +974,7 @@ mod tests {
     fn enrich_from_timeline_missing_file_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let mut info = make_info();
-        enrich_from_timeline_with_home(
-            &mut info,
-            tmp.path(),
-            std::path::Path::new("/nowhere"),
-            "no-session",
-        );
+        enrich_from_timeline_with_home(&mut info, tmp.path(), "no-session");
         assert!(info.prompt.is_none());
         assert!(info.child_cwd.is_none());
         assert!(info.worktree_path.is_none());
@@ -996,7 +986,7 @@ mod tests {
         let session_dir = setup_enrichment_dir(tmp.path(), cwd, "sess-x");
         std::fs::write(session_dir.join("timeline.jsonl"), "not json{{{\n").unwrap();
         let mut info = make_info();
-        enrich_from_timeline_with_home(&mut info, tmp.path(), cwd, "sess-x");
+        enrich_from_timeline_with_home(&mut info, tmp.path(), "sess-x");
         assert!(info.prompt.is_none());
     }
     #[test]

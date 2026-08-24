@@ -507,16 +507,12 @@ impl SessionActor {
                         },
                     );
                 }
-                if self.goal_harness_enabled() && goal_owned {
+                if self.goal_runtime_available() && goal_owned {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                    let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                    let tokens_used = self.goal_tokens_used(current_tokens);
                     self.record_control_snapshot();
                     let notify = self.goal_notify_sender();
-                    notify.emit_goal_updated(
-                        &self.goal_tracker.lock(),
-                        tokens_used,
-                        finished_marginal,
-                    );
+                    notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
                 }
                 let envelope = self.fire_hook(
                     ::hooks::event::HookEventName::SubagentStart,
@@ -550,19 +546,9 @@ impl SessionActor {
                 let goal_tokens_settled = self
                     .settle_goal_subagent_tokens(subagent_id, *tokens_used)
                     .is_some();
-                if goal_tokens_settled {
-                    let mut tracker = self.goal_tracker.lock();
-                    if let Some(o) = tracker.snapshot_mut() {
-                        o.live_subagent_tokens = 0;
-                        o.live_context_pct = 0;
-                        o.live_turn_count = 0;
-                        o.live_tool_call_count = 0;
-                        o.live_tokens_by_model.clear();
-                    }
-                }
-                if self.goal_harness_enabled() && goal_tokens_settled {
+                if self.goal_runtime_available() && goal_tokens_settled {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                    let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                    let tokens_used = self.goal_tokens_used(current_tokens);
                     if let Some(previous) = previous_goal
                         && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
                     {
@@ -579,20 +565,12 @@ impl SessionActor {
                         return;
                     }
                     let notify = self.goal_notify_sender();
-                    notify.emit_goal_updated(
-                        &self.goal_tracker.lock(),
-                        tokens_used,
-                        finished_marginal,
-                    );
+                    notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
                 }
             }
             GrowSessionUpdate::SubagentProgress {
                 subagent_id,
-                turn_count,
-                tool_call_count,
                 tokens_used,
-                context_window_tokens,
-                context_usage_pct,
                 ..
             } => {
                 let goal_id = self
@@ -606,10 +584,9 @@ impl SessionActor {
                         Some(rec)
                             if !rec.finished && goal_id.is_some() && rec.goal_id == goal_id =>
                         {
-                            let advanced = *tokens_used > rec.last_cumulative_reported;
                             rec.last_cumulative_reported =
                                 rec.last_cumulative_reported.max(*tokens_used);
-                            Some((advanced, rec.last_cumulative_reported))
+                            Some(())
                         }
                         Some(_) => None,
                         None => {
@@ -621,36 +598,7 @@ impl SessionActor {
                         }
                     }
                 };
-                if let Some((advanced, ratcheted_tokens)) = progress
-                    && self.goal_harness_enabled()
-                {
-                    let model_id = self
-                        .chat_state_handle
-                        .get_sampling_config()
-                        .await
-                        .map(|c| c.model)
-                        .unwrap_or_default();
-                    let tokens_by_model = self.goal_tokens_by_model(&model_id);
-                    self.goal_tracker.lock().update_live_progress(
-                        ratcheted_tokens,
-                        tokens_by_model,
-                        *context_window_tokens,
-                        *context_usage_pct,
-                        *turn_count,
-                        *tool_call_count,
-                    );
-                    if advanced {
-                        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                        let (goal_tokens_used, finished_marginal) =
-                            self.goal_tokens(current_tokens);
-                        let notify = self.goal_notify_sender();
-                        notify.emit_goal_updated_ephemeral(
-                            &self.goal_tracker.lock(),
-                            goal_tokens_used,
-                            finished_marginal,
-                        );
-                    }
-                }
+                let _ = progress;
                 return;
             }
             _ => {}
@@ -1241,19 +1189,9 @@ mod grow_event_id_stamping_tests {
                         None,
                         0,
                         "now".into(),
-                        None,
-                    );
-                    let planner = tracker
-                        .claim_stage(crate::session::goal_tracker::GoalPhase::Planning)
-                        .expect("planner lease");
-                    let board = "# Goal\n\n> done\n\n## Plan\n\n- [x] **T1** `done` — Finish\n  - Scope: runtime\n  - Acceptance: complete\n\n## Goal acceptance\n\n- Complete\n\n## Verification evidence\n\n- Verified\n\n## Open gaps\n\n- None";
-                    assert!(tracker.apply_planner_result(&planner, board.into()).unwrap());
-                    assert!(tracker.candidate_complete(1, 1, "done".into()).unwrap());
-                    let lease = tracker
-                        .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
-                        .expect("verifier lease");
-                    assert!(tracker.verification_achieved(&lease).unwrap());
-                    assert!(tracker.complete_verified());
+                    )
+                    .unwrap();
+                    assert!(tracker.complete());
                 }
 
                 let normal = actor

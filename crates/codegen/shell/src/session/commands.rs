@@ -144,14 +144,6 @@ pub enum SessionCommand {
     SetGoalContextSnapshot {
         snapshot: tools::implementations::grow_build::update_goal::GoalContextSnapshot,
     },
-    /// Install the planner stage's submit channel in a delegated Goal
-    /// planner child. Only the host-injected planner stage carries this
-    /// handle; the tool layer gates submission on it plus the Planner
-    /// context snapshot. Late commands fail closed when the parent stage
-    /// drops the receiving end.
-    SetGoalStageSubmitHandle {
-        handle: tools::implementations::grow_build::update_goal::GoalStageSubmitHandle,
-    },
     /// Resume hook: after a session is restored with
     /// `approval_pending == true`, re-issue the `grow/plan_approval`
     /// reverse-request so the client re-shows approval chrome over a real live
@@ -200,8 +192,7 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<crate::session::prompt_queue::PromptStatus>,
     },
     /// Snapshot the sole regular foreground owner for `session/load`.
-    /// Planner/verifier stages never appear here because they do not own the
-    /// foreground.
+    /// A future Goal continuation is not a foreground owner.
     QueryForeground {
         respond_to: oneshot::Sender<Option<prompt_queue::ForegroundSnapshot>>,
     },
@@ -359,19 +350,6 @@ pub enum SessionCommand {
     GetRewindFileCounts {
         respond_to: oneshot::Sender<std::collections::HashMap<usize, usize>>,
     },
-    /// Reconcile the file-state rewind tracker after a bridge-mode
-    /// `ConversationOnly` rewind that already committed server-side. Runs the
-    /// same tracker bookkeeping `handle_rewind` does for `ConversationOnly`
-    /// (merge the discarded prompts' file effects into the prior rewind point +
-    /// persist), without reverting files or rewinding the conversation — both
-    /// live server-side in bridge mode. Without it, bridge `ConversationOnly`
-    /// commits leave orphaned local rewind points. Fire-and-forget (no ack):
-    /// the server rewind has already committed, and the local truncation in
-    /// `handle_rewind` is itself fire-and-forget, so the bridge does not block
-    /// its response on the merge.
-    ReconcileRewindTracker {
-        target_prompt_index: usize,
-    },
     /// Grow extension session notification - client-side events to store in persistence
     GrowSessionNotification {
         notification: SessionNotification,
@@ -485,12 +463,11 @@ pub enum SessionCommand {
     ListTasks {
         respond_to: oneshot::Sender<Option<Vec<tools::types::TaskSnapshot>>>,
     },
-    /// Query whether the session has work in flight: a running turn
-    /// (`running_task.is_some()`) **or** queued inputs
-    /// (`pending_inputs` non-empty). Used by the leader's idle-unload decision
-    /// on client disconnect (the no-evict keystone) to avoid unloading a
-    /// session that still has pending work.
-    IsBusy {
+    /// Atomically unload this actor only when it owns no live work. The actor
+    /// decides from its canonical state and closes its mailbox before
+    /// acknowledging `true`; callers must never follow this with a separate
+    /// `Shutdown`, which would reintroduce a check-then-act race.
+    UnloadIfIdle {
         respond_to: oneshot::Sender<bool>,
     },
     GetHooksList {
@@ -539,12 +516,10 @@ pub enum SessionCommand {
         title: Option<String>,
         level: Option<String>,
     },
-    /// Record background-task ids reparented from a harness-internal
-    /// verifier/planner subagent's surviving dev server on subagent exit. The
-    /// handler inserts them into `goal_turn_task_ids` whenever the goal harness
-    /// is enabled (not gated on the racy `Active` status), so their late
-    /// auto-wake completions are suppressed by `maybe_drain_notifications` even
-    /// when a final verification round has already flipped the goal to Blocked.
+    /// Record background-task ids that survive a delegated child spawned by a
+    /// Goal turn. The handler keeps them in `goal_turn_task_ids` whenever the
+    /// Goal runtime is available, so a late completion cannot wake the parent
+    /// after the Goal has paused, blocked, completed, or been cleared.
     RecordGoalTurnTaskIds {
         task_ids: Vec<String>,
     },

@@ -292,8 +292,6 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         goal_context: None,
-        goal_stage_submit: None,
-        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -373,53 +371,67 @@ fn initializing_snapshot_is_running() {
 #[test]
 fn persist_gate_only_persists_successful_nonempty_outputs() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let session = crate::session::storage::ContainedDirectory::open(
+        dir.path(),
+        std::path::Path::new(""),
+        "subagent output test session",
+        false,
+    )
+    .expect("open test session capability");
     let ok = SubagentResult {
         success: true,
         output: std::sync::Arc::from("text"),
         ..Default::default()
     };
-    let output_ref = persist_subagent_output(dir.path(), &ok)
+    let output_ref = persist_subagent_output(&session, &ok)
         .expect("artifact write")
         .expect("successful non-empty output has an artifact");
-    assert!(
-        output_ref
-            .path
-            .starts_with(dir.path().join("artifacts/subagent-output"))
-    );
     assert!(
         output_ref
             .timeline_ref
             .starts_with("artifact:subagent-output:blake3:")
     );
+    assert_eq!(
+        load_subagent_output_ref_from_directory(&session, &output_ref.timeline_ref).as_deref(),
+        Ok("text")
+    );
     let empty = SubagentResult {
         success: true,
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &empty), Ok(None));
+    assert_eq!(persist_subagent_output(&session, &empty), Ok(None));
     let failed = SubagentResult {
         success: false,
         output: std::sync::Arc::from("partial"),
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &failed), Ok(None));
+    assert_eq!(persist_subagent_output(&session, &failed), Ok(None));
 }
 #[test]
 fn subagent_output_roundtrips_through_immutable_artifact() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let session = crate::session::storage::ContainedDirectory::open(
+        dir.path(),
+        std::path::Path::new(""),
+        "subagent output test session",
+        false,
+    )
+    .expect("open test session capability");
     let output = "line one\nline two with unicode ✓";
-    let output_ref = write_subagent_output(dir.path(), output).expect("artifact write");
+    let output_ref = write_subagent_output(&session, output).expect("artifact write");
     assert_eq!(
-        write_subagent_output(dir.path(), output).expect("idempotent artifact write"),
+        write_subagent_output(&session, output).expect("idempotent artifact write"),
         output_ref
     );
     assert_eq!(
-        read_subagent_output(&output_ref.path).as_deref(),
-        Some(output)
+        load_subagent_output_ref_from_directory(&session, &output_ref.timeline_ref).as_deref(),
+        Ok(output)
     );
-    assert_eq!(read_subagent_output(&dir.path().join("missing")), None);
-    let corrupt = dir.path().join("corrupt-artifact");
-    std::fs::write(&corrupt, "not json").expect("corrupt fixture");
-    assert_eq!(read_subagent_output(&corrupt), None);
+    assert!(load_subagent_output_ref_from_directory(
+        &session,
+        "artifact:subagent-output:blake3:0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    .is_err());
 }
 
 fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::SubagentSpawnEvent {
@@ -513,8 +525,15 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
     assert_eq!(result.turns, 3);
     assert_eq!(result.tokens_used, 912);
     let output_ref = result.output_ref.as_deref().expect("artifact reference");
+    let child_directory = crate::session::storage::ContainedDirectory::open(
+        child_dir.path(),
+        std::path::Path::new(""),
+        "recovered child test session",
+        false,
+    )
+    .unwrap();
     assert_eq!(
-        load_subagent_output_ref(child_dir.path(), output_ref).unwrap(),
+        load_subagent_output_ref_from_directory(&child_directory, output_ref).unwrap(),
         "canonical recovered output"
     );
 
@@ -530,12 +549,12 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
         result_ref: Some(result_ref.clone()),
         snapshot_ref: None,
     };
-    let SessionUpdate::SubagentFinished { output, .. } = finish_from_durable_facts_in_dir(
+    let SessionUpdate::SubagentFinished { output, .. } = finish_from_durable_facts_in_directory(
         "parent-recovery",
         spawn_seq,
         &spawn,
         &terminal,
-        child_dir.path(),
+        &child_directory,
     )
     .unwrap() else {
         panic!("expected finished projection");
@@ -577,12 +596,12 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
         "corrupt",
     )
     .unwrap();
-    assert!(finish_from_durable_facts_in_dir(
+    assert!(finish_from_durable_facts_in_directory(
         "parent-recovery",
         spawn_seq,
         &spawn,
         &terminal,
-        child_dir.path(),
+        &child_directory,
     )
     .is_err());
 }
@@ -707,7 +726,6 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         &backend,
-        parent_dir.path(),
         &parent_id,
         &parent,
         &gateway,
@@ -784,7 +802,6 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         &backend,
-        parent_dir.path(),
         &parent_id,
         &parent,
         &gateway,
@@ -857,7 +874,6 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         &backend,
-        parent_dir.path(),
         &parent_id,
         &parent,
         &gateway,
@@ -906,7 +922,6 @@ async fn missing_unpublished_child_closes_without_forging_result_ref() {
         &crate::session::storage::SubagentProjectionState::default(),
         false,
         &backend,
-        parent_dir.path(),
         &parent_id,
         &parent,
         &gateway,
@@ -949,11 +964,18 @@ fn subagent_output_reader_rejects_symlinked_artifact_root() {
     std::fs::write(outside_dir.join(format!("{hash}.json")), json).unwrap();
     symlink(outside.path(), session.path().join("artifacts")).unwrap();
 
-    let path = session
-        .path()
-        .join("artifacts/subagent-output")
-        .join(format!("{hash}.json"));
-    assert_eq!(read_subagent_output(&path), None);
+    let directory = crate::session::storage::ContainedDirectory::open(
+        session.path(),
+        std::path::Path::new(""),
+        "subagent output symlink test session",
+        false,
+    )
+    .unwrap();
+    assert!(load_subagent_output_ref_from_directory(
+        &directory,
+        &format!("artifact:subagent-output:blake3:{hash}")
+    )
+    .is_err());
 }
 #[test]
 fn initial_context_source_new_is_default() {
@@ -1325,8 +1347,6 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         fork_context,
         owner: SubagentOwner::Task,
         goal_context: None,
-        goal_stage_submit: None,
-        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }

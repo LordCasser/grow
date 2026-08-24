@@ -659,8 +659,6 @@ impl SchedulerActor {
             fork_context: false,
             owner: SubagentOwner::Task,
             goal_context: None,
-            goal_stage_submit: None,
-            goal_stage_resume: None,
             cancel_token: CancellationToken::new(),
         };
 
@@ -2255,10 +2253,11 @@ mod tests {
     #[tokio::test]
     async fn durable_delete_retries_persistence_and_reuses_version() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join("missing");
-        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
-            parent.join("resources_state.json"),
-        ));
+        let state_path = dir.path().join("resources_state.json");
+        std::fs::create_dir(&state_path).unwrap();
+        let persistence = Arc::new(
+            crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap(),
+        );
         let mut task = ScheduledTask::new(300, "retry".into(), true, true);
         task.id = "retry".into();
         let (handle, cancel, mut notifications, resources) =
@@ -2286,7 +2285,7 @@ mod tests {
             .await
             .get_or_default::<State<WebCitationCounter>>()
             .counter = 7;
-        std::fs::create_dir(&parent).unwrap();
+        std::fs::remove_dir(&state_path).unwrap();
         let pending = tokio::spawn({
             let handle = handle.clone();
             async move { delete(&handle, "retry").await }
@@ -2297,7 +2296,7 @@ mod tests {
         delivery.acknowledgement.unwrap().send(Ok(())).unwrap();
         assert!(pending.await.unwrap().unwrap());
         let persisted: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(parent.join("resources_state.json")).unwrap(),
+            &std::fs::read_to_string(&state_path).unwrap(),
         )
         .unwrap();
         assert_eq!(persisted["state"]["grow_build.WebCitation"]["counter"], 7);
@@ -2352,13 +2351,14 @@ mod tests {
     #[tokio::test]
     async fn pending_delete_abandons_closed_durable_target_and_unblocks_mutations() {
         let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join("missing");
+        let state_path = dir.path().join("resources_state.json");
+        std::fs::create_dir(&state_path).unwrap();
         let mut task = ScheduledTask::new(300, "stuck".into(), true, true);
         task.id = "stuck".into();
         let (mut actor, _) = make_boundary_actor(vec![task], 0);
-        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
-            parent.join("resources_state.json"),
-        ));
+        actor.resources_persistence = Arc::new(
+            crate::persistence::ResourcesPersistence::local(state_path).unwrap(),
+        );
         let (plain, mut notifications) = ToolNotificationHandle::channel();
         let (durable, durable_rx) = ToolNotificationHandle::acknowledged_channel();
         actor.notification_handle = ToolNotificationHandle::tee(vec![plain, durable]);
@@ -2615,9 +2615,10 @@ mod tests {
         let mut actor = make_boundary_actor(tasks, 0).0;
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
-            state_path.clone(),
-        ));
+        std::fs::create_dir(&state_path).unwrap();
+        actor.resources_persistence = Arc::new(
+            crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap(),
+        );
         let (notification_handle, mut notifications) =
             ToolNotificationHandle::acknowledged_channel();
         actor.notification_handle = notification_handle;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
+use fs2::FileExt as _;
 
 use super::host_service::{
     DiagnosticHook, HostDrainOutcome, WorkflowHostParams, spawn_workflow_host_service,
@@ -22,6 +24,65 @@ struct ActiveRun {
     cancel: CancellationToken,
     pause_intent: Arc<AtomicBool>,
     done: oneshot::Receiver<()>,
+}
+
+struct SessionJournalStorage {
+    run: crate::session::storage::ContainedDirectory,
+}
+
+impl workflow::JournalStorage for SessionJournalStorage {
+    fn read_bounded(&self, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+        self.run.read_bounded(
+            std::ffi::OsStr::new("journal.jsonl"),
+            "Workflow journal",
+            max_bytes,
+        )
+    }
+
+    fn append(&self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut file = self
+            .run
+            .open_read_write_create(std::ffi::OsStr::new("journal.jsonl"))?;
+        file.lock_exclusive()?;
+        let result = (|| {
+            let len = file.metadata()?.len();
+            if len.saturating_add(bytes.len() as u64) > workflow::journal::MAX_JOURNAL_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Workflow journal exceeds its byte limit",
+                ));
+            }
+            file.seek(std::io::SeekFrom::End(0))?;
+            file.write_all(bytes)?;
+            file.sync_data()?;
+            // A newly-created journal is not durable until its directory entry
+            // is synchronized.  This runs before the engine may dispatch the
+            // operation whose intent was appended above.
+            self.run.sync()
+        })();
+        let _ = file.unlock();
+        result
+    }
+
+    fn truncate(&self, len: u64) -> std::io::Result<()> {
+        let file = self
+            .run
+            .open_read_write_create(std::ffi::OsStr::new("journal.jsonl"))?;
+        file.lock_exclusive()?;
+        let result = (|| {
+            if len > file.metadata()?.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Workflow journal truncate would extend the file",
+                ));
+            }
+            file.set_len(len)?;
+            file.sync_data()?;
+            self.run.sync()
+        })();
+        let _ = file.unlock();
+        result
+    }
 }
 
 pub(crate) struct LaunchSpec {
@@ -57,7 +118,7 @@ pub(crate) enum LaunchError {
 
 pub(crate) struct WorkflowManager {
     session_id: String,
-    session_dir: Option<PathBuf>,
+    session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
     cwd: PathBuf,
     tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
     store: WorkflowRunStore,
@@ -73,10 +134,29 @@ pub(crate) struct WorkflowManager {
 }
 
 impl WorkflowManager {
+    fn journal_storage(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Arc<dyn workflow::JournalStorage>>, LaunchError> {
+        let Some(session) = self.session_directory.as_deref() else {
+            return Ok(None);
+        };
+        super::store::validate_run_id(run_id)
+            .map_err(|error| LaunchError::Journal(error.to_string()))?;
+        let run = session
+            .open_relative(
+                &std::path::Path::new("workflows").join(run_id),
+                "Workflow journal directory",
+                false,
+            )
+            .map_err(|error| LaunchError::Journal(error.to_string()))?;
+        Ok(Some(Arc::new(SessionJournalStorage { run })))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session_id: String,
-        session_dir: Option<PathBuf>,
+        session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
         cwd: PathBuf,
         tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
         store: WorkflowRunStore,
@@ -91,7 +171,7 @@ impl WorkflowManager {
     ) -> Self {
         Self {
             session_id,
-            session_dir,
+            session_directory,
             cwd,
             tracker,
             store,
@@ -159,22 +239,23 @@ impl WorkflowManager {
                 execution_script = self.store.script_for(run_id).ok_or_else(|| {
                     LaunchError::Store("immutable workflow script is missing".into())
                 })?;
-                let journal = match self
-                    .session_dir
-                    .as_ref()
-                    .zip(existing.journal_path.as_ref())
-                {
-                    Some((session_dir, relative)) => {
+                let journal = match existing.journal_path.as_ref() {
+                    Some(relative) => {
                         let expected = format!("workflows/{run_id}/journal.jsonl");
                         if relative != &expected {
                             return Err(LaunchError::Journal(
                                 "persisted journal path does not match its workflow run".into(),
                             ));
                         }
-                        Journal::load(session_dir.join(relative))
-                            .map_err(|e| LaunchError::Journal(e.to_string()))?
+                        let storage = self.journal_storage(run_id)?.ok_or_else(|| {
+                            LaunchError::Journal(
+                                "persisted Workflow journal has no session authority".into(),
+                            )
+                        })?;
+                        Journal::load_storage(storage)
+                            .map_err(|error| LaunchError::Journal(error.to_string()))?
                     }
-                    None => Journal::new(None),
+                    None => Journal::memory(),
                 };
                 if existing.status
                     == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
@@ -210,15 +291,17 @@ impl WorkflowManager {
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
                 let journal_rel = format!("workflows/{run_id}/journal.jsonl");
-                let journal_path = self.session_dir.as_ref().map(|d| d.join(&journal_rel));
-                let journal = Journal::new(journal_path);
+                let journal = match self.journal_storage(&run_id)? {
+                    Some(storage) => Journal::with_storage(storage),
+                    None => Journal::memory(),
+                };
                 let state = self.tracker.lock().start_run(
                     run_id.clone(),
                     resolved.meta.name,
                     spec.objective.clone(),
                     resolved.meta.phases,
                     Some(agent_budget),
-                    self.session_dir.as_ref().map(|_| journal_rel),
+                    self.session_directory.as_ref().map(|_| journal_rel),
                 );
                 let state = {
                     let mut tracker = self.tracker.lock();
@@ -290,7 +373,7 @@ impl WorkflowManager {
                 &run_id,
                 format!("workflow journal could not prepare resume: {message}"),
             ) {
-                let _ = self.store.persist_now(&interrupted);
+                let _ = self.store.persist_ack(&interrupted).await;
             }
             let _ = self
                 .timeline
@@ -307,13 +390,13 @@ impl WorkflowManager {
             return Err(LaunchError::Journal(message));
         }
 
-        if let Err(error) = self.store.persist_now(&state) {
+        if let Err(error) = self.store.persist_ack(&state).await {
             let interrupted = self.tracker.lock().interrupt(
                 &run_id,
                 "workflow state persistence failed before execution; start a new run",
             );
             if let Some(interrupted) = interrupted {
-                if let Err(persist_error) = self.store.persist_now(&interrupted) {
+                if let Err(persist_error) = self.store.persist_ack(&interrupted).await {
                     tracing::warn!(run_id = %run_id, %persist_error, "failed to persist interrupted workflow state");
                 }
                 if let Err(timeline_error) = self
@@ -339,24 +422,48 @@ impl WorkflowManager {
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
-        let scratch_dir = self
-            .session_dir
-            .clone()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("workflows")
-            .join(&run_id)
-            .join("scratch");
+        let scratch_directory = match self.session_directory.as_deref() {
+            Some(session) => Arc::new(
+                session
+                    .open_relative(
+                        &std::path::Path::new("workflows")
+                            .join(&run_id)
+                            .join("scratch"),
+                        "Workflow scratch directory",
+                        true,
+                    )
+                    .map_err(|error| LaunchError::Store(error.to_string()))?,
+            ),
+            None => {
+                let path = std::env::temp_dir().join(format!(
+                    "grow-workflow-scratch-{}",
+                    uuid::Uuid::now_v7().simple()
+                ));
+                std::fs::create_dir(&path)
+                    .map_err(|error| LaunchError::Store(error.to_string()))?;
+                Arc::new(
+                    crate::session::storage::ContainedDirectory::open(
+                        &path,
+                        std::path::Path::new(""),
+                        "ephemeral Workflow scratch directory",
+                        false,
+                    )
+                    .map_err(|error| LaunchError::Store(error.to_string()))?,
+                )
+            }
+        };
 
         let (host_service, host_drained) = spawn_workflow_host_service(
             WorkflowHostParams {
                 run_id: run_id.clone(),
                 cwd: self.cwd.clone(),
-                scratch_dir,
+                scratch_directory,
                 tracker: self.tracker.clone(),
                 store: self.store.clone(),
                 notify: self.notify.clone(),
                 subagent_event_tx: self.subagent_event_tx.clone(),
                 parent_session_id: self.session_id.clone(),
+                parent_timeline: Some(self.timeline.clone()),
                 allow_fork_context,
                 templates: self.templates.clone(),
                 diagnostics: self.diagnostics.clone(),
@@ -396,7 +503,7 @@ impl WorkflowManager {
         let store = self.store.clone();
         let notify = self.notify.clone();
         let session_cmd_tx = self.session_cmd_tx.clone();
-        let completion_session_dir = self.session_dir.clone();
+        let completion_session_directory = self.session_directory.clone();
         let completion_cwd = self.cwd.clone();
         let watcher_run_id = run_id.clone();
         let watcher_cancel = cancel.clone();
@@ -474,13 +581,13 @@ impl WorkflowManager {
                     && state.status
                         == crate::session::workflow::tracker::WorkflowRunStatus::Complete
                     && !state.private
-                    && let (Some(session_dir), Some(definition_id), Some(definition_hash)) = (
-                        completion_session_dir.as_deref(),
+                    && let (Some(session), Some(definition_id), Some(definition_hash)) = (
+                        completion_session_directory.as_deref(),
                         state.definition_id.as_ref(),
                         state.definition_hash.as_deref(),
                     )
                     && let Ok(mut workspace) =
-                        super::workspace::WorkflowWorkspace::open(session_dir, &completion_cwd)
+                        super::workspace::WorkflowWorkspace::open_in_session(session, &completion_cwd)
                     && workspace
                         .take_save_prompt(definition_id, definition_hash)
                         .unwrap_or(false)
@@ -551,7 +658,8 @@ impl WorkflowManager {
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let (persist_tx, _persist_rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(session_dir.clone(), persist_tx.clone());
+        let session_directory = test_session_directory(session_dir);
+        let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
         let notify = super::notify::WorkflowNotifySender::new(
             agent_client_protocol::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
@@ -560,7 +668,7 @@ impl WorkflowManager {
         );
         let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
             "test-session".into(),
-            session_dir,
+            session_directory,
             std::env::temp_dir(),
             tracker.clone(),
             store,
@@ -792,7 +900,7 @@ impl WorkflowManager {
                 )
             };
             if let Some(state) = state {
-                if let Err(error) = self.store.persist_now(&state) {
+                if let Err(error) = self.store.persist_ack(&state).await {
                     tracing::error!(%run_id, %error, "failed to persist workflow shutdown interruption");
                 }
                 let elapsed = self.tracker.lock().elapsed_ms(run_id);
@@ -818,15 +926,28 @@ impl WorkflowManager {
         self.store.script_for(run_id)
     }
 
-    pub(crate) fn script_copy_path(&self, run_id: &str) -> Option<std::path::PathBuf> {
-        self.store.script_copy_path(run_id)
-    }
-
     pub(crate) fn args_copy_for(&self, run_id: &str) -> serde_json::Value {
         self.store
             .args_for(run_id)
             .unwrap_or(serde_json::Value::Null)
     }
+}
+
+#[cfg(test)]
+fn test_session_directory(
+    path: Option<PathBuf>,
+) -> Option<Arc<crate::session::storage::ContainedDirectory>> {
+    path.map(|path| {
+        Arc::new(
+            crate::session::storage::ContainedDirectory::open(
+                &path,
+                std::path::Path::new(""),
+                "Workflow test session",
+                false,
+            )
+            .expect("pin Workflow test session"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -921,7 +1042,8 @@ mod tests {
             }
         });
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(session_dir.clone(), persist_tx.clone());
+        let session_directory = test_session_directory(session_dir);
+        let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
         let notify = WorkflowNotifySender::new(
             agent_client_protocol::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
@@ -931,7 +1053,7 @@ mod tests {
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let manager = WorkflowManager::new(
             "test-session".into(),
-            session_dir,
+            session_directory,
             std::env::temp_dir(),
             tracker,
             store,
@@ -1060,7 +1182,7 @@ mod tests {
             WorkflowOutcome::Paused { .. }
         ));
         std::fs::write(
-            manager.script_copy_path(&run_id).unwrap(),
+            dir.path().join("workflows").join(&run_id).join("script.rhai"),
             "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"edited\");",
         )
         .unwrap();

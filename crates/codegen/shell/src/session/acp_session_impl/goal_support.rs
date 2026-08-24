@@ -24,16 +24,14 @@ impl SubagentTokenRecord {
     }
 }
 
-pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &[String]) -> bool {
+pub(crate) fn goal_runtime_available_from_tools(goal_enabled: bool, tool_names: &[String]) -> bool {
     use tools::implementations::grow_build::{
-        GET_GOAL_TOOL_NAME, REQUEST_GOAL_REPLAN_TOOL_NAME, UPDATE_GOAL_PROGRESS_TOOL_NAME,
-        UPDATE_GOAL_TOOL_NAME,
+        CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
     };
     goal_enabled
         && [
+            CREATE_GOAL_TOOL_NAME,
             GET_GOAL_TOOL_NAME,
-            UPDATE_GOAL_PROGRESS_TOOL_NAME,
-            REQUEST_GOAL_REPLAN_TOOL_NAME,
             UPDATE_GOAL_TOOL_NAME,
         ]
         .into_iter()
@@ -41,10 +39,10 @@ pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &
 }
 
 pub(crate) fn laziness_injection_active(
-    goal_harness_enabled: bool,
+    goal_runtime_available: bool,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
 ) -> bool {
-    goal_harness_enabled && goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
+    goal_runtime_available && goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
 }
 
 fn fold_tokens_by_model<'a>(
@@ -85,20 +83,16 @@ impl SessionActor {
         admitted_behavior: tool_types::BehaviorId,
     ) {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        // A delegated Goal child is a fixed-revision capability context, not a
-        // new independent session. Preserve that ownership when it spawns a
-        // descendant so nested work cannot escape Goal object permissions or
-        // lose revision audit data merely because child sessions use Normal
-        // as their visible Behavior.
+        // A delegated Goal child receives an immutable objective view, not a
+        // second Goal runtime. Preserve that ownership through descendants so
+        // nested work cannot mutate lifecycle state merely because child
+        // sessions use Normal as their visible Behavior.
         let inherited_goal_context = bridge
             .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
             .await
             .and_then(|resource| resource.0);
         let expected_goal_id = match origin {
-            crate::session::PromptOrigin::GoalContinuation { goal_id, .. }
-            | crate::session::PromptOrigin::GoalFinalization { goal_id, .. } => {
-                Some(goal_id.as_str())
-            }
+            crate::session::PromptOrigin::GoalContinuation { goal_id } => Some(goal_id.as_str()),
             crate::session::PromptOrigin::User
                 if admitted_behavior == tool_types::BehaviorId::Goal =>
             {
@@ -110,10 +104,6 @@ impl SessionActor {
             (
                 tools::implementations::grow_build::task::types::SubagentOwner::goal(
                     &context.view.goal_id,
-                    context.view.objective_revision,
-                    context.view.plan_revision,
-                    context.view.board_revision,
-                    context.role,
                 ),
                 Some(context.view),
             )
@@ -131,12 +121,12 @@ impl SessionActor {
                     (
                         tools::implementations::grow_build::task::types::SubagentOwner::goal(
                             &goal.goal_id,
-                            goal.objective_revision,
-                            goal.board.plan_revision,
-                            goal.board.board_revision,
-                            tools::implementations::grow_build::task::types::GoalSubagentRole::Worker,
                         ),
-                        Some(super::goal::goal_view_from_snapshot(goal, 0)),
+                        Some(super::goal::goal_view_from_snapshot(
+                            goal,
+                            0,
+                            goal.elapsed_ms,
+                        )),
                     )
                 })
                 .unwrap_or_default()
@@ -167,8 +157,8 @@ impl SessionActor {
             .await;
     }
 
-    pub(super) fn goal_notify_sender(&self) -> crate::session::goal_orchestrator::GoalNotifySender {
-        crate::session::goal_orchestrator::GoalNotifySender::new(
+    pub(super) fn goal_notify_sender(&self) -> crate::session::goal_notification::GoalNotifySender {
+        crate::session::goal_notification::GoalNotifySender::new(
             self.session_info.id.clone(),
             self.notifications.gateway.clone(),
             self.notifications.persistence_tx.clone(),
@@ -178,7 +168,7 @@ impl SessionActor {
     pub(super) async fn persist_control_snapshot_durably(
         &self,
         behavior: crate::session::behavior::BehaviorSnapshot,
-        goal: Option<crate::session::goal_tracker::GoalOrchestration>,
+        goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> std::io::Result<()> {
         let revision = self
             .control_revision
@@ -200,7 +190,7 @@ impl SessionActor {
 
     pub(super) async fn commit_goal_mutation_or_restore(
         &self,
-        previous: crate::session::goal_tracker::GoalOrchestration,
+        previous: crate::session::goal_tracker::GoalState,
     ) -> Result<(), String> {
         let next = self.goal_tracker.lock().snapshot().cloned();
         let behavior = self.behavior.lock().snapshot();
@@ -217,9 +207,6 @@ impl SessionActor {
         if self.goal_tracker.lock().snapshot().is_none() {
             return;
         }
-        if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
-            cancel.cancel();
-        }
         self.settle_live_goal_subagent_tokens();
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let _ = self.goal_tokens(current_tokens);
@@ -231,13 +218,13 @@ impl SessionActor {
         }
     }
 
-    pub(super) fn goal_harness_enabled(&self) -> bool {
-        self.goal_harness_enabled
+    pub(super) fn goal_runtime_available(&self) -> bool {
+        self.goal_runtime_available
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn goal_loop_active(&self) -> bool {
-        self.goal_harness_enabled()
+        self.goal_runtime_available()
             && self.goal_tracker.lock().status()
                 == Some(crate::session::goal_tracker::GoalStatus::Active)
     }
@@ -252,25 +239,25 @@ impl SessionActor {
         &self,
         ids: impl IntoIterator<Item = String>,
     ) {
-        if self.goal_harness_enabled() {
+        if self.goal_runtime_available() {
             self.goal_turn_task_ids.lock().extend(ids);
         }
     }
 
-    fn set_goal_harness_from_tools(&self, tool_names: &[String]) -> bool {
-        let enabled = goal_slash_and_harness_available(self.goal_enabled, tool_names);
-        self.goal_harness_enabled
+    fn set_goal_runtime_availability_from_tools(&self, tool_names: &[String]) -> bool {
+        let enabled = goal_runtime_available_from_tools(self.goal_enabled, tool_names);
+        self.goal_runtime_available
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
         enabled
     }
 
-    pub(super) async fn refresh_goal_harness_enabled(&self) -> bool {
+    pub(super) async fn refresh_goal_runtime_availability(&self) -> bool {
         let tool_names = self.registered_tool_names().await;
-        let enabled = self.set_goal_harness_from_tools(&tool_names);
+        let enabled = self.set_goal_runtime_availability_from_tools(&tool_names);
         if !enabled {
             self.auto_pause_goal_if_active_with_message(
-                crate::session::goal_tracker::GoalPauseReason::Infra,
-                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable get_goal, update_goal_progress, request_goal_replan, and update_goal before resuming."
+                crate::session::goal_tracker::GoalPauseReason::RuntimeUnavailable,
+                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable create_goal, get_goal, and update_goal before restarting."
                     .to_string(),
             )
             .await;
@@ -286,7 +273,9 @@ impl SessionActor {
         let goal = tracker.snapshot()?;
         Some(sampling_types::GoalDirectiveTag {
             goal_id: goal.goal_id.clone(),
-            definition_revision: goal.objective_revision,
+            definition_revision: self
+                .control_revision
+                .load(std::sync::atomic::Ordering::Relaxed),
             kind,
         })
     }
@@ -303,17 +292,25 @@ impl SessionActor {
         }
     }
 
-    pub(super) async fn inject_paused_goal_interaction_directive(&self) {
+    pub(super) async fn inject_stopped_goal_interaction_directive(&self) {
         if self.behavior.lock().behavior() == tool_types::BehaviorId::Goal
             && self
                 .goal_tracker
                 .lock()
                 .status()
-                .is_some_and(crate::session::goal_tracker::GoalStatus::is_paused)
+                .is_some_and(|status| {
+                    matches!(
+                        status,
+                        crate::session::goal_tracker::GoalStatus::Paused
+                            | crate::session::goal_tracker::GoalStatus::Blocked
+                            | crate::session::goal_tracker::GoalStatus::UsageLimited
+                            | crate::session::goal_tracker::GoalStatus::BudgetLimited
+                    )
+                })
         {
             self.chat_state_handle
                 .push_user_message(ConversationItem::system_reminder(
-                    "The Goal is paused. Answer the user's current message normally; do not resume autonomous work unless the user explicitly resumes it."
+                    "The Goal is stopped. Answer the user's current message normally; do not restart autonomous work unless the user explicitly restarts it."
                         .to_string(),
                 ));
         }
@@ -383,9 +380,8 @@ impl SessionActor {
         Some(delta)
     }
 
-    /// Graceful shutdown abandons live Goal stages. Charge their latest known
-    /// progress before the persistence barrier so a reload cannot reuse the
-    /// same budget.
+    /// Charge delegated Goal work at graceful shutdown before the persistence
+    /// barrier so a reload cannot reuse the same budget.
     pub(super) fn settle_live_goal_subagent_tokens(&self) -> i64 {
         let Some(goal_id) = self
             .goal_tracker

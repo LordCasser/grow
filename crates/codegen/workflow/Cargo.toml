@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -25,8 +25,133 @@ pub(crate) enum AppendDurability {
 #[derive(Clone)]
 pub struct JsonlStorageAdapter {
     dir_mode: SessionDirMode,
+    authority: std::sync::Arc<std::sync::OnceLock<super::ContainedDirectory>>,
+    opened_sessions: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, std::sync::Arc<super::ContainedDirectory>>,
+        >,
+    >,
+    writer_leases: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, std::fs::File>>>,
+    timeline_prefixes: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>>,
+        >,
+    >,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LedgerPrefix {
+    len: u64,
+    hash: blake3::Hash,
+}
+
+/// One identity-checked session entity pinned to a single directory handle.
+/// Every multi-file projection must use this object so a concurrent ambient
+/// rename cannot splice Summary, Timeline, Sidebands, or blobs from different
+/// sessions.
+#[derive(Clone)]
+pub(crate) struct OpenedSession {
+    directory: std::sync::Arc<super::ContainedDirectory>,
+    summary: Summary,
+}
+
+impl OpenedSession {
+    pub(crate) fn directory(&self) -> &super::ContainedDirectory {
+        &self.directory
+    }
+
+    pub(crate) fn directory_handle(&self) -> std::sync::Arc<super::ContainedDirectory> {
+        self.directory.clone()
+    }
+
+    pub(crate) fn summary(&self) -> &Summary {
+        &self.summary
+    }
+
+    pub(crate) fn timeline_events(&self) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        JsonlStorageAdapter::read_timeline_from_directory(&self.directory)
+    }
+
+    /// Read the exact committed `updates.jsonl` envelopes. Unlike replay,
+    /// entity export is strict: a corrupt committed record makes the export
+    /// fail instead of silently producing an incomplete mirror.
+    pub(crate) fn update_envelopes(&self) -> io::Result<Vec<serde_json::Value>> {
+        let path = self.directory.display_path().join(super::UPDATES_FILE);
+        let file = match self.directory.open_regular(
+            std::ffi::OsStr::new(super::UPDATES_FILE),
+            "session updates ledger",
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let lines = super::CommittedJsonlLines::from_open_file_at(
+            file,
+            path,
+            "session updates ledger",
+            0,
+        )?;
+        let mut updates = Vec::new();
+        for (index, line) in lines.enumerate() {
+            let line = line?;
+            let value: serde_json::Value = serde_json::from_slice(line.trim_ascii()).map_err(
+                |error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid committed update {index}: {error}"),
+                    )
+                },
+            )?;
+            super::SessionUpdateEnvelope::from_value(value.clone()).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid committed update {index}: {error}"),
+                )
+            })?;
+            updates.push(value);
+        }
+        Ok(updates)
+    }
+
+    pub(crate) fn sideband_ledgers(
+        &self,
+        parent_timeline_id: &str,
+        parent: &chat_state::Timeline,
+    ) -> io::Result<super::SidebandLedgers> {
+        JsonlStorageAdapter::read_sideband_ledgers_from_directory(
+            &self.directory,
+            parent_timeline_id,
+            parent,
+        )
+    }
+
+    pub(crate) fn materialize_timeline(
+        &self,
+        timeline_id: &str,
+    ) -> io::Result<chat_state::TimelineMaterialization> {
+        let events = self.timeline_events()?;
+        let last_seq = events.last().map(|event| event.seq.get()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "source Timeline is empty")
+        })?;
+        let timeline = Timeline::from_events(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
+            &self.directory,
+            &timeline,
+        )?;
+        Ok(chat_state::TimelineMaterialization {
+            input_ref: chat_state::TimelineRangeRef {
+                timeline_id: timeline_id.to_string(),
+                first_seq: 0,
+                last_seq,
+            },
+            surface_revision: timeline.surface_revision(),
+            surface: timeline.surface().to_vec(),
+            surface_ids: timeline.surface_ids().to_vec(),
+        })
+    }
 }
 #[cfg(test)]
 type AppendProbe = dyn Fn(AppendDurability) -> io::Result<()> + Send + Sync;
@@ -39,6 +164,10 @@ impl JsonlStorageAdapter {
     pub fn new() -> Self {
         Self {
             dir_mode: SessionDirMode::FromRoot(crate::util::grow_home::grow_home()),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
         }
@@ -46,6 +175,10 @@ impl JsonlStorageAdapter {
     pub fn with_root(root_dir: PathBuf) -> Self {
         Self {
             dir_mode: SessionDirMode::FromRoot(root_dir),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
         }
@@ -58,6 +191,10 @@ impl JsonlStorageAdapter {
     pub fn with_explicit_session_dir(session_dir: PathBuf) -> Self {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
         }
@@ -69,12 +206,17 @@ impl JsonlStorageAdapter {
     ) -> Self {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
         }
     }
     /// Read one committed ledger snapshot and derive its exact reference plus
     /// Surface. Fork/resume callers must never obtain these through separate
     /// reads because a concurrent append could make the content outrun its ref.
+    #[cfg(test)]
     pub(crate) fn materialize_timeline_from_dir(
         &self,
         dir: &std::path::Path,
@@ -102,7 +244,29 @@ impl JsonlStorageAdapter {
         &self,
         info: &Info,
     ) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        self.read_timeline(self.timeline_file(info))
+        self.open_session(info)?.timeline_events()
+    }
+
+    /// Size of the currently pinned updates ledger. This exposes projection
+    /// metadata without leaking an authoritative session path.
+    pub fn updates_snapshot_len(&self, info: &Info) -> io::Result<u64> {
+        self.open_session(info)?
+            .directory()
+            .open_regular(std::ffi::OsStr::new(super::UPDATES_FILE), "session updates ledger")?
+            .metadata()
+            .map(|metadata| metadata.len())
+    }
+
+    fn timeline_prefix_state(
+        &self,
+        info: &Info,
+    ) -> io::Result<std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let mut prefixes = self
+            .timeline_prefixes
+            .lock()
+            .map_err(|_| io::Error::other("Timeline prefix cache poisoned"))?;
+        Ok(prefixes.entry(key).or_default().clone())
     }
 
     pub(crate) fn read_sideband_ledgers_sync(
@@ -110,7 +274,8 @@ impl JsonlStorageAdapter {
         info: &Info,
         parent: &chat_state::Timeline,
     ) -> io::Result<super::SidebandLedgers> {
-        Self::read_sideband_ledgers_from_dir(&self.session_dir(info), &info.id.to_string(), parent)
+        self.open_session(info)?
+            .sideband_ledgers(&info.id.to_string(), parent)
     }
 
     pub(crate) fn read_sideband_ledgers_from_dir(
@@ -118,13 +283,25 @@ impl JsonlStorageAdapter {
         parent_timeline_id: &str,
         parent: &chat_state::Timeline,
     ) -> io::Result<super::SidebandLedgers> {
-        let mut ledgers = super::SidebandLedgers::new();
         let session = super::ContainedDirectory::open(
             session_dir,
             Path::new(""),
             "sideband session directory",
             false,
         )?;
+        Self::read_sideband_ledgers_from_directory(
+            &session,
+            parent_timeline_id,
+            parent,
+        )
+    }
+
+    fn read_sideband_ledgers_from_directory(
+        session: &super::ContainedDirectory,
+        parent_timeline_id: &str,
+        parent: &chat_state::Timeline,
+    ) -> io::Result<super::SidebandLedgers> {
+        let mut ledgers = super::SidebandLedgers::new();
         let sideband_ids = parent
             .events()
             .iter()
@@ -166,6 +343,38 @@ impl JsonlStorageAdapter {
         Ok(ledgers)
     }
 
+    async fn recover_interrupted_sidebands(
+        &self,
+        info: &Info,
+        ledgers: &super::SidebandLedgers,
+    ) -> io::Result<()> {
+        for events in ledgers.values() {
+            let mut timeline = chat_state::SidebandTimeline::from_events(events.clone())
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if timeline.is_ended() {
+                continue;
+            }
+            let event = timeline
+                .prepare(chat_state::SidebandEventKind::End(
+                    chat_state::SidebandEnd {
+                        outcome: chat_state::SidebandOutcome::Cancelled,
+                        error: Some(
+                            "process ended before sideband reached a terminal state".into(),
+                        ),
+                    },
+                ))
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let session = self.open_session(info)?.directory;
+            Self::append_sideband_event_with_durability(
+                session,
+                &event,
+                AppendDurability::Durable,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Append a user-authored title to a dormant session without constructing
     /// a second title store. The immutable Timeline event commits first; the
     /// summary write is only a denormalized projection and is repairable on
@@ -175,7 +384,7 @@ impl JsonlStorageAdapter {
         info: &Info,
         title: String,
     ) -> io::Result<chat_state::TimelineEvent> {
-        let events = self.read_timeline(self.timeline_file(info))?;
+        let events = self.open_session(info)?.timeline_events()?;
         let timeline = Timeline::from_events(events)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let title = chat_state::SessionTitleEvent {
@@ -249,38 +458,80 @@ impl JsonlStorageAdapter {
             Err(error) => Err(error),
         }
     }
-    pub(crate) fn ensure_session_parent(&self, info: &Info) -> io::Result<PathBuf> {
+    pub(crate) fn ensure_session_parent(
+        &self,
+        info: &Info,
+    ) -> io::Result<super::ContainedDirectory> {
+        self.session_parent(info, true)
+    }
+
+    fn open_session_parent(&self, info: &Info) -> io::Result<super::ContainedDirectory> {
+        self.session_parent(info, false)
+    }
+
+    fn session_parent(
+        &self,
+        info: &Info,
+        create_missing: bool,
+    ) -> io::Result<super::ContainedDirectory> {
+        let authority = self.authority(create_missing)?;
         match &self.dir_mode {
-            SessionDirMode::FromRoot(root) => {
-                Self::ensure_storage_root(root)?;
+            SessionDirMode::FromRoot(_) => {
                 let encoded = crate::util::grow_home::encode_cwd_dirname(&info.cwd);
-                let directory = super::ContainedDirectory::open(
-                    root,
+                let directory = authority.open_relative(
                     &Path::new("sessions").join(&encoded),
                     "session storage directory",
-                    true,
+                    create_missing,
                 )?;
                 if encoded != urlencoding::encode(&info.cwd).as_ref() {
-                    Self::ensure_cwd_marker(&directory, &info.cwd)?;
+                    if create_missing {
+                        Self::ensure_cwd_marker(&directory, &info.cwd)?;
+                    } else {
+                        let marker = directory.read_bounded(
+                            std::ffi::OsStr::new(".cwd"),
+                            "session cwd marker",
+                            super::MAX_SESSION_SUMMARY_BYTES,
+                        )?;
+                        if marker != info.cwd.as_bytes() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "session cwd marker conflicts with the requested cwd",
+                            ));
+                        }
+                    }
                 }
-                Ok(root.join("sessions").join(encoded))
+                Ok(directory)
             }
-            SessionDirMode::Explicit(dir) => {
-                let parent = dir.parent().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "session path has no parent")
-                })?;
-                super::require_regular_directory(parent, "session storage directory")?;
-                Ok(parent.to_path_buf())
-            }
+            SessionDirMode::Explicit(_) => Ok(authority),
         }
     }
+
+    fn session_directory(
+        &self,
+        info: &Info,
+        create_missing: bool,
+    ) -> io::Result<super::ContainedDirectory> {
+        let parent = if create_missing {
+            self.ensure_session_parent(info)?
+        } else {
+            self.open_session_parent(info)?
+        };
+        let name = self
+            .session_dir(info)
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no file name")
+            })?
+            .to_os_string();
+        parent.open_relative(
+            Path::new(&name),
+            "session storage directory",
+            create_missing,
+        )
+    }
     fn ensure_session_dir(&self, info: &Info) -> io::Result<PathBuf> {
-        let target = self.session_dir(info);
-        let parent = self.ensure_session_parent(info)?;
-        let name = target.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "session path has no file name")
-        })?;
-        super::create_contained_dir_all(&parent, Path::new(name), "session storage directory")
+        self.session_directory(info, true)
+            .map(|directory| directory.display_path().to_path_buf())
     }
     pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::UPDATES_FILE)
@@ -311,41 +562,96 @@ impl JsonlStorageAdapter {
     fn rewind_points_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("rewind_points.jsonl")
     }
-    /// Enumerate all session directories, optionally filtered by cwd.
-    ///
-    /// Returns the path to each session directory (not the summary file).
-    /// Shared by both `list_sessions` (full scan) and `list_sessions_recent`
-    /// (mtime-based tail).
-    fn scan_session_dirs(&self, cwd: Option<&str>) -> io::Result<Vec<PathBuf>> {
-        let root_dir = match &self.dir_mode {
-            SessionDirMode::FromRoot(root) => root,
-            SessionDirMode::Explicit(_) => return Ok(Vec::new()),
+    /// Enumerate identity-checked session entities from the pinned storage
+    /// authority. Directory names, cwd markers, and Summary identity are one
+    /// indivisible admission boundary; callers never receive an ambient path.
+    fn scan_opened_sessions(&self, cwd: Option<&str>) -> io::Result<Vec<OpenedSession>> {
+        if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
+            return Ok(Vec::new());
+        }
+        let authority = self.authority(false)?;
+        let sessions = match authority.open_relative(
+            Path::new("sessions"),
+            "sessions directory",
+            false,
+        ) {
+            Ok(sessions) => sessions,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
         };
-        crate::session::storage::relocation::RelocationView::load(root_dir)
-            .and_then(|view| view.session_dirs(cwd))
-            .map_err(io::Error::other)
-    }
-    fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
-        let session_dirs = self.scan_session_dirs(cwd)?;
-        let mut summaries = Vec::new();
-        for session_dir in session_dirs {
-            let summary_path = session_dir.join(super::SUMMARY_FILE);
-            match super::read_bounded_regular_file(
-                &summary_path,
-                "session summary",
-                super::MAX_SESSION_SUMMARY_BYTES,
+        let mut opened = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for cwd_name in sessions.list_names()? {
+            if cwd_name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let cwd_directory = match sessions.open_relative(
+                Path::new(&cwd_name),
+                "session cwd directory",
+                false,
             ) {
-                Ok(bytes) => {
-                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
-                        && summary.validate_current_format().is_ok()
-                        && !summary.is_hidden()
-                    {
-                        summaries.push(summary);
-                    }
-                }
+                Ok(directory) => directory,
                 Err(_) => continue,
+            };
+            for session_name in cwd_directory.list_names()? {
+                if session_name.to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let directory = match cwd_directory.open_relative(
+                    Path::new(&session_name),
+                    "session directory",
+                    false,
+                ) {
+                    Ok(directory) => directory,
+                    Err(_) => continue,
+                };
+                let summary = match Self::read_summary_from_directory(&directory) {
+                    Ok(summary) => summary,
+                    Err(_) => continue,
+                };
+                if Self::validate_physical_session_identity(
+                    &cwd_name,
+                    &cwd_directory,
+                    &session_name,
+                    &summary,
+                )
+                .is_err()
+                    || summary.validate_current_format().is_err()
+                    || summary.is_hidden()
+                    || cwd.is_some_and(|expected| expected != summary.info.cwd)
+                {
+                    continue;
+                }
+                if !ids.insert(summary.info.id.to_string()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("duplicate canonical session id {}", summary.info.id),
+                    ));
+                }
+                let key = format!("{}\0{}", summary.info.id, summary.info.cwd);
+                let candidate = std::sync::Arc::new(directory);
+                let directory = self
+                    .opened_sessions
+                    .lock()
+                    .map_err(|_| io::Error::other("session capability cache poisoned"))?
+                    .entry(key)
+                    .or_insert_with(|| candidate.clone())
+                    .clone();
+                let canonical_summary = Self::read_summary_from_directory(&directory)?;
+                Self::validate_session_identity(&summary.info, &canonical_summary)?;
+                let summary = canonical_summary;
+                opened.push(OpenedSession { directory, summary });
             }
         }
+        Ok(opened)
+    }
+
+    pub(crate) fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
+        let mut summaries = self
+            .scan_opened_sessions(cwd)?
+            .into_iter()
+            .map(|opened| opened.summary)
+            .collect::<Vec<_>>();
         summaries.sort_by_cached_key(|s| {
             (
                 std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
@@ -363,45 +669,8 @@ impl JsonlStorageAdapter {
     /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
     /// Final order among candidates uses `last_active_at` else `updated_at`.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
-        let session_dirs = self.scan_session_dirs(None)?;
-        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> =
-            Vec::with_capacity(session_dirs.len());
-        for session_dir in session_dirs {
-            let summary_path = session_dir.join(super::SUMMARY_FILE);
-            if let Ok(meta) = std::fs::symlink_metadata(&summary_path)
-                && meta.is_file()
-                && !meta.file_type().is_symlink()
-                && let Ok(mtime) = meta.modified()
-            {
-                candidates.push((summary_path, mtime));
-            }
-        }
-        candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-        candidates.truncate(limit);
-        let mut summaries = Vec::with_capacity(candidates.len());
-        for (summary_path, _) in candidates {
-            match super::read_bounded_regular_file(
-                &summary_path,
-                "session summary",
-                super::MAX_SESSION_SUMMARY_BYTES,
-            ) {
-                Ok(bytes) => {
-                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
-                        && summary.validate_current_format().is_ok()
-                        && !summary.is_hidden()
-                    {
-                        summaries.push(summary);
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-        summaries.sort_by_cached_key(|s| {
-            (
-                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
-                s.info.id.0.to_string(),
-            )
-        });
+        let mut summaries = self.list_sessions_sync(None)?;
+        summaries.truncate(limit);
         Ok(summaries)
     }
     async fn append_jsonl<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> io::Result<()> {
@@ -430,23 +699,32 @@ impl JsonlStorageAdapter {
     }
 
     async fn append_timeline_event_with_durability(
-        path: PathBuf,
+        directory: std::sync::Arc<super::ContainedDirectory>,
+        prefix_state: std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>,
         event: &chat_state::TimelineEvent,
         durability: AppendDurability,
     ) -> io::Result<()> {
+        let path = directory.display_path().join(super::TIMELINE_FILE);
         let event_seq = event.seq.get();
         let mut line = serde_json::to_vec(event)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         line.push(b'\n');
         tokio::task::spawn_blocking(move || {
-            Self::append_timeline_line_sync(&path, line, event_seq, durability)
+            Self::append_timeline_line_in_directory_sync(
+                &directory,
+                &prefix_state,
+                &path,
+                line,
+                event_seq,
+                durability,
+            )
         })
         .await
         .map_err(io::Error::other)?
     }
 
     async fn append_sideband_event_with_durability(
-        session_dir: PathBuf,
+        session: std::sync::Arc<super::ContainedDirectory>,
         event: &chat_state::SidebandEvent,
         durability: AppendDurability,
     ) -> io::Result<()> {
@@ -456,13 +734,13 @@ impl JsonlStorageAdapter {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         line.push(b'\n');
         tokio::task::spawn_blocking(move || {
-            let parent = super::ContainedDirectory::open(
-                &session_dir,
+            let parent = session.open_relative(
                 &Path::new(super::SIDEBANDS_DIR).join(&sideband_id),
                 "sideband Timeline directory",
                 true,
             )?;
-            let path = session_dir
+            let path = session
+                .display_path()
                 .join(super::SIDEBANDS_DIR)
                 .join(&sideband_id)
                 .join(super::TIMELINE_FILE);
@@ -483,7 +761,10 @@ impl JsonlStorageAdapter {
         event: &chat_state::TimelineEvent,
         durability: AppendDurability,
     ) -> io::Result<()> {
-        Self::append_timeline_event_with_durability(self.timeline_file(info), event, durability)
+        self.ensure_writer_lease(info)?;
+        let directory = self.open_session(info)?.directory;
+        let prefix_state = self.timeline_prefix_state(info)?;
+        Self::append_timeline_event_with_durability(directory, prefix_state, event, durability)
             .await?;
         let mut patch = super::summary_write::SummaryPatch::default();
         match &event.kind {
@@ -528,7 +809,9 @@ impl JsonlStorageAdapter {
     /// committed fact and is truncated before the retry. Only the tail record
     /// is read, so append cost is independent of ledger length; strict loading
     /// remains responsible for detecting interior corruption.
-    fn append_timeline_line_sync(
+    fn append_timeline_line_in_directory_sync(
+        directory: &super::ContainedDirectory,
+        prefix_state: &std::sync::Mutex<Option<LedgerPrefix>>,
         path: &Path,
         line: Vec<u8>,
         event_seq: u64,
@@ -536,17 +819,7 @@ impl JsonlStorageAdapter {
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
         Self::validate_jsonl_line_size(&line, "Timeline event")?;
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Timeline path has no parent")
-        })?;
-        let name = path.file_name().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Timeline path has no file name",
-            )
-        })?;
-        let directory =
-            super::ContainedDirectory::open(parent, Path::new(""), "Timeline directory", false)?;
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
         #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, name, line, event_seq, durability);
@@ -556,7 +829,7 @@ impl JsonlStorageAdapter {
             ));
         }
         #[cfg(any(unix, windows))]
-        let lock = Self::lock_append_contained(&directory, name, path)?;
+        let lock = Self::lock_append_contained(directory, name, path)?;
         #[cfg(any(unix, windows))]
         let result = (|| {
             let mut file = directory.open_read_write_create(name)?;
@@ -570,6 +843,30 @@ impl JsonlStorageAdapter {
                 );
                 file.set_len(complete_len)?;
             }
+
+            let mut expected = prefix_state
+                .lock()
+                .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
+            let (actual_prefix, mut prefix_hasher) = Self::hash_timeline_prefix(
+                &mut file,
+                complete_len,
+                expected.is_none(),
+            )?;
+            if let Some(expected_prefix) = *expected
+                && expected_prefix != actual_prefix
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Timeline committed prefix changed: expected {} bytes/{}, found {} bytes/{}",
+                        expected_prefix.len,
+                        expected_prefix.hash.to_hex(),
+                        actual_prefix.len,
+                        actual_prefix.hash.to_hex(),
+                    ),
+                ));
+            }
+            *expected = Some(actual_prefix);
 
             match last_line.as_deref() {
                 Some(last_line) => {
@@ -613,6 +910,11 @@ impl JsonlStorageAdapter {
             file.seek(io::SeekFrom::End(0))?;
             file.write_all(&line)?;
             file.flush()?;
+            prefix_hasher.update(&line);
+            *expected = Some(LedgerPrefix {
+                len: complete_len.saturating_add(line.len() as u64),
+                hash: prefix_hasher.finalize(),
+            });
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
                 drop(file);
@@ -625,6 +927,54 @@ impl JsonlStorageAdapter {
             let _ = lock.unlock();
             result
         }
+    }
+
+    fn hash_timeline_prefix(
+        file: &mut std::fs::File,
+        complete_len: u64,
+        validate_structure: bool,
+    ) -> io::Result<(LedgerPrefix, blake3::Hasher)> {
+        file.seek(io::SeekFrom::Start(0))?;
+        let prefix_len = usize::try_from(complete_len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Timeline prefix is too large to validate on this platform",
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(prefix_len);
+        file.take(complete_len).read_to_end(&mut bytes)?;
+        if bytes.len() != prefix_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Timeline changed while its committed prefix was being validated",
+            ));
+        }
+        if validate_structure {
+            let mut events = Vec::new();
+            for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+                let json = record.strip_suffix(b"\n").ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Timeline committed prefix contains an incomplete record",
+                    )
+                })?;
+                events.push(
+                    serde_json::from_slice::<chat_state::TimelineEvent>(json)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                );
+            }
+            chat_state::Timeline::from_events(events)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&bytes);
+        Ok((
+            LedgerPrefix {
+                len: complete_len,
+                hash: hasher.finalize(),
+            },
+            hasher,
+        ))
     }
 
     fn append_sideband_line_sync(
@@ -823,6 +1173,16 @@ impl JsonlStorageAdapter {
                 .map_err(|error| {
                     io::Error::new(error.kind(), format!("open JSONL directory: {error}"))
                 })?;
+        Self::append_jsonl_line_in_directory_sync(&directory, name, path, line, durability)
+    }
+
+    fn append_jsonl_line_in_directory_sync(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        path: &Path,
+        mut line: Vec<u8>,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, name, line, durability);
@@ -832,7 +1192,7 @@ impl JsonlStorageAdapter {
             ));
         }
         #[cfg(any(unix, windows))]
-        let lock = Self::lock_append_contained(&directory, name, path)
+        let lock = Self::lock_append_contained(directory, name, path)
             .map_err(|error| io::Error::new(error.kind(), format!("lock JSONL append: {error}")))?;
         #[cfg(any(unix, windows))]
         let result = (|| {
@@ -912,6 +1272,29 @@ impl JsonlStorageAdapter {
         })();
         let _ = lock.unlock();
         result
+    }
+
+    #[cfg(test)]
+    fn append_timeline_line_sync(
+        path: &Path,
+        line: Vec<u8>,
+        event_seq: u64,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Timeline path has no parent")
+        })?;
+        let directory =
+            super::ContainedDirectory::open(parent, Path::new(""), "Timeline directory", false)?;
+        let prefix_state = std::sync::Mutex::new(None);
+        Self::append_timeline_line_in_directory_sync(
+            &directory,
+            &prefix_state,
+            path,
+            line,
+            event_seq,
+            durability,
+        )
     }
 
     fn validate_jsonl_line_size(line: &[u8], description: &str) -> io::Result<()> {
@@ -998,104 +1381,108 @@ impl JsonlStorageAdapter {
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
         super::sync_file_durable(file)
     }
-    #[cfg(unix)]
-    fn sync_parent_directory(path: &Path) -> io::Result<()> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "update has no parent"))?;
-        std::fs::File::open(parent)?.sync_all()
-    }
-    #[cfg(windows)]
-    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-    #[cfg(not(any(unix, windows)))]
-    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable directory sync is unsupported on this platform",
-        ))
-    }
-
-    /// Make every staged fork entry durable before the directory rename that
-    /// publishes it. Files are synced before their containing directories so
-    /// the published tree never depends on dirty child entries.
-    fn sync_staging_tree(path: &Path) -> io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                Self::sync_staging_tree(&entry.path())?;
-            } else if file_type.is_file() {
-                let file = std::fs::File::open(entry.path())?;
-                Self::sync_file_durable(&file)?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "unsupported entry in fork staging tree: {}",
-                        entry.path().display()
-                    ),
-                ));
-            }
-        }
-        #[cfg(unix)]
-        std::fs::File::open(path)?.sync_all()?;
-        Ok(())
-    }
-
-    /// Publish a completely built session directory at one no-replace commit
-    /// point. Fresh initialization and fork copy intentionally share this path.
-    fn publish_staged_session<T>(
-        staging_dir: &Path,
-        target_dir: &Path,
-        build_result: io::Result<T>,
+    /// Build a session beneath one pinned parent and publish that exact staged
+    /// directory with a single handle-relative no-replace rename. Creation,
+    /// fork, and import all use this transaction.
+    pub(crate) fn build_and_publish_session<T>(
+        parent: &super::ContainedDirectory,
+        target_name: &std::ffi::OsStr,
+        build: impl FnOnce(&super::ContainedDirectory) -> io::Result<T>,
     ) -> io::Result<T> {
-        match build_result {
-            Ok(result) => {
-                if let Err(error) = Self::publish_staged_directory(staging_dir, target_dir) {
-                    if let Err(cleanup_error) = std::fs::remove_dir_all(staging_dir) {
-                        tracing::warn!(
-                            path = %staging_dir.display(),
-                            %cleanup_error,
-                            "failed to clean session staging directory after publication failure"
-                        );
-                    }
-                    return Err(error);
-                }
-                Ok(result)
-            }
+        Self::build_and_publish_session_opened(parent, target_name, build)
+            .map(|(result, _)| result)
+    }
+
+    fn build_and_publish_session_opened<T>(
+        parent: &super::ContainedDirectory,
+        target_name: &std::ffi::OsStr,
+        build: impl FnOnce(&super::ContainedDirectory) -> io::Result<T>,
+    ) -> io::Result<(T, super::ContainedDirectory)> {
+        let staging_name = std::ffi::OsString::from(format!(
+            ".{}.{}.staging",
+            target_name.to_string_lossy(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        let staging = match parent.create_child(&staging_name, "session staging directory") {
+            Ok(staging) => staging,
             Err(error) => {
-                if let Err(cleanup_error) = std::fs::remove_dir_all(staging_dir) {
+                if let Err(cleanup_error) = parent.remove_tree_child(&staging_name)
+                    && cleanup_error.kind() != io::ErrorKind::NotFound
+                {
                     tracing::warn!(
-                        path = %staging_dir.display(),
+                        path = %parent.display_path().join(&staging_name).display(),
                         %cleanup_error,
-                        "failed to clean unpublished session staging directory"
+                        "failed to clean unconfirmed session staging directory"
                     );
                 }
-                Err(error)
+                return Err(error);
             }
-        }
-    }
-
-    /// Commit a fully built session directory. This is the single publication
-    /// primitive shared by session creation, fork copy, and session import.
-    pub(crate) fn publish_staged_directory(
-        staging_dir: &Path,
-        target_dir: &Path,
-    ) -> io::Result<()> {
-        Self::sync_staging_tree(staging_dir)?;
-        super::rename_no_replace(staging_dir, target_dir)?;
-        // Rename is the commit point. A parent-sync failure cannot be reported
-        // as uncommitted because retry would collide with the visible target.
-        if let Err(error) = Self::sync_parent_directory(target_dir) {
+        };
+        let built = build(&staging).and_then(|result| {
+            staging.sync_tree()?;
+            Ok(result)
+        });
+        let result = match built {
+            Ok(result) => match parent.rename_child_no_replace(&staging_name, target_name) {
+                Ok(()) => {
+                    // The namespace commit is already observable. A directory
+                    // fsync failure is therefore committed-unknown, not a safe
+                    // error to return and retry as a second entity.
+                    if let Err(error) = parent.sync() {
+                        tracing::warn!(
+                            path = %parent.display_path().join(target_name).display(),
+                            %error,
+                            "session published but parent directory sync failed"
+                        );
+                    }
+                    // Keep using the already-open staging capability. Reopening
+                    // the target after the namespace commit would introduce a
+                    // committed-unknown failure window (for example EMFILE) and
+                    // could observe a concurrently substituted directory.
+                    let published = staging.rebind_child_display_path(parent, target_name);
+                    return Ok((result, published));
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        if let Err(cleanup_error) = parent.remove_tree_child(&staging_name)
+            && cleanup_error.kind() != io::ErrorKind::NotFound
+        {
             tracing::warn!(
-                path = %target_dir.display(),
-                %error,
-                "session published but parent-directory sync failed"
+                path = %parent.display_path().join(&staging_name).display(),
+                %cleanup_error,
+                "failed to clean unpublished session staging directory"
             );
         }
-        Ok(())
+        result
+    }
+
+    fn build_publish_and_cache<T>(
+        &self,
+        info: &Info,
+        parent: &super::ContainedDirectory,
+        build: impl FnOnce(&super::ContainedDirectory) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let mut cache = self
+            .opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?;
+        if cache.contains_key(&key) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "session is already bound to this storage adapter",
+            ));
+        }
+        let target_name = info.id.to_string();
+        let (result, directory) = Self::build_and_publish_session_opened(
+            parent,
+            std::ffi::OsStr::new(&target_name),
+            build,
+        )?;
+        cache.insert(key, std::sync::Arc::new(directory));
+        Ok(result)
     }
     /// Write a full JSONL file (rewriting all items), crash-atomically: serialize
     /// to a temp file then rename over the target, so a crash / `ENOSPC` mid-write
@@ -1125,6 +1512,24 @@ impl JsonlStorageAdapter {
         )
     }
 
+    fn read_jsonl_from_directory<T: serde::de::DeserializeOwned>(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<Vec<T>> {
+        let file = match directory.open_regular(name, description) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        super::read_committed_jsonl_from_file(
+            file,
+            directory.display_path().join(name),
+            description,
+            super::MAX_JSONL_ENTRY_BYTES,
+        )
+    }
+
     /// Read every complete Timeline record. A final non-newline-terminated
     /// fragment was never committed and is ignored; every complete line is
     /// parsed strictly so interior corruption still fails closed.
@@ -1144,12 +1549,7 @@ impl JsonlStorageAdapter {
             "Timeline session directory",
             false,
         )?;
-        super::read_committed_jsonl_from_directory(
-            &directory,
-            name,
-            "mandatory Timeline ledger",
-            super::MAX_JSONL_ENTRY_BYTES,
-        )
+        Self::read_timeline_from_directory(&directory)
         .map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 io::Error::new(
@@ -1161,10 +1561,21 @@ impl JsonlStorageAdapter {
             }
         })
     }
+
+    fn read_timeline_from_directory(
+        directory: &super::ContainedDirectory,
+    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        super::read_committed_jsonl_from_directory(
+            directory,
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            "mandatory Timeline ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+        )
+    }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
     pub(super) async fn append_update_to_file(
         &self,
-        path: PathBuf,
+        info: &Info,
         update: &super::SessionUpdate,
         durability: AppendDurability,
     ) -> io::Result<()> {
@@ -1177,7 +1588,19 @@ impl JsonlStorageAdapter {
         let mut line = serde_json::to_vec(&envelope)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        Self::append_jsonl_line_blocking(path, line, durability).await
+        let directory = self.open_session(info)?.directory;
+        let path = directory.display_path().join(super::UPDATES_FILE);
+        tokio::task::spawn_blocking(move || {
+            Self::append_jsonl_line_in_directory_sync(
+                &directory,
+                std::ffi::OsStr::new(super::UPDATES_FILE),
+                &path,
+                line,
+                durability,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn append_update_with_bookkeeping(
         &self,
@@ -1185,7 +1608,9 @@ impl JsonlStorageAdapter {
         update: &super::SessionUpdate,
         durability: AppendDurability,
     ) -> Result<(), super::AppendUpdateError> {
-        self.append_update_to_file(self.updates_file(info), update, durability)
+        self.ensure_writer_lease(info)
+            .map_err(super::AppendUpdateError::NotCommitted)?;
+        self.append_update_to_file(info, update, durability)
             .await
             .map_err(super::AppendUpdateError::NotCommitted)?;
         self.apply_summary_patch(
@@ -1212,6 +1637,28 @@ impl JsonlStorageAdapter {
         let Some(iterator) = super::UpdatesIterator::open(&path)? else {
             return Ok(Vec::new());
         };
+        Self::collect_updates(iterator, &path)
+    }
+
+    fn read_updates_from_directory(
+        directory: &super::ContainedDirectory,
+    ) -> io::Result<Vec<super::SessionUpdate>> {
+        let path = directory.display_path().join(super::UPDATES_FILE);
+        let file = match directory.open_regular(
+            std::ffi::OsStr::new(super::UPDATES_FILE),
+            "session updates ledger",
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        Self::collect_updates(super::UpdatesIterator::from_file(file, path.clone()), &path)
+    }
+
+    fn collect_updates(
+        iterator: super::UpdatesIterator,
+        path: &Path,
+    ) -> io::Result<Vec<super::SessionUpdate>> {
         let mut skipped_lines: usize = 0;
         let mut updates = Vec::new();
         for parsed in iterator {
@@ -1249,16 +1696,309 @@ impl JsonlStorageAdapter {
         super::write_bytes_atomic(&summary_path, &bytes)
     }
     pub(crate) fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
-        let path = self.summary_file(info);
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "summary path has no parent")
-        })?;
-        let directory = super::ContainedDirectory::open(
-            parent,
-            Path::new(""),
-            "session summary directory",
+        Ok(self.open_session(info)?.summary)
+    }
+
+    pub(crate) fn open_session(&self, info: &Info) -> io::Result<OpenedSession> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let mut cache = self
+            .opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?;
+        let directory = match cache.get(&key) {
+            Some(directory) => directory.clone(),
+            None => {
+                let directory = self.session_directory(info, false)?;
+                let summary = Self::read_summary_from_directory(&directory)?;
+                Self::validate_session_identity(info, &summary)?;
+                let directory = std::sync::Arc::new(directory);
+                cache.insert(key, directory.clone());
+                return Ok(OpenedSession { directory, summary });
+            }
+        };
+        drop(cache);
+        let summary = Self::read_summary_from_directory(&directory)?;
+        Self::validate_session_identity(info, &summary)?;
+        Ok(OpenedSession { directory, summary })
+    }
+
+    pub(crate) fn open_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> io::Result<Option<OpenedSession>> {
+        if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "id-only resolution requires the canonical storage root",
+            ));
+        }
+        let authority = self.authority(false)?;
+        let sessions = match authority.open_relative(
+            Path::new("sessions"),
+            "sessions directory",
             false,
-        )?;
+        ) {
+            Ok(sessions) => sessions,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut found: Option<OpenedSession> = None;
+        for cwd_name in sessions.list_names()? {
+            if cwd_name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let cwd_dir = match sessions.open_relative(
+                Path::new(&cwd_name),
+                "session cwd directory",
+                false,
+            ) {
+                Ok(directory) => directory,
+                Err(_) => continue,
+            };
+            let session = match cwd_dir.open_relative(
+                Path::new(session_id),
+                "session directory",
+                false,
+            ) {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let summary = Self::read_summary_from_directory(&session)?;
+            Self::validate_physical_session_identity(
+                &cwd_name,
+                &cwd_dir,
+                std::ffi::OsStr::new(session_id),
+                &summary,
+            )?;
+            if found.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("duplicate canonical session id {session_id}"),
+                ));
+            }
+            let key = format!("{}\0{}", summary.info.id, summary.info.cwd);
+            let directory = std::sync::Arc::new(session);
+            self.opened_sessions
+                .lock()
+                .map_err(|_| io::Error::other("session capability cache poisoned"))?
+                .insert(key, directory.clone());
+            found = Some(OpenedSession { directory, summary });
+        }
+        Ok(found)
+    }
+
+    fn validate_physical_session_identity(
+        cwd_name: &std::ffi::OsStr,
+        cwd_directory: &super::ContainedDirectory,
+        session_name: &std::ffi::OsStr,
+        summary: &Summary,
+    ) -> io::Result<()> {
+        if session_name != std::ffi::OsStr::new(summary.info.id.0.as_ref()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session directory name conflicts with Summary id",
+            ));
+        }
+        let expected_cwd_name = crate::util::grow_home::encode_cwd_dirname(&summary.info.cwd);
+        if cwd_name != std::ffi::OsStr::new(&expected_cwd_name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session Summary cwd conflicts with its storage directory",
+            ));
+        }
+        if expected_cwd_name != urlencoding::encode(&summary.info.cwd).as_ref() {
+            let marker = cwd_directory.read_bounded(
+                std::ffi::OsStr::new(".cwd"),
+                "session cwd marker",
+                super::MAX_SESSION_SUMMARY_BYTES,
+            )?;
+            if marker != summary.info.cwd.as_bytes() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session cwd marker conflicts with Summary cwd",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_session_identity(info: &Info, summary: &Summary) -> io::Result<()> {
+        if summary.info.id.0 != info.id.0 || summary.info.cwd != info.cwd {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session identity mismatch: requested {}/{}, found {}/{}",
+                    info.id, info.cwd, summary.info.id, summary.info.cwd
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_session_by_id_sync(
+        &self,
+        session_id: &str,
+        cwd: Option<&str>,
+    ) -> io::Result<Option<Info>> {
+        let Some(opened) = self.open_session_by_id(session_id)? else {
+            return Ok(None);
+        };
+        if cwd.is_some_and(|expected| expected != opened.summary.info.cwd) {
+            return Ok(None);
+        }
+        let info = opened.summary.info.clone();
+        self.delete_opened_session(opened)?;
+        Ok(Some(info))
+    }
+
+    fn delete_opened_session(&self, opened: OpenedSession) -> io::Result<()> {
+        let info = opened.summary.info.clone();
+        self.ensure_writer_lease(&info)?;
+        let parent = self.open_session_parent(&info)?;
+        let name_string = info.id.to_string();
+        let name = std::ffi::OsStr::new(&name_string);
+        let quarantine_name = std::ffi::OsString::from(format!(
+            ".{}.{}.deleting",
+            info.id,
+            uuid::Uuid::now_v7().simple()
+        ));
+        parent.rename_child_no_replace(name, &quarantine_name)?;
+        if let Err(error) = parent.sync() {
+            tracing::warn!(
+                session_id = %info.id,
+                %error,
+                "session quarantine rename committed but parent sync failed"
+            );
+        }
+        let quarantined = match parent.open_relative(
+            std::path::Path::new(&quarantine_name),
+            "quarantined session directory",
+            false,
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                let _ = parent.rename_child_no_replace(&quarantine_name, name);
+                return Err(error);
+            }
+        };
+        let same_entity = match opened.directory().is_same_entity(&quarantined) {
+            Ok(same) => same,
+            Err(error) => {
+                let _ = parent.rename_child_no_replace(&quarantine_name, name);
+                return Err(error);
+            }
+        };
+        if !same_entity {
+            parent
+                .rename_child_no_replace(&quarantine_name, name)
+                .map_err(|restore_error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "session leaf changed during delete and quarantine restoration failed: {restore_error}"
+                        ),
+                    )
+                })?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session leaf changed during delete; replacement entity was preserved",
+            ));
+        }
+        quarantined.remove_all_contents()?;
+        parent.remove_empty_child(&quarantine_name, true)?;
+        let key = format!("{}\0{}", info.id, info.cwd);
+        self.writer_leases
+            .lock()
+            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
+            .remove(&key);
+        let lease_name = format!(".{}.writer.lock", info.id);
+        match parent.remove_file(std::ffi::OsStr::new(&lease_name), true) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?
+            .remove(&key);
+        Ok(())
+    }
+
+    fn ensure_writer_lease(&self, info: &Info) -> io::Result<()> {
+        if !self.try_acquire_writer_lease(info)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("session {} already has an active writer", info.id),
+            ));
+        }
+        Ok(())
+    }
+
+    fn try_acquire_writer_lease(&self, info: &Info) -> io::Result<bool> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let mut leases = self
+            .writer_leases
+            .lock()
+            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?;
+        if leases.contains_key(&key) {
+            return Ok(true);
+        }
+        let parent = self.open_session_parent(info)?;
+        let lease_name = format!(".{}.writer.lock", info.id);
+        let lease = parent.open_read_write_create(std::ffi::OsStr::new(&lease_name))?;
+        match lease.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        leases.insert(key, lease);
+        Ok(true)
+    }
+
+    /// Delete only whole, identity-checked stale session entities. A live
+    /// writer lease makes the entity ineligible; individual files are never
+    /// aged or removed independently.
+    pub(crate) fn cleanup_stale_sessions_sync(
+        &self,
+        ttl_days: u32,
+        skip_session_dir: Option<&Path>,
+    ) -> io::Result<(u32, u32)> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(ttl_days));
+        let mut deleted = 0u32;
+        let mut errors = 0u32;
+        for opened in self.scan_opened_sessions(None)? {
+            if skip_session_dir.is_some_and(|skip| opened.directory().display_path() == skip) {
+                continue;
+            }
+            let activity = opened
+                .summary()
+                .last_active_at
+                .unwrap_or(opened.summary().updated_at);
+            if activity >= cutoff {
+                continue;
+            }
+            match self.try_acquire_writer_lease(&opened.summary().info) {
+                Ok(false) => continue,
+                Ok(true) => match self.delete_opened_session(opened) {
+                    Ok(()) => deleted = deleted.saturating_add(1),
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, "failed to delete stale session entity");
+                    }
+                },
+                Err(error) => {
+                    errors = errors.saturating_add(1);
+                    tracing::warn!(%error, "failed to acquire stale session writer lease");
+                }
+            }
+        }
+        Ok((deleted, errors))
+    }
+
+    fn read_summary_from_directory(
+        directory: &super::ContainedDirectory,
+    ) -> io::Result<Summary> {
         let bytes = directory.read_bounded(
             std::ffi::OsStr::new(super::SUMMARY_FILE),
             "session summary",
@@ -1267,7 +2007,10 @@ impl JsonlStorageAdapter {
         if bytes.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("summary.json is empty (0 bytes): {}", path.display()),
+                format!(
+                    "summary.json is empty (0 bytes): {}",
+                    directory.display_path().join(super::SUMMARY_FILE).display()
+                ),
             ));
         }
         let summary = serde_json::from_slice::<Summary>(&bytes)
@@ -1331,13 +2074,7 @@ impl JsonlStorageAdapter {
         if run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let session_dir = self.session_dir(info);
-        let session = super::ContainedDirectory::open(
-            &session_dir,
-            Path::new(""),
-            "Workflow session directory",
-            false,
-        )?;
+        let session = self.open_session(info)?.directory;
         let mut restored = Vec::new();
         for run_id in run_ids {
             let run_relative = Path::new("workflows").join(&run_id);
@@ -1462,29 +2199,14 @@ impl JsonlStorageAdapter {
         initial_prompt_blobs: crate::session::persistence::ImmutablePromptBlobs,
         initial_facts: Vec<chat_state::TimelineEventKind>,
     ) -> io::Result<(Summary, Vec<chat_state::TimelineEvent>)> {
-        let target_dir = self.session_dir(info);
-        match std::fs::symlink_metadata(&target_dir) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("session already exists: {}", target_dir.display()),
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
         let parent = self.ensure_session_parent(info)?;
-        let staging_dir = parent.join(format!(
-            ".{}.{}.staging",
-            info.id,
-            uuid::Uuid::now_v7().simple()
-        ));
-        std::fs::create_dir(&staging_dir)?;
-        let staging = Self::with_explicit_session_dir(staging_dir.clone());
-        let build_result = (|| {
-            crate::session::persistence::write_initial_prompt_blobs(
+        let result = self.build_publish_and_cache(
+            info,
+            &parent,
+            |staging| {
+            crate::session::persistence::write_initial_prompt_blobs_to_directory(
                 &initial_surface,
-                &staging_dir,
+                staging,
                 &initial_prompt_blobs,
             )?;
             let mut timeline = Timeline::from_seed(initial_surface)
@@ -1494,11 +2216,23 @@ impl JsonlStorageAdapter {
                     .record(fact)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            super::write_jsonl_atomic(&staging.timeline_file(info), timeline.events())?;
-            staging.write_summary_sync(info, &summary)?;
+            staging.write_atomic(
+                std::ffi::OsStr::new(super::TIMELINE_FILE),
+                &super::to_jsonl_bytes(timeline.events())?,
+                true,
+                false,
+            )?;
+            staging.write_atomic(
+                std::ffi::OsStr::new(super::SUMMARY_FILE),
+                &super::serialize_summary(&summary)?,
+                true,
+                false,
+            )?;
             Ok((summary, timeline.events().to_vec()))
-        })();
-        Self::publish_staged_session(&staging_dir, &target_dir, build_result)
+            },
+        )?;
+        self.ensure_writer_lease(info)?;
+        Ok(result)
     }
     /// Like [`Self::apply_summary_patch`], but returns whether a
     /// a newer canonical title projection was applied (see [`Summary::apply_patch`]).
@@ -1507,10 +2241,15 @@ impl JsonlStorageAdapter {
         info: &Info,
         patch: super::summary_write::SummaryPatch,
     ) -> io::Result<bool> {
-        let summary_path = self.summary_file(info);
-        let lock_path = self.summary_lock_file(info);
+        self.ensure_writer_lease(info)?;
+        let directory = self.open_session(info)?.directory;
         tokio::task::spawn_blocking(move || {
-            super::summary_write::apply_patch_locked(&summary_path, &lock_path, &patch)
+            super::summary_write::apply_patch_locked_in_directory(
+                &directory,
+                std::ffi::OsStr::new(super::SUMMARY_FILE),
+                std::ffi::OsStr::new("summary.json.lock"),
+                &patch,
+            )
         })
         .await
         .map_err(io::Error::other)?
@@ -1604,70 +2343,27 @@ fn is_source_bound_projection_update(update: &super::SessionUpdate) -> bool {
 /// Apply fork-safety filtering to the selected Surface before copying.
 ///
 /// 1. Removes synthetic user messages (doom loop warnings, compaction metadata)
-/// 2. Truncates at the last complete turn boundary. A complete turn runs
-///    `User → Assistant → (matching ToolResults)`, possibly across multiple
-///    Assistant/ToolResult cycles, with `Reasoning` siblings interleaved
-///    throughout (real grow-build turns emit `[reasoning, assistant, tool
-///    results, reasoning, assistant, ...]`). The scan treats everything
-///    except `Assistant` as transparent and only advances the boundary when an
-///    Assistant closes every tool call it made, so it survives reasoning
-///    interleaving. Trailing incomplete turns — including a trailing
-///    user/reasoning tail with no matching assistant response (e.g. the
-///    in-flight `/goal` turn) — are removed so the child never sees an
-///    incoherent partial turn.
+/// 2. Truncates at chat-state's canonical complete-turn boundary. Trailing
+///    incomplete turns — including a trailing user/reasoning tail with no
+///    matching assistant response (e.g. the in-flight `/goal` turn) — are
+///    removed so the child never sees an incoherent partial turn.
 ///
 /// Also used by the live parent-chat fork path (summarized fallback only — the
 /// verbatim mirror path keeps items unfiltered to preserve cached synthetics).
 ///
-/// NOTE: this is one of two reasoning-aware turn-boundary scanners that must move
-/// together — the other is `count_complete_turns` in
-/// `agent/subagent/resolution/context.rs` (it counts turns in the same
-/// filtered list during summarization). Keep their notions of a "complete turn"
-/// in sync if the turn item model changes.
 pub(crate) fn fork_filter_surface(items: &mut Vec<ConversationItem>) {
     items.retain(|item| match item {
         ConversationItem::User(u) => u.synthetic_reason.is_none(),
         _ => true,
     });
-    let mut last_complete_end = 0;
-    let mut i = 0;
-    while i < items.len() {
-        match &items[i] {
-            ConversationItem::System(_) => {
-                last_complete_end = i + 1;
-                i += 1;
-            }
-            ConversationItem::Assistant(asst) => {
-                let expected: std::collections::HashSet<&str> =
-                    asst.tool_calls.iter().map(|tc| tc.id.as_ref()).collect();
-                let mut found = std::collections::HashSet::new();
-                let mut j = i + 1;
-                while j < items.len() {
-                    match &items[j] {
-                        ConversationItem::ToolResult(tr) => {
-                            if expected.contains(tr.tool_call_id.as_str()) {
-                                found.insert(tr.tool_call_id.as_str());
-                            }
-                            j += 1;
-                        }
-                        ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {
-                            j += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                if found == expected {
-                    last_complete_end = j;
-                    i = j;
-                } else {
-                    break;
-                }
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
+    let leading_system_end = items
+        .iter()
+        .take_while(|item| matches!(item, ConversationItem::System(_)))
+        .count();
+    let last_complete_end = chat_state::compaction_utils::complete_turn_ends(items.iter())
+        .last()
+        .copied()
+        .unwrap_or(leading_system_end);
     items.truncate(last_complete_end);
 }
 fn conversation_truncate_after_prompt(
@@ -1679,20 +2375,54 @@ fn conversation_truncate_after_prompt(
 
 fn copy_referenced_prompt_blobs(
     surface: &[ConversationItem],
-    source_session_dir: &Path,
-    staging_session_dir: &Path,
+    source_session: &super::ContainedDirectory,
+    staging_session: &super::ContainedDirectory,
 ) -> io::Result<usize> {
     let hashes = crate::session::persistence::referenced_prompt_blob_hashes(surface)?;
     for hash in &hashes {
-        let bytes =
-            crate::session::persistence::verified_prompt_blob_bytes(source_session_dir, hash)?;
+        let bytes = crate::session::persistence::verified_prompt_blob_bytes_from_directory(
+            source_session,
+            hash,
+        )?;
         let target = Path::new("prompts").join(format!("{hash}.txt"));
-        crate::session::persistence::write_immutable_blob(staging_session_dir, &target, &bytes)?;
+        crate::session::persistence::write_immutable_blob_to_directory(
+            staging_session,
+            &target,
+            &bytes,
+        )?;
     }
     Ok(hashes.len())
 }
 
 impl JsonlStorageAdapter {
+    fn authority(&self, create_root: bool) -> io::Result<super::ContainedDirectory> {
+        if let Some(authority) = self.authority.get() {
+            return authority.try_clone();
+        }
+        let root = match &self.dir_mode {
+            SessionDirMode::FromRoot(root) => {
+                if create_root {
+                    Self::ensure_storage_root(root)?;
+                }
+                root.as_path()
+            }
+            SessionDirMode::Explicit(dir) => dir.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no parent")
+            })?,
+        };
+        let opened = super::ContainedDirectory::open(
+            root,
+            Path::new(""),
+            "session storage authority",
+            false,
+        )?;
+        let _ = self.authority.set(opened);
+        self.authority
+            .get()
+            .expect("session authority initialized")
+            .try_clone()
+    }
+
     /// Fully synchronous version of `copy_session_data` for use inside
     /// `spawn_blocking`. The entire staged copy uses synchronous bounded
     /// storage primitives, without nesting `spawn_blocking` calls.
@@ -1702,33 +2432,19 @@ impl JsonlStorageAdapter {
         target_info: &Info,
         options: super::CopySessionOptions,
     ) -> io::Result<super::CopySessionResult> {
-        let target_dir = self.session_dir(target_info);
-        match std::fs::symlink_metadata(&target_dir) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("fork target already exists: {}", target_dir.display()),
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
         let parent = self.ensure_session_parent(target_info)?;
-        let staging_dir = parent.join(format!(
-            ".{}.{}.staging",
-            target_info.id,
-            uuid::Uuid::now_v7().simple()
-        ));
-        std::fs::create_dir(&staging_dir)?;
-        let target_storage = Self::with_explicit_session_dir(staging_dir.clone());
-        let build_result = (|| {
-            let source_summary = self.read_summary_sync(source_info)?;
-            let source_events = self.read_timeline(self.timeline_file(source_info))?;
+        let source_session = self.open_session(source_info)?;
+        self.build_publish_and_cache(
+            target_info,
+            &parent,
+            |staging| {
+            let source_summary = source_session.summary().clone();
+            let source_events = source_session.timeline_events()?;
             let source_timeline = Timeline::from_events(source_events)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             let mut surface_to_copy = source_timeline.surface().to_vec();
             let mut updates_to_copy: Vec<super::SessionUpdate> =
-                self.read_updates_jsonl(self.updates_file(source_info))?;
+                Self::read_updates_from_directory(source_session.directory())?;
             if let Some(target_idx) = options.target_prompt_index {
                 updates_to_copy = super::filter_rewind_updates(updates_to_copy);
                 updates_to_copy.truncate(updates_truncate_for_prompt(&updates_to_copy, target_idx));
@@ -1757,8 +2473,8 @@ impl JsonlStorageAdapter {
             }
             let prompt_blobs_copied = copy_referenced_prompt_blobs(
                 &surface_to_copy,
-                &self.session_dir(source_info),
-                &target_storage.session_dir(target_info),
+                source_session.directory(),
+                staging,
             )?;
             if options.strip_reasoning {
                 surface_to_copy =
@@ -1808,7 +2524,12 @@ impl JsonlStorageAdapter {
                 sandbox_profile: source_summary.sandbox_profile,
                 reasoning_effort: source_summary.reasoning_effort,
             };
-            target_storage.write_summary_sync(target_info, &target_summary)?;
+            staging.write_atomic(
+                std::ffi::OsStr::new(super::SUMMARY_FILE),
+                &super::serialize_summary(&target_summary)?,
+                true,
+                false,
+            )?;
             // A fork starts a new event lineage from the inherited surface. Source
             // replacement identities cannot be copied after truncation, filtering,
             // cwd transformation, or reasoning stripping.
@@ -1826,8 +2547,10 @@ impl JsonlStorageAdapter {
                     control.goal = None;
                     if matches!(
                         control.behavior.state,
-                        crate::session::behavior::BehaviorState::Goal
+                        crate::session::behavior::BehaviorState::Plan(_)
+                            | crate::session::behavior::BehaviorState::Workflow
                             | crate::session::behavior::BehaviorState::DeepResearch { .. }
+                            | crate::session::behavior::BehaviorState::Goal
                     ) {
                         control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
                     }
@@ -1853,9 +2576,11 @@ impl JsonlStorageAdapter {
                     .record(announcement_state.timeline_kind()?)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            super::write_jsonl_atomic(
-                &target_storage.timeline_file(target_info),
-                fork_timeline.events(),
+            staging.write_atomic(
+                std::ffi::OsStr::new(super::TIMELINE_FILE),
+                &super::to_jsonl_bytes(fork_timeline.events())?,
+                true,
+                false,
             )?;
             let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
                 .into_iter()
@@ -1866,9 +2591,11 @@ impl JsonlStorageAdapter {
                 .map(SessionUpdateEnvelope::from_update)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            super::write_jsonl_atomic(
-                &target_storage.updates_file(target_info),
-                &update_envelopes,
+            staging.write_atomic(
+                std::ffi::OsStr::new(super::UPDATES_FILE),
+                &super::to_jsonl_bytes(&update_envelopes)?,
+                true,
+                false,
             )?;
             Ok(super::CopySessionResult {
                 surface_items_copied,
@@ -1876,34 +2603,35 @@ impl JsonlStorageAdapter {
                 control_event_seeded,
                 prompt_blobs_copied,
             })
-        })();
-
-        Self::publish_staged_session(&staging_dir, &target_dir, build_result)
+            },
+        )
     }
 }
 #[async_trait]
 impl StorageAdapter for JsonlStorageAdapter {
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
-        let _ = self.ensure_session_dir(info)?;
-        let summary_path = self.summary_file(info);
-        match std::fs::symlink_metadata(&summary_path) {
-            Ok(_) => {
+        match self.open_session(info) {
+            Ok(opened) => {
                 tracing::info!("Loading existing session from JSONL");
-                let summary = self.read_summary_sync(info)?;
-                let timeline = Timeline::from_events(self.read_timeline(self.timeline_file(info))?)
+                let summary = opened.summary().clone();
+                let timeline = Timeline::from_events(opened.timeline_events()?)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                let _ = self.read_sideband_ledgers_sync(info, &timeline)?;
+                let _ = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
                 Ok(summary)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 tracing::info!("Creating new session in JSONL");
                 let mut summary = Summary::new(info, model_id)?;
                 summary.sandbox_profile = sandbox::configured_profile_name().map(String::from);
-                // The summary is the publication marker. Commit the mandatory empty
-                // ledger first so a visible session can never exist without its
-                // sole causal source of truth.
-                super::write_bytes_atomic(&self.timeline_file(info), &[])?;
-                self.write_summary_sync(info, &summary)?;
+                let (summary, _) = self
+                    .init_session_with_summary(
+                        info,
+                        summary,
+                        Vec::new(),
+                        Default::default(),
+                        Vec::new(),
+                    )
+                    .await?;
                 Ok(summary)
             }
             Err(error) => Err(error),
@@ -1971,11 +2699,11 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         event: &chat_state::SidebandEvent,
     ) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
         chat_state::validate_sideband_id(&event.sideband_id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let session_dir = self.session_dir(info);
-        Self::append_sideband_event_with_durability(session_dir, event, AppendDurability::Durable)
-            .await
+        let session = self.open_session(info)?.directory;
+        Self::append_sideband_event_with_durability(session, event, AppendDurability::Durable).await
     }
     async fn update_current_model_and_agent(
         &self,
@@ -2017,33 +2745,43 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         manifest: &crate::session::workflow::store::WorkflowRunManifest,
     ) -> io::Result<()> {
-        let session_dir = self.session_dir(info);
+        self.ensure_writer_lease(info)?;
+        let session = self.open_session(info)?.directory;
         let manifest = manifest.clone();
         tokio::task::spawn_blocking(move || {
-            crate::session::workflow::store::write_workflow_run_manifest(&session_dir, &manifest)
+            crate::session::workflow::store::write_workflow_run_manifest_in_directory(
+                &session,
+                &manifest,
+            )
         })
         .await
         .map_err(io::Error::other)?
     }
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()> {
-        let session_dir = self.session_dir(info);
+        self.ensure_writer_lease(info)?;
+        let session = self.open_session(info)?.directory;
         let run_id = run_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            crate::session::workflow::store::tombstone_workflow_run(&session_dir, &run_id)
+            crate::session::workflow::store::tombstone_workflow_run_in_directory(
+                &session,
+                &run_id,
+            )
         })
         .await
         .map_err(io::Error::other)?
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
-        let summary = self.read_summary_sync(info)?;
-        let timeline_events = self.read_timeline(self.timeline_file(info))?;
+        let opened = self.open_session(info)?;
+        let summary = opened.summary().clone();
+        let timeline_events = opened.timeline_events()?;
         let timeline = Timeline::from_events(timeline_events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::session::persistence::verify_timeline_prompt_blobs(
-            &self.session_dir(info),
+        crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
+            opened.directory(),
             &timeline,
         )?;
-        let _ = self.read_sideband_ledgers_sync(info, &timeline)?;
+        let sidebands = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
+        self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
             .await?;
@@ -2051,7 +2789,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
                 timeline.events(),
             )?;
-        let updates = self.read_updates_jsonl(self.updates_file(info))?;
+        let updates = Self::read_updates_from_directory(opened.directory())?;
         let signals =
             crate::session::signals::SessionSignals::latest_from_timeline(timeline.events())?;
         let announcement_state =
@@ -2059,7 +2797,11 @@ impl StorageAdapter for JsonlStorageAdapter {
                 timeline.events(),
             )?;
         let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
-        let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
+        let rewind_points = Self::read_jsonl_from_directory::<RewindPoint>(
+            opened.directory(),
+            std::ffi::OsStr::new("rewind_points.jsonl"),
+            "rewind points ledger",
+        )?;
         let result = PersistedData {
             summary,
             timeline_events,
@@ -2089,15 +2831,17 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
-        let summary = self.read_summary_sync(info)?;
-        let timeline_events = self.read_timeline(self.timeline_file(info))?;
+        let opened = self.open_session(info)?;
+        let summary = opened.summary().clone();
+        let timeline_events = opened.timeline_events()?;
         let timeline = Timeline::from_events(timeline_events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::session::persistence::verify_timeline_prompt_blobs(
-            &self.session_dir(info),
+        crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
+            opened.directory(),
             &timeline,
         )?;
-        let _ = self.read_sideband_ledgers_sync(info, &timeline)?;
+        let sidebands = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
+        self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
             .await?;
@@ -2150,42 +2894,107 @@ impl StorageAdapter for JsonlStorageAdapter {
             .map_err(io::Error::other)?
     }
     async fn delete_session(&self, info: &Info) -> io::Result<()> {
-        let dir = self.session_dir(info);
-        match tokio::fs::remove_dir_all(&dir).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }
+        let opened = match self.open_session(info) {
+            Ok(opened) => opened,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.delete_opened_session(opened)
     }
     async fn append_rewind_point(&self, info: &Info, point: &RewindPoint) -> io::Result<()> {
-        self.append_jsonl(self.rewind_points_file(info), point)
-            .await
+        self.ensure_writer_lease(info)?;
+        let mut line = serde_json::to_vec(point)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        line.push(b'\n');
+        let directory = self.open_session(info)?.directory;
+        let path = directory.display_path().join("rewind_points.jsonl");
+        tokio::task::spawn_blocking(move || {
+            Self::append_jsonl_line_in_directory_sync(
+                &directory,
+                std::ffi::OsStr::new("rewind_points.jsonl"),
+                &path,
+                line,
+                AppendDurability::Buffered,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>> {
         let info_clone = info.clone();
         let adapter_clone = self.clone();
         tokio::task::spawn_blocking(move || {
             let adapter = adapter_clone;
-            let path = adapter.rewind_points_file(&info_clone);
-            adapter.read_jsonl::<RewindPoint>(path)
+            let opened = adapter.open_session(&info_clone)?;
+            Self::read_jsonl_from_directory::<RewindPoint>(
+                opened.directory(),
+                std::ffi::OsStr::new("rewind_points.jsonl"),
+                "rewind points ledger",
+            )
         })
         .await
         .map_err(io::Error::other)?
     }
-    async fn truncate_rewind_points_from(&self, info: &Info, from_index: usize) -> io::Result<()> {
-        let points = self.load_rewind_points(info).await?;
-        let filtered: Vec<RewindPoint> = points
-            .into_iter()
-            .filter(|p| p.prompt_index < from_index)
-            .collect();
-        self.write_jsonl(self.rewind_points_file(info), &filtered)
-            .await
+    async fn replace_rewind_points(
+        &self,
+        info: &Info,
+        points: &[RewindPoint],
+    ) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
+        let bytes = super::to_jsonl_bytes(points)?;
+        let directory = self.open_session(info)?.directory;
+        tokio::task::spawn_blocking(move || {
+            directory.write_atomic(
+                std::ffi::OsStr::new("rewind_points.jsonl"),
+                &bytes,
+                true,
+                true,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
     }
-    async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()> {
-        let points = self.load_rewind_points(info).await?;
-        let merged = workspace::session::file_state::merge_rewind_points_from(points, target_index);
-        self.write_jsonl(self.rewind_points_file(info), &merged)
-            .await
+    async fn write_rewind_transaction(
+        &self,
+        info: &Info,
+        transaction: &crate::session::persistence::RewindTransaction,
+    ) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
+        transaction.validate()?;
+        let bytes = serde_json::to_vec(transaction).map_err(io::Error::other)?;
+        if bytes.len() as u64 > crate::session::persistence::MAX_REWIND_TRANSACTION_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rewind transaction exceeds its byte limit",
+            ));
+        }
+        let directory = self.open_session(info)?.directory;
+        tokio::task::spawn_blocking(move || {
+            directory.write_atomic(
+                std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
+                &bytes,
+                true,
+                true,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+    async fn clear_rewind_transaction(&self, info: &Info) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
+        let directory = self.open_session(info)?.directory;
+        tokio::task::spawn_blocking(move || {
+            match directory.remove_file(
+                std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
+                true,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn copy_session_data(
         &self,
@@ -2203,9 +3012,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))?
     }
     async fn load_prompt_records(&self, info: &Info) -> io::Result<Vec<chat_state::PromptRecord>> {
-        let timeline_path = self.timeline_file(info);
+        let directory = self.open_session(info)?.directory;
         tokio::task::spawn_blocking(move || {
-            let events = super::read_timeline_file(&timeline_path)?;
+            let events = Self::read_timeline_from_directory(&directory)?;
             let timeline = chat_state::Timeline::from_events(events)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             Ok(timeline.prompt_records())
@@ -2213,14 +3022,25 @@ impl StorageAdapter for JsonlStorageAdapter {
         .await
         .map_err(io::Error::other)?
     }
-    fn timeline_file_path(&self, info: &Info) -> Option<std::path::PathBuf> {
-        Some(self.timeline_file(info))
-    }
-    fn updates_file_path(&self, info: &Info) -> Option<std::path::PathBuf> {
-        Some(self.updates_file(info))
-    }
-    fn rewind_points_file_path(&self, info: &Info) -> Option<std::path::PathBuf> {
-        Some(self.rewind_points_file(info))
+    fn open_timeline_reader(&self, info: &Info) -> io::Result<super::TimelineLedgerReader> {
+        let opened = self.open_session(info)?;
+        let file = opened
+            .directory()
+            .open_regular(std::ffi::OsStr::new(super::TIMELINE_FILE), "mandatory Timeline ledger")
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "mandatory Timeline ledger is missing",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        super::TimelineLedgerReader::from_file(
+            file,
+            opened.directory().display_path().join(super::TIMELINE_FILE),
+        )
     }
 }
 #[cfg(test)]

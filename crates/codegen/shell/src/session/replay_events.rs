@@ -105,55 +105,12 @@ impl SessionNotification {
 #[derive(Debug)]
 pub(crate) enum SessionEvent {
     Notification(SessionNotification),
-    /// A deferred task or Goal-stage completion became ready outside the
+    /// A deferred task completion became ready outside the
     /// actor mailbox. Wakes the actor so an idle session can synthesize a
     /// model turn; an active turn drains it at its next safe boundary.
     ForegroundWake,
-    /// A background Goal stage (planner or verifier) finished
-    /// its model work. The mailbox validates the captured lease and commits
-    /// the pure state part; a stale completion (goal paused / cleared /
-    /// revised, or foreground context changed) is dropped with diagnostics.
-    /// The stage task never awaits the mailbox, so the mailbox is never
-    /// blocked on model work (B1: verification now runs off the actor loop).
-    GoalStageCompleted(GoalStageCompletion),
     FlushReplay {
         respond_to: Option<oneshot::Sender<()>>,
-    },
-}
-
-/// Payload of [`SessionEvent::GoalStageCompleted`]. Carries the lease the
-/// stage was scheduled under (goal identity + definition revision +
-/// autonomy generation + foreground completion generation) plus the stage's
-/// outcome (or a string error when the stage task itself failed) and the
-/// child subagent id once the coordinator produced a terminal result for it
-/// (`None` when the spawn infrastructure failed before the child ran).
-#[derive(Debug)]
-pub(crate) struct GoalStageCompletion {
-    pub(crate) lease: crate::session::goal_tracker::StageLease,
-    pub(crate) subagent_id: Option<String>,
-    pub(crate) kind: GoalStageKind,
-}
-
-#[derive(Debug)]
-pub(crate) enum GoalStageKind {
-    /// The planner no longer returns a Markdown document: its plan is
-    /// committed through `finalize_goal_plan`, so a clean completion
-    /// carries no payload. The mailbox decides from the current lease
-    /// whether the stage finalized (ignore) or ended without finalizing
-    /// (respawn accounting).
-    Planner(Result<(), String>),
-    Verifier(Result<GoalVerifierOutcome, String>),
-}
-
-#[derive(Debug)]
-pub(crate) enum GoalVerifierOutcome {
-    Achieved,
-    NotAchieved {
-        feedback: String,
-        fingerprint: String,
-    },
-    Blocked {
-        message: String,
     },
 }
 

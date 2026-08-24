@@ -214,12 +214,9 @@ pub struct SessionContext {
         Option<crate::implementations::grow_build::scheduler::types::SchedulerHandle>,
     /// Available skills for the Skill tool and description templates.
     pub skills: Vec<SkillInfo>,
-    /// Exact `resources_state.json` path for persisting Resources across restarts.
-    ///
-    /// The toolset loads existing state on construction and auto-saves
-    /// after every tool execution. The file stores serialized `State<T>`
-    /// values (e.g., `TodoState`). An empty path disables persistence.
-    pub state_path: PathBuf,
+    /// Session-owned persistence capability. The toolset loads its snapshot on
+    /// construction and auto-saves after every tool execution.
+    pub resources_persistence: Arc<ResourcesPersistence>,
     /// Optional memory backend for cross-session knowledge retrieval.
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
     /// tools can access it. When `None`, the tools return "not enabled".
@@ -603,12 +600,9 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::KillTaskTool>();
         b.register::<grow_build::KillTerminalCommandTool>();
         b.register::<grow_build::TodoWriteTool>();
+        b.register::<grow_build::CreateGoalTool>();
         b.register::<grow_build::GetGoalTool>();
-        b.register::<grow_build::UpdateGoalProgressTool>();
-        b.register::<grow_build::RequestGoalReplanTool>();
         b.register::<grow_build::UpdateGoalTool>();
-        b.register::<grow_build::SubmitGoalPlanSectionTool>();
-        b.register::<grow_build::FinalizeGoalPlanTool>();
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::TaskOutputTool>();
         b.register::<grow_build::GetTerminalCommandOutputTool>();
@@ -927,11 +921,7 @@ impl ToolRegistryBuilder {
         for entry in self.tools.values() {
             (entry.register_params)(&mut resources);
         }
-        let persistence = if ctx.state_path.as_os_str().is_empty() {
-            Arc::new(ResourcesPersistence::noop())
-        } else {
-            Arc::new(ResourcesPersistence::new(ctx.state_path))
-        };
+        let persistence = ctx.resources_persistence;
         persistence.load(&mut resources);
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
         for tool_config in &config.tools {
@@ -1679,12 +1669,12 @@ impl FinalizedToolset {
         self.resources_persistence.flush().await;
     }
     /// Serialize current in-memory state, write it to disk, and wait for
-    /// the write to complete. Returns the path to the persisted file.
+    /// the write to complete.
     ///
     /// Unlike `flush_persistence()` (which only flushes previously queued
     /// snapshots), this method captures a **fresh** snapshot of the current
     /// `Resources` and ensures it hits disk before returning.
-    pub async fn save_and_flush_persistence(&self) -> std::io::Result<&std::path::Path> {
+    pub async fn save_and_flush_persistence(&self) -> std::io::Result<()> {
         // Snapshot creation and persistence-command ordering are one critical
         // section. Every ordinary resource update enqueues while holding this
         // same lock, so a durable snapshot can neither overtake nor overwrite
@@ -1695,7 +1685,7 @@ impl FinalizedToolset {
                 .enqueue_save_and_flush(res.serialize())?
         };
         crate::persistence::ResourcesPersistence::await_save_and_flush(acknowledgement).await?;
-        Ok(self.resources_persistence.state_path())
+        Ok(())
     }
 
     /// Record a model image-input rejection as one cancellation-safe resource
@@ -1989,7 +1979,10 @@ mod tests {
             subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
-            state_path: tmp.path().join("resources_state.json"),
+            resources_persistence: Arc::new(
+                ResourcesPersistence::local(tmp.path().join("resources_state.json"))
+                    .expect("pin resources state test store"),
+            ),
             memory_backend: None,
             web_fetch_config:
                 crate::implementations::grow_build::web_fetch::WebFetchConfig::default(),

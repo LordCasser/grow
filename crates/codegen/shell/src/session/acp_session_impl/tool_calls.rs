@@ -63,6 +63,18 @@ fn record_tool_span_outcome(
     span.record("tool_result_size_bytes", result_size);
     success
 }
+
+fn undispatched_tool_outcome(action: &ToolLoop) -> &'static str {
+    match action {
+        ToolLoop::Continue => "not_dispatched",
+        ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => "invalid_tool",
+        ToolLoop::PermissionReject { .. } => "permission_rejected",
+        ToolLoop::Cancelled => "permission_cancelled",
+        ToolLoop::PermissionTimedOut { .. } => "permission_timed_out",
+        ToolLoop::FollowupMessage(_) => "followup",
+        ToolLoop::HookDenied { .. } => "hook_denied",
+    }
+}
 /// Blocking wait tools that should abort when a mid-turn interjection is pending.
 fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool {
     match tool_name {
@@ -568,6 +580,28 @@ fn revise_plan_message(feedback: &str) -> String {
         format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
+
+async fn write_plan_artifact_async(
+    session: std::sync::Arc<crate::session::storage::ContainedDirectory>,
+    markdown: String,
+) -> std::io::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        crate::session::behavior::write_plan_artifact(&session, &markdown)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn read_plan_artifact_async(
+    session: std::sync::Arc<crate::session::storage::ContainedDirectory>,
+    hash: String,
+) -> std::io::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        crate::session::behavior::read_plan_artifact(&session, &hash)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
 /// What the resume re-park does with the user's decision. Extracted
 /// from `resume_plan_approval` so the branch logic is unit-testable without
 /// driving a real turn.
@@ -690,7 +724,31 @@ impl SessionActor {
         final_result: &mut Option<ToolLoop>,
     ) -> Result<(), acp::Error> {
         let mut approved: Vec<PreparedToolCall> = Vec::new();
-        for call in tool_calls.into_iter() {
+        for mut call in tool_calls.into_iter() {
+            if call.id.is_empty() {
+                call.id = format!("synthetic-{}", uuid::Uuid::now_v7());
+            }
+            let frozen_input = serde_json::from_str::<serde_json::Value>(
+                crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
+                    &call.function.arguments,
+                ),
+            )
+            .unwrap_or_else(
+                |_| serde_json::json!({ "raw_arguments": call.function.arguments.clone() }),
+            );
+            if let Err(error) = self
+                .events
+                .tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    Some(frozen_input),
+                )
+                .await
+            {
+                self.events.cancel_active_tool();
+                return Err(acp::Error::internal_error()
+                    .data(format!("tool call was not durably recorded: {error}")));
+            }
             if final_result.is_some() {
                 let message = match &*final_result {
                     Some(ToolLoop::PermissionReject { .. }) => {
@@ -723,29 +781,73 @@ impl SessionActor {
                 };
                 self.chat_state_handle
                     .push_tool_result(ConversationItem::tool_result(call.id.clone(), message));
+                self.events
+                    .tool_completed_durably(
+                        &call.id,
+                        "cancelled".into(),
+                        Some(serde_json::json!({
+                            "dispatched": false,
+                            "stage": "batch_cancelled",
+                        })),
+                    )
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "cancelled tool call was not durably closed: {error}"
+                        ))
+                    })?;
                 continue;
             }
-            self.emit_event(crate::session::events::Event::ToolStarted {
-                tool_name: call.function.name.clone(),
-            });
+            let call_id = call.id.clone();
             let call_name = call.function.name.clone();
-            match self.prepare_tool_call(call, deferred_followups).await? {
+            let tool_call_id = acp::ToolCallId::new(Arc::from(call_id.clone()));
+            let prepared = match self.prepare_tool_call(call, deferred_followups).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.handle_tool_not_executed(
+                        &call_id,
+                        &tool_call_id,
+                        format!(
+                            "Tool `{call_name}` could not be admitted because the session runtime failed."
+                        ),
+                    )
+                    .await?;
+                    self.events
+                        .tool_completed_durably(
+                            &call_id,
+                            "error".into(),
+                            Some(serde_json::json!({
+                                "dispatched": false,
+                                "stage": "preflight",
+                            })),
+                        )
+                        .await
+                        .map_err(|timeline_error| {
+                            acp::Error::internal_error().data(format!(
+                                "failed tool admission was not durably closed: {timeline_error}"
+                            ))
+                        })?;
+                    return Err(error);
+                }
+            };
+            match prepared {
                 Ok(prepared) => approved.push(prepared),
                 Err(tool_loop) => {
-                    if let Some((server, tool)) =
-                        crate::session::mcp_servers::parse_mcp_tool_name(&call_name)
-                    {
-                        let error_reason = match &tool_loop {
-                            ToolLoop::PermissionReject { reason, .. } => reason.clone(),
-                            ToolLoop::Cancelled => "cancelled".to_string(),
-                            ToolLoop::PermissionTimedOut { .. } => "permission_timeout".to_string(),
-                            ToolLoop::FollowupMessage(_) => "followup".to_string(),
-                            ToolLoop::HookDenied { hook_name, .. } => {
-                                format!("hook_denied:{hook_name}")
-                            }
-                            other => format!("{other:?}"),
-                        };
-                    }
+                    self.events
+                        .tool_completed_durably(
+                            &call_id,
+                            undispatched_tool_outcome(&tool_loop).into(),
+                            Some(serde_json::json!({
+                                "dispatched": false,
+                                "stage": "preflight",
+                            })),
+                        )
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "undispatched tool call was not durably closed: {error}"
+                            ))
+                        })?;
                     if matches!(
                         tool_loop,
                         ToolLoop::PermissionReject { .. }
@@ -782,31 +884,23 @@ impl SessionActor {
                     format!("{reason}: `{}` was not executed", prepared.tool_name),
                 )
                 .await?;
+                self.events
+                    .tool_completed_durably(
+                        &prepared.call_id,
+                        "cancelled".into(),
+                        Some(serde_json::json!({
+                            "dispatched": false,
+                            "stage": "batch_cancelled",
+                        })),
+                    )
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "cancelled tool call was not durably closed: {error}"
+                        ))
+                    })?;
             }
             return Ok(());
-        }
-
-        // Tool execution is a fail-closed boundary. Persist every approved
-        // start before any dispatch future is allowed to poll.
-        for prepared in &mut approved {
-            if prepared.call_id.is_empty() {
-                prepared.call_id = format!("synthetic-{}", uuid::Uuid::now_v7());
-            }
-        }
-        for prepared in &approved {
-            if let Err(error) = self
-                .events
-                .tool_started(
-                    prepared.tool_name.clone(),
-                    prepared.call_id.clone(),
-                    Some(prepared.parsed_args.clone()),
-                )
-                .await
-            {
-                self.events.cancel_active_tool();
-                return Err(acp::Error::internal_error()
-                    .data(format!("tool start was not durably recorded: {error}")));
-            }
         }
         let write_paths: std::collections::HashSet<String> = approved
             .iter()
@@ -1144,13 +1238,17 @@ impl SessionActor {
                 &tool_call_id,
                 duration_ms,
             );
-            self.emit_event(crate::session::events::Event::ToolCompleted {
-                tool_name: prepared.tool_name.clone(),
-                duration_ms,
-                outcome: tool_outcome,
-                tool_call_id: tool_call_id.clone(),
-                source: crate::session::events::ToolCompletedSource::Shell,
-            });
+            self.events
+                .tool_completed_durably(
+                    &tool_call_id,
+                    <&'static str>::from(tool_outcome).to_owned(),
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("tool completion was not durably recorded: {error}"))
+                })?;
             ::diagnostics::session_ctx::log_event(::diagnostics::events::ToolCallCompleted {
                 tool_name: prepared.tool_name.clone(),
                 outcome: tool_outcome.into(),
@@ -1893,28 +1991,33 @@ impl SessionActor {
                 // Persist the control-plane artifact before opening approval UI.
                 // This is not a workspace edit and does not grant the Agent an
                 // Edit tool.
-                let plan_file_path = self.behavior.lock().plan_file_path().to_path_buf();
-                if let Err(error) = crate::session::storage::write_bytes_atomic_async(
-                    &plan_file_path,
-                    plan_content.as_bytes().to_vec(),
+                let artifact_hash = match write_plan_artifact_async(
+                    self.session_directory.clone(),
+                    plan_content.clone(),
                 )
                 .await
                 {
-                    tracing::warn!(
-                        path = %plan_file_path.display(),
-                        %error,
-                        "failed to persist submitted plan before approval"
-                    );
-                    self.handle_tool_not_executed(
-                        &call.id,
-                        &tool_call_id,
-                        format!("Failed to persist the plan artifact: {error}"),
-                    )
-                    .await?;
-                    return Ok(Err(ToolLoop::Continue));
-                }
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "failed to persist submitted plan before approval"
+                        );
+                        self.handle_tool_not_executed(
+                            &call.id,
+                            &tool_call_id,
+                            format!("Failed to persist the plan artifact: {error}"),
+                        )
+                        .await?;
+                        return Ok(Err(ToolLoop::Continue));
+                    }
+                };
                 let previous_behavior = self.behavior.lock().snapshot();
                 self.behavior.lock().record_plan_artifact(&plan_content);
+                debug_assert_eq!(
+                    self.behavior.lock().plan_artifact_hash(),
+                    Some(artifact_hash.as_str())
+                );
                 let submitted = match input.action {
                     PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
                     PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
@@ -2004,28 +2107,6 @@ impl SessionActor {
                             return Ok(Err(ToolLoop::Continue));
                         }
                         PlanApprovalOutcome::Approved => {
-                            let approved_path =
-                                self.behavior.lock().approved_plan_file_path().to_path_buf();
-                            if let Err(error) = crate::session::storage::write_bytes_atomic_async(
-                                &approved_path,
-                                plan_content.as_bytes().to_vec(),
-                            )
-                            .await
-                            {
-                                tracing::error!(%error, "failed to freeze approved Plan artifact");
-                                let previous_behavior = self.behavior.lock().snapshot();
-                                self.behavior.lock().reject_submitted_plan();
-                                let _ = self
-                                    .commit_behavior_mutation_or_restore(previous_behavior)
-                                    .await;
-                                self.handle_tool_not_executed(
-                                    &call.id,
-                                    &tool_call_id,
-                                    format!("Failed to freeze the approved Plan: {error}"),
-                                )
-                                .await?;
-                                return Ok(Err(ToolLoop::Continue));
-                            }
                             let previous_behavior = self.behavior.lock().snapshot();
                             if !self.behavior.lock().approve_submitted_plan() {
                                 self.handle_tool_not_executed(
@@ -2205,9 +2286,21 @@ impl SessionActor {
             tracing::debug!("plan_control resume: approval already pending; skip re-park");
             return;
         }
-        let plan_path = self.behavior.lock().plan_file_path().to_path_buf();
-        let plan_content = match tokio::fs::read_to_string(&plan_path).await {
-            Ok(s) if !s.trim().is_empty() => s,
+        let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
+        let plan_content = match artifact_hash {
+            Some(hash) => {
+                match read_plan_artifact_async(self.session_directory.clone(), hash).await {
+                    Ok(content) if !content.trim().is_empty() => content,
+                    _ => {
+                        tracing::info!(
+                            "plan_control resume: candidate artifact is unavailable; clearing approval state"
+                        );
+                        self.behavior.lock().set_approval_pending(false);
+                        self.record_control_snapshot();
+                        return;
+                    }
+                }
+            }
             _ => {
                 tracing::info!("plan_control resume: no candidate plan; clearing approval state");
                 self.behavior.lock().set_approval_pending(false);
@@ -2253,21 +2346,6 @@ impl SessionActor {
             }
             ResumeAction::LeaveAndImplement => {
                 tracing::info!("plan_control resume: user approved Plan");
-                let approved_path = self.behavior.lock().approved_plan_file_path().to_path_buf();
-                if let Err(error) = crate::session::storage::write_bytes_atomic_async(
-                    &approved_path,
-                    plan_content.as_bytes().to_vec(),
-                )
-                .await
-                {
-                    tracing::error!(%error, "failed to freeze approved Plan artifact on resume");
-                    let previous_behavior = self.behavior.lock().snapshot();
-                    self.behavior.lock().reject_submitted_plan();
-                    let _ = self
-                        .commit_behavior_mutation_or_restore(previous_behavior)
-                        .await;
-                    return;
-                }
                 let previous_behavior = self.behavior.lock().snapshot();
                 self.behavior.lock().approve_submitted_plan();
                 if self
@@ -2520,43 +2598,25 @@ impl SessionActor {
                 let title = format!("Workflow: {}", w.action_label());
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
+            ToolInput::CreateGoal(ref goal) => (
+                format!("Goal: create — {}", goal.objective),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::UpdateGoal(ref ug) => {
-                let title = match ug.action {
-                    tools::implementations::grow_build::update_goal::UpdateGoalAction::CandidateComplete => {
-                        "Goal: requesting verification".to_string()
+                let title = match ug.status {
+                    tools::implementations::grow_build::update_goal::GoalUpdateStatus::Complete => {
+                        "Goal: complete".to_string()
                     }
-                    tools::implementations::grow_build::update_goal::UpdateGoalAction::Blocked => {
-                        format!("Goal: blocked — {}", ug.message)
+                    tools::implementations::grow_build::update_goal::GoalUpdateStatus::Blocked => {
+                        "Goal: blocked".to_string()
                     }
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
-            ToolInput::UpdateGoalProgress(_) => (
-                "Goal: update progress".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::RequestGoalReplan(_) => (
-                "Goal: request replan".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
             ToolInput::GetGoal(_) => (
                 "Goal: read status".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::SubmitGoalPlanSection(_) => (
-                "Goal: submit plan section".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::FinalizeGoalPlan(_) => (
-                "Goal: finalize plan".to_string(),
                 acp::ToolKind::Other,
                 vec![],
                 vec![],
@@ -2863,7 +2923,11 @@ impl SessionActor {
                 &result.output,
                 tools::types::output::ToolOutput::PlanControl(_)
             ) {
-                let plan_path = self.behavior.lock().plan_file_path().display().to_string();
+                let plan_ref = self
+                    .behavior
+                    .lock()
+                    .plan_artifact_ref()
+                    .unwrap_or_else(|| "artifact:plan:unavailable".to_string());
                 if let Some(ref mut content) = tool_update.fields.content {
                     for item in content.iter_mut() {
                         if let acp::ToolCallContent::Content(acp::Content {
@@ -2871,7 +2935,7 @@ impl SessionActor {
                             ..
                         }) = item
                         {
-                            t.text = format!("Plan file: {}", plan_path);
+                            t.text = format!("Plan artifact: {plan_ref}");
                         }
                     }
                 }
@@ -3124,12 +3188,7 @@ impl SessionActor {
             SamplingEvent::StreamStarted { timestamp_ms, .. } => {
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
-            SamplingEvent::FirstToken { request_id } => {
-                self.events
-                    .request_event(chat_state::RequestEvent::FirstToken {
-                        id: request_id.as_str().to_string(),
-                    });
-            }
+            SamplingEvent::FirstToken { .. } => {}
             SamplingEvent::ChannelToken {
                 channel,
                 text,
@@ -3137,9 +3196,6 @@ impl SessionActor {
                 ..
             } => match channel {
                 SamplingChannel::Text => {
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingText,
-                    });
                     self.send_update(
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                             acp::ContentBlock::Text(acp::TextContent::new(text)),
@@ -3149,9 +3205,6 @@ impl SessionActor {
                     .await;
                 }
                 SamplingChannel::Reasoning => {
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingReasoning,
-                    });
                     self.send_thought_chunk(text, chunk_index).await;
                 }
             },
@@ -3249,7 +3302,7 @@ impl SessionActor {
                 doom_loop_aborted_at_chunk,
             } => {
                 self.events
-                    .request_event(chat_state::RequestEvent::Retrying {
+                    .request_retrying(chat_state::RequestEvent::Retrying {
                         id: request_id.as_str().to_string(),
                         attempt,
                         max_retries,
@@ -3334,11 +3387,9 @@ impl SessionActor {
     }
     /// Model-facing rejection for an ordinary file edit while Plan is active.
     pub(super) async fn plan_mode_edit_rejected_message(&self) -> String {
-        let plan_path = self.behavior.lock().plan_file_path().to_path_buf();
         self.render_plan_template(
             crate::session::behavior::plan_mode_edit_rejected_template(),
-            &plan_path,
-            false,
+            "",
         )
         .await
         .unwrap_or_else(|| {
@@ -3390,9 +3441,35 @@ fn execute_tool_call_parts(
     )
 }
 #[cfg(test)]
-mod execute_tool_call_parts_tests {
-    use super::execute_tool_call_parts;
+mod tool_call_pipeline_tests {
+    use super::{ToolLoop, execute_tool_call_parts, undispatched_tool_outcome};
     use std::path::Path;
+
+    #[test]
+    fn preflight_terminals_keep_their_causal_outcome() {
+        assert_eq!(
+            undispatched_tool_outcome(&ToolLoop::Continue),
+            "not_dispatched"
+        );
+        assert_eq!(
+            undispatched_tool_outcome(&ToolLoop::ToolParsingError),
+            "invalid_tool"
+        );
+        assert_eq!(
+            undispatched_tool_outcome(&ToolLoop::PermissionReject {
+                tool_name: "bash".into(),
+                reason: "denied".into(),
+            }),
+            "permission_rejected"
+        );
+        assert_eq!(
+            undispatched_tool_outcome(&ToolLoop::HookDenied {
+                hook_name: "guard".into(),
+            }),
+            "hook_denied"
+        );
+    }
+
     #[test]
     fn peels_redundant_session_cd_from_title() {
         let (title, ..) =
@@ -3471,7 +3548,7 @@ mod plan_mode_edit_gate_tests {
     /// Tracker in Plan Drafting with the session artifact at
     /// `/tmp/gate-session/plan.md`.
     fn active_tracker() -> BehaviorCoordinator {
-        let mut t = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
+        let mut t = BehaviorCoordinator::new();
         assert!(t.select_behavior(tool_types::BehaviorId::Plan));
         t
     }
@@ -3812,12 +3889,12 @@ mod plan_mode_edit_gate_tests {
     /// Normal allows edits; a selected Drafting Plan already narrows them.
     #[test]
     fn inactive_allows_edits_but_pending_plan_rejects_them() {
-        let inactive = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
+        let inactive = BehaviorCoordinator::new();
         assert_eq!(
             gate(&inactive, &search_replace("/tmp/src/main.rs")),
             PlanEditGate::Allow
         );
-        let mut pending = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
+        let mut pending = BehaviorCoordinator::new();
         assert!(pending.select_behavior(tool_types::BehaviorId::Plan));
         assert_eq!(
             gate(&pending, &search_replace("/tmp/src/main.rs")),

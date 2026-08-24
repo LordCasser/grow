@@ -380,8 +380,6 @@ fn soak_request(id: String, background: bool) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         goal_context: None,
-        goal_stage_submit: None,
-        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -605,7 +603,7 @@ async fn subagent_lifecycle_soak_bounds_threads_fds_and_heap() {
                 SubagentCoordinator::new(command_rx, SoakRunner { gate: gate.clone() }, config)
                     .run(),
             );
-            let backend = ChannelBackend::new(command_tx);
+            let backend = ChannelBackend::for_session(command_tx, "parent");
 
             let warmup_quiesced = warmup(&backend, bounds.warmup).await;
             // Drain the concurrent phase into the baseline; a failed drain marks

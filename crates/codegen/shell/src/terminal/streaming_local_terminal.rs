@@ -239,7 +239,7 @@ pub async fn kill_and_release_all_for_session(session_id: &str) {
     // `LocalSet` thread. Awaiting `child.wait()` here would keep this session's
     // command loop parked until each process is reaped — delaying its
     // `session/prompt` resolution and, worse, its idle-unload (`Shutdown` /
-    // `IsBusy` queue behind the in-flight cancel, so the leader cannot evict a
+    // `UnloadIfIdle` queues behind the in-flight cancel, so the leader cannot evict a
     // session stuck waiting on a slow-dying child). Reaping in a detached task
     // lets cancellation return immediately. The children are already SIGKILL'd
     // and `KillOnDrop` is armed, so they are torn down regardless of whether

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tools::implementations::grow_build::workflow::{
@@ -107,25 +107,45 @@ pub(crate) struct WorkflowCatalog {
 }
 
 pub(crate) struct WorkflowWorkspace {
-    root: PathBuf,
+    root: crate::session::storage::ContainedDirectory,
     state: WorkspaceState,
 }
 
 impl WorkflowWorkspace {
+    #[cfg(test)]
     pub(crate) fn open(session_dir: &Path, cwd: &Path) -> Result<Self, WorkspaceError> {
-        let root = session_dir.join("workflow-workspace");
-        match std::fs::symlink_metadata(&root) {
-            Ok(_) => require_real_directory(&root)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(WorkspaceError::Io {
-                    path: root.display().to_string(),
-                    error: error.to_string(),
-                });
-            }
-        }
-        let state_path = root.join("state.json");
-        let state = load_state(&state_path)?.unwrap_or_default();
+        let session = crate::session::storage::ContainedDirectory::open(
+            session_dir,
+            Path::new(""),
+            "Workflow test session",
+            false,
+        )
+        .map_err(|error| WorkspaceError::Io {
+            path: session_dir.display().to_string(),
+            error: error.to_string(),
+        })?;
+        Self::open_in_session(&session, cwd)
+    }
+
+    pub(crate) fn open_in_session(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+    ) -> Result<Self, WorkspaceError> {
+        let root = session
+            .open_relative(
+                Path::new("workflow-workspace"),
+                "Workflow workspace",
+                true,
+            )
+            .map_err(|error| WorkspaceError::Io {
+                path: session
+                    .display_path()
+                    .join("workflow-workspace")
+                    .display()
+                    .to_string(),
+                error: error.to_string(),
+            })?;
+        let state = load_state(&root)?.unwrap_or_default();
         let mut workspace = Self { root, state };
         workspace.recover_pending_publish(cwd)?;
         workspace.refresh_content_hashes()?;
@@ -154,7 +174,7 @@ impl WorkflowWorkspace {
                 }
                 Err(error) => diagnostics.push(WorkflowDiagnostic {
                     scope: WorkflowScope::Session,
-                    path: Some(self.root.join(&draft.script_file).display().to_string()),
+                    path: Some(self.draft_display_path(draft).display().to_string()),
                     code: "invalid_draft".into(),
                     message: error.to_string(),
                 }),
@@ -301,7 +321,6 @@ impl WorkflowWorkspace {
     pub(crate) fn draft(
         &mut self,
         cwd: &Path,
-        session_dir: &Path,
         expected_name: Option<&str>,
         input: WorkflowDraftSource,
     ) -> Result<WorkflowDefinition, WorkspaceError> {
@@ -325,7 +344,7 @@ impl WorkflowWorkspace {
                 (registry::resolve_inline(script)?, DraftSource::Inline)
             }
             WorkflowDraftSource::File { path } => {
-                let resolved = registry::resolve_by_path(Path::new(&path), cwd, Some(session_dir))?;
+                let resolved = registry::resolve_by_path(Path::new(&path), cwd, None)?;
                 let source_path = match &resolved.source {
                     WorkflowSource::File(path) => path.display().to_string(),
                     WorkflowSource::Builtin | WorkflowSource::Inline => {
@@ -456,8 +475,7 @@ impl WorkflowWorkspace {
                 // happen. Re-observe filesystem truth because a platform I/O
                 // error may still arrive after the rename became durable.
                 if self.resolve_pending_publish(cwd)? {
-                    let mut resolved =
-                        registry::resolve_by_path(&target_path, cwd, Some(&self.root))?;
+                    let mut resolved = registry::resolve_by_path(&target_path, cwd, None)?;
                     resolved.definition_id = target_id;
                     resolved.scope = scope;
                     return Ok(self.definition_from_saved(resolved));
@@ -467,16 +485,13 @@ impl WorkflowWorkspace {
         };
         let draft_path = self.complete_pending_publish()?;
         self.persist()?;
-        if let Some(draft_path) = draft_path
-            && require_real_directory(draft_path.parent().expect("draft path has parent")).is_ok()
+        if let Some(script_file) = draft_path
+            && let Err(error) = self.remove_draft_file(&script_file)
+            && error.kind() != std::io::ErrorKind::NotFound
         {
-            if let Err(error) = std::fs::remove_file(&draft_path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(path = %draft_path.display(), %error, "failed to remove published workflow draft");
-            }
+            tracing::warn!(path = %self.root.display_path().join(&script_file).display(), %error, "failed to remove published workflow draft");
         }
-        let mut resolved = registry::resolve_by_path(&path, cwd, Some(&self.root))?;
+        let mut resolved = registry::resolve_by_path(&path, cwd, None)?;
         resolved.definition_id = target_id;
         resolved.scope = scope;
         Ok(self.definition_from_saved(resolved))
@@ -499,9 +514,7 @@ impl WorkflowWorkspace {
         else {
             return Ok(false);
         };
-        let path = self.root.join(&draft.script_file);
-        require_real_directory(path.parent().expect("draft path has parent"))?;
-        let script = registry::read_trusted_source(&path)?;
+        let script = self.read_draft(draft)?;
         if registry::content_hash(&script) != content_hash {
             return Ok(false);
         }
@@ -532,9 +545,8 @@ impl WorkflowWorkspace {
             .iter()
             .position(|draft| &draft.definition_id == definition_id)
             .ok_or_else(|| WorkspaceError::NotDraft(definition_id.0.clone()))?;
-        let path = self.root.join(&self.state.drafts[index].script_file);
-        require_real_directory(path.parent().expect("draft path has parent"))?;
         let draft = self.state.drafts.remove(index);
+        let script_file = draft.script_file.clone();
         if self.state.focused_definition_id.as_ref() == Some(definition_id) {
             self.state.focused_definition_id = match draft.source {
                 DraftSource::Definition { definition_id, .. } => Some(definition_id),
@@ -542,10 +554,10 @@ impl WorkflowWorkspace {
             };
         }
         self.persist()?;
-        if let Err(error) = std::fs::remove_file(&path)
+        if let Err(error) = self.remove_draft_file(&script_file)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::warn!(path = %path.display(), %error, "failed to remove discarded workflow draft");
+            tracing::warn!(path = %self.root.display_path().join(&script_file).display(), %error, "failed to remove discarded workflow draft");
         }
         Ok(())
     }
@@ -589,10 +601,8 @@ impl WorkflowWorkspace {
         &self,
         draft: &DraftRecord,
     ) -> Result<WorkflowDefinition, WorkspaceError> {
-        let path = self.root.join(&draft.script_file);
-        require_real_directory(&self.root)?;
-        require_real_directory(path.parent().expect("draft path has parent"))?;
-        let script = registry::read_trusted_source(&path)?;
+        let path = self.draft_display_path(draft);
+        let script = self.read_draft(draft)?;
         let meta = registry::parse_workflow(&script, None)?;
         if meta.name != draft.name {
             return Err(WorkspaceError::InvalidState(format!(
@@ -655,49 +665,108 @@ impl WorkflowWorkspace {
         Ok(WorkflowDefinition { summary, resolved })
     }
 
-    fn write_draft(&self, draft: &DraftRecord, script: &str) -> Result<(), WorkspaceError> {
-        let path = self.root.join(&draft.script_file);
-        let parent = path.parent().expect("draft path has parent");
-        std::fs::create_dir_all(parent).map_err(|error| WorkspaceError::Io {
-            path: parent.display().to_string(),
-            error: error.to_string(),
+    fn draft_display_path(&self, draft: &DraftRecord) -> std::path::PathBuf {
+        self.root.display_path().join(&draft.script_file)
+    }
+
+    fn open_drafts(
+        &self,
+        create_missing: bool,
+    ) -> Result<crate::session::storage::ContainedDirectory, WorkspaceError> {
+        self.root
+            .open_relative(
+                Path::new("drafts"),
+                "Workflow draft directory",
+                create_missing,
+            )
+            .map_err(|error| WorkspaceError::Io {
+                path: self
+                    .root
+                    .display_path()
+                    .join("drafts")
+                    .display()
+                    .to_string(),
+                error: error.to_string(),
+            })
+    }
+
+    fn draft_name(script_file: &str) -> Result<&std::ffi::OsStr, WorkspaceError> {
+        let path = Path::new(script_file);
+        if path.parent() != Some(Path::new("drafts"))
+            || path.components().count() != 2
+            || path.file_name().is_none()
+        {
+            return Err(WorkspaceError::InvalidState(format!(
+                "invalid Workflow draft path: {script_file}"
+            )));
+        }
+        Ok(path.file_name().expect("checked above"))
+    }
+
+    fn read_draft(&self, draft: &DraftRecord) -> Result<String, WorkspaceError> {
+        let name = Self::draft_name(&draft.script_file)?;
+        let drafts = self.open_drafts(false)?;
+        let bytes = drafts
+            .read_bounded(name, "Workflow draft", registry::MAX_WORKFLOW_SOURCE_BYTES)
+            .map_err(|error| WorkspaceError::Io {
+                path: self.draft_display_path(draft).display().to_string(),
+                error: error.to_string(),
+            })?;
+        String::from_utf8(bytes).map_err(|error| {
+            WorkspaceError::InvalidState(format!(
+                "{} is not valid UTF-8: {error}",
+                self.draft_display_path(draft).display()
+            ))
+        })
+    }
+
+    fn remove_draft_file(&self, script_file: &str) -> std::io::Result<()> {
+        let name = Self::draft_name(script_file).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
         })?;
-        require_real_directory(&self.root)?;
-        require_real_directory(parent)?;
-        atomic_write(&path, script.as_bytes())
+        self.root
+            .open_relative(Path::new("drafts"), "Workflow draft directory", false)?
+            .remove_file(name, true)
+    }
+
+    fn write_draft(&self, draft: &DraftRecord, script: &str) -> Result<(), WorkspaceError> {
+        let name = Self::draft_name(&draft.script_file)?;
+        let drafts = self.open_drafts(true)?;
+        drafts
+            .write_atomic(name, script.as_bytes(), true, true)
+            .map_err(|error| WorkspaceError::Io {
+                path: self.draft_display_path(draft).display().to_string(),
+                error: error.to_string(),
+            })
     }
 
     fn persist(&self) -> Result<(), WorkspaceError> {
-        std::fs::create_dir_all(&self.root).map_err(|error| WorkspaceError::Io {
-            path: self.root.display().to_string(),
-            error: error.to_string(),
-        })?;
-        require_real_directory(&self.root)?;
         let bytes = serde_json::to_vec_pretty(&self.state)
             .map_err(|error| WorkspaceError::InvalidState(error.to_string()))?;
-        atomic_write(&self.root.join("state.json"), &bytes)
+        self.root
+            .write_atomic(std::ffi::OsStr::new("state.json"), &bytes, true, true)
+            .map_err(|error| WorkspaceError::Io {
+                path: self
+                    .root
+                    .display_path()
+                    .join("state.json")
+                    .display()
+                    .to_string(),
+                error: error.to_string(),
+            })
     }
 
     fn lock_state(&self) -> Result<std::fs::File, WorkspaceError> {
         use fs2::FileExt as _;
 
-        std::fs::create_dir_all(&self.root).map_err(|error| WorkspaceError::Io {
-            path: self.root.display().to_string(),
-            error: error.to_string(),
-        })?;
-        require_real_directory(&self.root)?;
-        let path = self.root.join("state.lock");
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(&path).map_err(|error| WorkspaceError::Io {
-            path: path.display().to_string(),
-            error: error.to_string(),
-        })?;
+        let path = self.root.display_path().join("state.lock");
+        let file = self
+            .root
+            .open_read_write_create(std::ffi::OsStr::new("state.lock"))
+            .map_err(|error| WorkspaceError::Io {
+                path: path.display().to_string(),
+                error: error.to_string(),
+            })?;
         file.lock_exclusive().map_err(|error| WorkspaceError::Io {
             path: path.display().to_string(),
             error: error.to_string(),
@@ -706,8 +775,7 @@ impl WorkflowWorkspace {
     }
 
     fn reload_state(&mut self) -> Result<(), WorkspaceError> {
-        let path = self.root.join("state.json");
-        self.state = load_state(&path)?.unwrap_or_default();
+        self.state = load_state(&self.root)?.unwrap_or_default();
         Ok(())
     }
 
@@ -758,21 +826,17 @@ impl WorkflowWorkspace {
                 return Ok(false);
             }
         };
-        let actual_hash = registry::read_trusted_source(&target)
-            .ok()
-            .map(|script| registry::content_hash(&script));
-        let target_missing = matches!(
-            std::fs::symlink_metadata(&target),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        );
+        let target_script = registry::read_publish_target(cwd, pending.scope, target_name)?;
+        let actual_hash = target_script.as_deref().map(registry::content_hash);
+        let target_missing = target_script.is_none();
         if actual_hash.as_deref() == Some(pending.content_hash.as_str()) {
             let draft_path = self.complete_pending_publish()?;
             self.persist()?;
-            if let Some(draft_path) = draft_path
-                && let Err(error) = std::fs::remove_file(&draft_path)
+            if let Some(script_file) = draft_path
+                && let Err(error) = self.remove_draft_file(&script_file)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
-                tracing::warn!(path = %draft_path.display(), %error, "failed to remove recovered published workflow draft");
+                tracing::warn!(path = %self.root.display_path().join(&script_file).display(), %error, "failed to remove recovered published workflow draft");
             }
             return Ok(true);
         }
@@ -799,7 +863,7 @@ impl WorkflowWorkspace {
     /// editor changed the draft after the publish intent captured its hash,
     /// retain that newer content as a draft derived from the just-published
     /// Definition instead of deleting it.
-    fn complete_pending_publish(&mut self) -> Result<Option<PathBuf>, WorkspaceError> {
+    fn complete_pending_publish(&mut self) -> Result<Option<String>, WorkspaceError> {
         let pending = self.state.pending_publish.take().ok_or_else(|| {
             WorkspaceError::InvalidState("publish intent disappeared before commit".into())
         })?;
@@ -813,8 +877,9 @@ impl WorkflowWorkspace {
                     "publish intent references a missing session draft".into(),
                 )
             })?;
-        let draft_path = self.root.join(&self.state.drafts[index].script_file);
-        let current_hash = registry::read_trusted_source(&draft_path)
+        let script_file = self.state.drafts[index].script_file.clone();
+        let current_hash = self
+            .read_draft(&self.state.drafts[index])
             .ok()
             .map(|script| registry::content_hash(&script));
         let remove_draft = current_hash.as_deref() == Some(pending.content_hash.as_str());
@@ -845,7 +910,7 @@ impl WorkflowWorkspace {
         self.state
             .validated_hashes
             .insert(pending.target_definition_id, pending.content_hash);
-        Ok(remove_draft.then_some(draft_path))
+        Ok(remove_draft.then_some(script_file))
     }
 
     fn refresh_content_hashes(&mut self) -> Result<(), WorkspaceError> {
@@ -855,20 +920,13 @@ impl WorkflowWorkspace {
         let _lock = self.lock_state()?;
         self.reload_state()?;
         let mut changed = false;
-        for draft in &mut self.state.drafts {
-            let path = self.root.join(&draft.script_file);
-            let Some(parent) = path.parent() else {
-                continue;
-            };
-            if require_real_directory(parent).is_err() {
-                continue;
-            }
-            let Ok(script) = registry::read_trusted_source(&path) else {
+        for index in 0..self.state.drafts.len() {
+            let Ok(script) = self.read_draft(&self.state.drafts[index]) else {
                 continue;
             };
             let hash = registry::content_hash(&script);
-            if draft.content_hash != hash {
-                draft.content_hash = hash;
+            if self.state.drafts[index].content_hash != hash {
+                self.state.drafts[index].content_hash = hash;
                 changed = true;
             }
         }
@@ -879,11 +937,16 @@ impl WorkflowWorkspace {
     }
 }
 
-fn load_state(path: &Path) -> Result<Option<WorkspaceState>, WorkspaceError> {
-    use std::io::Read as _;
-
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+fn load_state(
+    root: &crate::session::storage::ContainedDirectory,
+) -> Result<Option<WorkspaceState>, WorkspaceError> {
+    let path = root.display_path().join("state.json");
+    let bytes = match root.read_bounded(
+        std::ffi::OsStr::new("state.json"),
+        "Workflow workspace state",
+        MAX_WORKSPACE_STATE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(WorkspaceError::Io {
@@ -892,42 +955,6 @@ fn load_state(path: &Path) -> Result<Option<WorkspaceState>, WorkspaceError> {
             });
         }
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(WorkspaceError::InvalidState(format!(
-            "{} must be a real state file, not a symlink",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_WORKSPACE_STATE_BYTES {
-        return Err(WorkspaceError::InvalidState(format!(
-            "{} exceeds the workspace state size limit",
-            path.display()
-        )));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(path).map_err(|error| WorkspaceError::Io {
-        path: path.display().to_string(),
-        error: error.to_string(),
-    })?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_WORKSPACE_STATE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| WorkspaceError::Io {
-            path: path.display().to_string(),
-            error: error.to_string(),
-        })?;
-    if bytes.len() as u64 > MAX_WORKSPACE_STATE_BYTES {
-        return Err(WorkspaceError::InvalidState(format!(
-            "{} exceeds the workspace state size limit",
-            path.display()
-        )));
-    }
     let state: WorkspaceState = serde_json::from_slice(&bytes)
         .map_err(|error| WorkspaceError::InvalidState(format!("{}: {error}", path.display())))?;
     validate_state(&state)?;
@@ -1072,49 +1099,6 @@ fn validate_state(state: &WorkspaceState) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
-fn require_real_directory(path: &Path) -> Result<(), WorkspaceError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| WorkspaceError::Io {
-        path: path.display().to_string(),
-        error: error.to_string(),
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(WorkspaceError::InvalidState(format!(
-            "{} must be a real directory, not a symlink",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
-    use std::io::Write as _;
-
-    let parent = path.parent().expect("workflow workspace path has parent");
-    let temp = parent.join(format!(".workflow-{}.tmp", uuid::Uuid::now_v7().simple()));
-    let result = (|| -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)?;
-        if let Ok(directory) = std::fs::File::open(parent) {
-            let _ = directory.sync_all();
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&temp);
-    result.map_err(|error| WorkspaceError::Io {
-        path: path.display().to_string(),
-        error: error.to_string(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,7 +1117,6 @@ mod tests {
         let first = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("first", "one"),
@@ -1143,7 +1126,6 @@ mod tests {
         let second = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("second", "two"),
@@ -1187,7 +1169,6 @@ mod tests {
         let review = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("review-changes", "review a patch"),
@@ -1197,7 +1178,6 @@ mod tests {
         workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("deploy-release", "ship a release"),
@@ -1228,7 +1208,6 @@ mod tests {
         let draft = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("publish-me", "one"),
@@ -1269,7 +1248,6 @@ mod tests {
         let draft = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("prompt-once", "one"),
@@ -1325,7 +1303,6 @@ mod tests {
         let draft = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Definition {
                     definition_id: source_id,
@@ -1365,7 +1342,6 @@ mod tests {
         let draft = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("recover-publish", "committed"),
@@ -1412,7 +1388,6 @@ mod tests {
         let draft = workspace
             .draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("recover-edited", "published"),
@@ -1523,7 +1498,6 @@ mod tests {
         assert!(matches!(
             workspace.draft(
                 project.path(),
-                session.path(),
                 None,
                 WorkflowDraftSource::Inline {
                     script: script("contained", "one"),

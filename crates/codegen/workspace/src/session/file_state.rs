@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Seek as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -144,9 +144,7 @@ pub struct RewindPointMeta {
     pub num_file_snapshots: usize,
 }
 
-/// Open a `rewind_points.jsonl` for streaming. `NotFound` → `Ok(None)` (no file
-/// yet); other I/O errors propagate so callers can distinguish "absent" from
-/// "transiently unreadable" and avoid discarding on-disk history.
+#[cfg(test)]
 fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::File>>> {
     match std::fs::File::open(path) {
         Ok(f) => Ok(Some(io::BufReader::new(f))),
@@ -159,7 +157,8 @@ fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::F
 /// file can be hundreds of MB), skipping malformed lines with a `warn!`. Missing
 /// file → `Ok(empty)`; a transient I/O error propagates as `Err` so callers don't
 /// treat an unreadable file as empty and drop history. This is the LENIENT reader;
-/// the rewrite path uses a STRICT read (see `merge_rewind_points_from`).
+/// callers that rewrite the ledger first materialize this complete typed set.
+#[cfg(test)]
 fn read_rewind_jsonl_lines<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     let Some(mut reader) = open_rewind_points(path)? else {
         return Ok(Vec::new());
@@ -183,7 +182,34 @@ fn read_rewind_jsonl_lines<T: serde::de::DeserializeOwned>(path: &Path) -> io::R
     Ok(out)
 }
 
+fn read_rewind_jsonl_from_file<T: serde::de::DeserializeOwned>(
+    file: &std::fs::File,
+    label: &Path,
+) -> io::Result<Vec<T>> {
+    let mut file = file.try_clone()?;
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut reader = io::BufReader::new(file);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    while reader.read_line(&mut line)? != 0 {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            match serde_json::from_str::<T>(trimmed) {
+                Ok(value) => out.push(value),
+                Err(error) => tracing::warn!(
+                    %error,
+                    path = %label.display(),
+                    "skipping malformed rewind_points.jsonl line"
+                ),
+            }
+        }
+        line.clear();
+    }
+    Ok(out)
+}
+
 /// Read all rewind points (full content) for the on-demand historical load.
+#[cfg(test)]
 fn read_rewind_points_file(path: &Path) -> io::Result<Vec<RewindPoint>> {
     read_rewind_jsonl_lines(path)
 }
@@ -222,6 +248,7 @@ impl<'de> Deserialize<'de> for MapEntryCount {
 /// other fields are skipped by serde). `file_snapshots` is required — mirroring
 /// `RewindPoint` — so the picker rejects exactly the lines the on-rewind full load
 /// would (never advertising a target that won't materialize).
+#[cfg(test)]
 fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
     #[derive(Deserialize)]
     struct MetaRow {
@@ -237,6 +264,47 @@ fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
             num_file_snapshots: r.file_snapshots.0,
         })
         .collect())
+}
+
+fn scan_rewind_point_metas_from_file(
+    file: &std::fs::File,
+    label: &Path,
+) -> io::Result<Vec<RewindPointMeta>> {
+    #[derive(Deserialize)]
+    struct MetaRow {
+        prompt_index: usize,
+        created_at: DateTime<Utc>,
+        file_snapshots: MapEntryCount,
+    }
+    Ok(read_rewind_jsonl_from_file::<MetaRow>(file, label)?
+        .into_iter()
+        .map(|row| RewindPointMeta {
+            prompt_index: row.prompt_index,
+            created_at: row.created_at,
+            num_file_snapshots: row.file_snapshots.0,
+        })
+        .collect())
+}
+
+pub struct PinnedRewindSource {
+    file: std::fs::File,
+    /// Diagnostic label only. Reads always use the pinned file handle.
+    label: PathBuf,
+}
+
+impl PinnedRewindSource {
+    pub fn new(file: std::fs::File, label: PathBuf) -> Self {
+        Self { file, label }
+    }
+}
+
+impl std::fmt::Debug for PinnedRewindSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PinnedRewindSource")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Fold rewind points at indices `>= target_index` into the point at
@@ -285,7 +353,7 @@ pub fn merge_rewind_points_from(
 /// Each rewind point captures the state of files BEFORE they are read or modified
 /// during that prompt's processing.
 ///
-/// **Lazy historical loading**: a tracker built via [`with_lazy_source`] does NOT
+/// **Lazy historical loading**: a tracker built via [`with_lazy_file`] does NOT
 /// read the (potentially huge) persisted rewind points up front, so resuming a
 /// session is cheap. They load on demand the first time a rewind *operation* needs
 /// them (see [`ensure_historical_loaded`]). Live capture and persisting the
@@ -293,7 +361,7 @@ pub fn merge_rewind_points_from(
 /// load, so "resume then keep working" stays fast; the picker uses the
 /// metadata-only [`get_rewind_point_metas`].
 ///
-/// [`with_lazy_source`]: FileStateTracker::with_lazy_source
+/// [`with_lazy_file`]: FileStateTracker::with_lazy_file
 /// [`ensure_historical_loaded`]: FileStateTracker::ensure_historical_loaded
 /// [`get_rewind_point_metas`]: FileStateTracker::get_rewind_point_metas
 #[derive(Debug)]
@@ -302,9 +370,9 @@ pub struct FileStateTracker {
     rewind_points: Arc<Mutex<HashMap<usize, RewindPoint>>>,
     /// Current prompt index being processed
     current_prompt_index: Arc<Mutex<Option<usize>>>,
-    /// Deferred historical source: `Some(path)` until the points are lazily
+    /// Deferred historical source: one pinned file handle until the points are lazily
     /// loaded (then `None`); `None` from the start without a lazy source.
-    lazy_source: Arc<Mutex<Option<PathBuf>>>,
+    lazy_source: Arc<Mutex<Option<PinnedRewindSource>>>,
 }
 
 impl Default for FileStateTracker {
@@ -324,13 +392,17 @@ impl FileStateTracker {
     }
 
     /// Create a tracker that lazily loads its historical rewind points from
-    /// `lazy_path` on first rewind access (resume path). The in-memory set starts
+    /// an already-opened file on first rewind access (resume path). The in-memory set starts
     /// empty and live captures win over disk on load (`or_insert`), never clobbered.
-    pub fn with_lazy_source(lazy_path: PathBuf) -> Self {
+    pub fn with_lazy_file(file: std::fs::File, label: PathBuf) -> Self {
+        Self::with_lazy_source(PinnedRewindSource::new(file, label))
+    }
+
+    pub fn with_lazy_source(source: PinnedRewindSource) -> Self {
         Self {
             rewind_points: Arc::new(Mutex::new(HashMap::new())),
             current_prompt_index: Arc::new(Mutex::new(None)),
-            lazy_source: Arc::new(Mutex::new(Some(lazy_path))),
+            lazy_source: Arc::new(Mutex::new(Some(source))),
         }
     }
 
@@ -346,16 +418,18 @@ impl FileStateTracker {
     /// (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) {
         let mut source = self.lazy_source.lock().await;
-        // Clone the path so we can clear `source` after a successful read.
-        let Some(path) = source.clone() else {
+        let Some(lazy_file) = source.as_ref() else {
             return; // already loaded, or never lazy
         };
-        let loaded = match read_rewind_points_file(&path) {
+        let loaded = match read_rewind_jsonl_from_file::<RewindPoint>(
+            &lazy_file.file,
+            &lazy_file.label,
+        ) {
             Ok(points) => points,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    path = %path.display(),
+                    path = %lazy_file.label.display(),
                     "deferred rewind-point load failed; leaving lazy source set to retry"
                 );
                 return;
@@ -578,8 +652,8 @@ impl FileStateTracker {
                 })
                 .collect()
         };
-        if let Some(path) = source.as_ref() {
-            match scan_rewind_point_metas(path) {
+        if let Some(lazy_file) = source.as_ref() {
+            match scan_rewind_point_metas_from_file(&lazy_file.file, &lazy_file.label) {
                 Ok(scanned) => {
                     for meta in scanned {
                         metas.entry(meta.prompt_index).or_insert(meta);
@@ -587,7 +661,7 @@ impl FileStateTracker {
                 }
                 Err(e) => tracing::warn!(
                     error = %e,
-                    path = %path.display(),
+                    path = %lazy_file.label.display(),
                     "rewind-point metadata scan failed; picker shows in-memory points only"
                 ),
             }
@@ -638,6 +712,19 @@ impl FileStateTracker {
         for p in merge_rewind_points_from(all, target_index) {
             points.insert(p.prompt_index, p);
         }
+    }
+
+    /// Install the already-persisted complete rewind projection.
+    pub async fn replace_rewind_points(&self, replacement: Vec<RewindPoint>) {
+        let mut source = self.lazy_source.lock().await;
+        let mut points = self.rewind_points.lock().await;
+        points.clear();
+        points.extend(
+            replacement
+                .into_iter()
+                .map(|point| (point.prompt_index, point)),
+        );
+        *source = None;
     }
 
     /// Get the maximum prompt index that has a rewind point
@@ -1057,13 +1144,20 @@ mod tests {
         f
     }
 
+    fn lazy_tracker(file: &tempfile::NamedTempFile) -> FileStateTracker {
+        FileStateTracker::with_lazy_file(
+            file.reopen().expect("reopen rewind fixture"),
+            file.path().to_path_buf(),
+        )
+    }
+
     #[tokio::test]
     async fn lazy_get_rewind_point_singular_does_not_load() {
         let file = write_rewind_file(&[
             point_with_files(0, &[("a.rs", "v0")]),
             point_with_files(1, &[("b.rs", "v1")]),
         ]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         // Singular lookup must NOT trigger the historical load (live-persist path).
         assert!(tracker.get_rewind_point(0).await.is_none());
@@ -1086,7 +1180,7 @@ mod tests {
             point_with_files(1, &[("c.rs", "v1")]),
             point_with_files(2, &[]),
         ]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         let metas = tracker.get_rewind_point_metas().await;
         assert_eq!(metas.len(), 3);
@@ -1115,7 +1209,7 @@ mod tests {
             point_with_files(0, &[("a.rs", "h0")]),
             point_with_files(1, &[("b.rs", "h1")]),
         ]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         // A new prompt during the resumed session adds an in-memory point (no load).
         let cwd = Path::new("/repo");
@@ -1152,7 +1246,7 @@ mod tests {
     async fn lazy_live_capture_wins_over_disk_at_conflicting_index() {
         // Disk has point 0 with content "disk".
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "disk")])]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         // A LIVE capture at the same index 0 (before any historical load) adds an
         // in-memory point 0 with different content.
@@ -1176,7 +1270,7 @@ mod tests {
     #[tokio::test]
     async fn lazy_metas_combine_memory_and_disk() {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "h0")])]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         // New in-memory point at index 1.
         let cwd = Path::new("/repo");
@@ -1193,9 +1287,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lazy_missing_file_is_empty_not_error() {
-        let tracker =
-            FileStateTracker::with_lazy_source(PathBuf::from("/nonexistent/rewind_points.jsonl"));
+    async fn tracker_without_historical_file_is_empty() {
+        let tracker = FileStateTracker::new();
         assert!(tracker.get_rewind_points().await.is_empty());
         assert!(tracker.get_rewind_point_metas().await.is_empty());
     }
@@ -1208,7 +1301,7 @@ mod tests {
             point_with_files(1, &[("b.rs", "h1")]),
             point_with_files(2, &[("c.rs", "h2")]),
         ]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
 
         // Merge points >= 1 into point 0's predecessor (index 0).
         tracker.merge_and_remove_from(1).await;
@@ -1232,7 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn lazy_get_rewind_points_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "h0")])]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
@@ -1242,7 +1335,7 @@ mod tests {
     #[tokio::test]
     async fn lazy_max_prompt_index_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[]), point_with_files(4, &[])]);
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
         assert_eq!(tracker.max_prompt_index().await, Some(4));
     }
 
@@ -1254,9 +1347,7 @@ mod tests {
             point_with_files(0, &[("a.rs", "h0")]),
             point_with_files(1, &[("b.rs", "h1")]),
         ]);
-        let tracker = Arc::new(FileStateTracker::with_lazy_source(
-            file.path().to_path_buf(),
-        ));
+        let tracker = Arc::new(lazy_tracker(&file));
 
         let t1 = tracker.clone();
         let capture = async move {
@@ -1409,7 +1500,7 @@ mod tests {
         );
 
         // Same via the tracker's lazy load.
-        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let tracker = lazy_tracker(&file);
         let points = tracker.get_rewind_points().await;
         assert_eq!(
             points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),

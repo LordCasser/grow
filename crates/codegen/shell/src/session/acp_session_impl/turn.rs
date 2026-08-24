@@ -288,7 +288,13 @@ impl SessionActor {
         // Prompt text and queued metadata never drive Behavior transitions.
         *self.turn_behavior.lock() = admitted_behavior;
         self.signals_handle().increment_turn();
-        self.sync_active_behavior_prompt(admitted_behavior).await;
+        self.sync_active_behavior_prompt(admitted_behavior)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "behavior context was not durably published: {error}"
+                ))
+            })?;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
@@ -318,6 +324,45 @@ impl SessionActor {
             }
             acc
         });
+        // The turn intent is the admission boundary for every route below,
+        // including slash commands, Goal/Workflow launches, and direct Bash.
+        // No route may perform an external effect before this fact is durable.
+        self.events.begin_turn();
+        let model_id = self.current_model_id().await;
+        let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
+        self.current_turn_number.set(turn_number);
+        let permission_mode = self.permissions.mode();
+        let msg_count = self.chat_state_handle.get_conversation_len().await;
+        let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
+            self.events.take_prior_redirect_kind()
+        } else {
+            None
+        };
+        let input_kind = if Self::extract_bash_command(&prompt_blocks).is_some() {
+            chat_state::TurnInputKind::Bash
+        } else {
+            chat_state::TurnInputKind::Prompt
+        };
+        self.events
+            .start_turn(crate::session::events::Event::TurnStarted {
+                session_id: self.session_id_string(),
+                turn_number,
+                identity: origin.turn_identity(turn_kind),
+                model_id: model_id.clone(),
+                permission_mode,
+                conversation_message_count: msg_count,
+                prompt_index: Some(turn_number as usize),
+                prompt_text: Some(original_prompt_text.trim().to_owned()),
+                input_kind,
+                session_relationship: crate::session::events::SessionRelationship::Primary,
+                schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+                redirect_kind,
+            })
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("turn start was not durably recorded: {error}"))
+            })?;
         let implicit_goal_set = should_capture_implicit_goal_objective(
             &origin,
             admitted_behavior == tool_types::BehaviorId::Goal,
@@ -388,7 +433,7 @@ impl SessionActor {
                     | BuiltinAction::GoalUsage
                     | BuiltinAction::GoalStatus
                     | BuiltinAction::GoalPause
-                    | BuiltinAction::GoalResume
+                    | BuiltinAction::GoalRestart
                     | BuiltinAction::GoalClear
                     | BuiltinAction::GoalBudget { .. }) => {
                         ::diagnostics::session_ctx::log_event(slash_used);
@@ -475,42 +520,6 @@ impl SessionActor {
                 original_blocks
             }
         };
-        self.events.begin_turn();
-        let model_id = self.current_model_id().await;
-        let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
-        self.current_turn_number.set(turn_number);
-        let permission_mode = self.permissions.mode();
-        let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
-            self.events.take_prior_redirect_kind()
-        } else {
-            None
-        };
-        let input_kind = if Self::extract_bash_command(&prompt_blocks).is_some() {
-            chat_state::TurnInputKind::Bash
-        } else {
-            chat_state::TurnInputKind::Prompt
-        };
-        self.events
-            .start_turn(crate::session::events::Event::TurnStarted {
-                session_id: self.session_id_string(),
-                turn_number,
-                identity: origin.turn_identity(turn_kind),
-                model_id: model_id.clone(),
-                permission_mode,
-                conversation_message_count: msg_count,
-                prompt_index: Some(turn_number as usize),
-                prompt_text: Some(original_prompt_text.trim().to_owned()),
-                input_kind,
-                session_relationship: crate::session::events::SessionRelationship::Primary,
-                schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
-                redirect_kind,
-            })
-            .await
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("turn start was not durably recorded: {error}"))
-            })?;
         self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
             turn_number: self.chat_state_handle.get_prompt_index().await as u64,
             model_id: model_id.clone(),
@@ -660,9 +669,9 @@ impl SessionActor {
         self.maybe_inject_mcp_reminder().await;
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_date_rollover_reminder().await;
-        self.inject_behavior_reminders().await;
+        self.inject_behavior_reminders().await?;
         if matches!(&origin, super::super::PromptOrigin::User) {
-            self.inject_paused_goal_interaction_directive().await;
+            self.inject_stopped_goal_interaction_directive().await;
         }
         self.inject_resumed_tasks_reminder();
         if matches!(&origin, super::super::PromptOrigin::User) {
@@ -681,13 +690,8 @@ impl SessionActor {
         let user_message = if user_images.is_empty() {
             user_message
         } else {
-            let session_dir =
-                crate::session::persistence::session_dir(&crate::session::info::Info {
-                    id: self.session_info.id.clone(),
-                    cwd: self.session_info.cwd.clone(),
-                });
             crate::session::image_describe::persist_and_prepend_image_files(
-                &session_dir,
+                &self.session_directory,
                 &user_images,
                 &user_message,
             )
@@ -717,8 +721,7 @@ impl SessionActor {
                 super::super::PromptOrigin::HostCommand => {
                     ConversationItem::system_reminder(user_message)
                 }
-                super::super::PromptOrigin::GoalContinuation { .. }
-                | super::super::PromptOrigin::GoalFinalization { .. } => self.goal_directive_item(
+                super::super::PromptOrigin::GoalContinuation { .. } => self.goal_directive_item(
                     user_message,
                     sampling_types::SyntheticReason::SystemReminder,
                     sampling_types::GoalDirectiveKind::Continuation,
@@ -804,7 +807,7 @@ impl SessionActor {
         let result = {
             let mut stop_continuations_this_turn: u32 = 0;
             loop {
-                if self.goal_harness_enabled() {
+                if self.goal_runtime_available() {
                     let goal_loop_active = self.goal_tracker.lock().status()
                         == Some(crate::session::goal_tracker::GoalStatus::Active);
                     self.set_goal_loop_active_resource(goal_loop_active).await;
@@ -828,11 +831,7 @@ impl SessionActor {
                 ) {
                     break round;
                 }
-                if matches!(
-                    origin,
-                    super::super::PromptOrigin::GoalContinuation { .. }
-                        | super::super::PromptOrigin::GoalFinalization { .. }
-                ) {
+                if matches!(origin, super::super::PromptOrigin::GoalContinuation { .. }) {
                     break round;
                 }
                 match self
@@ -1391,7 +1390,7 @@ impl SessionActor {
         suppress_goal_continuation: bool,
     ) {
         let goal_active_now = laziness_injection_active(
-            self.goal_harness_enabled(),
+            self.goal_runtime_available(),
             self.goal_tracker.lock().status(),
         );
         if !goal_active_now {
@@ -2010,9 +2009,6 @@ impl SessionActor {
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
                 .map_err(|message| acp::Error::internal_error().data(message))?;
-            self.emit_event(crate::session::events::Event::PhaseChanged {
-                phase: crate::session::events::Phase::WaitingForModel,
-            });
             ::diagnostics::unified_log::info(
                 "shell.turn.inference_start",
                 Some(self.session_info.id.0.as_ref()),
@@ -2567,9 +2563,6 @@ impl SessionActor {
                     },
                 })
                 .collect();
-            self.emit_event(crate::session::events::Event::PhaseChanged {
-                phase: crate::session::events::Phase::ToolExecution,
-            });
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {

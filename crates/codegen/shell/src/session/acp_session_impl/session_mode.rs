@@ -35,7 +35,7 @@ impl SessionActor {
             .await
             .is_some();
         let goal_supported =
-            super::goal_support::goal_slash_and_harness_available(self.goal_enabled, &tool_names);
+            super::goal_support::goal_runtime_available_from_tools(self.goal_enabled, &tool_names);
         (plan_supported, workflow_supported, goal_supported)
     }
 
@@ -123,7 +123,10 @@ impl SessionActor {
 
     /// Synchronize the selected primary-session Behavior into the fixed system
     /// prompt layer: Mandatory Core → Audience → Role → Behavior → Runtime.
-    pub(super) async fn sync_active_behavior_prompt(&self, admitted: tool_types::BehaviorId) {
+    pub(super) async fn sync_active_behavior_prompt(
+        &self,
+        admitted: tool_types::BehaviorId,
+    ) -> Result<(), chat_state::TimelineWriteError> {
         use crate::session::behavior::{
             clarify_reminder_template, deep_research_reminder_template, goal_reminder_template,
             plan_behavior_template, workflow_reminder_template,
@@ -142,13 +145,10 @@ impl SessionActor {
             .borrow_mut()
             .set_behavior_instructions(instructions)
             .await;
-        if let Err(error) = self
-            .chat_state_handle
+        self.chat_state_handle
             .replace_system_head(&system_prompt)
             .await
-        {
-            tracing::error!(%error, "failed to durably publish behavior context");
-        }
+            .map(|_| ())
     }
 
     pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
@@ -333,27 +333,29 @@ impl SessionActor {
     /// use the mutable candidate artifact; executing uses the frozen approved
     /// artifact. The phase itself is the edit gate—there is no hidden pending
     /// or re-entry state.
-    pub(super) async fn inject_behavior_reminders(&self) {
+    pub(super) async fn inject_behavior_reminders(&self) -> Result<(), acp::Error> {
         use crate::session::behavior::{
             BehaviorState, PlanPhase, plan_execution_reminder_template,
             plan_mode_reminder_full_template, plan_mode_reminder_sparse_template,
         };
         let admitted = *self.turn_behavior.lock();
         if admitted == tool_types::BehaviorId::Workflow {
-            let session_dir = &self.session_dir;
-            let context = crate::session::workflow::workspace::WorkflowWorkspace::open(
-                &session_dir,
+            let workspace = crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+                &self.session_directory,
                 std::path::Path::new(self.session_info.cwd.as_str()),
             )
-            .map(|workspace| {
-                workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()))
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "active Workflow workspace is unavailable: {error}"
+                ))
             })
-            .unwrap_or_else(|error| format!("Workflow workspace unavailable: {error}"));
+            ?;
+            let context = workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()));
             self.push_system_reminder_with_tag(&context, self.reminder_wrapper_tag());
-            return;
+            return Ok(());
         }
         if admitted != tool_types::BehaviorId::Plan {
-            return;
+            return Ok(());
         }
         let push_reminder = |this: &Self, content: &str| {
             this.push_system_reminder_with_tag(content, this.reminder_wrapper_tag());
@@ -363,7 +365,7 @@ impl SessionActor {
             match controller.state() {
                 BehaviorState::Plan(PlanPhase::Executing) => Some((
                     plan_execution_reminder_template(),
-                    controller.approved_plan_file_path().to_path_buf(),
+                    controller.plan_artifact_hash().map(str::to_owned),
                 )),
                 BehaviorState::Plan(
                     PlanPhase::Drafting | PlanPhase::AwaitingApproval | PlanPhase::Amending,
@@ -373,23 +375,38 @@ impl SessionActor {
                     } else {
                         plan_mode_reminder_sparse_template()
                     };
-                    Some((template, controller.plan_file_path().to_path_buf()))
+                    Some((template, controller.plan_artifact_hash().map(str::to_owned)))
                 }
                 _ => None,
             }
         };
-        let Some((template, plan_path)) = plan else {
-            return;
+        let Some((template, artifact_hash)) = plan else {
+            return Ok(());
         };
-        let plan_has_content = crate::session::behavior::plan_file_has_content(&plan_path).await;
-        if let Some(rendered) = self
-            .render_plan_template(template, &plan_path, plan_has_content)
-            .await
-        {
+        let plan_content = match artifact_hash {
+            Some(hash) => {
+                let session = self.session_directory.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::session::behavior::read_plan_artifact(&session, &hash)
+                })
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to join Plan artifact read: {error}"))
+                })?
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("active Plan artifact failed validation: {error}"))
+                })?
+            }
+            None => String::new(),
+        };
+        if let Some(rendered) = self.render_plan_template(template, &plan_content).await {
             push_reminder(self, &rendered);
             self.behavior.lock().record_reminder_injected();
             self.record_control_snapshot();
         }
+        Ok(())
     }
     /// Render a plan mode template via the tool bridge's `TemplateRenderer`.
     ///
@@ -398,20 +415,9 @@ impl SessionActor {
     pub(super) async fn render_plan_template(
         &self,
         template: &str,
-        plan_path: &std::path::Path,
-        plan_has_content: bool,
+        plan_content: &str,
     ) -> Option<String> {
-        let plan_content = if plan_has_content {
-            tokio::fs::read_to_string(plan_path)
-                .await
-                .ok()
-                .map(|content| content.trim().to_owned())
-                .filter(|content| !content.is_empty())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let extra = serde_json::json!({ "plan_content": plan_content });
+        let extra = serde_json::json!({ "plan_content": plan_content.trim() });
         self.agent
             .borrow()
             .tool_bridge()
@@ -447,9 +453,8 @@ impl SessionActor {
         let next = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if let Err(error) = self.persist_control_snapshot_durably(next, goal).await {
-            let session_dir = self.session_dir.clone();
             *self.behavior.lock() =
-                crate::session::behavior::BehaviorCoordinator::from_snapshot(session_dir, previous);
+                crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
             return Err(format!("Behavior control state was not persisted: {error}"));
         }
         Ok(())

@@ -40,7 +40,7 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(BehaviorId, &'static str
         modes.push((
             BehaviorId::Goal,
             "Goal",
-            "Persist until an independent verifier confirms the objective is achieved",
+            "Keep pursuing one long-term objective across idle continuations",
         ));
     }
     modes

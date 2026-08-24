@@ -9,7 +9,7 @@
 use agent_client_protocol as acp;
 use tempfile::TempDir;
 
-use shell::session::storage::{JsonlStorageAdapter, StorageAdapter, load_updates_for_replay_at};
+use shell::session::storage::{JsonlStorageAdapter, load_updates_for_replay_at};
 use shell::session::testkit::synth::{self, SessionSpec};
 
 #[tokio::test]
@@ -69,10 +69,9 @@ fn synthesize_to_target_bytes_reaches_target_and_parses() {
     let info = synth::synthesize_to_target_bytes(root.path(), target);
 
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-    let updates_path = adapter.updates_file_path(&info).expect("updates path");
-    let len = std::fs::metadata(&updates_path)
-        .expect("stat updates.jsonl")
-        .len();
+    let len = adapter
+        .updates_snapshot_len(&info)
+        .expect("read updates ledger metadata");
     assert!(
         len >= target,
         "updates.jsonl ({len} B) reached the target ({target} B)"

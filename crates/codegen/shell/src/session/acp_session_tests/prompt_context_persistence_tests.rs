@@ -1,5 +1,6 @@
 use super::support::create_test_actor;
 use super::*;
+use crate::session::persistence::write_immutable_blob;
 
 // ── Large-prompt truncation: maybe_truncate_large_prompt_with_skills ────
 //
@@ -326,9 +327,8 @@ fn write_offload_and_build_wires_offload_and_fallback() {
     let message = write_offload_and_build(
         &full,
         bounded.clone(),
-        file_path.clone(),
         fake_prompt_ref(),
-        crate::util::secure_file::write_secure_file,
+        |bytes| crate::util::secure_file::write_secure_file(&file_path, bytes),
     );
     assert_eq!(
         std::fs::read_to_string(&file_path).unwrap(),
@@ -352,9 +352,8 @@ fn write_offload_and_build_wires_offload_and_fallback() {
     let fallback_msg = write_offload_and_build(
         &full,
         bounded.clone(),
-        file_path.clone(),
         fake_prompt_ref(),
-        |_p, _b| Err(std::io::Error::other("simulated disk full")),
+        |_bytes| Err(std::io::Error::other("simulated disk full")),
     );
     assert_ne!(
         fallback_msg, bounded,

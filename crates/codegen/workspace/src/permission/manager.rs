@@ -1905,13 +1905,11 @@ fn spawn_permission_manager_with_pin(
                     // Evaluate managed policy (direct access + per-segment Bash command
                     // rules + Bash shell-file args) up front so the always-approve/sandbox fast
                     // paths below honor a deny or forced prompt. The preflight also
-                    // resolves the auto-mode disposition of a fail-closed gate Ask:
-                    // defer to the classifier or stay prompt-binding on a rule match.
+                    // resolves every managed Ask before any mode-specific fast path.
                     let preflight = GatePreflight::evaluate(
                         compiled_policy.as_ref(),
                         &access,
                         request_cwd,
-                        effective_auto_mode,
                     );
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
@@ -1946,10 +1944,8 @@ fn spawn_permission_manager_with_pin(
                     let child_shell_escalation = child_permission_key.is_some()
                         && within_capability_fence
                         && matches!(access, AccessKind::Bash(_))
-                        && (preflight.shell_heuristic_ask()
-                            || bash_request_floor_requires_prompt(bash_evaluation.as_ref()));
-                    let managed_prompt_required = policy_forced_prompt
-                        && !(child_permission_key.is_some() && preflight.shell_heuristic_ask());
+                        && bash_request_floor_requires_prompt(bash_evaluation.as_ref());
+                    let managed_prompt_required = policy_forced_prompt;
                     if within_capability_fence
                         && !managed_prompt_required
                         && !child_shell_escalation
@@ -1963,11 +1959,7 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    let child_mode_can_override_shell_heuristic =
-                        child_permission_key.is_some() && !managed_prompt_required;
-                    if effective_always_approve
-                        && (!shell_forced_prompt || child_mode_can_override_shell_heuristic)
-                    {
+                    if effective_always_approve && !shell_forced_prompt {
                         tracing::debug!("always-approve mode: auto-approving permission request");
                         let decision = Decision::Allow;
                         emit_event(&decision, true, false, None, Some(reasons::ALWAYS_APPROVE));
@@ -2022,8 +2014,8 @@ fn spawn_permission_manager_with_pin(
                     // Policy deny already handled; forced Ask falls through unless
                     // fast-path/classifier allows. Policy Ask still prompts below
                     // unless auto fast-path/classifier decides first for non-forced
-                    // paths; policy Asks and Bash request floors skip auto entirely
-                    // unless they defer (fail-closed gate Ask / unvetted-env floor).
+                    // paths; every policy Ask skips auto entirely. Bash request
+                    // floors may still use their separate explicit deferral rule.
                     let is_capability_grant = matches!(access, AccessKind::CapabilityGrant { .. });
                     let child_auto_judgment = child_permission_key.is_some()
                         && (is_capability_grant || child_shell_escalation);
@@ -2239,14 +2231,12 @@ fn spawn_permission_manager_with_pin(
                                         }
                                         continue;
                                     }
-                                    // Deferred gate Asks and floor deferrals stay
-                                    // prompt-binding on a Block: never a silent deny,
-                                    // no denial-budget consumption.
+                                    // Floor deferrals stay prompt-binding on a Block:
+                                    // never a silent deny, no denial-budget consumption.
                                     ClassifierVerdict::Block
-                                        if preflight.defers_gate_ask()
-                                            || bash_request_floor_requires_prompt(
-                                                bash_evaluation.as_ref(),
-                                            ) =>
+                                        if bash_request_floor_requires_prompt(
+                                            bash_evaluation.as_ref(),
+                                        ) =>
                                     {
                                         tracing::info!(
                                             tool = %tool_name,
@@ -4133,7 +4123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_shell_escalation_preserves_always_auto_ask_modes() {
+    async fn managed_shell_uncertainty_binds_every_child_mode_to_ask() {
         use crate::permission::types::{
             PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
         };
@@ -4145,7 +4135,7 @@ mod tests {
                 // Any configured Bash policy enables command decomposition. The
                 // inline substitution cannot be proven against that policy, so
                 // the gate returns AskFailClosed even though no rule matches.
-                // This is a heuristic escalation, not a managed Ask rule.
+                // Parser uncertainty is itself a binding managed Ask.
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Ask,
                     tool: ToolFilter::Bash,
@@ -4165,101 +4155,41 @@ mod tests {
                     classifier_turns: Some(vec![]),
                 };
 
-                // Always-approve handles the secondary shell risk exactly as
-                // the same mode does on a primary session: no classifier and
-                // no user prompt.
-                let (always, _events) =
-                    test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
-                let (always_classifier, always_seen) =
-                    capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Block);
-                always.set_classifier(Some(always_classifier));
-                let decision = always
-                    .request_with_context(
-                        AccessKind::Bash(command.clone()),
-                        tool_call(),
-                        None,
-                        context(RequestPermissionMode::AlwaysApprove),
-                    )
-                    .await;
-                assert!(matches!(decision, Decision::Allow));
-                assert!(always_seen.lock().unwrap().is_empty());
-
-                // Auto consumes one primary-context LLM judgment and never
-                // falls through to the 60-second human prompt.
-                let (auto, mut auto_events) =
-                    test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
-                let (auto_classifier, auto_seen) =
-                    capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
-                auto.set_classifier(Some(auto_classifier));
-                let decision = auto
-                    .request_with_context(
-                        AccessKind::Bash(command.clone()),
-                        tool_call(),
-                        None,
-                        context(RequestPermissionMode::Auto),
-                    )
-                    .await;
-                assert!(matches!(decision, Decision::Allow));
-                assert_eq!(auto_seen.lock().unwrap().len(), 1);
-                let event = auto_events.try_recv().expect("auto audit event");
-                assert!(!event.user_prompted);
-                assert_eq!(event.classifier_verdict.as_deref(), Some("allow"));
-
-                // Deny and unavailable are final tool-level Auto outcomes.
-                // Neither may escape into the 60-second human prompt path.
-                for verdict in [
-                    crate::permission::auto_mode::ClassifierVerdict::Block,
-                    crate::permission::auto_mode::ClassifierVerdict::Unavailable,
+                for mode in [
+                    RequestPermissionMode::AlwaysApprove,
+                    RequestPermissionMode::Auto,
+                    RequestPermissionMode::Ask,
                 ] {
-                    let (auto, mut events) =
-                        test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
-                    let (classifier, seen) = capturing_classifier(verdict);
-                    auto.set_classifier(Some(classifier));
-                    let decision = auto
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (manager, mut events) = manager_with_recording_client(
+                        &cwd,
+                        Some(config.clone()),
+                        client,
+                        ClientType::Generic,
+                    );
+                    let (classifier, seen) =
+                        capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    manager.set_classifier(Some(classifier));
+                    let decision = manager
                         .request_with_context(
                             AccessKind::Bash(command.clone()),
                             tool_call(),
                             None,
-                            context(RequestPermissionMode::Auto),
+                            context(mode),
                         )
                         .await;
-                    assert!(
-                        matches!(decision, Decision::PolicyDeny(_)),
-                        "{verdict:?} must fail only the child tool, got {decision:?}"
-                    );
-                    assert_eq!(seen.lock().unwrap().len(), 1);
-                    let event = events.try_recv().expect("auto audit event");
-                    assert!(!event.user_prompted);
+                    assert!(matches!(decision, Decision::Reject(_)), "mode={mode:?}");
+                    assert_eq!(prompts.borrow().len(), 1, "mode={mode:?}");
+                    assert!(seen.lock().unwrap().is_empty(), "mode={mode:?}");
+                    let event = events.try_recv().expect("managed Ask audit event");
+                    assert!(event.user_prompted, "mode={mode:?}");
                     assert_eq!(
-                        event.classifier_verdict.as_deref(),
-                        Some(match verdict {
-                            crate::permission::auto_mode::ClassifierVerdict::Block => "block",
-                            crate::permission::auto_mode::ClassifierVerdict::Unavailable => {
-                                "unavailable"
-                            }
-                            crate::permission::auto_mode::ClassifierVerdict::Allow =>
-                                unreachable!(),
-                        })
+                        event.decision_reason.as_deref(),
+                        Some(reasons::BASH_COMMAND_GATE_ASK),
+                        "mode={mode:?}"
                     );
                 }
-
-                // Ask penetrates the UI request path. The recording client
-                // rejects immediately so the test proves a prompt was sent
-                // without paying the production timeout.
-                let client = RecordingClient::default();
-                let prompts = client.prompts.clone();
-                let (ask, _events) =
-                    manager_with_recording_client(&cwd, Some(config), client, ClientType::Generic);
-                let decision = ask
-                    .request_with_context(
-                        AccessKind::Bash(command),
-                        tool_call(),
-                        None,
-                        context(RequestPermissionMode::Ask),
-                    )
-                    .await;
-                assert!(matches!(decision, Decision::Reject(_)));
-                assert_eq!(prompts.borrow().len(), 1);
             })
             .await;
     }
@@ -4982,10 +4912,8 @@ mod tests {
             .await;
     }
 
-    /// Boundary tests for the auto-mode gate-ask deferral and the invariant
-    /// that MCP / web_fetch reach the classifier. Deferral eligibility itself
-    /// is unit-tested in `gate_preflight`; these pin the end-to-end manager
-    /// behavior (decision, prompt count, classifier calls, trigger label).
+    /// Boundaries between binding managed Ask decisions and requests that may
+    /// reach the classifier (including MCP / web_fetch).
     mod auto_classifier_boundaries {
         use super::*;
         use crate::permission::auto_mode::ClassifierVerdict;
@@ -5054,17 +4982,23 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn fail_closed_gate_ask_defers_and_classifier_allow_runs() {
+        async fn fail_closed_gate_ask_prompts_without_classifier() {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
-                    for (name, config, cmd) in [
+                    for (name, config, cmd, expected_reason) in [
                         (
                             "bash command gate",
                             armed_bash_config(),
                             "echo \"build $(date)\"",
+                            reasons::BASH_COMMAND_GATE_ASK,
                         ),
-                        ("shell file gate", read_deny_config(), "rg TODO"),
+                        (
+                            "shell file gate",
+                            read_deny_config(),
+                            "rg TODO",
+                            reasons::SHELL_FILE_GATE_ASK,
+                        ),
                     ] {
                         let tmp = tempfile::tempdir().unwrap();
                         let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
@@ -5081,24 +5015,24 @@ mod tests {
                         mgr.set_classifier(Some(clf));
 
                         let d = request(&mgr, AccessKind::Bash(cmd.into())).await;
-                        assert!(matches!(d, Decision::Allow), "{name}: {d:?}");
-                        assert_eq!(prompts.borrow().len(), 0, "{name}");
-                        assert_eq!(seen.lock().unwrap().len(), 1, "{name}");
+                        assert!(matches!(d, Decision::Reject(_)), "{name}: {d:?}");
+                        assert_eq!(prompts.borrow().len(), 1, "{name}");
+                        assert_eq!(seen.lock().unwrap().len(), 0, "{name}");
                         let ev = events.try_recv().expect("event must be emitted");
                         assert_eq!(
                             ev.decision_reason.as_deref(),
-                            Some(reasons::AUTO_CLASSIFIER_ALLOW),
+                            Some(expected_reason),
                             "{name}"
                         );
-                        assert!(ev.auto_approved && !ev.user_prompted, "{name}");
-                        assert_eq!(ev.classifier_source.as_deref(), Some("heuristic"), "{name}");
+                        assert!(ev.user_prompted && !ev.auto_approved, "{name}");
+                        assert_eq!(ev.classifier_source, None, "{name}");
                     }
                 })
                 .await;
         }
 
         #[tokio::test]
-        async fn deferred_classifier_block_prompts_without_budget() {
+        async fn fail_closed_gate_ask_does_not_spend_denial_budget() {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
@@ -5119,20 +5053,20 @@ mod tests {
                     let d = request(&mgr, AccessKind::Bash("echo \"build $(date)\"".into())).await;
                     assert!(
                         matches!(d, Decision::Reject(_)),
-                        "deferred Block must prompt (answered reject-once), got {d:?}"
+                        "managed Ask must prompt (answered reject-once), got {d:?}"
                     );
                     assert_eq!(prompts.borrow().len(), 1);
-                    assert_eq!(seen.lock().unwrap().len(), 1);
+                    assert_eq!(seen.lock().unwrap().len(), 0);
                     let ev = events.try_recv().expect("event must be emitted");
                     assert_eq!(
                         ev.decision_reason.as_deref(),
-                        Some(reasons::AUTO_CLASSIFIER_BLOCK)
+                        Some(reasons::BASH_COMMAND_GATE_ASK)
                     );
                     assert!(ev.user_prompted);
                     assert_eq!(
                         ev.auto_denials_total,
                         Some(0),
-                        "deferred Block must not consume denial budget"
+                        "managed Ask must not consume denial budget"
                     );
                 })
                 .await;
@@ -5140,8 +5074,7 @@ mod tests {
 
         /// A rule-match Ask (an actual ask-rule match on a decomposed command)
         /// hard-prompts with the gate label and ZERO classifier calls: a model
-        /// verdict must never waive a matched policy rule. Contrast the
-        /// fail-closed asks above, which defer to the classifier.
+        /// verdict must never waive a matched policy rule.
         #[tokio::test]
         async fn rule_match_ask_prompts_without_classifier() {
             let local = tokio::task::LocalSet::new();
@@ -5183,11 +5116,10 @@ mod tests {
                 .await;
         }
 
-        /// A deferrable fail-closed gate Ask on an opaque `bash -c "$X"` must
-        /// still hard-prompt (`opaque_shell`) with zero classifier calls: the
-        /// floor outranks gate-ask deferral.
+        /// A fail-closed gate Ask on an opaque `bash -c "$X"` also hard-prompts
+        /// with zero classifier calls; the managed gate owns the label.
         #[tokio::test]
-        async fn opaque_shell_floor_outranks_gate_ask_deferral() {
+        async fn opaque_shell_managed_gate_owns_the_prompt() {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
@@ -5205,7 +5137,7 @@ mod tests {
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
-                    // `"$X"` is undecomposable, so the gate is a deferrable Ask.
+                    // `"$X"` is undecomposable, so the gate is a binding Ask.
                     let d = request(&mgr, AccessKind::Bash("bash -c \"$X\"".into())).await;
                     assert!(
                         matches!(d, Decision::Reject(_)),
@@ -5218,7 +5150,10 @@ mod tests {
                         "opaque shell must never reach the classifier"
                     );
                     let ev = events.try_recv().expect("event must be emitted");
-                    assert_eq!(ev.decision_reason.as_deref(), Some(reasons::OPAQUE_SHELL));
+                    assert_eq!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::BASH_COMMAND_GATE_ASK)
+                    );
                     assert!(ev.user_prompted);
                 })
                 .await;

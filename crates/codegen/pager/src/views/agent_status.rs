@@ -22,7 +22,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::context_bar::SEPARATOR;
-use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
+use crate::app::agent::{GoalDisplayState, GoalDisplayStatus};
 use crate::app::agent_view::McpInitProgress;
 use crate::theme::Theme;
 
@@ -166,20 +166,12 @@ fn format_elapsed_compact(ms: u64) -> String {
 
 fn goal_phase_label(goal: &GoalDisplayState) -> String {
     match goal.status {
-        GoalDisplayStatus::Paused | GoalDisplayStatus::Blocked => goal.status.pause_label().into(),
+        GoalDisplayStatus::Paused
+        | GoalDisplayStatus::Blocked
+        | GoalDisplayStatus::UsageLimited => goal.status.stopped_label().into(),
         GoalDisplayStatus::BudgetLimited => "Budget".into(),
         GoalDisplayStatus::Complete => "Done".into(),
-        GoalDisplayStatus::Active => active_phase_label(goal),
-    }
-}
-
-/// The persisted Goal phase is the sole display source of truth.
-pub fn active_phase_label(goal: &GoalDisplayState) -> String {
-    match goal.phase {
-        GoalDisplayPhase::Planning => "Planning".into(),
-        GoalDisplayPhase::Executing => "Executing".into(),
-        GoalDisplayPhase::Verifying => "Verifying".into(),
-        GoalDisplayPhase::Summarizing => "Summarizing".into(),
+        GoalDisplayStatus::Active => "Active".into(),
     }
 }
 
@@ -194,13 +186,12 @@ pub fn goal_status_line(
     theme: &Theme,
     hovered: bool,
     frame_stamp: crate::motion::FrameStamp,
-    context_used: Option<u64>,
-    active_subagent_tokens: u64,
+    _context_used: Option<u64>,
+    _active_subagent_tokens: u64,
 ) -> Line<'static> {
     let label = goal_phase_label(goal);
 
-    let tokens_str =
-        format_tokens_compact(goal.live_tokens_used(context_used, active_subagent_tokens));
+    let tokens_str = format_tokens_compact(goal.tokens_used);
     let tokens_display = match goal.token_budget {
         Some(budget) if budget > 0 => {
             format!("{}/{} tokens", tokens_str, format_tokens_compact(budget))
@@ -211,9 +202,9 @@ pub fn goal_status_line(
     let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms_at(frame_stamp.now()));
 
     let dim_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-    // Paused goals use an inverted warning-colour chip so the chip background
-    // visually matches the modal's `theme.warning` status row.
-    let mut label_style = if goal.status.is_paused() {
+    // Restartable stopped Goals use an inverted warning-colour chip so their
+    // state is visible without implying foreground activity.
+    let mut label_style = if goal.status.uses_warning_chip() {
         Style::default().fg(theme.bg_base).bg(theme.warning)
     } else {
         Style::default().fg(theme.accent_plan).bg(theme.bg_base)
@@ -282,20 +273,6 @@ pub fn mcp_status_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn active_label_comes_only_from_goal_phase() {
-        let mut goal = GoalDisplayState::test_stub();
-        for (phase, label) in [
-            (GoalDisplayPhase::Planning, "Planning"),
-            (GoalDisplayPhase::Executing, "Executing"),
-            (GoalDisplayPhase::Verifying, "Verifying"),
-            (GoalDisplayPhase::Summarizing, "Summarizing"),
-        ] {
-            goal.phase = phase;
-            assert_eq!(active_phase_label(&goal), label);
-        }
-    }
 
     #[test]
     fn compact_formatting_is_stable() {

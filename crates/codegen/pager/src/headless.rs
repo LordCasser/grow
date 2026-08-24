@@ -1215,6 +1215,7 @@ fn reap_request_for_work(
         BackgroundWork::Subagent(id) => (
             "grow/subagent/cancel",
             serde_json::value::to_raw_value(&CancelSubagentRequest {
+                session_id: session_id.0.to_string(),
                 subagent_id: id.clone(),
             })?,
         ),

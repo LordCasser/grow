@@ -167,13 +167,7 @@ impl tool_runtime::Tool for TaskTool {
                 .map(|owner| owner.0.clone())
                 .unwrap_or_default();
             let goal_context = match &owner {
-                SubagentOwner::Goal {
-                    goal_id,
-                    objective_revision,
-                    plan_revision,
-                    board_revision,
-                    role,
-                } => {
+                SubagentOwner::Goal { goal_id } => {
                     let view = res
                         .get::<crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource>()
                         .and_then(|resource| resource.0.clone())
@@ -183,19 +177,14 @@ impl tool_runtime::Tool for TaskTool {
                                 "Goal-owned subagents require an immutable Goal context snapshot.",
                             )
                         })?;
-                    if view.goal_id != *goal_id
-                        || view.objective_revision != *objective_revision
-                        || view.plan_revision != *plan_revision
-                        || view.board_revision != *board_revision
-                    {
+                    if view.goal_id != *goal_id {
                         return Err(tool_runtime::ToolError::custom(
                             "stale_goal_context",
-                            "Goal subagent ownership and delegated blackboard revisions do not match.",
+                            "Goal subagent ownership and delegated Goal snapshot do not match.",
                         ));
                     }
                     Some(
                         crate::implementations::grow_build::update_goal::GoalContextSnapshot {
-                            role: *role,
                             view,
                         },
                     )
@@ -388,8 +377,6 @@ impl tool_runtime::Tool for TaskTool {
             fork_context: false,
             owner,
             goal_context,
-            goal_stage_submit: None,
-            goal_stage_resume: None,
             cancel_token: child_cancellation,
         };
 
@@ -539,16 +526,13 @@ mod tests {
         crate::implementations::grow_build::update_goal::GoalView {
             goal_id: "goal-123".into(),
             objective: "test objective".into(),
-            objective_revision: 1,
             status: "active".into(),
-            phase: "executing".into(),
             token_budget: None,
             tokens_used: 0,
-            plan_revision: 2,
-            board_revision: 3,
-            tasks: Vec::new(),
-            plan_markdown: String::new(),
-            verifier_feedback: None,
+            elapsed_ms: 0,
+            created_at: "2026-08-24T00:00:00Z".into(),
+            updated_at: "2026-08-24T00:00:00Z".into(),
+            status_message: None,
         }
     }
 
@@ -744,13 +728,7 @@ mod tests {
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
-        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
-            "goal-123",
-            1,
-            2,
-            3,
-            GoalSubagentRole::Worker,
-        )));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal("goal-123")));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
                 goal_view(),
@@ -771,8 +749,8 @@ mod tests {
                 .goal_context
                 .as_ref()
                 .expect("Goal worker must receive its immutable snapshot");
-            assert_eq!(context.role, GoalSubagentRole::Worker);
-            assert_eq!(context.view.board_revision, 3);
+            assert_eq!(context.view.goal_id, "goal-123");
+            assert_eq!(context.view.objective, "test objective");
             request
                 .respond_with(|request| SubagentResult {
                     success: true,
@@ -821,19 +799,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goal_owned_subagent_without_matching_snapshot_fails_closed() {
+    async fn goal_owned_subagent_with_mismatched_snapshot_fails_closed() {
         let (backend, _rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
-        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
-            "goal-123",
-            1,
-            2,
-            4,
-            GoalSubagentRole::Worker,
-        )));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal("other-goal")));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
                 goal_view(),
@@ -857,7 +829,7 @@ mod tests {
             },
         )
         .await
-        .expect_err("mismatched Goal revisions must not spawn");
+        .expect_err("mismatched Goal identity must not spawn");
 
         assert!(result.to_string().contains("do not match"), "{result}");
     }

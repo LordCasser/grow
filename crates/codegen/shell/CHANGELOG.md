@@ -1,5 +1,17 @@
 # Changelog
 
+# 1.1.11 — 2026-08-24
+
+## Long-term Goal Behavior
+
+- Goal now persists one objective, lifecycle status, budget, usage, and timestamps. Planner/verifier stages, Markdown boards, Goal-specific task types, and finalization turns were removed.
+- Active Goals continue only after foreground and user FIFO are idle. Every continuation audits the full objective before creating the next ordinary task/todo slice.
+- `/goal edit`, `pause`, `restart`, `budget`, and `clear` provide the user control plane; `create_goal`, `get_goal`, and `update_goal` are the complete model lifecycle API.
+- Goal and Behavior transitions commit through one versioned Timeline Control snapshot and roll back on persistence failure.
+- Pager Goal UI and Timeline updates now show durable lifecycle state only; streaming phase/progress noise is not persisted.
+
+完整发布说明见 [changelogs/1.1.11.md](changelogs/1.1.11.md)。
+
 # 1.1.5 — 2026-08-09
 
 ## Behavior Changes

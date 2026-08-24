@@ -73,7 +73,7 @@ fn run_scenario(
                 | Request::ReleaseAgentCalls { reply, .. } => {
                     let _ = reply.send(Ok(()));
                 }
-                Request::SpawnAgent { opts, reply } => {
+                Request::SpawnAgent { opts, reply, .. } => {
                     let label = opts.label.unwrap_or_default();
                     captured_modes
                         .lock()
@@ -181,7 +181,7 @@ fn run_scenario(
     let outcome = workflow::run_workflow(workflow::WorkflowRunParams {
         script: resolved.script,
         args: serde_json::json!({ "query": "Test query" }),
-        journal: workflow::Journal::new(None),
+        journal: workflow::Journal::memory(),
         host_tx,
         cancel: tokio_util::sync::CancellationToken::new(),
         max_ops: workflow::WorkflowRunParams::DEFAULT_MAX_OPS,

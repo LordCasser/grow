@@ -158,20 +158,6 @@ pub fn resolve_agent_definition(
     Ok(definition)
 }
 
-/// Resolve an exact host-owned Goal stage profile. These definitions bypass
-/// ordinary discovery deliberately: project/user Agents cannot shadow them,
-/// and the general Task tool cannot name them.
-pub fn resolve_goal_stage_definition(
-    subagent_type: &str,
-    role: tools::implementations::grow_build::task::types::GoalSubagentRole,
-) -> Option<AgentDefinition> {
-    use tools::implementations::grow_build::task::types::GoalSubagentRole;
-    match (role, subagent_type) {
-        (GoalSubagentRole::Planner, "goal-planner") => Some(AgentDefinition::goal_planner()),
-        (GoalSubagentRole::Verifier, "goal-verifier") => Some(AgentDefinition::goal_verifier()),
-        _ => None,
-    }
-}
 /// Fill runtime values whose defaults live on the resolved agent definition.
 pub fn apply_definition_runtime_defaults(
     runtime: &mut EffectiveRuntimeConfig,
@@ -203,22 +189,12 @@ pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_su
     }
 }
 
-/// Restrict Goal-owned children to the immutable blackboard view. Even an
-/// initial `All` grant cannot restore an object mutation the delegated Goal
-/// role does not own. The one narrow exception is the Planner role: it keeps
-/// the structured plan submission tools (`GoalPlanSubmit`), which the tool
-/// layer additionally gates on a planner-only stage handle. Verifier and
-/// Worker roles never see them.
-pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition, planner_stage: bool) {
+/// A delegated child may read its immutable Goal snapshot, but only the
+/// owning primary Session may mutate Goal lifecycle state.
+pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
     definition.tool_config.tools.retain(|tool| {
-        tool.kind.is_some_and(|kind| {
-            !matches!(
-                kind,
-                ToolKind::GoalProgressUpdate
-                    | ToolKind::GoalReplanRequest
-                    | ToolKind::GoalLifecycleUpdate
-            ) && !(matches!(kind, ToolKind::GoalPlanSubmit) && !planner_stage)
-        })
+        tool.kind
+            .is_some_and(|kind| kind != ToolKind::GoalLifecycleUpdate)
     });
 }
 /// Resolve runtime overrides and definition defaults in the production order.
@@ -299,7 +275,7 @@ mod tests {
         let toggles = HashMap::new();
         let mut definition =
             resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
-        apply_goal_object_tool_policy(&mut definition, false);
+        apply_goal_object_tool_policy(&mut definition);
         let kinds: Vec<Option<ToolKind>> = definition
             .tool_config
             .tools
@@ -307,15 +283,13 @@ mod tests {
             .map(|tool| tool.kind)
             .collect();
         assert!(kinds.contains(&Some(ToolKind::GoalRead)));
-        assert!(!kinds.contains(&Some(ToolKind::GoalProgressUpdate)));
-        assert!(!kinds.contains(&Some(ToolKind::GoalReplanRequest)));
         assert!(!kinds.contains(&Some(ToolKind::GoalLifecycleUpdate)));
 
         definition
             .tool_config
             .tools
             .push(ToolConfig::from_id("custom:opaque"));
-        apply_goal_object_tool_policy(&mut definition, false);
+        apply_goal_object_tool_policy(&mut definition);
         assert!(
             definition
                 .tool_config
@@ -325,96 +299,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn goal_object_policy_keeps_plan_submit_only_for_the_planner_role() {
-        use tools::implementations::grow_build::task::types::GoalSubagentRole;
-        let cwd = tempfile::tempdir().unwrap();
-        let toggles = HashMap::new();
-        for (role, planner_stage) in [
-            (GoalSubagentRole::Planner, true),
-            (GoalSubagentRole::Verifier, false),
-            (GoalSubagentRole::Worker, false),
-        ] {
-            let mut definition =
-                resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles))
-                    .unwrap();
-            for tool in [
-                ToolConfig::for_tool::<tools::implementations::grow_build::SubmitGoalPlanSectionTool>(
-                ),
-                ToolConfig::for_tool::<tools::implementations::grow_build::FinalizeGoalPlanTool>(),
-                ToolConfig::for_tool::<tools::implementations::grow_build::GetGoalTool>(),
-            ] {
-                definition.tool_config.tools.push(tool);
-            }
-            apply_goal_object_tool_policy(&mut definition, planner_stage);
-            let submit_kept = definition
-                .tool_config
-                .tools
-                .iter()
-                .any(|tool| tool.kind == Some(ToolKind::GoalPlanSubmit));
-            assert_eq!(
-                submit_kept,
-                planner_stage,
-                "{role:?} must {} the structured plan submission tools",
-                if planner_stage { "keep" } else { "lose" }
-            );
-            assert!(
-                definition
-                    .tool_config
-                    .tools
-                    .iter()
-                    .any(|tool| tool.kind == Some(ToolKind::GoalRead)),
-                "{role:?} keeps the read-only snapshot view"
-            );
-        }
-    }
-
-    #[test]
-    fn host_goal_profiles_are_role_bound_and_minimal() {
-        use tools::implementations::grow_build::task::types::GoalSubagentRole;
-        let planner = resolve_goal_stage_definition("goal-planner", GoalSubagentRole::Planner)
-            .expect("planner profile");
-        let verifier = resolve_goal_stage_definition("goal-verifier", GoalSubagentRole::Verifier)
-            .expect("verifier profile");
-        assert!(
-            resolve_goal_stage_definition("goal-verifier", GoalSubagentRole::Planner).is_none()
-        );
-        assert!(
-            planner
-                .tool_config
-                .tools
-                .iter()
-                .all(|tool| !matches!(tool.kind, Some(ToolKind::Execute | ToolKind::Task)))
-        );
-        assert!(
-            verifier
-                .tool_config
-                .tools
-                .iter()
-                .any(|tool| tool.kind == Some(ToolKind::Execute))
-        );
-        assert_eq!(verifier.isolation, Some(IsolationMode::Worktree));
-        let verifier_kinds: Vec<_> = verifier
-            .tool_config
-            .tools
-            .iter()
-            .map(|tool| tool.kind)
-            .collect();
-        assert!(
-            verifier.tool_config.tools.iter().all(|tool| {
-                matches!(
-                    tool.kind,
-                    Some(
-                        ToolKind::Execute
-                            | ToolKind::Read
-                            | ToolKind::ListDir
-                            | ToolKind::List
-                            | ToolKind::Search
-                            | ToolKind::GoalRead
-                    )
-                )
-            }),
-            "verifier kinds: {verifier_kinds:?}"
-        );
-    }
 }

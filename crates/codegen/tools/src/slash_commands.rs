@@ -72,7 +72,8 @@ pub const GOAL_COMMAND_NAME: &str = "goal";
 
 /// Bare subcommand tokens reserved for goal lifecycle control rather than
 /// being treated as an objective, matching the shell's /goal grammar.
-pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] = &["status", "pause", "resume", "clear", "edit"];
+pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] =
+    &["status", "pause", "restart", "clear", "edit", "budget", "set"];
 
 pub fn goal_usage_message() -> &'static str {
     "Usage: /goal <objective>\n\
@@ -81,24 +82,23 @@ pub fn goal_usage_message() -> &'static str {
 
 pub fn goal_instruction(objective: &str) -> String {
     format!(
-        "# /goal -- pursue an objective\n\n\
-         A goal has been set: {objective}\n\n\
-         Work directly on this goal and carry it as far as you can. Deliver \
-         everything the user asked for yourself: no follow-up questions, no \
-         manual steps left for the user. If the conversation continues, keep \
-         pursuing the goal until it is complete.\n\n\
-         TRACKING: break the objective into concrete steps and track them \
-         (use your todo tool if one is available), marking each done as you \
-         finish it.\n\n\
-         VERIFY AS YOU GO: test each change on the real path before moving on. \
-         A completion claim must be backed by evidence produced in this \
-         session, not assumptions.\n\n\
-         Call update_goal(completed: true, message: \"summary\") ONLY when the \
-         goal is fully achieved. Call update_goal(blocked_reason: \"reason\") \
-         only when truly stuck after 3+ consecutive failed attempts at the \
-         same problem. Call update_goal(message: \"status note\") to log \
-         progress along the way. If update_goal returns an error, continue \
-         working the goal and report status in your reply instead.\n\n\
+        "# /goal -- pursue a long-term objective\n\n\
+         OBJECTIVE:\n{objective}\n\n\
+         Begin this turn, and every automatic continuation, with a completion \
+         audit against the entire objective and concrete workspace evidence. \
+         If every requirement is satisfied, call update_goal with \
+         status=complete and report that evidence.\n\n\
+         If work remains, plan only the next small, verifiable slice using the \
+         ordinary Grow task/todo mechanism. Use todo_write for short-lived \
+         execution steps and task subagents when delegation or an independent \
+         check materially helps. Complete and verify that slice before choosing \
+         the next one. These local tasks are execution context, not a second \
+         persistent Goal state, and must never replace or narrow the objective.\n\n\
+         Do not stop because a turn or local task list ended. Call update_goal \
+         with status=complete only when the full objective is achieved. Call \
+         update_goal with status=blocked only at a genuine impasse; otherwise \
+         leave the Goal active for the next idle continuation. User messages \
+         always take priority.\n\n\
          Start now."
     )
 }
@@ -145,9 +145,14 @@ mod tests {
     fn goal_instruction_carries_objective_and_contract_tokens() {
         let text = goal_instruction("ship the widget");
         assert!(text.contains("ship the widget"));
-        assert!(text.contains("update_goal(completed: true"));
-        assert!(text.contains("blocked_reason"));
-        assert!(text.contains("If update_goal returns an error"));
+        assert!(text.contains("every automatic continuation"));
+        assert!(text.contains("completion audit"));
+        assert!(text.contains("todo_write"));
+        assert!(text.contains("task subagents"));
+        assert!(text.contains("not a second persistent Goal state"));
+        assert!(text.contains("status=complete"));
+        assert!(text.contains("status=blocked"));
+        assert!(text.contains("full objective"));
         assert!(
             !text.contains("system-reminder"),
             "expansions ride as user messages and must not claim reminder authority"

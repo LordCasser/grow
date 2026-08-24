@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sampling_types::ConversationItem;
 use serde::{Deserialize, Serialize};
 
-pub const SIDEBAND_SCHEMA_VERSION: u8 = 3;
+pub const SIDEBAND_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -320,6 +320,10 @@ impl SidebandTimeline {
         &self.sideband_id
     }
 
+    pub fn is_ended(&self) -> bool {
+        self.ended
+    }
+
     /// Validate this independent ledger against the one immutable fact held by
     /// its initiating Timeline. This is the trust boundary used by resume,
     /// import, and Trajectory; none of those consumers may infer parentage from
@@ -352,7 +356,8 @@ impl SidebandTimeline {
         if self.sideband_id != spawn.sideband_id
             || request.purpose != spawn.purpose
             || request.source_refs != spawn.source_refs
-            || request.initiator_ref != format!("t:{parent_timeline_id}/{spawn_seq}")
+            || request.initiator_ref
+                != format!("t:{parent_timeline_id}/sideband:{}", spawn.sideband_id)
             || !usize::try_from(spawn_seq)
                 .ok()
                 .and_then(|index| parent.events().get(index))
@@ -787,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v2_is_not_replayed_by_the_v3_reader() {
+    fn old_schema_is_not_replayed_by_the_current_reader() {
         let id = uuid::Uuid::now_v7().to_string();
         let timeline = SidebandTimeline::new(id).unwrap();
         let mut event = timeline
@@ -920,7 +925,7 @@ mod tests {
         let spawn_event = parent
             .record(crate::TimelineEventKind::Sideband(spawn.clone()))
             .unwrap();
-        let mut sideband = SidebandTimeline::new(sideband_id).unwrap();
+        let mut sideband = SidebandTimeline::new(sideband_id.clone()).unwrap();
         for kind in [
             SidebandEventKind::Request(SidebandRequest {
                 purpose: SidebandPurpose::ContextRecall,
@@ -930,7 +935,7 @@ mod tests {
                     model: "test-model".into(),
                     backend: "responses".into(),
                 },
-                initiator_ref: format!("t:parent/{}", spawn_event.seq.get()),
+                initiator_ref: format!("t:parent/sideband:{sideband_id}"),
                 executor: "main".into(),
                 output_schema: None,
             }),

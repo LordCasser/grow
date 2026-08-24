@@ -409,7 +409,7 @@ mod capability_catalog_restore_tests {
 }
 
 fn restored_plan_artifact_is_valid(
-    session_dir: &std::path::Path,
+    session: &crate::session::storage::ContainedDirectory,
     snapshot: &crate::session::behavior::BehaviorSnapshot,
     phase: crate::session::behavior::PlanPhase,
 ) -> bool {
@@ -418,18 +418,11 @@ fn restored_plan_artifact_is_valid(
     if phase == crate::session::behavior::PlanPhase::Drafting && has_no_artifact {
         return true;
     }
-    let path = if phase == crate::session::behavior::PlanPhase::Executing {
-        session_dir.join("approved_plan.md")
-    } else {
-        session_dir.join("plan.md")
+    let Some(hash) = snapshot.plan_artifact_hash.as_deref() else {
+        return false;
     };
-    std::fs::read_to_string(path).ok().is_some_and(|markdown| {
-        let coordinator = crate::session::behavior::BehaviorCoordinator::from_snapshot(
-            session_dir.to_path_buf(),
-            snapshot.clone(),
-        );
-        coordinator.plan_artifact_is_valid(&markdown)
-    })
+    snapshot.plan_artifact_revision > 0
+        && crate::session::behavior::read_plan_artifact(session, hash).is_ok()
 }
 
 #[cfg(test)]
@@ -502,12 +495,23 @@ mod plan_restore_validation_tests {
     use crate::session::behavior::{BehaviorCoordinator, BehaviorSnapshot, PlanPhase};
     use tool_types::BehaviorId;
 
+    fn session(dir: &tempfile::TempDir) -> crate::session::storage::ContainedDirectory {
+        crate::session::storage::ContainedDirectory::open(
+            dir.path(),
+            std::path::Path::new(""),
+            "Plan restore test session",
+            false,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn fresh_drafting_plan_restores_without_an_artifact() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot = BehaviorSnapshot::selected(BehaviorId::Plan);
+        let session = session(&dir);
         assert!(restored_plan_artifact_is_valid(
-            dir.path(),
+            &session,
             &snapshot,
             PlanPhase::Drafting,
         ));
@@ -517,35 +521,28 @@ mod plan_restore_validation_tests {
     fn submitted_and_executing_plans_require_the_matching_artifact() {
         let dir = tempfile::tempdir().unwrap();
         let markdown = "# Plan\n\n- implement the change\n";
-        let mut coordinator = BehaviorCoordinator::from_snapshot(
-            dir.path().to_path_buf(),
-            BehaviorSnapshot::selected(BehaviorId::Plan),
-        );
+        let session = session(&dir);
+        let mut coordinator =
+            BehaviorCoordinator::from_snapshot(BehaviorSnapshot::selected(BehaviorId::Plan));
         coordinator.record_plan_artifact(markdown);
         assert!(coordinator.submit_initial_plan());
         let submitted = coordinator.snapshot();
         assert!(!restored_plan_artifact_is_valid(
-            dir.path(),
+            &session,
             &submitted,
             PlanPhase::AwaitingApproval,
         ));
-        std::fs::write(dir.path().join("plan.md"), markdown).unwrap();
+        crate::session::behavior::write_plan_artifact(&session, markdown).unwrap();
         assert!(restored_plan_artifact_is_valid(
-            dir.path(),
+            &session,
             &submitted,
             PlanPhase::AwaitingApproval,
         ));
 
         assert!(coordinator.approve_submitted_plan());
         let executing = coordinator.snapshot();
-        assert!(!restored_plan_artifact_is_valid(
-            dir.path(),
-            &executing,
-            PlanPhase::Executing,
-        ));
-        std::fs::write(dir.path().join("approved_plan.md"), markdown).unwrap();
         assert!(restored_plan_artifact_is_valid(
-            dir.path(),
+            &session,
             &executing,
             PlanPhase::Executing,
         ));
@@ -781,7 +778,7 @@ pub(crate) async fn spawn_session_actor(
     persistence: PersistenceHandle,
     session_title_route: Option<crate::session::summary::SessionTitleRoute>,
     timeline_bootstrap: TimelineBootstrap,
-    rewind_points_path: Option<std::path::PathBuf>,
+    rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     fs_notify_config: Option<ClientFsConfig>,
     mut startup_hints: StartupHints,
     client_type: ClientType,
@@ -806,7 +803,7 @@ pub(crate) async fn spawn_session_actor(
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
     persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
-    persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
+    persisted_goal_mode: Option<crate::session::goal_tracker::GoalState>,
     persisted_control_revision: u64,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
@@ -855,6 +852,39 @@ pub(crate) async fn spawn_session_actor(
             "max_turns must be greater than 0".to_string(),
         ));
     }
+    let session_directory = match persistence.session_directory() {
+        Some(directory) => directory,
+        None => {
+            #[cfg(test)]
+            {
+                std::fs::create_dir_all(&session_dir).map_err(|error| {
+                    agent::AgentBuildError::InvalidConfig(format!(
+                        "failed to create test session directory: {error}"
+                    ))
+                })?;
+                std::sync::Arc::new(
+                    crate::session::storage::ContainedDirectory::open(
+                        &session_dir,
+                        std::path::Path::new(""),
+                        "test session entity",
+                        false,
+                    )
+                    .map_err(|error| {
+                        agent::AgentBuildError::InvalidConfig(format!(
+                            "failed to pin test session directory: {error}"
+                        ))
+                    })?,
+                )
+            }
+            #[cfg(not(test))]
+            {
+                return Err(agent::AgentBuildError::InvalidConfig(
+                    "session persistence did not provide an identity-bound directory capability"
+                        .to_string(),
+                ));
+            }
+        }
+    };
     let (resumed_timeline, validated_timeline, mut conversation) = match timeline_bootstrap {
         TimelineBootstrap::Fresh => (None, None, Vec::new()),
         TimelineBootstrap::Existing(events) => {
@@ -1069,8 +1099,8 @@ pub(crate) async fn spawn_session_actor(
         _ if startup_hints.non_interactive => McpInitStrategy::Blocking,
         _ => McpInitStrategy::Progressive,
     };
-    let file_state_tracker = Arc::new(match rewind_points_path {
-        Some(path) => FileStateTracker::with_lazy_source(path),
+    let file_state_tracker = Arc::new(match rewind_points_source {
+        Some(source) => FileStateTracker::with_lazy_source(source),
         None => FileStateTracker::new(),
     });
     let file_state_handle = FileStateHandle::new(file_state_tracker.clone());
@@ -1091,29 +1121,14 @@ pub(crate) async fn spawn_session_actor(
         serde_json::json!({
             "architecture_version": goal.architecture_version,
             "status": goal.status,
-            "phase": goal.phase,
             "goal_enabled": goal_enabled,
         })
     });
     let had_persisted_goal = persisted_goal_mode.is_some();
-    let mut restored_goal_tracker = goal_enabled
+    let restored_goal_tracker = goal_enabled
         .then_some(persisted_goal_mode)
         .flatten()
         .and_then(crate::session::goal_tracker::GoalTracker::from_snapshot);
-    let goal_finalization_reconciled = restored_goal_tracker.as_mut().is_some_and(|tracker| {
-        let Some(goal) = tracker.snapshot() else {
-            return false;
-        };
-        if goal.status != crate::session::goal_tracker::GoalStatus::Active
-            || goal.phase != crate::session::goal_tracker::GoalPhase::Summarizing
-        {
-            return false;
-        }
-        resumed_timeline
-            .as_ref()
-            .is_some_and(|timeline| timeline.has_successful_goal_finalization(&goal.goal_id))
-            && tracker.complete_verified()
-    });
     let goal_was_restored = restored_goal_tracker.is_some();
     let goal_state_needs_clear = had_persisted_goal && !goal_was_restored;
     if goal_state_needs_clear {
@@ -1130,7 +1145,7 @@ pub(crate) async fn spawn_session_actor(
         let valid = snapshot.runtime_fields_match_selection()
             && match &snapshot.state {
                 crate::session::behavior::BehaviorState::Plan(phase) => {
-                    restored_plan_artifact_is_valid(&session_dir, &snapshot, *phase)
+                    restored_plan_artifact_is_valid(&session_directory, &snapshot, *phase)
                 }
                 crate::session::behavior::BehaviorState::DeepResearch {
                     run_id: Some(run_id),
@@ -1158,12 +1173,9 @@ pub(crate) async fn spawn_session_actor(
     });
     let (behavior, restored_behavior) = {
         let mut tracker = if let Some(snapshot) = persisted_behavior {
-            crate::session::behavior::BehaviorCoordinator::from_snapshot(
-                session_dir.clone(),
-                snapshot,
-            )
+            crate::session::behavior::BehaviorCoordinator::from_snapshot(snapshot)
         } else {
-            crate::session::behavior::BehaviorCoordinator::new(session_dir.clone())
+            crate::session::behavior::BehaviorCoordinator::new()
         };
         let selected_behavior = tracker.behavior();
         (
@@ -1271,7 +1283,8 @@ pub(crate) async fn spawn_session_actor(
         } else {
             std::sync::Arc::new(tools::computer::local::LocalFs)
         };
-    let resource_state_path = session_dir.join("resources_state.json");
+    let resources_persistence =
+        crate::session::storage::resources_persistence(session_directory.clone());
     let initial_agent_type = Some(agent_definition.name.clone());
     let subagent_filter_for_handle = agent_definition.subagent_filter();
     let harness_metrics = {
@@ -1475,7 +1488,7 @@ pub(crate) async fn spawn_session_actor(
         terminal_backend: terminal_backend.clone(),
         fs_backend: fs_backend.clone(),
         tools_notification_handle: tools_notification_handle.clone(),
-        resource_state_path: resource_state_path.clone(),
+        resources_persistence: resources_persistence.clone(),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
         compaction_policy,
@@ -1787,10 +1800,10 @@ pub(crate) async fn spawn_session_actor(
         tools::implementations::grow_build::update_goal::GoalCommand,
     >();
     crate::session::workflow::registry::warm_builtin_cache();
-    let workflow_session_dir = session_dir.clone();
+    let workflow_session_directory = session_directory.clone();
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
-            Some(workflow_session_dir.clone()),
+            Some(workflow_session_directory.clone()),
             persistence.tx.clone(),
             persisted_workflow_runs,
             resumed_timeline.as_ref(),
@@ -1810,8 +1823,8 @@ pub(crate) async fn spawn_session_actor(
     );
     if pause_goal {
         goal_tracker.lock().pause_with_message(
-            crate::session::goal_tracker::GoalPauseReason::Infra,
-            "Recovered a non-terminal public Workflow alongside this Goal. Stop or finish the Workflow, then use /goal resume."
+            crate::session::goal_tracker::GoalPauseReason::RuntimeUnavailable,
+            "Recovered a non-terminal public Workflow alongside this Goal. Stop or finish the Workflow, then restart the Goal."
                 .to_string(),
         );
     }
@@ -1837,7 +1850,7 @@ pub(crate) async fn spawn_session_actor(
     let workflow_manager = Arc::new(tokio::sync::Mutex::new(
         crate::session::workflow::manager::WorkflowManager::new(
             session_info.id.0.to_string(),
-            Some(workflow_session_dir),
+            Some(workflow_session_directory.clone()),
             std::path::PathBuf::from(session_info.cwd.as_str()),
             workflow_tracker.clone(),
             workflow_store,
@@ -1866,7 +1879,7 @@ pub(crate) async fn spawn_session_actor(
         let behavior = behavior.clone();
         let workflow_cmd_tx = cmd_tx.clone();
         let launch_cwd = std::path::PathBuf::from(session_info.cwd.as_str());
-        let launch_session_dir = session_dir.clone();
+        let launch_session_directory = workflow_session_directory.clone();
         tokio::spawn(async move {
             use crate::session::workflow::{registry, workspace::WorkflowWorkspace};
             use tools::implementations::grow_build::workflow::{
@@ -1913,7 +1926,10 @@ pub(crate) async fn spawn_session_actor(
                     continue;
                 }
                 let output: Result<WorkflowToolOutput, (&'static str, String)> = async {
-                    let mut workspace = WorkflowWorkspace::open(&launch_session_dir, &launch_cwd)
+                    let mut workspace = WorkflowWorkspace::open_in_session(
+                        &launch_session_directory,
+                        &launch_cwd,
+                    )
                         .map_err(|error| ("workflow_workspace_failed", error.to_string()))?;
                     match input {
                         WorkflowToolInput::Search { query, limit } => {
@@ -1950,7 +1966,6 @@ pub(crate) async fn spawn_session_actor(
                             let definition = workspace
                                 .draft(
                                     &launch_cwd,
-                                    &launch_session_dir,
                                     name.as_deref(),
                                     source,
                                 )
@@ -2275,6 +2290,7 @@ pub(crate) async fn spawn_session_actor(
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         session_dir: session_dir.clone(),
+        session_directory: session_directory.clone(),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -2399,10 +2415,8 @@ pub(crate) async fn spawn_session_actor(
         goal_enabled,
         background_workflows_enabled,
         // Fail closed until the live tool bridge proves all Goal tools exist.
-        goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
+        goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
-        goal_stage_cancel: parking_lot::Mutex::new(None),
-        goal_plan_staging: std::sync::Mutex::new(None),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
@@ -2460,10 +2474,15 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
+    session.recover_pending_rewind().await.map_err(|error| {
+        agent::AgentBuildError::IoError(std::io::Error::other(format!(
+            "failed to recover pending rewind transaction: {error}"
+        )))
+    })?;
     crate::session::context_recall::serve_context_recall(&session, context_recall_receiver);
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
-    session.refresh_goal_harness_enabled().await;
+    session.refresh_goal_runtime_availability().await;
     session.finish_restored_deep_research_if_terminal().await;
     if goal_projection_needs_clear {
         if goal_state_needs_clear && let Err(error) = session.delete_goal_state_durably().await {
@@ -2476,14 +2495,8 @@ pub(crate) async fn spawn_session_actor(
         // Replay happens before actor spawn, so explicitly retire any stale
         // GoalUpdated projection the client may just have reconstructed.
         session
-            .send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
+            .send_grow_notification(crate::session::goal_notification::build_goal_cleared())
             .await;
-    }
-    if goal_finalization_reconciled {
-        tracing::info!(
-            session_id = %session.session_info.id.0,
-            "reconciled durable Goal finalization terminal into Complete control state"
-        );
     }
     if behavior_normalized || goal_was_restored {
         let behavior = session.behavior.lock().snapshot();
@@ -2497,14 +2510,12 @@ pub(crate) async fn spawn_session_actor(
     }
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
-        let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);
+        let tokens_used = session.goal_tokens_used(current_tokens);
         // The durable write above also captures any fail-closed sanitization
         // performed by `from_snapshot`; do not enqueue a second, weaker copy.
-        session.goal_notify_sender().emit_goal_updated(
-            &session.goal_tracker.lock(),
-            tokens_used,
-            finished_marginal,
-        );
+        session
+            .goal_notify_sender()
+            .emit_goal_updated(&session.goal_tracker.lock(), tokens_used);
     }
     {
         let drainer_session = session.clone();
@@ -2886,7 +2897,7 @@ pub(crate) async fn spawn_session_on_thread(
     persistence: PersistenceHandle,
     session_title_route: Option<crate::session::summary::SessionTitleRoute>,
     timeline_bootstrap: TimelineBootstrap,
-    rewind_points_path: Option<std::path::PathBuf>,
+    rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     fs_notify_config: Option<ClientFsConfig>,
     startup_hints: StartupHints,
     client_type: ClientType,
@@ -2911,7 +2922,7 @@ pub(crate) async fn spawn_session_on_thread(
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
     persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
-    persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
+    persisted_goal_mode: Option<crate::session::goal_tracker::GoalState>,
     persisted_control_revision: u64,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
@@ -2995,7 +3006,7 @@ pub(crate) async fn spawn_session_on_thread(
                     persistence,
                     session_title_route,
                     timeline_bootstrap,
-                    rewind_points_path,
+                    rewind_points_source,
                     fs_notify_config,
                     startup_hints,
                     client_type,

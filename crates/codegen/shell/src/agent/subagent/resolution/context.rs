@@ -65,7 +65,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     }
 
     // Count complete turns (User -> Assistant [-> ToolResult*] cycles).
-    let turns = count_complete_turns(&parent_items);
+    let turns = chat_state::compaction_utils::complete_turn_ends(parent_items.iter().copied());
 
     let mut background = String::from("<background_context>\n");
     background.push_str(
@@ -92,65 +92,6 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
 
     let conversation = vec![system, ConversationItem::user(&background)];
     (conversation, 2)
-}
-
-/// Count complete turns in a slice of non-System conversation items.
-///
-/// Returns a vec of indices where each complete turn ends (exclusive).
-/// A turn is: one or more consecutive User messages, followed by an
-/// Assistant message, followed by zero or more ToolResult messages.
-/// Real histories interleave `Reasoning` (and `BackendToolCall`) siblings,
-/// so those are skipped both before the Assistant and within the
-/// post-assistant tool-result run — otherwise long forked histories would
-/// register zero turns and never summarize, blowing up token usage.
-///
-/// NOTE: this is one of two reasoning-aware turn-boundary scanners that must move
-/// together — the other is `fork_filter_surface` in
-/// `shell/src/session/storage/jsonl.rs` (it truncates to the last
-/// complete turn before this counts them). Keep their notions of a "complete
-/// turn" in sync if the turn item model changes.
-fn count_complete_turns(items: &[&ConversationItem]) -> Vec<usize> {
-    let mut turn_ends = Vec::new();
-    let mut i = 0;
-    while i < items.len() {
-        // Skip until the start of a turn (a User message).
-        if !matches!(items[i], ConversationItem::User(_)) {
-            i += 1;
-            continue;
-        }
-        // Consume consecutive User messages.
-        while i < items.len() && matches!(items[i], ConversationItem::User(_)) {
-            i += 1;
-        }
-        // Skip Reasoning / BackendToolCall siblings that precede the Assistant.
-        while i < items.len()
-            && matches!(
-                items[i],
-                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-            )
-        {
-            i += 1;
-        }
-        // Expect Assistant.
-        if i >= items.len() || !matches!(items[i], ConversationItem::Assistant(_)) {
-            break;
-        }
-        i += 1; // skip past Assistant
-        // Consume the post-assistant run: ToolResults plus interleaved
-        // Reasoning / BackendToolCall siblings, until the next User/Assistant.
-        while i < items.len()
-            && matches!(
-                items[i],
-                ConversationItem::ToolResult(_)
-                    | ConversationItem::Reasoning(_)
-                    | ConversationItem::BackendToolCall(_)
-            )
-        {
-            i += 1;
-        }
-        turn_ends.push(i);
-    }
-    turn_ends
 }
 
 /// Strip content from user message text that is redundant in a forked
@@ -700,7 +641,7 @@ mod tests {
             assistant_item("A2"),
         ];
         let refs: Vec<&ConversationItem> = items.iter().collect();
-        let turns = count_complete_turns(&refs);
+        let turns = chat_state::compaction_utils::complete_turn_ends(refs.iter().copied());
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0], 2); // after A1
         assert_eq!(turns[1], 4); // after A2
@@ -711,13 +652,13 @@ mod tests {
         let items = [
             user_item("U1"),
             assistant_with_tool_calls("A1", &["bash"]),
-            tool_result("output"),
-            tool_result("output2"),
+            ConversationItem::tool_result("tc-bash", "output"),
+            ConversationItem::tool_result("unmatched-historical-result", "output2"),
             user_item("U2"),
             assistant_item("A2"),
         ];
         let refs: Vec<&ConversationItem> = items.iter().collect();
-        let turns = count_complete_turns(&refs);
+        let turns = chat_state::compaction_utils::complete_turn_ends(refs.iter().copied());
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0], 4); // after 2 tool results
         assert_eq!(turns[1], 6);
@@ -731,7 +672,7 @@ mod tests {
             user_item("U2"), // trailing User with no Assistant
         ];
         let refs: Vec<&ConversationItem> = items.iter().collect();
-        let turns = count_complete_turns(&refs);
+        let turns = chat_state::compaction_utils::complete_turn_ends(refs.iter().copied());
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0], 2);
     }
@@ -749,7 +690,7 @@ mod tests {
             assistant_item("A2"),
         ];
         let refs: Vec<&ConversationItem> = items.iter().collect();
-        let turns = count_complete_turns(&refs);
+        let turns = chat_state::compaction_utils::complete_turn_ends(refs.iter().copied());
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0], 3); // after reasoning + A1
         assert_eq!(turns[1], 6); // after reasoning + A2

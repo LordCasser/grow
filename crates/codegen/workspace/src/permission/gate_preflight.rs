@@ -1,11 +1,9 @@
 //! Managed-policy preflight for one permission request.
 //!
 //! Evaluates the direct rule pass and both bash security gates once and keeps
-//! each gate's `Ask` provenance, so the manager can tell a rule-match Ask (an
-//! actual policy match — stays a prompt) from a fail-closed Ask (analysis
-//! could not decompose the command to check rules). In auto mode a fail-closed
-//! Ask defers to the classifier; the manager consumes this single result
-//! instead of correlating parallel booleans at every decision site.
+//! each gate's `Ask` provenance. Both a matched Ask and a fail-closed Ask bind
+//! the request to a human prompt; parser uncertainty is never delegated to a
+//! model classifier or a child permission mode.
 
 use std::path::Path;
 
@@ -19,14 +17,6 @@ pub(crate) struct GatePreflight {
     direct: Option<Decision>,
     bash_command: Option<GateDecision>,
     shell_file: Option<GateDecision>,
-    /// A gate could not decompose the command and therefore asked
-    /// fail-closed, with no actual managed Ask rule match. Child permission
-    /// modes route this heuristic as AlwaysApprove/Auto/Ask; it is not itself
-    /// an authoritative managed-policy Ask.
-    shell_heuristic_ask: bool,
-    /// Auto mode + a fail-closed gate Ask with no rule match: the classifier
-    /// arbitrates (Allow runs, Block prompts). A rule-match Ask never defers.
-    defers_gate_ask: bool,
 }
 
 impl GatePreflight {
@@ -34,7 +24,6 @@ impl GatePreflight {
         policy: Option<&CompiledPolicy>,
         access: &AccessKind,
         cwd: &Path,
-        auto_mode: bool,
     ) -> Self {
         let direct = policy.and_then(|policy| policy.evaluate(access));
         let (bash_command, shell_file) = match (policy, access) {
@@ -44,21 +33,10 @@ impl GatePreflight {
             ),
             _ => (None, None),
         };
-        let rule_match_ask = matches!(direct, Some(Decision::Ask))
-            || matches!(bash_command, Some(GateDecision::AskRuleMatch))
-            || matches!(shell_file, Some(GateDecision::AskRuleMatch));
-        let fail_closed_ask = matches!(bash_command, Some(GateDecision::AskFailClosed))
-            || matches!(shell_file, Some(GateDecision::AskFailClosed));
-        // WHY: a fail-closed Ask means analysis could not decompose the command
-        // to check rules, so the classifier arbitrates it; a rule-match Ask is
-        // an actual policy match that stays a prompt (never waived by a model).
-        let defers_gate_ask = auto_mode && fail_closed_ask && !rule_match_ask;
         Self {
             direct,
             bash_command,
             shell_file,
-            shell_heuristic_ask: fail_closed_ask && !rule_match_ask,
-            defers_gate_ask,
         }
     }
 
@@ -89,21 +67,10 @@ impl GatePreflight {
         self.shell_file.as_ref().is_some_and(GateDecision::is_ask)
     }
 
-    /// Whether the auto classifier may run despite a gate Ask: no Ask at all,
-    /// or a fail-closed Ask that defers.
+    /// The auto classifier is only admissible when managed policy has not
+    /// required a prompt. This includes parser/gate uncertainty.
     pub(crate) fn admits_auto_classifier(&self) -> bool {
-        !self.policy_forced_prompt() || self.defers_gate_ask()
-    }
-
-    /// Deferral is active: a classifier Block must prompt (never silently
-    /// deny, no denial-budget consumption).
-    pub(crate) fn defers_gate_ask(&self) -> bool {
-        self.defers_gate_ask
-    }
-
-    /// A parser/gate uncertainty rather than a matched managed Ask rule.
-    pub(crate) fn shell_heuristic_ask(&self) -> bool {
-        self.shell_heuristic_ask
+        !self.policy_forced_prompt()
     }
 
     /// The gate-owned prompt trigger for diagnostics, or `None` when a bash floor
@@ -115,11 +82,6 @@ impl GatePreflight {
     ) -> Option<&'static str> {
         if matches!(self.direct, Some(Decision::Ask)) {
             return Some(reasons::POLICY_ASK);
-        }
-        // WHY: a preempting request floor owns the reason, so a deferrable Ask
-        // whose classifier a floor blocked (`auto_prompt_reason` None) yields it.
-        if self.defers_gate_ask() {
-            return auto_prompt_reason;
         }
         if self.bash_command.as_ref().is_some_and(GateDecision::is_ask) {
             return Some(reasons::BASH_COMMAND_GATE_ASK);
@@ -160,26 +122,12 @@ mod tests {
         let cwd = Path::new("/work");
         let bash = |cmd: &str| AccessKind::Bash(cmd.to_owned());
 
-        // Fail-closed gate Ask in auto mode: admitted to the classifier, Block
-        // stays prompt-binding, trigger follows the classifier outcome.
-        let deferred = GatePreflight::evaluate(Some(&policy), &bash("echo \"$(date)\""), cwd, true);
-        assert!(deferred.policy_forced_prompt());
-        assert!(deferred.admits_auto_classifier());
-        assert!(deferred.defers_gate_ask());
+        // Gate uncertainty is a binding managed prompt in every session mode.
+        let fail_closed = GatePreflight::evaluate(Some(&policy), &bash("echo \"$(date)\""), cwd);
+        assert!(fail_closed.policy_forced_prompt());
+        assert!(!fail_closed.admits_auto_classifier());
         assert_eq!(
-            deferred.prompt_trigger(Some(reasons::AUTO_CLASSIFIER_BLOCK)),
-            Some(reasons::AUTO_CLASSIFIER_BLOCK)
-        );
-
-        // Same request outside auto mode: nothing admits the classifier and
-        // the gate label is the trigger.
-        let ask_mode =
-            GatePreflight::evaluate(Some(&policy), &bash("echo \"$(date)\""), cwd, false);
-        assert!(ask_mode.policy_forced_prompt());
-        assert!(!ask_mode.admits_auto_classifier());
-        assert!(!ask_mode.defers_gate_ask());
-        assert_eq!(
-            ask_mode.prompt_trigger(None),
+            fail_closed.prompt_trigger(Some(reasons::AUTO_CLASSIFIER_BLOCK)),
             Some(reasons::BASH_COMMAND_GATE_ASK)
         );
 
@@ -189,20 +137,17 @@ mod tests {
             Some(&policy),
             &bash("echo hi && git push origin main"),
             cwd,
-            true,
         );
         assert!(!rule_match.admits_auto_classifier());
-        assert!(!rule_match.defers_gate_ask());
         assert_eq!(
             rule_match.prompt_trigger(None),
             Some(reasons::BASH_COMMAND_GATE_ASK)
         );
 
         // No policy at all: inert preflight.
-        let inert = GatePreflight::evaluate(None, &bash("echo hi"), cwd, true);
+        let inert = GatePreflight::evaluate(None, &bash("echo hi"), cwd);
         assert!(inert.policy_decision().is_none());
         assert!(inert.admits_auto_classifier());
-        assert!(!inert.defers_gate_ask());
         assert_eq!(inert.prompt_trigger(None), None);
     }
 }

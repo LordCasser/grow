@@ -564,15 +564,6 @@ pub(super) async fn run_session(
                             )
                             .await;
                         }
-                        // A background Goal stage (planner or verifier)
-                        // finished its model work. Commit the
-                        // pure state part under the captured lease; stale
-                        // completions are dropped with diagnostics. The
-                        // stage never awaited the mailbox, so the mailbox
-                        // stays responsive to user commands throughout.
-                        SessionEvent::GoalStageCompleted(completion) => {
-                            session.handle_goal_stage_completed(completion).await;
-                        }
                         SessionEvent::FlushReplay { respond_to } => {
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
@@ -799,14 +790,6 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
-                    SessionCommand::SetGoalStageSubmitHandle { handle } => {
-                        session
-                            .agent
-                            .borrow()
-                            .tool_bridge()
-                            .update_resource(handle)
-                            .await;
-                    }
                     SessionCommand::RestorePlanApproval => {
                         // Resume re-park: spawn the approval
                         // round-trip so the command loop is not blocked on
@@ -839,7 +822,12 @@ pub(super) async fn run_session(
                             SessionActor::respond_removed_prompt(respond_to);
                             continue;
                         }
-                        session.ensure_prefix_ready().await;
+                        if let Err(error) = session.ensure_prefix_ready().await {
+                            let _ = respond_to.send(Err(acp::Error::internal_error().data(
+                                format!("session context was not durably published: {error}"),
+                            )));
+                            continue;
+                        }
                         // Clear suppression -- user is re-engaging
                         // (skip for synthetic auto-wake prompts; the user hasn't
                         // actually re-engaged, so post-cancel suppression must hold)
@@ -1492,18 +1480,20 @@ pub(super) async fn run_session(
                         );
                     }
                     SessionCommand::Rewind { request, respond_to } => {
-                        let s = session.clone();
-                        tokio::task::spawn_local(async move {
-                            let result = s.handle_rewind(request).await;
-                            let _ = respond_to.send(result);
-                        });
+                        let result = session.handle_rewind(request).await;
+                        let transaction_incomplete = result.is_err();
+                        let _ = respond_to.send(result);
+                        if transaction_incomplete {
+                            tracing::error!(
+                                session_id = %session.session_info.id,
+                                "rewind transaction is incomplete; stopping the actor for recovery"
+                            );
+                            break;
+                        }
                     }
                     SessionCommand::RepairHistory { dry_run, respond_to } => {
-                        let s = session.clone();
-                        tokio::task::spawn_local(async move {
-                            let result = s.handle_repair_history(dry_run).await;
-                            let _ = respond_to.send(result);
-                        });
+                        let result = session.handle_repair_history(dry_run).await;
+                        let _ = respond_to.send(result);
                     }
                     SessionCommand::GetRewindPoints { respond_to } => {
                         let response = session.get_rewind_points().await;
@@ -1511,9 +1501,6 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::GetRewindFileCounts { respond_to } => {
                         let _ = respond_to.send(session.rewind_file_counts().await);
-                    }
-                    SessionCommand::ReconcileRewindTracker { target_prompt_index } => {
-                        session.merge_rewind_tracker_from(target_prompt_index).await;
                     }
                     SessionCommand::GrowSessionNotification { notification } => {
                         session.handle_grow_session_notification(notification).await;
@@ -1594,17 +1581,6 @@ pub(super) async fn run_session(
                             }
                         };
                         let _ = respond_to.send(usage);
-                    }
-                    SessionCommand::IsBusy { respond_to } => {
-                        // Goal stages deliberately own no foreground, but an
-                        // Active Goal is still live work and must not be
-                        // idle-unloaded between stage/turn boundaries.
-                        let goal_status = session.goal_tracker.lock().status();
-                        let busy = {
-                            let state = session.state.lock().await;
-                            session_has_work(&state, goal_status)
-                        };
-                        let _ = respond_to.send(busy);
                     }
                     SessionCommand::FlushComplete { respond_to } => {
                         // Flush the actor-owned replay buffer inline. This branch
@@ -1885,7 +1861,7 @@ pub(super) async fn run_session(
                         drop(mcp_state);
 
                         session.refresh_mcp_snapshot_and_schedule_reminder().await;
-                        session.refresh_goal_harness_enabled().await;
+                        session.refresh_goal_runtime_availability().await;
 
                         // Persist to config and emit notification in background.
                         let notifications = session.notifications.gateway.clone();
@@ -2161,7 +2137,42 @@ pub(super) async fn run_session(
                             PersistenceMsg::GitHead { commit, branch },
                         );
                     }
-                    SessionCommand::Shutdown => {
+                    command @ (SessionCommand::Shutdown
+                    | SessionCommand::UnloadIfIdle { .. }) => {
+                        if let SessionCommand::UnloadIfIdle { respond_to } = command {
+                            // This decision and mailbox close are performed in
+                            // one actor turn. Commands already ahead of this one
+                            // have been applied; commands behind it are ordered
+                            // after the unload request and are rejected once the
+                            // receiver is closed.
+                            let goal_status = session.goal_tracker.lock().status();
+                            let has_parked_plan_approval =
+                                crate::session::pending_interaction::has_parked_plan_approval(
+                                    &session.pending_interactions,
+                                );
+                            let busy = {
+                                let state = session.state.lock().await;
+                                session_has_work(
+                                    &state,
+                                    goal_status,
+                                    has_parked_plan_approval,
+                                )
+                            } || !cmd_rx.is_empty();
+                            // The leader bounds this transaction. If its
+                            // waiter timed out while the actor was occupied,
+                            // the unload request is cancelled: shutting down
+                            // now would leave a dead actor behind a retained
+                            // session handle.
+                            if respond_to.is_closed() {
+                                continue;
+                            }
+                            if busy {
+                                let _ = respond_to.send(false);
+                                continue;
+                            }
+                            cmd_rx.close();
+                            let _ = respond_to.send(true);
+                        }
                         stop_permission_manager_and_drain_audit(&session).await;
                         shutdown_workflows(&session).await;
                         // Flush the actor-owned replay buffer so any

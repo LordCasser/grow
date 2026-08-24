@@ -19,11 +19,15 @@ pub(crate) enum SidebandRunError {
     Parent(#[from] chat_state::TimelineWriteError),
     #[error("sideband persistence failed: {0}")]
     Persistence(String),
+    #[error("an interrupted sideband append was recovered; the new operation was not applied")]
+    InterruptedAppendRecovered,
 }
 
 pub(crate) struct SidebandRun {
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
+    pending: Option<chat_state::SidebandEvent>,
+    persistence_poison: Option<String>,
 }
 
 impl SessionActor {
@@ -54,17 +58,6 @@ impl SessionActor {
             .into());
         }
         let sideband_id = uuid::Uuid::now_v7().to_string();
-        let spawn = self
-            .chat_state_handle
-            .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
-                chat_state::SidebandSpawnEvent {
-                    sideband_id: sideband_id.clone(),
-                    purpose,
-                    source_refs: source_refs.clone(),
-                },
-            ))
-            .await?;
-        let initiator_ref = format!("t:{}/{}", self.session_info.id, spawn.seq.get());
         let mut timeline = chat_state::SidebandTimeline::new(sideband_id)?;
         let request = timeline.prepare(chat_state::SidebandEventKind::Request(
             chat_state::SidebandRequest {
@@ -72,7 +65,11 @@ impl SessionActor {
                 prompt,
                 source_refs,
                 route,
-                initiator_ref,
+                initiator_ref: format!(
+                    "t:{}/sideband:{}",
+                    self.session_info.id,
+                    timeline.sideband_id()
+                ),
                 executor: if self.startup_hints.is_subagent {
                     format!("subagent:{}", self.session_info.id)
                 } else {
@@ -81,12 +78,33 @@ impl SessionActor {
                 output_schema,
             },
         ))?;
-        append_sideband_exact(&self.notifications, request.clone()).await?;
-        timeline.accept(request)?;
-        Ok(SidebandRun {
+        let mut run = SidebandRun {
             timeline,
             persistence: self.notifications.clone(),
-        })
+            pending: Some(request),
+            persistence_poison: None,
+        };
+        run.flush_pending().await?;
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
+                chat_state::SidebandSpawnEvent {
+                    sideband_id: run.timeline.sideband_id().to_owned(),
+                    purpose,
+                    source_refs: run
+                        .timeline
+                        .events()
+                        .first()
+                        .and_then(|event| match &event.kind {
+                            chat_state::SidebandEventKind::Request(request) => {
+                                Some(request.source_refs.clone())
+                            }
+                            _ => None,
+                        })
+                        .ok_or(chat_state::SidebandError::InvalidRequestBoundary)?,
+                },
+            ))
+            .await?;
+        Ok(run)
     }
 }
 
@@ -234,9 +252,28 @@ impl SidebandRun {
         &mut self,
         kind: chat_state::SidebandEventKind,
     ) -> Result<(), SidebandRunError> {
+        if let Some(error) = self.persistence_poison.as_ref() {
+            return Err(SidebandRunError::Persistence(error.clone()));
+        }
+        if self.pending.is_some() {
+            self.flush_pending().await?;
+            return Err(SidebandRunError::InterruptedAppendRecovered);
+        }
         let event = self.timeline.prepare(kind)?;
-        append_sideband_exact(&self.persistence, event.clone()).await?;
+        self.pending = Some(event);
+        self.flush_pending().await
+    }
+
+    async fn flush_pending(&mut self) -> Result<(), SidebandRunError> {
+        let Some(event) = self.pending.clone() else {
+            return Ok(());
+        };
+        if let Err(error) = append_sideband_exact(&self.persistence, event.clone()).await {
+            self.persistence_poison = Some(error.to_string());
+            return Err(error);
+        }
         self.timeline.accept(event)?;
+        self.pending = None;
         Ok(())
     }
 }
@@ -245,26 +282,29 @@ async fn append_sideband_exact(
     persistence: &NotificationSender,
     event: chat_state::SidebandEvent,
 ) -> Result<(), SidebandRunError> {
-    for attempt in 0..2 {
+    let mut attempts = 0_u32;
+    loop {
         match persistence
             .append_sideband_event_durably(event.clone())
             .await
         {
             Ok(()) => return Ok(()),
-            Err(crate::session::persistence::DurableAppendError::AcknowledgementLost(error))
-                if attempt == 0 =>
-            {
-                tracing::warn!(
-                    sideband_id = %event.sideband_id,
-                    seq = event.seq,
-                    %error,
-                    "sideband acknowledgement was lost; retrying the exact immutable event"
-                );
+            Err(error) if error.retry_exact() => {
+                attempts = attempts.saturating_add(1);
+                if attempts == 1 || attempts % 10 == 0 {
+                    tracing::warn!(
+                        sideband_id = %event.sideband_id,
+                        seq = event.seq,
+                        attempts,
+                        %error,
+                        "sideband durability is uncertain; retrying the exact immutable event"
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             Err(error) => return Err(SidebandRunError::Persistence(error.to_string())),
         }
     }
-    unreachable!("bounded sideband acknowledgement loop always returns")
 }
 
 pub(crate) fn sideband_usage(response: &ConversationResponse) -> chat_state::SidebandUsage {
@@ -297,5 +337,104 @@ pub(crate) fn sideband_backend(backend: sampling_types::ApiBackend) -> &'static 
         sampling_types::ApiBackend::ChatCompletions => "chat_completions",
         sampling_types::ApiBackend::Responses => "responses",
         sampling_types::ApiBackend::Messages => "messages",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_run() -> (
+        SidebandRun,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::persistence::PersistenceMsg>,
+    ) {
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let mut timeline = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
+        let request = timeline
+            .prepare(chat_state::SidebandEventKind::Request(
+                chat_state::SidebandRequest {
+                    purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                    prompt: "judge".into(),
+                    source_refs: Vec::new(),
+                    route: chat_state::SidebandRoute {
+                        model: "test-model".into(),
+                        backend: "responses".into(),
+                    },
+                    initiator_ref: format!("t:parent/sideband:{sideband_id}"),
+                    executor: "main".into(),
+                    output_schema: None,
+                },
+            ))
+            .unwrap();
+        timeline.accept(request).unwrap();
+
+        let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let persistence = NotificationSender {
+            gateway: acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+            gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistence_tx,
+        };
+        (
+            SidebandRun {
+                timeline,
+                persistence,
+                pending: None,
+                persistence_poison: None,
+            },
+            persistence_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelled_append_recovers_exact_event_without_swallowing_new_operation() {
+        let (mut run, mut persistence_rx) = test_run();
+        let request = ConversationRequest::default();
+
+        let mut first = Box::pin(run.attempt_all_sources(&request, Some("first".into())));
+        let first_message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut first => panic!("append unexpectedly completed: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event: first_event,
+            respond_to,
+        } = first_message
+        else {
+            panic!("unexpected persistence message");
+        };
+        drop(first);
+        drop(respond_to);
+
+        let mut retry = Box::pin(run.attempt_all_sources(&request, Some("different".into())));
+        let retry_message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut retry => panic!("retry unexpectedly completed: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event: retry_event,
+            respond_to,
+        } = retry_message
+        else {
+            panic!("unexpected persistence message");
+        };
+        assert_eq!(
+            serde_json::to_vec(&retry_event).unwrap(),
+            serde_json::to_vec(&first_event).unwrap()
+        );
+        respond_to.send(Ok(())).unwrap();
+        assert!(matches!(
+            retry.await,
+            Err(SidebandRunError::InterruptedAppendRecovered)
+        ));
+
+        assert_eq!(
+            run.timeline
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)))
+                .count(),
+            1
+        );
     }
 }

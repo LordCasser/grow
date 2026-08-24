@@ -96,6 +96,7 @@ pub struct ChannelBackend {
 }
 
 impl ChannelBackend {
+    #[cfg(test)]
     pub fn new(tx: mpsc::UnboundedSender<SubagentEvent>) -> Self {
         Self {
             tx,

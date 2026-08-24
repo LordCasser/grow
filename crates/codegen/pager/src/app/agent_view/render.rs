@@ -4121,25 +4121,15 @@ impl AgentView {
         if self.show_goal_detail
             && let Some(ref goal) = self.goal_state
         {
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
             if let Some(output) = crate::views::goal_detail::render_goal_detail(
                 buf,
                 area,
                 goal,
-                &mut self.goal_board_renderer,
+                &mut self.goal_detail_renderer,
                 frame_stamp,
-                self.context_state.as_ref().map(|c| c.used),
-                active_subagent_tokens,
                 self.hit_goal_close.hovered,
-                self.hit_goal_projection_toggle.hovered,
             ) {
                 self.hit_goal_close.rect = output.close;
-                self.hit_goal_projection_toggle.rect = output.projection_toggle;
                 self.frame_occluder_rects.push(output.area);
             }
         }

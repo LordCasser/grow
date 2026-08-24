@@ -535,7 +535,12 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: tmp.path().join("resources_state.json"),
+        resources_persistence: std::sync::Arc::new(
+            tools::persistence::ResourcesPersistence::local(
+                tmp.path().join("resources_state.json"),
+            )
+            .expect("pin resources state test store"),
+        ),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
@@ -622,7 +627,7 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
         code_nav_enabled: false,
         ask_user_question_enabled: true,
         behavior: std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::session::behavior::BehaviorCoordinator::new(std::path::PathBuf::from("/tmp")),
+            crate::session::behavior::BehaviorCoordinator::new(),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: workspace::permission::PermissionHandle::allow_all(),
@@ -1476,10 +1481,19 @@ fn find_model_by_catalog_id_never_matches_routing_slug() {
         "the routing slug is not a catalog identity"
     );
 }
-fn write_updates(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
+fn write_updates(dir: &std::path::Path, lines: &[&str]) {
     let path = dir.join("updates.jsonl");
     std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
-    path
+}
+fn stale_tasks(dir: &std::path::Path) -> Vec<OrphanedTask> {
+    let directory = crate::session::storage::ContainedDirectory::open(
+        dir,
+        std::path::Path::new(""),
+        "updates fixture",
+        false,
+    )
+    .unwrap();
+    MvpAgent::find_stale_background_task_projections(&directory)
 }
 fn bg_line(task_id: &str) -> String {
     format!(
@@ -1496,22 +1510,16 @@ fn orphaned_ids(tasks: &[OrphanedTask]) -> std::collections::HashSet<&str> {
 }
 #[test]
 fn orphaned_tasks_returns_empty_for_no_file() {
-    let result = MvpAgent::find_stale_background_task_projections(&None);
-    assert!(result.is_empty());
-}
-#[test]
-fn orphaned_tasks_returns_empty_for_missing_file() {
-    let path = PathBuf::from("/nonexistent/updates.jsonl");
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
-    assert!(result.is_empty());
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(stale_tasks(tmp.path()).is_empty());
 }
 #[test]
 fn orphaned_tasks_returns_empty_when_all_completed() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
     let done = completed_line("t1");
-    let path = write_updates(tmp.path(), &[&bg, &done]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &[&bg, &done]);
+    let result = stale_tasks(tmp.path());
     assert!(result.is_empty());
 }
 #[test]
@@ -1520,8 +1528,8 @@ fn orphaned_tasks_returns_uncompleted() {
     let bg1 = bg_line("t1");
     let bg2 = bg_line("t2");
     let done1 = completed_line("t1");
-    let path = write_updates(tmp.path(), &[&bg1, &bg2, &done1]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &[&bg1, &bg2, &done1]);
+    let result = stale_tasks(tmp.path());
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 1);
     assert!(ids.contains("t2"));
@@ -1533,8 +1541,8 @@ fn orphaned_tasks_returns_multiple_uncompleted() {
     let bg2 = bg_line("t2");
     let bg3 = bg_line("t3");
     let done2 = completed_line("t2");
-    let path = write_updates(tmp.path(), &[&bg1, &bg2, &bg3, &done2]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &[&bg1, &bg2, &bg3, &done2]);
+    let result = stale_tasks(tmp.path());
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 2);
     assert!(ids.contains("t1"));
@@ -1544,8 +1552,8 @@ fn orphaned_tasks_returns_multiple_uncompleted() {
 fn orphaned_tasks_captures_command_and_cwd() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
-    let path = write_updates(tmp.path(), &[&bg]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &[&bg]);
+    let result = stale_tasks(tmp.path());
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].command, "sleep 99");
     assert_eq!(result[0].cwd, "/tmp");
@@ -1554,8 +1562,8 @@ fn orphaned_tasks_captures_command_and_cwd() {
 fn orphaned_tasks_skips_malformed_lines() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
-    let path = write_updates(tmp.path(), &["not json", &bg, "{}"]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &["not json", &bg, "{}"]);
+    let result = stale_tasks(tmp.path());
     assert_eq!(result.len(), 1);
 }
 #[test]
@@ -1563,8 +1571,8 @@ fn orphaned_tasks_ignores_unrelated_updates() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
     let unrelated = r#"{"timestamp":1,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"auto_compact_started","percentage":80}}}"#;
-    let path = write_updates(tmp.path(), &[&bg, unrelated]);
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    write_updates(tmp.path(), &[&bg, unrelated]);
+    let result = stale_tasks(tmp.path());
     assert_eq!(result.len(), 1);
 }
 #[test]
@@ -1575,7 +1583,7 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
     let rewind = r#"{"timestamp":3,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2025-01-01T00:00:00Z"}}}"#;
     let user_msg2 = r#"{"timestamp":4,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"retry"}}}}"#;
     let bg_after_rewind = bg_line("t-alive");
-    let path = write_updates(
+    write_updates(
         tmp.path(),
         &[
             user_msg,
@@ -1585,7 +1593,7 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
             &bg_after_rewind,
         ],
     );
-    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
+    let result = stale_tasks(tmp.path());
     let ids = orphaned_ids(&result);
     assert!(
         ids.contains("t-alive"),
@@ -1809,6 +1817,11 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
     });
 }
 use crate::session::SessionCommand as TestSessionCommand;
+
+enum FakeActorEvent {
+    IdleUnloadCommitted,
+    Command(TestSessionCommand),
+}
 /// Build a session handle wired to a *live* command channel. Returns the
 /// handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx` so a test
 /// can observe what the agent sends to the actor and prove the channel is
@@ -1833,22 +1846,27 @@ fn make_live_session_handle(
     }
     (handle, cmd_tx, cmd_rx)
 }
-/// Spawn a minimal fake session actor on the `LocalSet` that answers
-/// `SessionCommand::IsBusy` with `busy` and forwards every other command to
-/// the returned receiver so a test can assert on them (e.g. `Shutdown`).
+/// Spawn a minimal fake session actor on the `LocalSet` that accepts or rejects
+/// the actor-owned idle-unload transaction and forwards other commands.
 fn spawn_fake_actor(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
     busy: bool,
-) -> tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand> {
+) -> tokio::sync::mpsc::UnboundedReceiver<FakeActorEvent> {
     let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_local(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                TestSessionCommand::IsBusy { respond_to } => {
-                    let _ = respond_to.send(busy);
+                TestSessionCommand::UnloadIfIdle { respond_to } => {
+                    if busy {
+                        let _ = respond_to.send(false);
+                    } else {
+                        let _ = observed_tx.send(FakeActorEvent::IdleUnloadCommitted);
+                        let _ = respond_to.send(true);
+                        break;
+                    }
                 }
                 other => {
-                    let _ = observed_tx.send(other);
+                    let _ = observed_tx.send(FakeActorEvent::Command(other));
                 }
             }
         }
@@ -1864,7 +1882,7 @@ async fn drive_disconnect(agent: &MvpAgent, sid: &acp::SessionId) {
 /// Like `drive_disconnect`, but evicts several sessions in a single
 /// `grow/internal/evict_sessions` notification — the realistic shape of a
 /// real client disconnect, and the path that exercises `handle_evict_sessions`'
-/// concurrent `join_all` check pass followed by the sequential act pass.
+/// concurrent actor-owned unload transactions.
 async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
     use acp::Agent as _;
     let ids: Vec<&str> = sids.iter().map(|s| s.0.as_ref()).collect();
@@ -1902,10 +1920,10 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-live");
-        let (_cmd_tx, mut cmd_rx) = {
+        let (_cmd_tx, mut observed) = {
             let (handle, tx, rx) = make_live_session_handle(&sid, Some("turn-1"));
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
-            (tx, rx)
+            (tx, spawn_fake_actor(rx, true))
         };
         drive_disconnect(&agent, &sid).await;
         assert!(
@@ -1914,7 +1932,7 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         );
         assert!(
             matches!(
-                cmd_rx.try_recv(),
+                observed.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
             "no command may be sent to a session kept resident with live work"
@@ -1929,10 +1947,11 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
             .cmd_tx
             .send(TestSessionCommand::ResetPermissionState)
             .expect("resident session channel must accept commands post-disconnect");
+        tokio::task::yield_now().await;
         assert!(
             matches!(
-                cmd_rx.try_recv(),
-                Ok(TestSessionCommand::ResetPermissionState)
+                observed.try_recv(),
+                Ok(FakeActorEvent::Command(TestSessionCommand::ResetPermissionState))
             ),
             "the resident session's receiver must observe the delivered command"
         );
@@ -1943,37 +1962,20 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         );
     });
 }
-/// Keep-resident must hold even if the `current_prompt_id` lock is poisoned:
-/// an unknown state is treated as "busy" (never unload). Guards against a
-/// regression flipping the `unwrap_or(true)` fallback to `false`.
+/// An unreachable actor cannot accept the unload transaction, so the leader
+/// conservatively retains the handle.
 #[test]
-fn disconnect_keeps_resident_on_poisoned_lock() {
+fn disconnect_keeps_resident_when_actor_is_unreachable() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
-        let sid = acp::SessionId::new("sess-poison");
-        let (handle, _tx, _rx) = make_live_session_handle(&sid, None);
-        let poison_target = handle.current_prompt_id.clone();
+        let sid = acp::SessionId::new("sess-unreachable");
+        let (handle, _tx, rx) = make_live_session_handle(&sid, None);
+        drop(rx);
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        let _ = std::thread::spawn(move || {
-            let _g = poison_target.lock().unwrap();
-            panic!("poison current_prompt_id");
-        })
-        .join();
-        assert!(
-            agent
-                .sessions
-                .borrow()
-                .get(&sid)
-                .unwrap()
-                .current_prompt_id
-                .lock()
-                .is_err(),
-            "precondition: the lock must be poisoned"
-        );
         drive_disconnect(&agent, &sid).await;
         assert!(
             agent.sessions.borrow().contains_key(&sid),
-            "a session with an unknown (poisoned) state must be kept resident"
+            "an actor that cannot accept unload must be kept resident"
         );
         assert_eq!(
             agent.session_live_state_for(&sid),
@@ -1981,8 +1983,8 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         );
     });
 }
-/// Idle-unload stub (memory bound) + supervisor interaction: a *fully idle*
-/// session is unloaded to disk on disconnect (actor `Shutdown`, handle
+/// Idle-unload + supervisor interaction: a *fully idle* session is unloaded to
+/// disk on disconnect (the actor accepts `UnloadIfIdle`, handle
 /// dropped) while the `SessionThread` is **retained** for
 /// `drain_old_session_thread`. It is not finalized, and once the kept thread
 /// finishes the supervisor reaps it as a *clean* exit — never `DeadFailed`.
@@ -2011,13 +2013,13 @@ fn disconnect_unloads_idle_session_without_finalize() {
             agent.session_threads.borrow().contains_key(&sid),
             "idle-unload must keep the SessionThread for reconnect drain"
         );
-        let shutdown = tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
+        let unload = tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
             .await
-            .expect("idle-unload must send a command within 1s")
+            .expect("idle-unload must commit within 1s")
             .expect("fake actor channel must stay open");
         assert!(
-            matches!(shutdown, TestSessionCommand::Shutdown),
-            "idle-unload must send SessionCommand::Shutdown"
+            matches!(unload, FakeActorEvent::IdleUnloadCommitted),
+            "idle-unload must be committed by the actor"
         );
         assert_eq!(
             agent.session_live_state_for(&sid),
@@ -2051,11 +2053,8 @@ fn disconnect_unloads_idle_session_without_finalize() {
         );
     });
 }
-/// The `IsBusy` keep-resident path. A between-turns session
-/// (`current_prompt_id = None`) whose actor answers `IsBusy = true` (queued
-/// inputs at the turn boundary) must be kept resident — NOT unloaded — and
-/// must receive no `Shutdown`. This exercises the async round-trip that the
-/// sync fast-path tests skip.
+/// A between-turns session whose actor rejects `UnloadIfIdle` because it owns
+/// queued work must stay resident.
 #[test]
 fn disconnect_keeps_resident_when_actor_reports_busy() {
     run_local_for_bridge_test(|| async {
@@ -2067,7 +2066,7 @@ fn disconnect_keeps_resident_when_actor_reports_busy() {
         drive_disconnect(&agent, &sid).await;
         assert!(
             agent.sessions.borrow().contains_key(&sid),
-            "a between-turns session with queued work (IsBusy=true) must stay resident"
+            "a between-turns session with queued work must stay resident"
         );
         assert_eq!(
             agent.session_live_state_for(&sid),
@@ -2080,15 +2079,14 @@ fn disconnect_keeps_resident_when_actor_reports_busy() {
                 observed.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
-            "a busy session must not be sent Shutdown"
+            "a busy session must not commit idle unload"
         );
     });
 }
 /// A between-turns session whose ONLY outstanding work is a parked
 /// `PlanApproval` reverse-request (the resume re-park) must be kept resident on
-/// disconnect. The actor answers `IsBusy = false`, so the keep-resident outcome
-/// can come ONLY from the parked-approval sync fast path in `session_has_live_work`
-/// — deleting that check would let this session unload (mutation-killing).
+/// disconnect. The actor's canonical live-work predicate includes the parked
+/// approval and therefore rejects the unload.
 #[test]
 fn disconnect_keeps_resident_when_plan_approval_parked() {
     run_local_for_bridge_test(|| async {
@@ -2100,7 +2098,7 @@ fn disconnect_keeps_resident_when_plan_approval_parked() {
             crate::session::pending_interaction::PendingKind::PlanApproval,
         );
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        let mut observed = spawn_fake_actor(cmd_rx, false);
+        let mut observed = spawn_fake_actor(cmd_rx, true);
         drive_disconnect(&agent, &sid).await;
         assert!(
             agent.sessions.borrow().contains_key(&sid),
@@ -2117,17 +2115,15 @@ fn disconnect_keeps_resident_when_plan_approval_parked() {
                 observed.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
-            "a parked-approval session must not be sent Shutdown"
+            "a parked-approval session must not commit idle unload"
         );
     });
 }
 /// Mixed batch in a *single* `grow/internal/evict_sessions` notification —
 /// the realistic disconnect shape and the path that exercises
-/// `handle_evict_sessions`' `join_all` two-pass (concurrent `IsBusy` checks,
-/// then sequential act). One session's actor reports busy (→ kept resident,
-/// `Working`, no `Shutdown`); the other is idle (→ unloaded, `Dormant`,
-/// `Shutdown` sent). Each must get its own outcome with no cross-contamination
-/// between the concurrent check pass and the sequential act pass.
+/// `handle_evict_sessions`' concurrent actor-owned unload transactions. One
+/// actor rejects unload (→ resident/Working); the other commits it
+/// (→ unloaded/Dormant), without cross-contamination.
 #[test]
 fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
     run_local_for_bridge_test(|| async {
@@ -2165,14 +2161,14 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
             Some(SessionLiveState::Dormant),
             "the idle session must be Dormant"
         );
-        let idle_shutdown =
+        let idle_unload =
             tokio::time::timeout(std::time::Duration::from_secs(1), idle_observed.recv())
                 .await
                 .expect("idle session must receive a command within 1s")
                 .expect("fake actor channel must stay open");
         assert!(
-            matches!(idle_shutdown, TestSessionCommand::Shutdown),
-            "the idle session must be sent Shutdown"
+            matches!(idle_unload, FakeActorEvent::IdleUnloadCommitted),
+            "the idle session must commit its unload"
         );
         tokio::task::yield_now().await;
         assert!(
@@ -2180,7 +2176,7 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
                 busy_observed.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
-            "the busy session must not be sent Shutdown in a mixed batch"
+            "the busy session must not commit unload in a mixed batch"
         );
     });
 }

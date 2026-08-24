@@ -26,7 +26,11 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
         .run(),
     );
     ActorGuard {
-        handle: PersistenceHandle { tx, noop: false },
+        handle: PersistenceHandle {
+            tx,
+            noop: false,
+            session_directory: None,
+        },
         task,
     }
 }

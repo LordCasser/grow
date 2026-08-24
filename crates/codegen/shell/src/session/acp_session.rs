@@ -35,8 +35,7 @@ use crate::session::mcp_servers::mcp_target_str;
 use crate::session::mcp_servers::mcp_transport_str;
 use crate::session::mcp_servers::parse_mcp_tool_name;
 use crate::session::persistence::{
-    PersistenceHandle, PersistenceMsg, get_prompt_blob_path, get_prompt_blob_ref,
-    write_immutable_blob,
+    PersistenceHandle, PersistenceMsg, get_prompt_blob_ref,
 };
 use crate::session::prompt_parser::parse_prompt_with_skills;
 use crate::session::replay_events::{SessionEvent, SessionNotification};
@@ -214,8 +213,8 @@ use crate::session::commands::{NotificationPriority, NotificationSource};
 /// Credentials (api_key, optional extra access key, client_version) live in
 /// the `credentials` sync mutex on `SessionActor`.
 pub(crate) struct State {
-    /// The sole owner of foreground execution. Goal stages deliberately live
-    /// outside this enum and therefore cannot block user admission.
+    /// The sole owner of foreground execution. Goal's future continuation
+    /// right is not foreground work and therefore cannot block user admission.
     pub(crate) foreground: ForegroundState,
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
@@ -345,17 +344,20 @@ impl State {
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.foreground.is_idle() && state.pending_inputs.is_empty() && !state.notifications_suppressed
 }
-/// Aggregate behind `SessionCommand::IsBusy`. Goal stages deliberately own no
-/// foreground, but an Active Goal remains resident while its planner/verifier
-/// or next idle continuation is pending.
+/// Canonical actor-owned blocker for idle unload. An Active Goal remains
+/// resident because it owns the right to request the next idle continuation.
+/// A parked Plan approval is also live work even though its reverse-request
+/// runs in a detached task.
 pub(crate) fn session_has_work(
     state: &State,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
+    has_parked_plan_approval: bool,
 ) -> bool {
     !state.foreground.is_idle()
         || state.pending_manual_compact.is_some()
         || !state.pending_inputs.is_empty()
         || goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
+        || has_parked_plan_approval
 }
 /// Data carried from prepare_tool_call → dispatch_tool → finalize.
 #[derive(Debug, Clone)]
@@ -409,6 +411,10 @@ pub(crate) struct SessionActor {
     /// because child entities are nested under their parent and cannot be
     /// reconstructed from `cwd + id`.
     pub(crate) session_dir: PathBuf,
+    /// Identity-checked directory handle shared with the persistence actor.
+    /// `session_dir` is only a display label; all session-contained I/O must
+    /// descend from this capability.
+    pub(crate) session_directory: std::sync::Arc<crate::session::storage::ContainedDirectory>,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through
@@ -570,28 +576,13 @@ pub(crate) struct SessionActor {
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,
-    goal_harness_enabled: std::sync::atomic::AtomicBool,
-    /// Goal mode orchestration tracker. Session-scoped state for the
-    /// Design-Execute-Verify loop. Runtime state is independent of Behavior.
+    goal_runtime_available: std::sync::atomic::AtomicBool,
+    /// Durable long-lived Goal state. Idle continuation authority is runtime
+    /// state and is deliberately not persisted in this value.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
-    /// Cancellation for the single background planner/verifier. Main-turn
-    /// cancellation never touches it; explicit Goal pause/clear does.
-    pub(crate) goal_stage_cancel: parking_lot::Mutex<
-        Option<(
-            crate::session::goal_tracker::StageLease,
-            tokio_util::sync::CancellationToken,
-        )>,
-    >,
-    /// Transient planner staging accumulator for the current planning
-    /// epoch. Sections accepted through the planner's submit channel are
-    /// kept here until `finalize_goal_plan` commits the assembled board
-    /// (which clears it) or the planning epoch is invalidated by
-    /// edit/replan/clear/pause (which drops it). Never persisted: the
-    /// durable truth remains the canonical Markdown blackboard.
-    pub(crate) goal_plan_staging: std::sync::Mutex<Option<goal::GoalPlanStaging>>,
     /// `task_id`s of background tasks (and monitors) that originated during
-    /// the goal turn — either spawned by the goal model itself or reparented
-    /// from a harness verifier/planner subagent on its exit. Their late
+    /// a Goal turn, including surviving tasks reparented from delegated
+    /// children. Their late
     /// auto-wake completions are dropped by [`Self::maybe_drain_notifications`]
     /// regardless of the goal's current status, so a leftover dev/verification
     /// server that completes after the run ended (Blocked / paused / cleared)
@@ -859,7 +850,7 @@ impl SessionActor {
         let memory_read_registered = tool_names
             .iter()
             .any(|n| n == MEMORY_SEARCH_TOOL_NAME || n == MEMORY_GET_TOOL_NAME);
-        let goal = goal_support::goal_slash_and_harness_available(self.goal_enabled, tool_names);
+        let goal = goal_support::goal_runtime_available_from_tools(self.goal_enabled, tool_names);
         slash_commands::CommandAvailability {
             memory: self.memory.is_enabled() && memory_read_registered,
             memory_configured: self.memory.backend_params.is_some(),
@@ -1040,8 +1031,6 @@ mod chat_history_integrity_tests;
 #[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
 mod compaction_pre_prune_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/goal/goal_plan_staging_tests.rs"]
-mod goal_plan_staging_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;

@@ -116,27 +116,14 @@ pub enum SessionEvent {
         /// What triggered the save: "session-end", "flush", or "dream".
         trigger: String,
     },
-    /// A Goal was accepted and its background planning phase began.
-    GoalAccepted,
-    /// An edited Goal returned to background planning.
-    GoalPlanningRestarted,
-    /// Planning produced a board and execution began.
-    GoalExecutionStarted,
-    /// Execution produced a candidate and verification began.
-    GoalVerificationStarted,
-    /// Verification found gaps and execution resumed.
-    GoalExecutionResumed,
-    /// Verification passed and the final user-facing report began.
-    GoalFinalizationStarted,
-    /// Goal execution was paused.
+    /// A long-lived Goal was created.
+    GoalCreated,
+    GoalObjectiveUpdated,
     GoalPaused,
-    /// Goal execution is blocked on an unresolved gap.
     GoalBlocked,
-    /// The configured Goal token budget was exhausted.
+    GoalUsageLimited,
     GoalBudgetLimited,
-    /// A paused or blocked Goal resumed.
-    GoalResumed,
-    /// The Goal was cleared before completion.
+    GoalRestarted,
     GoalCleared,
     /// A `/goal` finished (status → Complete). Carries the goal's total
     /// elapsed time across all its turns, distinct from the per-turn
@@ -249,24 +236,15 @@ impl SessionEvent {
                 let short_path = crate::util::abbreviate_path(path);
                 format!("Memory saved ({trigger}) \u{2192} {short_path}  \u{00b7}  /memory to view")
             }
-            SessionEvent::GoalAccepted => {
-                "Goal accepted. Planning runs in the background.".to_string()
-            }
-            SessionEvent::GoalPlanningRestarted => "Goal revised. Restarting planning.".to_string(),
-            SessionEvent::GoalExecutionStarted => "Goal planned. Starting execution.".to_string(),
-            SessionEvent::GoalVerificationStarted => {
-                "Execution complete. Starting verification.".to_string()
-            }
-            SessionEvent::GoalExecutionResumed => {
-                "Verification found gaps. Resuming execution.".to_string()
-            }
-            SessionEvent::GoalFinalizationStarted => {
-                "Goal verified. Preparing the final report.".to_string()
+            SessionEvent::GoalCreated => "Long-term Goal created.".to_string(),
+            SessionEvent::GoalObjectiveUpdated => {
+                "Goal objective updated; automatic continuation is active.".to_string()
             }
             SessionEvent::GoalPaused => "Goal paused.".to_string(),
             SessionEvent::GoalBlocked => "Goal blocked.".to_string(),
+            SessionEvent::GoalUsageLimited => "Goal stopped by a usage limit.".to_string(),
             SessionEvent::GoalBudgetLimited => "Goal token budget exhausted.".to_string(),
-            SessionEvent::GoalResumed => "Goal resumed.".to_string(),
+            SessionEvent::GoalRestarted => "Goal restarted.".to_string(),
             SessionEvent::GoalCleared => "Goal cleared.".to_string(),
             SessionEvent::GoalCompleted { elapsed } => {
                 format!(
@@ -694,26 +672,14 @@ mod tests {
     #[test]
     fn goal_transition_messages_are_concise_system_statuses() {
         let cases = [
+            (SessionEvent::GoalCreated, "Long-term Goal created."),
             (
-                SessionEvent::GoalAccepted,
-                "Goal accepted. Planning runs in the background.",
+                SessionEvent::GoalObjectiveUpdated,
+                "Goal objective updated; automatic continuation is active.",
             ),
-            (
-                SessionEvent::GoalExecutionStarted,
-                "Goal planned. Starting execution.",
-            ),
-            (
-                SessionEvent::GoalVerificationStarted,
-                "Execution complete. Starting verification.",
-            ),
-            (
-                SessionEvent::GoalExecutionResumed,
-                "Verification found gaps. Resuming execution.",
-            ),
-            (
-                SessionEvent::GoalFinalizationStarted,
-                "Goal verified. Preparing the final report.",
-            ),
+            (SessionEvent::GoalPaused, "Goal paused."),
+            (SessionEvent::GoalBlocked, "Goal blocked."),
+            (SessionEvent::GoalRestarted, "Goal restarted."),
         ];
         for (event, expected) in cases {
             assert_eq!(event.message(), expected);

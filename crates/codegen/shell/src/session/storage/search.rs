@@ -27,7 +27,7 @@ use tokio::time::Instant;
 
 use super::search_fts::{self, SessionDoc, SessionSearchIndex, SessionSearchRow};
 use super::search_recovery;
-use super::{StorageAdapter, read_timeline_file};
+use super::{StorageAdapter, TimelineLedgerReader};
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
 use agent_client_protocol as acp;
@@ -183,16 +183,8 @@ fn is_index_enabled() -> bool {
     }
 }
 
-/// Pre-check: skip sessions with excessively large updates files.
-///
-/// Returns `true` if the file at `updates_path` exceeds `max_size` bytes.
-/// Returns `false` if the file doesn't exist or can't be stat'd — let the
-/// indexer handle those cases.
-fn should_skip_session(updates_path: &Path, max_size: u64) -> bool {
-    match std::fs::metadata(updates_path) {
-        Ok(meta) => meta.len() > max_size,
-        Err(_) => false,
-    }
+fn should_skip_session(snapshot_len: u64, max_size: u64) -> bool {
+    snapshot_len > max_size
 }
 
 /// Internal search request (deserialized from the ACP extension params).
@@ -1041,14 +1033,11 @@ async fn upsert_session(
 ) -> io::Result<UpsertOutcome> {
     // Search is a pure projection of the canonical Timeline ledger. The UI
     // replay stream is deliberately excluded from content reconstruction.
-    let (content, bytes_read) = if let Some(timeline_path) = storage.timeline_file_path(info) {
-        tokio::task::spawn_blocking(move || collect_timeline_indexable_content(&timeline_path))
+    let reader = storage.open_timeline_reader(info)?;
+    let (content, bytes_read) =
+        tokio::task::spawn_blocking(move || collect_timeline_indexable_content(reader))
             .await
-            .map_err(io::Error::other)??
-    } else {
-        // Storage backend doesn't expose file paths — no content to index
-        return Ok(UpsertOutcome::NoContent);
-    };
+            .map_err(io::Error::other)??;
     let doc = build_session_doc(summary, content);
     let db_path = search_db_path(root_dir);
 
@@ -1107,23 +1096,21 @@ async fn reindex_all(
         .store(summaries.len() as u64, Ordering::Relaxed);
     let expected_ids: HashSet<String> = summaries.iter().map(|s| s.info.id.to_string()).collect();
 
-    // Pre-compute Timeline file paths for all sessions (cheap path
-    // computation — no I/O). This decouples the parallel pipeline from
-    // the StorageAdapter reference which cannot be shared across tasks.
-    let sessions: Vec<(Summary, Option<PathBuf>)> = summaries
+    // Pin each ledger before spawning parallel work. Every task retains the
+    // identity-checked file handle selected by the storage authority.
+    let sessions: Vec<(Summary, TimelineLedgerReader)> = summaries
         .into_iter()
-        .map(|s| {
-            let path = storage.timeline_file_path(&s.info);
-            (s, path)
+        .map(|summary| {
+            storage
+                .open_timeline_reader(&summary.info)
+                .map(|reader| (summary, reader))
         })
-        .collect();
+        .collect::<io::Result<_>>()?;
 
     // Pre-scan: count sessions that will be skipped due to size cap
     let mut skipped_large = 0u64;
-    for (_, path) in &sessions {
-        if let Some(timeline_path) = path
-            && should_skip_session(timeline_path, BOOTSTRAP_MAX_FILE_SIZE)
-        {
+    for (_, reader) in &sessions {
+        if should_skip_session(reader.snapshot_len(), BOOTSTRAP_MAX_FILE_SIZE) {
             skipped_large += 1;
         }
     }
@@ -1144,7 +1131,7 @@ async fn reindex_all(
 
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (summary, timeline_path) in sessions {
+    for (summary, timeline_reader) in sessions {
         let sem = semaphore.clone();
         let progress = progress_arc.clone();
         let root = root_owned.clone();
@@ -1170,10 +1157,8 @@ async fn reindex_all(
             let session_id = summary.info.id.to_string();
 
             // File size pre-check: skip sessions with oversized Timeline ledgers.
-            if let Some(ref path) = timeline_path
-                && should_skip_session(path, max_file_size)
-            {
-                let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if should_skip_session(timeline_reader.snapshot_len(), max_file_size) {
+                let file_size = timeline_reader.snapshot_len();
                 tracing::debug!(
                     session_id = %session_id,
                     file_size = file_size,
@@ -1200,23 +1185,19 @@ async fn reindex_all(
             }
 
             // Wrap with per-session timeout to prevent pipeline stalls.
-            // The inner block is `async move` to own summary, timeline_path,
+            // The inner block is `async move` to own summary, timeline_reader,
             // and root — the outer block retains session_id and progress
             // for post-timeout error reporting.
             match tokio::time::timeout(timeout_dur, async move {
                 // Collect content via one strict Timeline fold.
-                let (content, bytes_read) = if let Some(path) = timeline_path {
-                    match tokio::task::spawn_blocking(move || {
-                        collect_timeline_indexable_content(&path)
-                    })
-                    .await
-                    {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(e)) => return Err(e),
-                        Err(e) => return Err(io::Error::other(e)),
-                    }
-                } else {
-                    return Ok(UpsertOutcome::NoContent);
+                let (content, bytes_read) = match tokio::task::spawn_blocking(move || {
+                    collect_timeline_indexable_content(timeline_reader)
+                })
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => return Err(io::Error::other(e)),
                 };
 
                 let doc = build_session_doc(&summary, content);
@@ -1440,9 +1421,11 @@ fn push_search_text(output: &mut String, text: &str, limit: usize) {
     output.push_str(&text[..take]);
 }
 
-fn collect_timeline_indexable_content(timeline_path: &Path) -> io::Result<(String, u64)> {
-    let bytes_read = std::fs::metadata(timeline_path)?.len();
-    let events = read_timeline_file(timeline_path)?;
+fn collect_timeline_indexable_content(
+    reader: TimelineLedgerReader,
+) -> io::Result<(String, u64)> {
+    let bytes_read = reader.snapshot_len();
+    let events = reader.read_events()?;
     let timeline = Timeline::from_events(events)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok((timeline_indexable_content(&timeline), bytes_read))
@@ -1795,40 +1778,17 @@ mod tests {
 
     #[test]
     fn test_should_skip_session_large_file() {
-        use std::io::Write as _;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&[0u8; 1024]).unwrap();
-        f.flush().unwrap();
-
-        assert!(should_skip_session(f.path(), 512));
+        assert!(should_skip_session(1024, 512));
     }
 
     #[test]
     fn test_should_skip_session_small_file() {
-        use std::io::Write as _;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&[0u8; 1024]).unwrap();
-        f.flush().unwrap();
-
-        assert!(!should_skip_session(f.path(), 2048));
+        assert!(!should_skip_session(1024, 2048));
     }
 
     #[test]
     fn test_should_skip_session_exact_limit() {
-        use std::io::Write as _;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&[0u8; 1024]).unwrap();
-        f.flush().unwrap();
-
-        assert!(!should_skip_session(f.path(), 1024));
-    }
-
-    #[test]
-    fn test_should_skip_session_nonexistent_file() {
-        assert!(!should_skip_session(
-            Path::new("/nonexistent/timeline.jsonl"),
-            100
-        ));
+        assert!(!should_skip_session(1024, 1024));
     }
 
     // ── progress and status tests ──────────────────────────────────────────
@@ -1873,10 +1833,53 @@ mod tests {
         file.flush().unwrap();
         let file_size = std::fs::metadata(file.path()).unwrap().len();
 
-        let (content, bytes_read) = collect_timeline_indexable_content(file.path()).unwrap();
+        let reader = TimelineLedgerReader::from_file(
+            file.reopen().unwrap(),
+            file.path().to_path_buf(),
+        )
+        .unwrap();
+        let (content, bytes_read) = collect_timeline_indexable_content(reader).unwrap();
         assert!(content.contains("hello"));
         assert!(content.contains("world"));
         assert_eq!(bytes_read, file_size);
+    }
+
+    #[test]
+    fn timeline_collector_reads_the_pinned_entity_after_namespace_replacement() {
+        use std::io::Write as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("timeline.jsonl");
+        let displaced = temp.path().join("original.jsonl");
+
+        let mut original = Timeline::default();
+        record_search_turn(&mut original, 1, 0, "original prompt", "original answer", vec![]);
+        let mut file = std::fs::File::create(&path).unwrap();
+        for event in original.events() {
+            serde_json::to_writer(&mut file, event).unwrap();
+            writeln!(file).unwrap();
+        }
+        file.sync_all().unwrap();
+
+        let reader = TimelineLedgerReader::from_file(
+            std::fs::File::open(&path).unwrap(),
+            path.clone(),
+        )
+        .unwrap();
+
+        std::fs::rename(&path, &displaced).unwrap();
+        let mut decoy = Timeline::default();
+        record_search_turn(&mut decoy, 2, 0, "decoy prompt", "decoy answer", vec![]);
+        let mut replacement = std::fs::File::create(&path).unwrap();
+        for event in decoy.events() {
+            serde_json::to_writer(&mut replacement, event).unwrap();
+            writeln!(replacement).unwrap();
+        }
+        replacement.sync_all().unwrap();
+
+        let (content, _) = collect_timeline_indexable_content(reader).unwrap();
+        assert!(content.contains("original prompt"));
+        assert!(!content.contains("decoy prompt"));
     }
 
     // ── bootstrap_once eager flag tests ────────────────────────────────────

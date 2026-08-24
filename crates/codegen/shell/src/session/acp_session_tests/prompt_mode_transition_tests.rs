@@ -87,7 +87,7 @@ fn prompt_mode_selects_exactly_one_behavior() {
     fn reconcile(tracker: &mut BehaviorCoordinator, mode: tool_types::BehaviorId) {
         tracker.select_behavior(mode);
     }
-    let mut tracker = BehaviorCoordinator::new(PathBuf::from("/tmp/test"));
+    let mut tracker = BehaviorCoordinator::new();
     assert_eq!(tracker.state(), BehaviorState::Normal);
     reconcile(&mut tracker, tool_types::BehaviorId::Plan);
     assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));

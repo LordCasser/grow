@@ -880,71 +880,20 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result_summary: Option<String>,
     },
-    /// Goal mode orchestration progress update.
-    ///
-    /// Sent on the parent session's notification channel at phase transitions
-    /// and rate-limited from the progress handler (max 1/s). Fire-and-forget
-    /// to pager — not actionable.
+    /// Projection of the one long-lived Goal attached to this session.
     GoalUpdated {
         goal_id: String,
         objective: String,
-        objective_revision: u64,
-        /// `"active"`, `"paused"`, `"blocked"`, `"budget_limited"`,
-        /// `"complete"`, or the one-shot removal signal `"cleared"`.
         status: String,
-        /// `"planning"`, `"executing"`, `"verifying"`, `"summarizing"`.
-        phase: String,
-        plan_revision: u64,
-        board_revision: u64,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tasks: Vec<tool_types::GoalTaskProjection>,
-        plan_markdown: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verifier_feedback: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         token_budget: Option<i64>,
         #[serde(default)]
         tokens_used: i64,
         elapsed_ms: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        current_subagent_role: Option<String>,
-        total_worker_rounds: u32,
-        total_verify_rounds: u32,
-        #[serde(default)]
-        token_baseline: i64,
-        #[serde(default)]
-        finished_subagent_tokens: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        live_subagent_tokens: Option<u64>,
-        /// Per-model marginal-token breakdown `(model_id, tokens)`, sorted
-        /// by tokens descending. The producer (`build_goal_updated`) only
-        /// populates this when ≥2 distinct models appear; a single-model
-        /// goal collapses to the single tokens line, so the field is empty
-        /// (and omitted on the wire). The pager re-checks ≥2 as defence in
-        /// depth.
-        ///
-        /// This is a live, active-subagent-window field (it mirrors
-        /// `live_subagent_tokens` and is cleared on `SubagentFinished`): the
-        /// pager renders it only under the "Active subagent" block. The
-        /// producer must therefore keep its populate gate on that same
-        /// axis so the wire and render gates stay aligned.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        live_tokens_by_model: Vec<(String, u64)>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        live_context_pct: Option<u8>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        live_turn_count: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        live_tool_call_count: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event_detail: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event_timestamp: Option<String>,
-        /// Human-readable explanation for paused or blocked state.
+        created_at: String,
+        updated_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pause_message: Option<String>,
+        status_message: Option<String>,
     },
     /// A blocking reverse-request (permission / `ask_user_question` /
     /// plan-approval) is now **pending** on the agent, keyed by `tool_call_id`
@@ -1487,45 +1436,24 @@ mod tests {
         SessionUpdate::GoalUpdated {
             goal_id: "g-1".into(),
             objective: "Build widget".into(),
-            objective_revision: 2,
             status: "active".into(),
-            phase: "verifying".into(),
-            plan_revision: 4,
-            board_revision: 9,
-            tasks: Vec::new(),
-            plan_markdown: "board".into(),
-            verifier_feedback: Some("Run the integration suite".into()),
             token_budget: Some(100_000),
             tokens_used: 25_000,
             elapsed_ms: 5_000,
-            current_subagent_role: Some("verifier".into()),
-            total_worker_rounds: 4,
-            total_verify_rounds: 2,
-            token_baseline: 0,
-            finished_subagent_tokens: 10_000,
-            live_subagent_tokens: Some(2_000),
-            live_tokens_by_model: vec![("grow-4".into(), 2_000)],
-            live_context_pct: Some(35),
-            live_turn_count: Some(3),
-            live_tool_call_count: Some(8),
-            last_event: Some("verification_rejected".into()),
-            last_event_detail: Some("Run the integration suite".into()),
-            last_event_timestamp: Some("2026-01-01T00:05:00Z".into()),
-            pause_message: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:05:00Z".into(),
+            status_message: Some("Working through the next slice".into()),
         }
     }
 
     #[test]
-    fn goal_updated_v2_round_trips_with_structured_state() {
+    fn goal_updated_round_trips_long_term_state() {
         let update = goal_update();
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "goal_updated");
-        assert_eq!(json["objective_revision"], 2);
-        assert_eq!(json["phase"], "verifying");
-        assert_eq!(json["plan_revision"], 4);
-        assert_eq!(json["board_revision"], 9);
-        assert_eq!(json["plan_markdown"], "board");
-        assert_eq!(json["verifier_feedback"], "Run the integration suite");
+        assert_eq!(json["status"], "active");
+        assert_eq!(json["tokens_used"], 25_000);
+        assert_eq!(json["status_message"], "Working through the next slice");
         assert_eq!(
             serde_json::from_value::<SessionUpdate>(json).unwrap(),
             update
@@ -1533,17 +1461,17 @@ mod tests {
     }
 
     #[test]
-    fn goal_updated_v2_requires_the_blackboard_contract() {
+    fn goal_updated_rejects_retired_blackboard_contract() {
         let obsolete = serde_json::json!({
             "sessionUpdate": "goal_updated",
             "goal_id": "g-old",
             "objective": "obsolete",
             "status": "active",
-            "phase": "idle",
             "tokens_used": 0,
             "elapsed_ms": 0,
-            "total_worker_rounds": 0,
-            "total_verify_rounds": 0
+            "created_at": "now",
+            "updated_at": "now",
+            "plan_markdown": "retired"
         });
         assert!(serde_json::from_value::<SessionUpdate>(obsolete).is_err());
     }
@@ -1633,10 +1561,10 @@ mod tests {
         let update = SessionUpdate::TurnCompleted {
             prompt_id: "p-1".into(),
             identity: Some(TurnIdentity {
-                origin: "goal_finalization".into(),
+                origin: "goal_continuation".into(),
                 turn_kind: "internal".into(),
                 goal_id: Some("g-1".into()),
-                stage_id: Some(7),
+                stage_id: None,
             }),
             stop_reason: "end_turn".into(),
             agent_result: Some("done".into()),

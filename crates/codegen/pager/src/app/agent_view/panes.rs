@@ -505,7 +505,7 @@ impl AgentView {
             return;
         }
         if self.show_goal_detail {
-            self.goal_board_renderer.apply_scroll_delta(lines);
+            self.goal_detail_renderer.apply_scroll_delta(lines);
             return;
         }
         if let Some(ref mut modal) = self.active_modal {

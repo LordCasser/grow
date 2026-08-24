@@ -249,11 +249,10 @@ pub(super) fn strip_offload_notice(message: &str, notice: &str) -> String {
 pub(super) fn write_offload_and_build(
     full_message: &str,
     message: String,
-    file_path: std::path::PathBuf,
     blob_ref: &str,
-    writer: impl FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+    writer: impl FnOnce(&[u8]) -> std::io::Result<()>,
 ) -> String {
-    match writer(&file_path, full_message.as_bytes()) {
+    match writer(full_message.as_bytes()) {
         Ok(()) => message,
         Err(e) => {
             tracing::warn!(
@@ -376,8 +375,11 @@ impl SessionActor {
         if full_message.len() <= LARGE_PROMPT_THRESHOLD {
             return full_message;
         }
-        let file_path = get_prompt_blob_path(&self.session_dir, &full_message);
         let blob_ref = get_prompt_blob_ref(&full_message);
+        let hash = blob_ref
+            .strip_prefix(crate::session::persistence::PROMPT_BLOB_REF_PREFIX)
+            .expect("prompt blob reference uses the canonical prefix")
+            .to_string();
         let full_len = full_message.len();
         let bounded = build_truncated_prompt_message(
             &context,
@@ -388,21 +390,18 @@ impl SessionActor {
         );
         let join_fallback =
             strip_offload_notice(&bounded, &build_offload_notice(full_len, &blob_ref));
-        let session_dir = self.session_dir.clone();
+        let session = self.session_directory.clone();
         let offload = tokio::task::spawn_blocking(move || {
             write_offload_and_build(
                 &full_message,
                 bounded,
-                file_path,
                 &blob_ref,
-                |path, bytes| {
-                    let relative = path.strip_prefix(&session_dir).map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "prompt blob path escapes the session directory",
-                        )
-                    })?;
-                    write_immutable_blob(&session_dir, relative, bytes)
+                |bytes| {
+                    crate::session::persistence::write_immutable_blob_to_directory(
+                        &session,
+                        &std::path::Path::new("prompts").join(format!("{hash}.txt")),
+                        bytes,
+                    )
                 },
             )
         })

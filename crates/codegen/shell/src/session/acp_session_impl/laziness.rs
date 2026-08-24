@@ -52,7 +52,7 @@ pub(crate) enum LazinessFireOutcome {
 /// Why a `Nudge` verdict was not injected into the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LazinessSuppressReason {
-    /// Post-classifier gate: goal harness is off or goal is not `Active`.
+    /// Post-classifier gate: Goal runtime is unavailable or Goal is not active.
     NotGoalMode,
 }
 
@@ -834,7 +834,7 @@ impl SessionActor {
             evaluate_laziness(&parsed, &cfg, nudges_used, LAZINESS_DEFAULT_MIN_CONFIDENCE);
 
         let goal_active = laziness_injection_active(
-            self.goal_harness_enabled(),
+            self.goal_runtime_available(),
             self.goal_tracker.lock().status(),
         );
 
@@ -883,7 +883,7 @@ impl SessionActor {
         let nudge_text = build_laziness_nudge(
             category,
             &evidence,
-            Some(tools::implementations::grow_build::UPDATE_GOAL_PROGRESS_TOOL_NAME),
+            Some("todo_write"),
         );
         if nudge_text.is_empty() {
             // Defensive — `evaluate_laziness` only returns Nudge for

@@ -5,7 +5,7 @@
 //! projections and UI clocks are intentionally absent and reconstructed after
 //! reload.
 
-pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 1;
+pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionControlSnapshot {
@@ -13,14 +13,14 @@ pub struct SessionControlSnapshot {
     pub control_revision: u64,
     pub behavior: crate::session::behavior::BehaviorSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub goal: Option<crate::session::goal_tracker::GoalState>,
 }
 
 impl SessionControlSnapshot {
     pub fn new(
         control_revision: u64,
         behavior: crate::session::behavior::BehaviorSnapshot,
-        goal: Option<crate::session::goal_tracker::GoalOrchestration>,
+        goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> Self {
         Self {
             architecture_version: SESSION_CONTROL_ARCHITECTURE_VERSION,

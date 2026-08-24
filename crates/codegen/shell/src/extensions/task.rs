@@ -53,8 +53,9 @@ struct ListTasksResponse {
 /// `pub` (with both serde directions) so ACP clients (pager) build
 /// the request from the same type the agent parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CancelSubagentRequest {
+    pub session_id: String,
     pub subagent_id: String,
 }
 
@@ -165,8 +166,9 @@ impl From<SubagentInspection> for SubagentLiveSnapshotDto {
 // ── Subagent get DTOs ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GetSubagentRequest {
+    session_id: String,
     subagent_id: String,
     #[serde(default)]
     block: Option<bool>,
@@ -407,8 +409,11 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         "grow/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;
             tracing::info!(subagent_id = %req.subagent_id, "Cancelling subagent via ext method");
-            let outcome =
-                SubagentCancelOutcomeDto::from(agent.cancel_subagent(&req.subagent_id).await);
+            let outcome = SubagentCancelOutcomeDto::from(
+                agent
+                    .cancel_subagent(&req.session_id, &req.subagent_id)
+                    .await,
+            );
             respond(Ok::<_, String>(CancelSubagentResponse {
                 subagent_id: req.subagent_id,
                 outcome,
@@ -420,9 +425,16 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
             let snapshot = agent
-                .query_subagent(&req.subagent_id, block, Some(timeout_ms))
+                .query_subagent(
+                    &req.session_id,
+                    &req.subagent_id,
+                    block,
+                    Some(timeout_ms),
+                )
                 .await;
-            let inspection = agent.inspect_subagent(&req.subagent_id).await;
+            let inspection = agent
+                .inspect_subagent(&req.session_id, &req.subagent_id)
+                .await;
             let (parent_session_id, child_session_id, provenance) = inspection
                 .map(|inspection| {
                     (
@@ -761,8 +773,9 @@ mod tests {
 
     #[test]
     fn get_subagent_request_deserializes_block_false() {
-        let json = r#"{"subagentId":"sub-1","block":false}"#;
+        let json = r#"{"sessionId":"parent-1","subagentId":"sub-1","block":false}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.session_id, "parent-1");
         assert_eq!(req.subagent_id, "sub-1");
         assert_eq!(req.block, Some(false));
         assert!(req.timeout_ms.is_none());
@@ -770,7 +783,7 @@ mod tests {
 
     #[test]
     fn get_subagent_request_deserializes_block_true_with_timeout() {
-        let json = r#"{"subagentId":"sub-2","block":true,"timeoutMs":5000}"#;
+        let json = r#"{"sessionId":"parent-2","subagentId":"sub-2","block":true,"timeoutMs":5000}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.subagent_id, "sub-2");
         assert_eq!(req.block, Some(true));
@@ -779,7 +792,7 @@ mod tests {
 
     #[test]
     fn get_subagent_request_defaults_block_and_timeout() {
-        let json = r#"{"subagentId":"sub-3"}"#;
+        let json = r#"{"sessionId":"parent-3","subagentId":"sub-3"}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
         assert!(req.block.is_none());
         assert!(req.timeout_ms.is_none());

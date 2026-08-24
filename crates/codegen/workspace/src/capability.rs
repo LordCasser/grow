@@ -94,10 +94,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::UseTool,
     ToolKind::Monitor,
     ToolKind::GoalRead,
-    ToolKind::GoalProgressUpdate,
-    ToolKind::GoalReplanRequest,
     ToolKind::GoalLifecycleUpdate,
-    ToolKind::GoalPlanSubmit,
     ToolKind::Workflow,
     ToolKind::CapabilityRequest,
     ToolKind::Other,
@@ -126,10 +123,8 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Meta tools: always allowed.
         Plan | PlanControl | AskUser | Skill | SearchTool | CapabilityRequest => true,
 
-        GoalRead | GoalPlanSubmit => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
-        GoalProgressUpdate | GoalReplanRequest | GoalLifecycleUpdate => {
-            matches!(mode, M::ReadWrite)
-        }
+        GoalRead => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
+        GoalLifecycleUpdate => matches!(mode, M::ReadWrite),
 
         // Read class.
         Read | MemoryGet | MemorySearch | ContextRecall => {

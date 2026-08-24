@@ -330,7 +330,7 @@ impl SessionActor {
             });
         self.mcp_reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.refresh_goal_harness_enabled().await;
+        self.refresh_goal_runtime_availability().await;
         self.send_available_commands_update().await;
         tracing::info!(
             session_id = %self.session_info.id.0,

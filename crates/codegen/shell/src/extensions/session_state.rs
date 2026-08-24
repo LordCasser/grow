@@ -15,6 +15,8 @@ const SUMMARY_COLUMN: &str = "summary";
 const TIMELINE_COLUMN: &str = "timeline";
 const SIDEBANDS_COLUMN: &str = "sidebands";
 const BLOBS_COLUMN: &str = "blobs";
+const UPDATES_COLUMN: &str = "updates";
+const MAX_SESSION_STATE_BYTES: u64 = 128 * 1024 * 1024;
 
 type ImmutableBlobs = std::collections::BTreeMap<String, String>;
 
@@ -22,7 +24,6 @@ type ImmutableBlobs = std::collections::BTreeMap<String, String>;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StateRequest {
     session_id: String,
-    cwd: String,
 }
 
 /// A session id is a UUID (see acp_agent's new_session); requiring that keeps it safe
@@ -40,49 +41,65 @@ pub async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
     let request: StateRequest = super::parse_params(args)?;
     validate_session_uuid(&request.session_id)?;
 
-    let Some(dir) = resolve_session_dir(&request.session_id, &request.cwd) else {
-        return Err(acp::Error::invalid_params().data("session not found"));
-    };
-    let info = crate::session::info::Info {
-        id: acp::SessionId::new(request.session_id),
-        cwd: request.cwd,
-    };
-    let storage = st::JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
-    let summary = storage
-        .read_summary_sync(&info)
+    let opened = open_session_by_id(&request.session_id)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+    let state = read_entity_state(&opened)
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let timeline = storage
-        .read_timeline_events_sync(&info)
+    validate_state_size(&state)
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let parent = chat_state::Timeline::from_events(timeline.clone())
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let sidebands = storage
-        .read_sideband_ledgers_sync(&info, &parent)
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let blobs = read_entity_blobs(&dir, &parent)
-        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    let mut state = serde_json::Map::new();
-    state.insert(
-        SUMMARY_COLUMN.to_string(),
-        serde_json::to_value(summary)
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
-    );
-    state.insert(
-        TIMELINE_COLUMN.to_string(),
-        serde_json::to_value(timeline)
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
-    );
-    state.insert(
-        SIDEBANDS_COLUMN.to_string(),
-        serde_json::to_value(sidebands)
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
-    );
-    state.insert(
-        BLOBS_COLUMN.to_string(),
-        serde_json::to_value(blobs)
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
-    );
     super::to_raw_response(&state)
+}
+
+fn read_entity_state(
+    opened: &st::jsonl::OpenedSession,
+) -> std::io::Result<std::collections::HashMap<String, Value>> {
+    let timeline_events = opened.timeline_events()?;
+    let timeline = chat_state::Timeline::from_events(timeline_events.clone())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let session_id = opened.summary().info.id.to_string();
+    let sidebands = opened.sideband_ledgers(&session_id, &timeline)?;
+    let blobs = read_entity_blobs(opened.directory(), &timeline)?;
+    let updates = opened.update_envelopes()?;
+    Ok(std::collections::HashMap::from([
+        (
+            SUMMARY_COLUMN.to_string(),
+            serde_json::to_value(opened.summary())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        ),
+        (
+            TIMELINE_COLUMN.to_string(),
+            serde_json::to_value(timeline_events)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        ),
+        (
+            SIDEBANDS_COLUMN.to_string(),
+            serde_json::to_value(sidebands)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        ),
+        (
+            BLOBS_COLUMN.to_string(),
+            serde_json::to_value(blobs)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        ),
+        (
+            UPDATES_COLUMN.to_string(),
+            serde_json::to_value(updates)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        ),
+    ]))
+}
+
+fn validate_state_size(value: &impl serde::Serialize) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if bytes.len() as u64 > MAX_SESSION_STATE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("session state exceeds {MAX_SESSION_STATE_BYTES} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -92,14 +109,11 @@ struct ImportRequest {
     cwd: String,
     #[serde(default)]
     state: std::collections::HashMap<String, Value>,
-    /// One JSON object per `updates.jsonl` line, not pre-serialized strings.
-    #[serde(default)]
-    updates: Vec<Value>,
 }
 
 /// `grow/session/import`: recreate a session on this host from the exact mirrored
-/// summary + parent/Sideband ledgers + referenced immutable blobs. A session
-/// that already exists locally is left unchanged.
+/// summary + update/Timeline/Sideband ledgers + referenced immutable blobs. A
+/// repeated import is idempotent only when the complete entity is identical.
 pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     let mut request: ImportRequest = super::parse_params(args)?;
     validate_session_uuid(&request.session_id)?;
@@ -108,74 +122,102 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
         id: acp::SessionId::new(request.session_id.clone()),
         cwd: request.cwd.clone(),
     };
-    let dir = crate::session::persistence::session_dir(&info);
+    let storage = st::JsonlStorageAdapter::new();
+    validate_import_state_columns(&request.state)?;
+    let Some(summary_value) = request.state.get_mut(SUMMARY_COLUMN) else {
+        return Err(acp::Error::invalid_params().data("session/import requires a summary column"));
+    };
+    let Some(summary_object) = summary_value.as_object_mut() else {
+        return Err(acp::Error::invalid_params().data("session/import summary must be an object"));
+    };
+    validate_import_summary_format(summary_object)?;
+    validate_import_summary_identity(summary_object, &request.session_id)?;
+    sanitize_summary_for_host(summary_object, &request.session_id, &request.cwd);
+    let Ok(summary) = Summary::deserialize(&*summary_value) else {
+        return Err(acp::Error::invalid_params().data("summary column is not a valid summary"));
+    };
+    summary
+        .validate_current_format()
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let summary_bytes = serde_json::to_vec(&summary)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    if summary_bytes.len() as u64 > st::MAX_SESSION_SUMMARY_BYTES {
+        return Err(acp::Error::invalid_params().data(format!(
+            "session/import summary exceeds {} bytes",
+            st::MAX_SESSION_SUMMARY_BYTES
+        )));
+    }
+    *summary_value = serde_json::to_value(summary)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let timeline = validate_timeline_column(&request.state)?;
+    let sidebands = validate_sidebands_column(&request.state)?;
+    validate_updates_column(&request.state)?;
+    validate_blobs_column(&request.state, &timeline)?;
+    validate_state_size(&request.state)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    st::validate_sideband_ledgers(&request.session_id, &timeline, &sidebands)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
 
-    // resolve_session_dir gates on summary.json, so an interrupted import (dir created,
-    // summary not yet written) is recreated on retry rather than skipped forever.
-    let has_local_session = resolve_session_dir(&request.session_id, &request.cwd).is_some();
-    if !has_local_session {
-        match std::fs::symlink_metadata(&dir) {
-            Ok(_) => {
-                return Err(acp::Error::invalid_params().data(format!(
-                    "session/import target already exists but is not a valid session: {}",
-                    dir.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(acp::Error::internal_error().data(error.to_string()));
-            }
-        }
-        validate_import_state_columns(&request.state)?;
-        validate_import_updates(&request.updates)?;
-        let Some(summary_value) = request.state.get_mut(SUMMARY_COLUMN) else {
-            return Err(
-                acp::Error::invalid_params().data("session/import requires a summary column")
-            );
-        };
-        let Some(summary) = summary_value.as_object_mut() else {
-            return Err(
-                acp::Error::invalid_params().data("session/import summary must be an object")
-            );
-        };
-        validate_import_summary_format(summary)?;
-        validate_import_summary_identity(summary, &request.session_id)?;
-        sanitize_summary_for_host(summary, &request.session_id, &request.cwd);
-        // Reject a summary that would not load rather than persist one that bricks the
-        // session and blocks re-import.
-        let Ok(summary) = Summary::deserialize(&*summary_value) else {
-            return Err(acp::Error::invalid_params().data("summary column is not a valid summary"));
-        };
-        summary
-            .validate_current_format()
-            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-        let summary_bytes = serde_json::to_vec(&summary)
-            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-        if summary_bytes.len() as u64 > st::MAX_SESSION_SUMMARY_BYTES {
+    if let Some(existing) = storage
+        .open_session_by_id(&request.session_id)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+    {
+        if existing.summary().info.cwd != request.cwd {
             return Err(acp::Error::invalid_params().data(format!(
-                "session/import summary exceeds {} bytes",
-                st::MAX_SESSION_SUMMARY_BYTES
+                "session {} already exists under cwd {}",
+                request.session_id,
+                existing.summary().info.cwd
             )));
         }
-        let timeline = validate_timeline_column(&request.state)?;
-        let sidebands = validate_sidebands_column(&request.state)?;
-        validate_blobs_column(&request.state, &timeline)?;
-        st::validate_sideband_ledgers(&request.session_id, &timeline, &sidebands)
-            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-        // Prepare the canonical parent and its hash-path marker through the
-        // same contained storage primitive used by normal session creation.
-        st::JsonlStorageAdapter::new()
-            .ensure_session_parent(&info)
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-        write_import(&dir, &request.state, &request.updates).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                acp::Error::invalid_params().data(error.to_string())
-            } else {
-                acp::Error::internal_error().data(error.to_string())
-            }
+        let mut existing_state = read_entity_state(&existing)
+            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        let existing_summary = existing_state
+            .get_mut(SUMMARY_COLUMN)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                acp::Error::internal_error().data("existing session summary is not an object")
+            })?;
+        sanitize_summary_for_host(
+            existing_summary,
+            &request.session_id,
+            &request.cwd,
+        );
+        let existing_summary = Summary::deserialize(&*existing_summary).map_err(|error| {
+            acp::Error::internal_error().data(format!(
+                "existing session summary cannot be normalized: {error}"
+            ))
         })?;
+        existing_state.insert(
+            SUMMARY_COLUMN.to_string(),
+            serde_json::to_value(existing_summary)
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
+        );
+        if existing_state == request.state {
+            return super::to_raw_response(&json!({ "imported": false }));
+        }
+        return Err(acp::Error::invalid_params().data(format!(
+            "session {} already exists with different causal state",
+            request.session_id
+        )));
     }
-    super::to_raw_response(&json!({ "imported": !has_local_session }))
+
+    let parent = storage
+        .ensure_session_parent(&info)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let target_name = info.id.to_string();
+    write_import(
+        &parent,
+        std::ffi::OsStr::new(&target_name),
+        &request.state,
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            acp::Error::invalid_params().data(error.to_string())
+        } else {
+            acp::Error::internal_error().data(error.to_string())
+        }
+    })?;
+    super::to_raw_response(&json!({ "imported": true }))
 }
 
 fn validate_import_state_columns(
@@ -186,7 +228,11 @@ fn validate_import_state_columns(
         .filter(|column| {
             !matches!(
                 column.as_str(),
-                SUMMARY_COLUMN | TIMELINE_COLUMN | SIDEBANDS_COLUMN | BLOBS_COLUMN
+                SUMMARY_COLUMN
+                    | TIMELINE_COLUMN
+                    | SIDEBANDS_COLUMN
+                    | BLOBS_COLUMN
+                    | UPDATES_COLUMN
             )
         })
         .cloned()
@@ -200,7 +246,15 @@ fn validate_import_state_columns(
     Ok(())
 }
 
-fn validate_import_updates(updates: &[Value]) -> Result<(), acp::Error> {
+fn validate_updates_column(
+    state: &std::collections::HashMap<String, Value>,
+) -> Result<&Vec<Value>, acp::Error> {
+    let updates = state
+        .get(UPDATES_COLUMN)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            acp::Error::invalid_params().data("session/import requires an updates array")
+        })?;
     for (index, update) in updates.iter().enumerate() {
         validate_jsonl_entry_size(update, &format!("update {index}"))?;
         crate::session::storage::SessionUpdateEnvelope::from_value(update.clone()).map_err(
@@ -210,7 +264,7 @@ fn validate_import_updates(updates: &[Value]) -> Result<(), acp::Error> {
             },
         )?;
     }
-    Ok(())
+    Ok(updates)
 }
 
 fn validate_timeline_column(
@@ -306,36 +360,29 @@ fn blob_path(dir: &Path, key: &str) -> Option<PathBuf> {
 }
 
 fn read_entity_blobs(
-    dir: &Path,
+    session: &st::ContainedDirectory,
     timeline: &chat_state::Timeline,
 ) -> std::io::Result<ImmutableBlobs> {
     let mut blobs = ImmutableBlobs::new();
     for key in referenced_blob_keys(timeline)? {
-        let path = blob_path(dir, &key).ok_or_else(|| {
+        let relative = blob_path(Path::new(""), &key).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid immutable blob key",
             )
         })?;
-        let parent = path.parent().ok_or_else(|| {
+        let parent = relative.parent().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "immutable blob path has no parent",
             )
         })?;
-        let relative_parent = parent.strip_prefix(dir).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "immutable blob path escapes session root",
-            )
-        })?;
-        let directory = st::ContainedDirectory::open(
-            dir,
-            relative_parent,
+        let directory = session.open_relative(
+            parent,
             "session immutable blob directory",
             false,
         )?;
-        let file_name = path.file_name().ok_or_else(|| {
+        let file_name = relative.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "immutable blob path has no file name",
@@ -351,11 +398,13 @@ fn read_entity_blobs(
             .map(|(_, hash)| hash)
             .unwrap_or_default();
         if blake3::hash(&bytes).to_hex().as_str() != hash {
+            let path = session.display_path().join(&relative);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("immutable blob hash mismatch at {}", path.display()),
             ));
         }
+        let path = session.display_path().join(&relative);
         let text = String::from_utf8(bytes).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -489,66 +538,19 @@ fn set_or_remove(obj: &mut serde_json::Map<String, Value>, key: &str, value: Opt
 /// Build an imported current-format session out of namespace, then publish the whole
 /// directory with the storage layer's no-replace commit primitive.
 fn write_import(
-    dir: &Path,
+    parent: &st::ContainedDirectory,
+    target_name: &std::ffi::OsStr,
     state: &std::collections::HashMap<String, Value>,
-    updates: &[Value],
 ) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(dir) {
-        Ok(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("session/import target already exists: {}", dir.display()),
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let parent = dir.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "session/import target has no parent",
-        )
-    })?;
-    st::require_regular_directory(parent, "session/import parent directory")?;
-    let name = dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "session/import target has no UTF-8 name",
-            )
-        })?;
-    let staging = parent.join(format!(
-        ".{name}.{}.import-staging",
-        uuid::Uuid::now_v7().simple()
-    ));
-    std::fs::create_dir(&staging)?;
-    let result = write_import_staging(&staging, state, updates).and_then(|()| {
-        crate::session::storage::jsonl::JsonlStorageAdapter::publish_staged_directory(&staging, dir)
-    });
-    if result.is_err()
-        && matches!(
-            std::fs::symlink_metadata(&staging),
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
-        )
-    {
-        let _ = std::fs::remove_dir_all(staging);
-    }
-    result
+    st::JsonlStorageAdapter::build_and_publish_session(parent, target_name, |staging| {
+        write_import_staging(staging, state)
+    })
 }
 
 fn write_import_staging(
-    dir: &Path,
+    staging: &st::ContainedDirectory,
     state: &std::collections::HashMap<String, Value>,
-    updates: &[Value],
 ) -> std::io::Result<()> {
-    let staging = st::ContainedDirectory::open(
-        dir,
-        Path::new(""),
-        "session/import staging directory",
-        false,
-    )?;
     let timeline = state
         .get(TIMELINE_COLUMN)
         .and_then(Value::as_array)
@@ -602,20 +604,27 @@ fn write_import_staging(
         })?)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     for (key, content) in blobs {
-        let path = blob_path(dir, &key).ok_or_else(|| {
+        let path = blob_path(Path::new(""), &key).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("invalid immutable blob key {key}"),
             )
         })?;
-        let relative = path.strip_prefix(dir).map_err(|_| {
+        crate::session::persistence::write_immutable_blob_to_directory(
+            staging,
+            &path,
+            content.as_bytes(),
+        )?;
+    }
+    let updates = state
+        .get(UPDATES_COLUMN)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("immutable blob key escapes session root: {key}"),
+                "session/import requires an updates array",
             )
         })?;
-        crate::session::persistence::write_immutable_blob(dir, relative, content.as_bytes())?;
-    }
     if !updates.is_empty() {
         staging.write_atomic(
             std::ffi::OsStr::new(st::UPDATES_FILE),
@@ -631,7 +640,7 @@ fn write_import_staging(
             "session/import requires a summary column",
         )
     })?;
-    write_column(&staging, st::SUMMARY_FILE, summary)?;
+    write_column(staging, st::SUMMARY_FILE, summary)?;
     Ok(())
 }
 
@@ -648,25 +657,15 @@ fn write_column(
     )
 }
 
-/// The session's directory, or `None` when it isn't found on this host. Falls back to
-/// an id scan when `(id, cwd)` has no summary (subagents use their own cwd); both
-/// branches require summary.json so a bare directory doesn't count as present.
-fn resolve_session_dir(session_id: &str, cwd: &str) -> Option<PathBuf> {
-    let info = crate::session::info::Info {
-        id: acp::SessionId::new(session_id.to_string()),
-        cwd: cwd.to_string(),
-    };
-    let dir = crate::session::persistence::session_dir(&info);
-    if crate::session::persistence::is_persisted_session_dir(&dir) {
-        return Some(dir);
-    }
-    crate::session::persistence::find_session_dir_by_id(session_id)
-        .filter(|found| crate::session::persistence::is_persisted_session_dir(found))
+fn open_session_by_id(session_id: &str) -> std::io::Result<Option<st::jsonl::OpenedSession>> {
+    let storage = st::JsonlStorageAdapter::new();
+    storage.open_session_by_id(session_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::storage::StorageAdapter as _;
     use serde_json::json;
 
     fn linked_ledgers() -> (
@@ -686,7 +685,7 @@ mod tests {
                 },
             ))
             .unwrap();
-        let mut sideband = chat_state::SidebandTimeline::new(sideband_id).unwrap();
+        let mut sideband = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
         for kind in [
             chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
@@ -696,7 +695,7 @@ mod tests {
                     model: "test-model".into(),
                     backend: "responses".into(),
                 },
-                initiator_ref: format!("t:{parent_id}/0"),
+                initiator_ref: format!("t:{parent_id}/sideband:{sideband_id}"),
                 executor: "main".into(),
                 output_schema: None,
             }),
@@ -798,6 +797,7 @@ mod tests {
             (TIMELINE_COLUMN.to_string(), json!([])),
             (SIDEBANDS_COLUMN.to_string(), json!({})),
             (BLOBS_COLUMN.to_string(), json!({})),
+            (UPDATES_COLUMN.to_string(), json!([])),
         ]);
         assert!(validate_import_state_columns(&valid).is_ok());
 
@@ -897,6 +897,13 @@ mod tests {
     fn write_import_writes_columns_and_updates() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("target-session");
+        let parent = st::ContainedDirectory::open(
+            tmp.path(),
+            Path::new(""),
+            "session import test parent",
+            false,
+        )
+        .unwrap();
 
         let mut state = std::collections::HashMap::new();
         state.insert(
@@ -919,8 +926,9 @@ mod tests {
             json!({ "method": "session/update", "params": { "a": 1 } }),
             json!({ "method": "session/update", "params": { "b": 2 } }),
         ];
+        state.insert(UPDATES_COLUMN.to_string(), json!(updates));
 
-        write_import(&dir, &state, &updates).unwrap();
+        write_import(&parent, std::ffi::OsStr::new("target-session"), &state).unwrap();
 
         assert!(dir.join("summary.json").exists(), "summary.json written");
         assert!(
@@ -946,7 +954,12 @@ mod tests {
                 .ends_with("import-staging")
         }));
 
-        let error = write_import(&dir, &state, &updates).unwrap_err();
+        let error = write_import(
+            &parent,
+            std::ffi::OsStr::new("target-session"),
+            &state,
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read_to_string(dir.join(st::SUMMARY_FILE)).unwrap(),
@@ -965,6 +978,13 @@ mod tests {
         let target = tmp.path().join("target-session");
         std::fs::create_dir(&outside).unwrap();
         symlink(&outside, &target).unwrap();
+        let parent = st::ContainedDirectory::open(
+            tmp.path(),
+            Path::new(""),
+            "session import test parent",
+            false,
+        )
+        .unwrap();
         let state = std::collections::HashMap::from([
             (
                 SUMMARY_COLUMN.to_string(),
@@ -973,9 +993,14 @@ mod tests {
             (TIMELINE_COLUMN.to_string(), json!([])),
             (SIDEBANDS_COLUMN.to_string(), json!({})),
             (BLOBS_COLUMN.to_string(), json!({})),
+            (UPDATES_COLUMN.to_string(), json!([])),
         ]);
 
-        let error = write_import(&target, &state, &[])
+        let error = write_import(
+            &parent,
+            std::ffi::OsStr::new("target-session"),
+            &state,
+        )
             .expect_err("session import must not traverse a symlinked target");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(std::fs::read_dir(&outside).unwrap().next().is_none());

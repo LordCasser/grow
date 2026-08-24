@@ -190,7 +190,9 @@ fn sideband_error_to_sample_error(error: SidebandRunError) -> CompactionSampleEr
     let message = error.to_string();
     match error {
         SidebandRunError::Invalid(_) => CompactionSampleError::Deterministic(message),
-        SidebandRunError::Parent(_) | SidebandRunError::Persistence(_) => {
+        SidebandRunError::Parent(_)
+        | SidebandRunError::Persistence(_)
+        | SidebandRunError::InterruptedAppendRecovered => {
             CompactionSampleError::Transient(message)
         }
     }

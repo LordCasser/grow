@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 7;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 8;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -210,9 +210,6 @@ pub enum RequestEvent {
         model_id: String,
         input_message_count: usize,
         tool_count: usize,
-    },
-    FirstToken {
-        id: String,
     },
     Retrying {
         id: String,
@@ -1267,32 +1264,6 @@ impl Timeline {
             }
         }
         latest
-    }
-
-    /// Whether the ledger proves that the named Goal's final report reached a
-    /// successful terminal. This closes the crash window between committing
-    /// the turn terminal and committing the subsequent Control receipt.
-    pub fn has_successful_goal_finalization(&self, goal_id: &str) -> bool {
-        let mut identities = BTreeMap::new();
-        for event in &self.events {
-            match &event.kind {
-                TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. }) => {
-                    identities.insert(*id, identity);
-                }
-                TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) => {
-                    if identities.get(id).is_some_and(|identity| {
-                        identity.origin == "goal_finalization"
-                            && identity.goal_id.as_deref() == Some(goal_id)
-                    }) && terminal.stop_reason == "end_turn"
-                        && terminal.completion_kind == "completed"
-                    {
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
     }
 
     pub fn surface_len(&self) -> usize {
@@ -2364,8 +2335,7 @@ impl LifecycleFold {
                     return Err(TimelineError::RequestAlreadyOpen(id.clone()));
                 }
             }
-            TimelineEventKind::Request(RequestEvent::FirstToken { id })
-            | TimelineEventKind::Request(RequestEvent::Retrying { id, .. }) => {
+            TimelineEventKind::Request(RequestEvent::Retrying { id, .. }) => {
                 if !self.open_requests.contains_key(id) {
                     return Err(TimelineError::RequestNotOpen(id.clone()));
                 }
@@ -3078,12 +3048,12 @@ mod tests {
         }
     }
 
-    fn goal_identity(goal_id: &str) -> TurnIdentity {
+    fn goal_continuation_identity(goal_id: &str) -> TurnIdentity {
         TurnIdentity {
-            origin: "goal_finalization".into(),
+            origin: "goal_continuation".into(),
             turn_kind: "internal".into(),
             goal_id: Some(goal_id.into()),
-            stage_id: Some(4),
+            stage_id: None,
         }
     }
 
@@ -3414,66 +3384,6 @@ mod tests {
     }
 
     #[test]
-    fn goal_finalization_requires_matching_identity_and_success_terminal() {
-        let mut timeline = Timeline::default();
-        let failed = TurnId(1);
-        timeline
-            .record(TimelineEventKind::Turn(TurnEvent::Started {
-                id: failed,
-                identity: goal_identity("goal-1"),
-                model_id: "model".into(),
-                input_message_count: 0,
-                prompt_index: 0,
-                prompt_text: "finalize".into(),
-                input_kind: TurnInputKind::Prompt,
-                redirect_kind: None,
-            }))
-            .unwrap();
-        timeline
-            .record(TimelineEventKind::Turn(TurnEvent::Ended {
-                id: failed,
-                outcome: "completed".into(),
-                duration_ms: 1,
-                tool_count: 0,
-                terminal: TurnTerminal {
-                    stop_reason: "refusal".into(),
-                    completion_kind: "completed".into(),
-                },
-                cancellation_category: None,
-                details: None,
-            }))
-            .unwrap();
-        assert!(!timeline.has_successful_goal_finalization("goal-1"));
-
-        let succeeded = TurnId(2);
-        timeline
-            .record(TimelineEventKind::Turn(TurnEvent::Started {
-                id: succeeded,
-                identity: goal_identity("goal-1"),
-                model_id: "model".into(),
-                input_message_count: 0,
-                prompt_index: 1,
-                prompt_text: "finalize again".into(),
-                input_kind: TurnInputKind::Prompt,
-                redirect_kind: None,
-            }))
-            .unwrap();
-        timeline
-            .record(TimelineEventKind::Turn(TurnEvent::Ended {
-                id: succeeded,
-                outcome: "completed".into(),
-                duration_ms: 1,
-                tool_count: 0,
-                terminal: completed_terminal(),
-                cancellation_category: None,
-                details: None,
-            }))
-            .unwrap();
-        assert!(timeline.has_successful_goal_finalization("goal-1"));
-        assert!(!timeline.has_successful_goal_finalization("goal-2"));
-    }
-
-    #[test]
     fn replacement_keeps_transcript_immutable() {
         let mut timeline = Timeline::from_seed(vec![
             ConversationItem::system("system"),
@@ -3615,7 +3525,7 @@ mod tests {
             2,
             1,
             "internal continuation",
-            goal_identity("goal-1"),
+            goal_continuation_identity("goal-1"),
             TurnInputKind::Prompt,
         );
         record_input(

@@ -449,7 +449,7 @@ pub(crate) struct ShellCompletionData {
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     diagnostics_tokens: u64,
     spawned_notification_emitted: bool,
-    persisted_output_ref: Option<PathBuf>,
+    persisted_output_ref: Option<String>,
     terminal_committed: bool,
 }
 impl ShellCompletionData {
@@ -466,15 +466,19 @@ impl ShellCompletionData {
             terminal_committed: false,
         }
     }
-    pub(crate) fn persisted_output_ref(&self) -> Option<&Path> {
+    pub(crate) fn persisted_output_ref(&self) -> Option<&str> {
         self.persisted_output_ref.as_deref()
     }
-    fn set_persisted_output_ref(&mut self, path: Option<PathBuf>) {
-        self.persisted_output_ref = path;
+    fn set_persisted_output_ref(&mut self, output_ref: Option<String>) {
+        self.persisted_output_ref = output_ref;
     }
 
     fn mark_terminal_committed(&mut self) {
         self.terminal_committed = true;
+    }
+
+    pub(crate) fn terminal_committed(&self) -> bool {
+        self.terminal_committed
     }
 }
 pub(crate) struct SubagentPresentation {
@@ -969,7 +973,7 @@ fn verbatim_or_normalize_fork_with_ref(
 
 fn freeze_initial_prompt_blobs(
     mut context: InitialContext,
-    source_session_dir: Option<&Path>,
+    source_session: Option<&crate::session::storage::ContainedDirectory>,
 ) -> Result<InitialContext, String> {
     let references =
         crate::session::persistence::referenced_prompt_blob_hashes(&context.conversation)
@@ -977,13 +981,15 @@ fn freeze_initial_prompt_blobs(
     if references.is_empty() {
         return Ok(context);
     }
-    let source_session_dir = source_session_dir.ok_or_else(|| {
+    let source_session = source_session.ok_or_else(|| {
         "inherited Surface references prompt artifacts but its source session directory is unavailable"
             .to_string()
     })?;
-    context.prompt_blobs =
-        crate::session::persistence::freeze_prompt_blobs(&context.conversation, source_session_dir)
-            .map_err(|error| format!("cannot freeze inherited prompt artifacts: {error}"))?;
+    context.prompt_blobs = crate::session::persistence::freeze_prompt_blobs_from_directory(
+        &context.conversation,
+        source_session,
+    )
+    .map_err(|error| format!("cannot freeze inherited prompt artifacts: {error}"))?;
     Ok(context)
 }
 #[cfg(test)]
@@ -1029,7 +1035,7 @@ enum BootstrapInitialContext {
 /// Unresolved non-empty resume is aborted by the caller before this runs.
 async fn bootstrap_initial_context(
     request: &SubagentRequest,
-    resume_source: Option<&ResumeSourceData>,
+    resume_source: Option<&DurableResumeSource>,
     ctx: &SubagentSpawnContext,
     child_context_window: u64,
 ) -> BootstrapInitialContext {
@@ -1041,19 +1047,11 @@ async fn bootstrap_initial_context(
             "resume_from and fork_context both set; resolved resume wins (fail-closed on copy error, never forks)"
         );
     }
-    if let Some(source) = resume_source {
-        let source_session_info = SessionInfo {
-            id: acp::SessionId::new(source.child_session_id.clone()),
-            cwd: source.child_cwd.clone(),
-        };
-        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
-            crate::util::grow_home::grow_home(),
-        );
-        let source_session_dir =
-            crate::session::persistence::find_session_dir_by_id(&source.child_session_id)
-                .unwrap_or_else(|| session::persistence::session_dir(&source_session_info));
-        let materialized = match storage
-            .materialize_timeline_from_dir(&source_session_dir, &source.child_session_id)
+    if let Some(resolved) = resume_source {
+        let source = &resolved.data;
+        let materialized = match resolved
+            .session
+            .materialize_timeline(&source.child_session_id)
         {
             Ok(materialized) if !materialized.surface.is_empty() => materialized,
             Ok(_) => {
@@ -1092,7 +1090,7 @@ async fn bootstrap_initial_context(
         );
         return match freeze_initial_prompt_blobs(
             resume_initial_context_with_ref(conversation, materialized.input_ref),
-            Some(&source_session_dir),
+            Some(resolved.session.directory()),
         ) {
             Ok(context) => BootstrapInitialContext::Ready(context),
             Err(error) => BootstrapInitialContext::Abort(error),
@@ -1125,15 +1123,15 @@ async fn bootstrap_initial_context(
             Ok(context) => context,
             Err(error) => return BootstrapInitialContext::Abort(error),
         };
-        let source_session_dir = crate::session::persistence::find_session_dir_by_id(
-            &ctx.parent_session_id,
-        )
-        .or_else(|| {
-            ctx.parent_session_info
-                .as_ref()
-                .map(session::persistence::session_dir)
+        let source_session = ctx.parent_session_info.as_ref().and_then(|info| {
+            crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                .open_session(info)
+                .ok()
         });
-        let ctx_out = match freeze_initial_prompt_blobs(ctx_out, source_session_dir.as_deref()) {
+        let ctx_out = match freeze_initial_prompt_blobs(
+            ctx_out,
+            source_session.as_ref().map(|session| session.directory()),
+        ) {
             Ok(context) => context,
             Err(error) => return BootstrapInitialContext::Abort(error),
         };
@@ -1151,12 +1149,15 @@ async fn bootstrap_initial_context(
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
             crate::util::grow_home::grow_home(),
         );
-        let parent_session_dir =
-            crate::session::persistence::find_session_dir_by_id(&ctx.parent_session_id)
-                .unwrap_or_else(|| session::persistence::session_dir(parent_info));
-        let materialized = match storage
-            .materialize_timeline_from_dir(&parent_session_dir, &ctx.parent_session_id)
-        {
+        let parent_session = match storage.open_session(parent_info) {
+            Ok(session) => session,
+            Err(error) => {
+                return BootstrapInitialContext::Abort(format!(
+                    "Cannot fork parent session: source session could not be opened: {error}"
+                ));
+            }
+        };
+        let materialized = match parent_session.materialize_timeline(&ctx.parent_session_id) {
             Ok(materialized) => materialized,
             Err(error) => {
                 return BootstrapInitialContext::Abort(format!(
@@ -1172,7 +1173,9 @@ async fn bootstrap_initial_context(
             "Materialized frozen disk fork source without publishing the child session"
         );
         return match forked_initial_context_with_ref(materialized.surface, materialized.input_ref)
-            .and_then(|context| freeze_initial_prompt_blobs(context, Some(&parent_session_dir)))
+            .and_then(|context| {
+                freeze_initial_prompt_blobs(context, Some(parent_session.directory()))
+            })
         {
             Ok(context) => BootstrapInitialContext::Ready(context),
             Err(error) => BootstrapInitialContext::Abort(error),
@@ -1235,7 +1238,7 @@ fn durable_resume_source_for(
     id: &str,
     parent_session_id: &str,
     parent_cwd: &Path,
-) -> Option<ResumeSourceData> {
+) -> Option<DurableResumeSource> {
     let parent_info = SessionInfo {
         id: acp::SessionId::new(parent_session_id),
         cwd: parent_cwd.to_string_lossy().into_owned(),
@@ -1243,23 +1246,42 @@ fn durable_resume_source_for(
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
         crate::util::grow_home::grow_home(),
     );
-    let timeline =
-        chat_state::Timeline::from_events(storage.read_timeline_events_sync(&parent_info).ok()?)
-            .ok()?;
+    let parent = storage.open_session(&parent_info).ok()?;
+    let timeline = chat_state::Timeline::from_events(parent.timeline_events().ok()?).ok()?;
     let (spawn_seq, spawn, terminal) = resume_source_facts_from_timeline(&timeline, id)?;
-    let source_session_dir =
-        crate::session::persistence::find_session_dir_by_id(&spawn.child_session_id)
-            .unwrap_or_else(|| {
-                session::persistence::session_dir(&SessionInfo {
-                    id: acp::SessionId::new(spawn.child_session_id.clone()),
-                    cwd: spawn.child_cwd.clone(),
-                })
-            });
-    let child = crate::session::storage::read_timeline_in_session_dir(&source_session_dir).ok()?;
+    let child_session = storage.open_session_by_id(&spawn.child_session_id).ok()??;
+    let summary = child_session.summary();
+    if summary.parent_session_id.as_deref() != Some(parent_session_id)
+        || !summary
+            .session_kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("subagent"))
+    {
+        return None;
+    }
+    let child = chat_state::Timeline::from_events(child_session.timeline_events().ok()?).ok()?;
     child
         .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
         .ok()?;
-    Some(resume_source_from_facts(spawn, terminal))
+    let mut data = resume_source_from_facts(spawn, terminal);
+    data.child_cwd = summary.info.cwd.clone();
+    Some(DurableResumeSource {
+        data,
+        session: child_session,
+    })
+}
+
+struct DurableResumeSource {
+    data: ResumeSourceData,
+    session: crate::session::storage::jsonl::OpenedSession,
+}
+
+impl std::ops::Deref for DurableResumeSource {
+    type Target = ResumeSourceData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 fn resume_source_facts_from_timeline<'a>(
@@ -2058,11 +2080,13 @@ struct SubagentOutputFileRef<'a> {
 const SUBAGENT_OUTPUT_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubagentOutputArtifact {
-    path: PathBuf,
     timeline_ref: String,
 }
 
-fn write_subagent_output(dir: &Path, output: &str) -> Result<SubagentOutputArtifact, String> {
+fn write_subagent_output(
+    session: &crate::session::storage::ContainedDirectory,
+    output: &str,
+) -> Result<SubagentOutputArtifact, String> {
     let file = SubagentOutputFileRef {
         schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
         output,
@@ -2078,48 +2102,45 @@ fn write_subagent_output(dir: &Path, output: &str) -> Result<SubagentOutputArtif
     let relative = Path::new("artifacts")
         .join("subagent-output")
         .join(format!("{hash}.json"));
-    let path = dir.join(&relative);
-    if let Err(e) =
-        crate::session::persistence::write_immutable_blob(dir, &relative, json.as_bytes())
+    if let Err(e) = crate::session::persistence::write_immutable_blob_to_directory(
+        session,
+        &relative,
+        json.as_bytes(),
+    )
     {
         tracing::warn!(error = %e, "failed to write subagent output");
         return Err(format!("failed to write subagent output: {e}"));
     }
     Ok(SubagentOutputArtifact {
-        path,
         timeline_ref: format!("artifact:subagent-output:blake3:{hash}"),
     })
 }
-pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
+fn read_subagent_output_from_directory(
+    session: &crate::session::storage::ContainedDirectory,
+    hash: &str,
+) -> Option<String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct OutputFile {
         schema_version: u32,
         output: String,
     }
-    let artifact_dir = path.parent()?;
-    let artifacts_dir = artifact_dir.parent()?;
-    let session_dir = artifacts_dir.parent()?;
-    if artifact_dir.file_name()? != "subagent-output" || artifacts_dir.file_name()? != "artifacts" {
-        return None;
-    }
-    let directory = crate::session::storage::ContainedDirectory::open(
-        session_dir,
-        Path::new("artifacts/subagent-output"),
-        "subagent output artifact directory",
-        false,
-    )
-    .ok()?;
-    let file_name = path.file_name()?;
+    let directory = session
+        .open_relative(
+            Path::new("artifacts/subagent-output"),
+            "subagent output artifact directory",
+            false,
+        )
+        .ok()?;
+    let file_name = format!("{hash}.json");
     let data = directory
         .read_bounded(
-            file_name,
+            std::ffi::OsStr::new(&file_name),
             "subagent output artifact",
             crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
         )
         .ok()?;
-    let expected_hash = path.file_stem()?.to_str()?;
-    if blake3::hash(&data).to_hex().as_str() != expected_hash {
+    if blake3::hash(&data).to_hex().as_str() != hash {
         return None;
     }
     let file: OutputFile = serde_json::from_slice(&data).ok()?;
@@ -2127,13 +2148,13 @@ pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
 }
 #[must_use]
 fn persist_subagent_output(
-    dir: &Path,
+    session: &crate::session::storage::ContainedDirectory,
     result: &SubagentResult,
 ) -> Result<Option<SubagentOutputArtifact>, String> {
     if !result.success || result.output.is_empty() {
         return Ok(None);
     }
-    write_subagent_output(dir, &result.output).map(Some)
+    write_subagent_output(session, &result.output).map(Some)
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";
 
@@ -2159,18 +2180,38 @@ fn finish_from_terminal(
     }
 }
 
-fn load_subagent_output_ref(child_dir: &Path, output_ref: &str) -> Result<String, String> {
+pub(crate) fn load_subagent_output_ref_from_directory(
+    child: &crate::session::storage::ContainedDirectory,
+    output_ref: &str,
+) -> Result<String, String> {
     const PREFIX: &str = "artifact:subagent-output:blake3:";
     let hash = output_ref
         .strip_prefix(PREFIX)
         .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| format!("invalid subagent output reference: {output_ref}"))?;
-    let path = child_dir
-        .join("artifacts")
-        .join("subagent-output")
-        .join(format!("{hash}.json"));
-    read_subagent_output(&path)
+    read_subagent_output_from_directory(child, hash)
         .ok_or_else(|| format!("subagent output artifact is missing or corrupt: {output_ref}"))
+}
+
+fn validate_child_session_identity(
+    opened: &crate::session::storage::jsonl::OpenedSession,
+    parent_session_id: &str,
+    spawn: &chat_state::SubagentSpawnEvent,
+) -> Result<(), String> {
+    let summary = opened.summary();
+    if summary.info.id.0.as_ref() != spawn.child_session_id
+        || summary.parent_session_id.as_deref() != Some(parent_session_id)
+        || !summary
+            .session_kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("subagent"))
+    {
+        return Err(format!(
+            "child session '{}' identity does not match parent spawn",
+            spawn.child_session_id
+        ));
+    }
+    Ok(())
 }
 
 fn finish_from_durable_facts(
@@ -2182,22 +2223,132 @@ fn finish_from_durable_facts(
     if terminal.result_ref.is_none() {
         return Ok(finish_from_terminal(terminal, None));
     }
-    let child_dir = crate::session::persistence::find_persisted_session_dir_by_id_result(
-        &spawn.child_session_id,
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let opened = storage
+        .open_session_by_id(&spawn.child_session_id)
+        .map_err(|error| format!("cannot resolve child session: {error}"))?
+        .ok_or_else(|| "cannot resolve child session: session is missing".to_string())
+        .map_err(|error| format!("cannot resolve child session: {error}"))?;
+    validate_child_session_identity(&opened, parent_timeline_id, spawn)?;
+    let child = chat_state::Timeline::from_events(
+        opened
+            .timeline_events()
+            .map_err(|error| format!("cannot validate child Timeline: {error}"))?,
     )
-    .map_err(|error| format!("cannot resolve child session: {error}"))?
-    .ok_or_else(|| format!("child session is missing: {}", spawn.child_session_id))?;
-    finish_from_durable_facts_in_dir(parent_timeline_id, spawn_seq, spawn, terminal, &child_dir)
+    .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+    let result = child
+        .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+        .map_err(|error| format!("invalid child result link: {error}"))?;
+    let output = result
+        .output_ref
+        .as_deref()
+        .map(|output_ref| {
+            load_subagent_output_ref_from_directory(opened.directory(), output_ref)
+        })
+        .transpose()?;
+    Ok(finish_from_terminal(terminal, output))
 }
 
-fn finish_from_durable_facts_in_dir(
+pub(crate) enum DurableChildOperation {
+    Missing,
+    Open,
+    Completed(SubagentResult),
+}
+
+pub(crate) async fn durable_child_operation(
+    parent_timeline_id: &str,
+    subagent_id: &str,
+    parent: &chat_state::ChatStateHandle,
+) -> Result<DurableChildOperation, String> {
+    let events = parent
+        .timeline_events()
+        .await
+        .ok_or_else(|| "cannot query parent Timeline".to_string())?;
+    let timeline = chat_state::Timeline::from_events(events)
+        .map_err(|error| format!("invalid parent Timeline: {error}"))?;
+    let Some((spawn_seq, spawn)) = timeline.events().iter().find_map(|event| match &event.kind {
+        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
+            if spawn.subagent_id == subagent_id =>
+        {
+            Some((event.seq, spawn))
+        }
+        _ => None,
+    }) else {
+        return Ok(DurableChildOperation::Missing);
+    };
+    let Some(terminal) = timeline.events().iter().find_map(|event| match &event.kind {
+        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal))
+            if terminal.subagent_id == subagent_id =>
+        {
+            Some(terminal)
+        }
+        _ => None,
+    }) else {
+        return Ok(DurableChildOperation::Open);
+    };
+
+    let (output, outcome, error) = if terminal.result_ref.is_some() {
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+        let child = storage
+            .open_session_by_id(&spawn.child_session_id)
+            .map_err(|error| format!("cannot resolve child session: {error}"))?
+            .ok_or_else(|| "canonical child session is missing".to_string())?;
+        validate_child_session_identity(&child, parent_timeline_id, spawn)?;
+        let child_timeline = chat_state::Timeline::from_events(
+            child
+                .timeline_events()
+                .map_err(|error| format!("cannot read child Timeline: {error}"))?,
+        )
+        .map_err(|error| format!("invalid child Timeline: {error}"))?;
+        let result = child_timeline
+            .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+            .map_err(|error| format!("invalid child result link: {error}"))?;
+        let output = result
+            .output_ref
+            .as_deref()
+            .map(|output_ref| {
+                load_subagent_output_ref_from_directory(child.directory(), output_ref)
+            })
+            .transpose()?;
+        (output.unwrap_or_default(), result.outcome, result.error.clone())
+    } else {
+        if terminal.outcome == chat_state::SubagentOutcome::Completed {
+            return Err("completed child terminal has no canonical result reference".into());
+        }
+        (String::new(), terminal.outcome, terminal.error.clone())
+    };
+    Ok(DurableChildOperation::Completed(SubagentResult {
+        success: outcome == chat_state::SubagentOutcome::Completed,
+        output: std::sync::Arc::from(output),
+        error,
+        cancelled: outcome == chat_state::SubagentOutcome::Cancelled,
+        subagent_id: terminal.subagent_id.clone(),
+        child_session_id: terminal.child_session_id.clone(),
+        tool_calls: terminal.tool_calls,
+        turns: terminal.turns,
+        duration_ms: terminal.duration_ms,
+        tokens_used: terminal.tokens_used,
+        total_tokens_used: terminal.tokens_used,
+        ..Default::default()
+    }))
+}
+
+#[cfg(test)]
+fn finish_from_durable_facts_in_directory(
     parent_timeline_id: &str,
     spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
     terminal: &chat_state::SubagentTerminalEvent,
-    child_dir: &Path,
+    child_directory: &crate::session::storage::ContainedDirectory,
 ) -> Result<SessionUpdate, String> {
-    let child = crate::session::storage::read_timeline_in_session_dir(&child_dir)
+    let events = crate::session::storage::read_committed_jsonl_from_directory(
+        child_directory,
+        std::ffi::OsStr::new(crate::session::storage::TIMELINE_FILE),
+        "child Timeline ledger",
+        crate::session::storage::MAX_JSONL_ENTRY_BYTES,
+    )
+    .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+    let child = chat_state::Timeline::from_events(events)
         .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
     let result = child
         .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
@@ -2205,7 +2356,9 @@ fn finish_from_durable_facts_in_dir(
     let output = result
         .output_ref
         .as_deref()
-        .map(|output_ref| load_subagent_output_ref(&child_dir, output_ref))
+        .map(|output_ref| {
+            load_subagent_output_ref_from_directory(child_directory, output_ref)
+        })
         .transpose()?;
     Ok(finish_from_terminal(terminal, output))
 }
@@ -2339,22 +2492,25 @@ async fn ensure_recovered_child_result(
     ),
     ChildResultRecoveryError,
 > {
-    let child_dir = crate::session::persistence::find_persisted_session_dir_by_id_result(
-        &spawn.child_session_id,
-    )
-    .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?
-    .ok_or_else(|| {
-        ChildResultRecoveryError::Unpublished(format!(
-            "child session {} does not exist",
-            spawn.child_session_id
-        ))
-    })?;
-    ensure_recovered_child_result_in_dir(
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let opened = storage
+        .open_session_by_id(&spawn.child_session_id)
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!("cannot open child session: {error}"))
+        })?
+        .ok_or_else(|| {
+            ChildResultRecoveryError::Unpublished(format!(
+                "child session {} does not exist",
+                spawn.child_session_id
+            ))
+        })?;
+    ensure_recovered_child_result_with_opened(
         parent_timeline_id,
         parent_spawn_seq,
         spawn,
         fallback,
-        &child_dir,
+        &opened,
+        &storage,
     )
     .await
 }
@@ -2380,8 +2536,46 @@ async fn ensure_recovered_child_result_in_dir(
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(
         child_dir.to_path_buf(),
     );
-    let events = storage
-        .read_timeline_events_sync(&child_info)
+    let opened = storage.open_session(&child_info).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ChildResultRecoveryError::Unpublished(format!(
+                "child session {} does not exist",
+                spawn.child_session_id
+            ))
+        } else {
+            ChildResultRecoveryError::Invalid(format!("cannot open child session: {error}"))
+        }
+    })?;
+    ensure_recovered_child_result_with_opened(
+        parent_timeline_id,
+        parent_spawn_seq,
+        spawn,
+        fallback,
+        &opened,
+        &storage,
+    )
+    .await
+}
+
+async fn ensure_recovered_child_result_with_opened(
+    parent_timeline_id: &str,
+    parent_spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    fallback: RecoveredInspectionResult,
+    opened: &crate::session::storage::jsonl::OpenedSession,
+    storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
+) -> Result<
+    (
+        chat_state::TimelineRangeRef,
+        chat_state::SubagentResultEvent,
+        Option<String>,
+    ),
+    ChildResultRecoveryError,
+> {
+    validate_child_session_identity(opened, parent_timeline_id, spawn)
+        .map_err(ChildResultRecoveryError::Invalid)?;
+    let events = opened
+        .timeline_events()
         .map_err(|error| {
             ChildResultRecoveryError::Invalid(format!("cannot read child Timeline: {error}"))
         })?;
@@ -2404,7 +2598,9 @@ async fn ensure_recovered_child_result_in_dir(
         let output = result
             .output_ref
             .as_deref()
-            .map(|output_ref| load_subagent_output_ref(&child_dir, output_ref))
+            .map(|output_ref| {
+                load_subagent_output_ref_from_directory(opened.directory(), output_ref)
+            })
             .transpose()
             .map_err(ChildResultRecoveryError::Invalid)?;
         return Ok((
@@ -2421,8 +2617,8 @@ async fn ensure_recovered_child_result_in_dir(
     if fallback_event.outcome == chat_state::SubagentOutcome::Completed
         && let Some(output) = fallback.output.as_deref()
     {
-        let artifact =
-            write_subagent_output(&child_dir, output).map_err(ChildResultRecoveryError::Invalid)?;
+        let artifact = write_subagent_output(opened.directory(), output)
+            .map_err(ChildResultRecoveryError::Invalid)?;
         fallback_event.output_ref = Some(artifact.timeline_ref);
     }
     let event = timeline
@@ -2433,8 +2629,8 @@ async fn ensure_recovered_child_result_in_dir(
             ChildResultRecoveryError::Invalid(format!("invalid recovered child result: {error}"))
         })?;
     crate::session::storage::StorageAdapter::append_timeline_event_durable(
-        &storage,
-        &child_info,
+        storage,
+        &opened.summary().info,
         &event,
     )
     .await
@@ -2459,20 +2655,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     projections: &crate::session::storage::SubagentProjectionState,
     emit_replay_projections: bool,
     backend: &tools::implementations::grow_build::task::backend::ChannelBackend,
-    session_dir: &Path,
     parent_session_id: &str,
     parent_chat_state: &chat_state::ChatStateHandle,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
-    let parent_info = SessionInfo {
-        id: acp::SessionId::new(parent_session_id),
-        cwd: String::new(),
-    };
-    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(
-        session_dir.to_path_buf(),
-    );
-    let Ok(events) = storage.read_timeline_events_sync(&parent_info) else {
+    let Some(events) = parent_chat_state.timeline_events().await else {
+        tracing::error!(%parent_session_id, "cannot query parent Timeline during subagent recovery");
         return;
     };
     let Ok(timeline) = chat_state::Timeline::from_events(events) else {

@@ -286,13 +286,6 @@ impl SessionActor {
                 cancel_trigger,
             )
             .await;
-            if matches!(
-                turn_origin,
-                crate::session::PromptOrigin::GoalFinalization { .. }
-            ) && Self::goal_finalization_terminal_succeeded(&result)
-            {
-                self.finalize_goal_finalization_turn().await;
-            }
         }
         // The terminal is durable before clients observe either a new running
         // owner or an idle queue snapshot.
@@ -413,17 +406,6 @@ impl SessionActor {
         )
     }
 
-    /// A Goal completion receipt requires a real successful final report.
-    /// Refusal, cancellation, max-turn termination, and stationarity are all
-    /// terminal events, but none proves that the summarizing turn delivered
-    /// the report the verifier authorized.
-    pub(super) fn goal_finalization_terminal_succeeded(result: &PromptTurnResult) -> bool {
-        result.as_ref().ok().is_some_and(|ok| {
-            ok.stop_reason == acp::StopReason::EndTurn
-                && matches!(ok.completion_kind, PromptCompletionKind::Completed)
-        })
-    }
-
     /// `(turn_succeeded, suppress_goal_continuation, goal_pause_message)`.
     /// Only a Goal-owned internal turn may degrade the Goal lifecycle. The same
     /// provider outcome on an ordinary user turn belongs to that turn alone and
@@ -462,18 +444,18 @@ impl SessionActor {
             .flatten()
             .and_then(|ok| match &ok.completion_kind {
                 crate::session::commands::PromptCompletionKind::StationarityEnded => Some(
-                    "Goal continuation stopped after repeated identical actions. Review the blackboard and use /goal resume after correcting the blocker."
+                        "Goal continuation stopped after repeated identical actions. Review the objective and restart the Goal after correcting the blocker."
                         .to_string(),
                 ),
                 crate::session::commands::PromptCompletionKind::MaxTurnsReached { .. } => Some(
-                    "Goal continuation reached the configured turn limit. Increase the limit or revise the plan, then use /goal resume."
+                        "Goal continuation reached the configured turn limit. Increase the limit or edit the objective, then restart the Goal."
                         .to_string(),
                 ),
                 crate::session::commands::PromptCompletionKind::Completed
                     if ok.stop_reason == acp::StopReason::Refusal =>
                 {
                     Some(
-                        "The model provider refused the Goal continuation. Use /goal resume to retry after addressing the refusal."
+                        "The model provider refused the Goal continuation. Restart the Goal after addressing the refusal."
                             .to_string(),
                     )
                 }
@@ -493,13 +475,13 @@ impl SessionActor {
         };
         let paused = self
             .auto_pause_goal_if_active_with_message(
-                crate::session::goal_tracker::GoalPauseReason::Infra,
+                crate::session::goal_tracker::GoalPauseReason::TurnError,
                 message,
             )
             .await;
         if paused {
             self.send_slash_command_output(&format!(
-                "Goal paused due to turn error: {slash_detail}. Use /goal resume to retry."
+                "Goal stopped due to turn error: {slash_detail}. Restart it to retry."
             ))
             .await;
         }

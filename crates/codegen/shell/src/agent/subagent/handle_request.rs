@@ -1,6 +1,15 @@
 use super::*;
 use sampling_types::ReasoningEffort;
 use tools::implementations::grow_build;
+
+/// Filesystem work that may only begin after the parent Timeline owns the
+/// child spawn intent. The target path is kept separately because it is part
+/// of that immutable parent fact.
+enum WorktreeMaterialization {
+    Create { source: PathBuf },
+    Rehydrate { snapshot_ref: String },
+}
+
 pub(super) fn canonical_total_tokens(totals: &chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
 }
@@ -56,59 +65,10 @@ pub(super) fn task_model_override_error(
 }
 
 fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
-    use tools::implementations::grow_build::task::types::{GoalSubagentRole, SubagentOwner};
+    use tools::implementations::grow_build::task::types::SubagentOwner;
     match (&request.owner, &request.goal_context) {
-        (
-            SubagentOwner::Goal {
-                goal_id,
-                objective_revision,
-                plan_revision,
-                board_revision,
-                role,
-            },
-            Some(context),
-        ) if context.role == *role
-            && context.view.goal_id == *goal_id
-            && context.view.objective_revision == *objective_revision
-            && context.view.plan_revision == *plan_revision
-            && context.view.board_revision == *board_revision =>
-        {
-            if matches!(role, GoalSubagentRole::Planner | GoalSubagentRole::Verifier) {
-                // Resuming is a planner-only capability and the two resume
-                // fields must name the same prior child: `resume_from` is the
-                // live resume lookup key and `goal_stage_resume` is the
-                // host's record of the prior planning stage. Verifiers and
-                // every other Goal shape keep the fail-closed rejection.
-                let resume_pair_valid = match (role, &request.goal_stage_resume) {
-                    (GoalSubagentRole::Planner, Some(resume)) => {
-                        request.resume_from.as_deref() == Some(resume.prior_subagent_id.as_str())
-                    }
-                    _ => request.resume_from.is_none() && request.goal_stage_resume.is_none(),
-                };
-                if !resume_pair_valid {
-                    return Err(
-                        "Goal stage resume is restricted to a planner resuming its own prior \
-                         planning session; resume_from and goal_stage_resume must agree"
-                            .to_string(),
-                    );
-                }
-                if request.goal_stage_submit.is_some() && *role != GoalSubagentRole::Planner {
-                    return Err(
-                        "Only the Goal planner stage may carry a plan submit handle".to_string()
-                    );
-                }
-                // Fresh planners fork the parent context; a resuming planner
-                // relies on the resolved resume source (forking is skipped).
-                let expected_fork =
-                    *role == GoalSubagentRole::Planner && request.resume_from.is_none();
-                if request.fork_context != expected_fork {
-                    return Err(format!(
-                        "Goal {role:?} stage has an invalid context isolation policy"
-                    ));
-                }
-            }
-            Ok(())
-        }
+        (SubagentOwner::Goal { goal_id }, Some(context))
+            if context.view.goal_id == *goal_id => Ok(()),
         (SubagentOwner::Goal { .. }, _) => Err(
             "Goal-owned subagent request has a missing or mismatched immutable context snapshot"
                 .to_string(),
@@ -149,38 +109,12 @@ pub(crate) async fn run_shell_child(
     if let Err(message) = validate_goal_context(&request) {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
-    use tools::implementations::grow_build::task::types::GoalSubagentRole;
-    let host_goal_stage = request
-        .owner
-        .goal_role()
-        .filter(|role| matches!(role, GoalSubagentRole::Planner | GoalSubagentRole::Verifier));
-    let definition = host_goal_stage
-        .and_then(|role| {
-            crate::agent::subagent::resolution::resolve_goal_stage_definition(
-                &request.subagent_type,
-                role,
-            )
-        })
-        .or_else(|| {
-            host_goal_stage
-                .is_none()
-                .then(|| resolve_agent_definition(&request.subagent_type, &ctx))
-                .flatten()
-        });
+    let definition = resolve_agent_definition(&request.subagent_type, &ctx);
     let Some(mut definition) = definition else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
         return child_run_output(failure_result(&request, &msg), completion_data);
     };
-    if host_goal_stage.is_some() {
-        // Session operator allow/deny remains the final clamp even for a
-        // host-owned profile; discovery and the user-visible subagent toggle
-        // intentionally do not govern internal runtime stages.
-        ctx.apply_session_cli_overrides(&mut definition);
-    }
-    match host_goal_stage
-        .map(|_| SubagentValidateTypeOutcome::Ok)
-        .unwrap_or_else(|| gate_subagent_type(&request.subagent_type, &ctx))
-    {
+    match gate_subagent_type(&request.subagent_type, &ctx) {
         SubagentValidateTypeOutcome::Disabled => {
             let msg = format!(
                 "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
@@ -199,23 +133,11 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data);
         }
     }
-    if host_goal_stage.is_none() {
-        resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
-    }
+    resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
     let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
         &request.runtime_overrides,
         &definition,
     );
-    match host_goal_stage {
-        Some(GoalSubagentRole::Planner) => {
-            effective_runtime.isolation = tool_types::SubagentIsolationMode::None;
-        }
-        Some(GoalSubagentRole::Verifier) => {
-            effective_runtime.isolation = tool_types::SubagentIsolationMode::Worktree;
-            request.cwd = None;
-        }
-        Some(GoalSubagentRole::Worker) | None => {}
-    }
     let prompt = request.prompt.clone();
     // Normalize the historical implicit default before any worktree, MCP, or
     // session side effect. Nested authority is a strict subset relation, not a
@@ -273,7 +195,7 @@ pub(crate) async fn run_shell_child(
         effective_runtime.model = None;
         if let Err(e) = crate::agent::subagent::resolution::validate_resume_identity(
             &request.subagent_type,
-            source,
+            &source.data,
         ) {
             return child_run_output(failure_result(&request, &e.to_string()), completion_data);
         }
@@ -287,7 +209,7 @@ pub(crate) async fn run_shell_child(
     ) {
         return child_run_output(failure_result(&request, &error), completion_data);
     }
-    let worktree_path = if let Some(ref source) = resume_source {
+    let (worktree_path, worktree_materialization) = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
         {
@@ -300,42 +222,16 @@ pub(crate) async fn run_shell_child(
             );
         }
         match source.worktree_path.as_deref() {
-            None => None,
+            None => (None, None),
             Some(dest) => {
                 match resume_worktree_action(dest.is_dir(), source.snapshot_ref.as_deref()) {
-                    ResumeWorktreeAction::Reuse => Some(dest.to_path_buf()),
+                    ResumeWorktreeAction::Reuse => (Some(dest.to_path_buf()), None),
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source.snapshot_ref.clone().unwrap_or_default();
-                        let source_repo = resolve_subagent_source_repo(&ctx);
-                        match crate::session::worktree::rehydrate_subagent_worktree(
-                            dest,
-                            &source_repo,
-                            &snapshot_ref,
-                            Some(source.subagent_id.as_str()),
+                        (
+                            Some(dest.to_path_buf()),
+                            Some(WorktreeMaterialization::Rehydrate { snapshot_ref }),
                         )
-                        .await
-                        {
-                            Ok(path) => {
-                                tracing::info!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %path.display(),
-                                    snapshot_ref = %snapshot_ref,
-                                    "Rehydrated subagent worktree from snapshot for resume"
-                                );
-                                Some(path)
-                            }
-                            Err(e) => {
-                                return child_run_output(
-                                    failure_result(
-                                        &request,
-                                        &format!(
-                                            "Cannot resume isolated subagent: failed to rehydrate worktree: {e}"
-                                        ),
-                                    ),
-                                    completion_data,
-                                );
-                            }
-                        }
                     }
                     ResumeWorktreeAction::Missing => {
                         return child_run_output(
@@ -367,64 +263,17 @@ pub(crate) async fn run_shell_child(
                     .join(&request.id)
             }
         };
-        let source_clone = source_cwd;
-        let subagent_id = request.id.clone();
-        let creation_mode: fast_worktree::CreationMode = ctx.worktree_type.into();
-        let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
-        match tokio::task::spawn_blocking(move || {
-            let mut builder = fast_worktree::WorktreeBuilder::new(&source_clone, &dest)
-                .working_tree_mode(fast_worktree::WorkingTreeMode::PreserveWorkingTree)
-                .creation_mode(creation_mode)
-                .worktree_kind(fast_worktree::WorktreeKind::Subagent)
-                .session_id(subagent_id);
-            if let Some(delegate) = btrfs_delegate {
-                builder = builder.btrfs_delegate(delegate);
-            }
-            builder.create()
-        })
-        .await
-        {
-            Ok(Ok(report)) => {
-                tracing::info!(
-                    subagent_id = %request.id,
-                    worktree_path = %report.worktree_path.display(),
-                    commit = %report.commit,
-                    "Created isolated worktree for subagent"
-                );
-                Some(report.worktree_path)
-            }
-            Ok(Err(e)) => {
-                return child_run_output(
-                    failure_result(
-                        &request,
-                        &format!("Cannot create isolated subagent worktree: {e}"),
-                    ),
-                    completion_data,
-                );
-            }
-            Err(e) => {
-                return child_run_output(
-                    failure_result(
-                        &request,
-                        &format!("Isolated subagent worktree task failed: {e}"),
-                    ),
-                    completion_data,
-                );
-            }
-        }
+        (
+            Some(dest),
+            Some(WorktreeMaterialization::Create { source: source_cwd }),
+        )
     } else {
-        None
+        (None, None)
     };
-    if host_goal_stage == Some(GoalSubagentRole::Verifier) && worktree_path.is_none() {
-        return child_run_output(
-            failure_result(
-                &request,
-                "Goal verifier requires an isolated worktree; creation failed",
-            ),
-            completion_data,
-        );
-    }
-    let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
+    let worktree_freshly_created = matches!(
+        &worktree_materialization,
+        Some(WorktreeMaterialization::Create { .. })
+    );
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
@@ -465,11 +314,8 @@ pub(crate) async fn run_shell_child(
         &mut definition,
         allow_nested_subagents,
     );
-    if let Some(role) = request.owner.goal_role() {
-        crate::agent::subagent::resolution::apply_goal_object_tool_policy(
-            &mut definition,
-            role == GoalSubagentRole::Planner,
-        );
+    if request.owner.goal_id().is_some() {
+        crate::agent::subagent::resolution::apply_goal_object_tool_policy(&mut definition);
     }
     if let Some(mode) = effective_runtime.capability_mode {
         tracing::info!(
@@ -572,7 +418,10 @@ pub(crate) async fn run_shell_child(
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
-    let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
+    let override_cwd = select_override_cwd(
+        resume_source.as_ref().map(|source| &source.data),
+        request.cwd.as_deref(),
+    );
     let effective_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd)
         .to_string_lossy()
         .into_owned();
@@ -690,6 +539,101 @@ pub(crate) async fn run_shell_child(
         source_ref,
         normalized: context_normalized,
     };
+
+    // The parent spawn is the write-ahead intent. Only after it commits may
+    // an isolated worktree be created or rehydrated. Any materialization
+    // failure closes the parent lifecycle explicitly, leaving no orphan
+    // filesystem mutation without a canonical owner.
+    let materialization_error = match worktree_materialization {
+        None => None,
+        Some(WorktreeMaterialization::Rehydrate { snapshot_ref }) => {
+            let target = worktree_path
+                .as_deref()
+                .expect("rehydration always has a planned target");
+            let source_repo = resolve_subagent_source_repo(&ctx);
+            match crate::session::worktree::rehydrate_subagent_worktree(
+                target,
+                &source_repo,
+                &snapshot_ref,
+                resume_source
+                    .as_ref()
+                    .map(|source| source.subagent_id.as_str()),
+            )
+            .await
+            {
+                Ok(path) if path == target => {
+                    tracing::info!(
+                        subagent_id = %request.id,
+                        worktree_path = %path.display(),
+                        snapshot_ref = %snapshot_ref,
+                        "Rehydrated subagent worktree from snapshot for resume"
+                    );
+                    None
+                }
+                Ok(path) => Some(format!(
+                    "Cannot resume isolated subagent: worktree materialized at '{}', expected '{}'",
+                    path.display(),
+                    target.display()
+                )),
+                Err(error) => Some(format!(
+                    "Cannot resume isolated subagent: failed to rehydrate worktree: {error}"
+                )),
+            }
+        }
+        Some(WorktreeMaterialization::Create { source }) => {
+            let target = worktree_path
+                .as_deref()
+                .expect("worktree creation always has a planned target")
+                .to_path_buf();
+            let target_for_task = target.clone();
+            let subagent_id = request.id.clone();
+            let creation_mode: fast_worktree::CreationMode = ctx.worktree_type.into();
+            let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
+            match tokio::task::spawn_blocking(move || {
+                let mut builder = fast_worktree::WorktreeBuilder::new(&source, &target_for_task)
+                    .working_tree_mode(fast_worktree::WorkingTreeMode::PreserveWorkingTree)
+                    .creation_mode(creation_mode)
+                    .worktree_kind(fast_worktree::WorktreeKind::Subagent)
+                    .session_id(subagent_id);
+                if let Some(delegate) = btrfs_delegate {
+                    builder = builder.btrfs_delegate(delegate);
+                }
+                builder.create()
+            })
+            .await
+            {
+                Ok(Ok(report)) if report.worktree_path == target => {
+                    tracing::info!(
+                        subagent_id = %request.id,
+                        worktree_path = %report.worktree_path.display(),
+                        commit = %report.commit,
+                        "Created isolated worktree for subagent"
+                    );
+                    None
+                }
+                Ok(Ok(report)) => Some(format!(
+                    "Isolated subagent worktree materialized at '{}', expected '{}'",
+                    report.worktree_path.display(),
+                    target.display()
+                )),
+                Ok(Err(error)) => {
+                    Some(format!("Cannot create isolated subagent worktree: {error}"))
+                }
+                Err(error) => Some(format!("Isolated subagent worktree task failed: {error}")),
+            }
+        }
+    };
+    if let Some(message) = materialization_error {
+        let result = failure_result(&request, &message);
+        if record_parent_subagent_end(parent_chat_state, &result, None, None)
+            .await
+            .is_ok()
+        {
+            completion_data.mark_terminal_committed();
+        }
+        return child_run_output(result, completion_data);
+    }
+
     emit_subagent_notification(
         gateway,
         &ctx.parent_session_id,
@@ -713,9 +657,8 @@ pub(crate) async fn run_shell_child(
         ctx.parent_cmd_tx.as_ref(),
     );
     completion_data.spawned_notification_emitted = true;
-    let (persistence, child_timeline_events) = match session::persistence::new_with_explicit_dir(
+    let (persistence, child_timeline_events, child_session_directory) = match session::persistence::new_child(
         &child_session_info,
-        child_session_dir.clone(),
         effective_model_id.clone(),
         session::persistence::SessionLineage {
             session_kind: match &context_source {
@@ -1177,11 +1120,6 @@ pub(crate) async fn run_shell_child(
             .cmd_tx
             .send(SessionCommand::SetGoalContextSnapshot { snapshot });
     }
-    if let Some(handle) = request.goal_stage_submit.take() {
-        let _ = child_handle
-            .cmd_tx
-            .send(SessionCommand::SetGoalStageSubmitHandle { handle });
-    }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
@@ -1434,7 +1372,7 @@ pub(crate) async fn run_shell_child(
         result.output_tokens_used = output_tokens_used.unwrap_or(0);
         result.output_usage_incomplete = subagent_usage_incomplete || output_tokens_used.is_none();
     }
-    let persisted_output_ref = match persist_subagent_output(&child_session_dir, &result) {
+    let persisted_output_ref = match persist_subagent_output(&child_session_directory, &result) {
         Ok(output_ref) => output_ref,
         Err(error) => {
             tracing::error!(subagent_id = %request.id, %error, "subagent output artifact failed");
@@ -1447,7 +1385,7 @@ pub(crate) async fn run_shell_child(
     completion_data.set_persisted_output_ref(
         persisted_output_ref
             .as_ref()
-            .map(|artifact| artifact.path.clone()),
+            .map(|artifact| artifact.timeline_ref.clone()),
     );
     let child_result_ref = record_child_result(
         &child_handle.chat_state_handle,
@@ -1581,14 +1519,8 @@ pub(crate) async fn run_shell_child(
         .end_local_session(child_session_id.0.as_ref());
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
-    let verifier_worktree = request.owner.goal_role()
-        == Some(tools::implementations::grow_build::task::types::GoalSubagentRole::Verifier);
     if let Some(ref wt_path) = worktree_path {
-        if verifier_worktree {
-            // Verifier isolation is intentionally disposable evidence space,
-            // not resumable delegated work. Never create a snapshot ref that
-            // could later reintroduce its mutations.
-        } else if snapshot_dispose_enabled {
+        if snapshot_dispose_enabled {
             let ref_name = format!("refs/grow/subagents/{}", request.id);
             let source_repo = resolve_subagent_source_repo(&ctx);
             match crate::session::worktree::snapshot_subagent_worktree(
@@ -1634,7 +1566,7 @@ pub(crate) async fn run_shell_child(
     if terminal_committed {
         completion_data.mark_terminal_committed();
         if let Some(ref wt_path) = worktree_path
-            && (verifier_worktree || disposed_snapshot_ref.is_some())
+            && disposed_snapshot_ref.is_some()
         {
             match crate::session::worktree::remove_subagent_worktree(wt_path).await {
                 Ok(()) => {
@@ -1658,6 +1590,23 @@ pub(crate) async fn run_shell_child(
             subagent_id = %request.id,
             "preserving subagent worktree because the parent terminal is not canonical"
         );
+    }
+    if !terminal_committed {
+        let canonical_error = match result.error.take() {
+            Some(error) => format!(
+                "subagent finished but its canonical child→parent terminal chain did not commit: {error}"
+            ),
+            None => "subagent finished but its canonical child→parent terminal chain did not commit"
+                .to_owned(),
+        };
+        // The immutable artifact remains available for diagnosis/recovery, but
+        // no waiter may consume a successful result that the parent Timeline
+        // cannot prove. Recovery will close the still-open spawn from durable
+        // child facts on the next load.
+        result.success = false;
+        result.cancelled = false;
+        result.output = std::sync::Arc::from("");
+        result.error = Some(canonical_error);
     }
     if worktree_removed {
         result.worktree_path = None;

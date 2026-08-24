@@ -154,6 +154,7 @@ libc = { workspace = true }
 nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
 siphasher = { workspace = true }
 windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }

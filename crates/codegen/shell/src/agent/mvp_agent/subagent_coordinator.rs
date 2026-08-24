@@ -99,13 +99,37 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             .store(running, std::sync::atomic::Ordering::Relaxed);
     }
     fn persisted_output_ref(&self, completion_data: &Self::CompletionData) -> Option<String> {
-        completion_data
-            .persisted_output_ref()
-            .map(|path| path.to_string_lossy().into_owned())
+        completion_data.persisted_output_ref().map(str::to_owned)
     }
-    fn load_persisted_output(&self, reference: &str) -> Option<std::sync::Arc<str>> {
-        crate::agent::subagent::read_subagent_output(std::path::Path::new(reference))
-            .map(std::sync::Arc::from)
+    fn terminal_committed(&self, completion_data: &Self::CompletionData) -> bool {
+        completion_data.terminal_committed()
+    }
+    fn load_persisted_output(
+        &self,
+        request: &tools::implementations::grow_build::task::types::SubagentRequest,
+        child_session_id: &str,
+        reference: &str,
+    ) -> Option<std::sync::Arc<str>> {
+        if request.id != child_session_id {
+            return None;
+        }
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+        let opened = storage.open_session_by_id(child_session_id).ok()??;
+        let summary = opened.summary();
+        if summary.parent_session_id.as_deref() != Some(request.parent_session_id.as_str())
+            || !summary
+                .session_kind
+                .as_deref()
+                .is_some_and(|kind| kind.starts_with("subagent"))
+        {
+            return None;
+        }
+        crate::agent::subagent::load_subagent_output_ref_from_directory(
+            opened.directory(),
+            reference,
+        )
+        .ok()
+        .map(std::sync::Arc::from)
     }
 }
 impl MvpAgent {

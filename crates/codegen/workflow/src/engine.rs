@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::{AgentOpts, HostError, WorkflowHostRequest};
-use crate::journal::{HOST_ERROR_KEY, Journal, JournalError, request_hash};
+use crate::journal::{HOST_ERROR_KEY, Journal, JournalError, OperationReplay, request_hash};
 use crate::run::{PauseKind, WorkflowOutcome};
 use crate::{MAX_HOST_CALLS, MAX_PARALLEL};
 
@@ -77,6 +77,30 @@ impl Ctx {
     ) -> ScriptResult<()> {
         self.journal
             .record(seq, kind, hash, value)
+            .map_err(journal_fatal)
+    }
+
+    fn begin_operation(
+        &mut self,
+        seq: u64,
+        kind: &str,
+        hash: String,
+        operation_id: String,
+    ) -> ScriptResult<()> {
+        self.journal
+            .begin_operation(seq, kind, hash, operation_id)
+            .map_err(journal_fatal)
+    }
+
+    fn complete_operation(
+        &mut self,
+        seq: u64,
+        kind: &str,
+        hash: String,
+        value: serde_json::Value,
+    ) -> ScriptResult<()> {
+        self.journal
+            .complete_operation(seq, kind, hash, value)
             .map_err(journal_fatal)
     }
 }
@@ -246,27 +270,41 @@ fn host_call<T>(
     ctx: &Rc<RefCell<Ctx>>,
     kind: &'static str,
     payload: serde_json::Value,
-    build: impl FnOnce(oneshot::Sender<Result<T, HostError>>) -> WorkflowHostRequest,
+    build: impl FnOnce(String, oneshot::Sender<Result<T, HostError>>) -> WorkflowHostRequest,
     to_result: impl FnOnce(T) -> serde_json::Value,
 ) -> ScriptResult<serde_json::Value> {
     let hash = request_hash(kind, &payload);
     let seq = ctx.borrow_mut().next_seq()?;
 
-    match ctx.borrow().journal.replay(seq, kind, &hash) {
-        Ok(Some(recorded)) => {
+    let replay = {
+        let ctx = ctx.borrow();
+        ctx.journal.replay_operation(seq, kind, &hash)
+    };
+    let operation_id = match replay {
+        Ok(Some(OperationReplay::Completed(recorded))) => {
             if let Some(err) = replay_host_error(&recorded) {
                 return Err(err);
             }
             return Ok(recorded);
         }
-        Ok(None) => {}
+        Ok(Some(OperationReplay::Pending { operation_id })) => operation_id,
+        Ok(None) => {
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            ctx.borrow_mut().begin_operation(
+                seq,
+                kind,
+                hash.clone(),
+                operation_id.clone(),
+            )?;
+            operation_id
+        }
         Err(error) => return Err(journal_fatal(error)),
-    }
+    };
 
     let (reply_tx, reply_rx) = oneshot::channel();
     ctx.borrow()
         .host_tx
-        .send(build(reply_tx))
+        .send(build(operation_id, reply_tx))
         .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
 
     let reply = reply_rx
@@ -288,17 +326,20 @@ fn host_call<T>(
         Err(HostError::Cancelled) => return Err(terminated(ControlToken::Cancelled)),
         Err(HostError::Unsupported(msg)) => {
             let sentinel = host_error_sentinel(&msg);
-            ctx.borrow_mut().record(seq, kind, hash, sentinel)?;
+            ctx.borrow_mut()
+                .complete_operation(seq, kind, hash, sentinel)?;
             return Err(runtime_error(msg));
         }
         Err(HostError::Failed(msg)) => {
             let sentinel = host_error_sentinel(&msg);
-            ctx.borrow_mut().record(seq, kind, hash, sentinel)?;
+            ctx.borrow_mut()
+                .complete_operation(seq, kind, hash, sentinel)?;
             return Err(runtime_error(msg));
         }
     };
 
-    ctx.borrow_mut().record(seq, kind, hash, value.clone())?;
+    ctx.borrow_mut()
+        .complete_operation(seq, kind, hash, value.clone())?;
     Ok(value)
 }
 
@@ -416,7 +457,10 @@ fn spawn_agent_call(ctx: &Rc<RefCell<Ctx>>, opts: AgentOpts) -> ScriptResult<Dyn
     let hash = request_hash("spawn_agent", &payload);
     let is_live = {
         let ctx = ctx.borrow();
-        match ctx.journal.replay(ctx.seq, "spawn_agent", &hash) {
+        match ctx
+            .journal
+            .replay_operation(ctx.seq, "spawn_agent", &hash)
+        {
             Ok(Some(_)) => false,
             Ok(None) => true,
             Err(error) => return Err(journal_fatal(error)),
@@ -429,7 +473,11 @@ fn spawn_agent_call(ctx: &Rc<RefCell<Ctx>>, opts: AgentOpts) -> ScriptResult<Dyn
         ctx,
         "spawn_agent",
         payload,
-        |reply| WorkflowHostRequest::SpawnAgent { opts, reply },
+        |operation_id, reply| WorkflowHostRequest::SpawnAgent {
+            operation_id,
+            opts,
+            reply,
+        },
         |result| serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
     ) {
         Ok(value) => value,
@@ -507,7 +555,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 let mut seq = ctx.seq;
                 let mut live = 0usize;
                 for (_, hash) in &requests {
-                    match ctx.journal.replay(seq, "spawn_agent", hash) {
+                    match ctx.journal.replay_operation(seq, "spawn_agent", hash) {
                         Ok(Some(_)) => {}
                         Ok(None) => live += 1,
                         Err(error) => return Err(journal_fatal(error)),
@@ -526,13 +574,49 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 let seq = c.borrow_mut().next_seq().inspect_err(|_| {
                     drain_parallel_replies(std::mem::take(&mut pending));
                 })?;
-                match c.borrow().journal.replay(seq, "spawn_agent", &hash) {
-                    Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
-                    Ok(None) => {
+                let operation = c
+                    .borrow()
+                    .journal
+                    .replay_operation(seq, "spawn_agent", &hash);
+                match operation {
+                    Ok(Some(OperationReplay::Completed(value))) => {
+                        pending.push(PendingAgent::Replayed(value));
+                    }
+                    Ok(Some(OperationReplay::Pending { operation_id })) => {
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if c.borrow()
                             .host_tx
                             .send(WorkflowHostRequest::SpawnAgent {
+                                operation_id,
+                                opts,
+                                reply: reply_tx,
+                            })
+                            .is_err()
+                        {
+                            drain_parallel_replies(pending);
+                            return Err(terminated(ControlToken::Fatal(
+                                "workflow host channel closed".into(),
+                            )));
+                        }
+                        pending.push(PendingAgent::Live {
+                            seq,
+                            hash,
+                            reply_rx,
+                        });
+                    }
+                    Ok(None) => {
+                        let operation_id = uuid::Uuid::new_v4().to_string();
+                        c.borrow_mut().begin_operation(
+                            seq,
+                            "spawn_agent",
+                            hash.clone(),
+                            operation_id.clone(),
+                        )?;
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        if c.borrow()
+                            .host_tx
+                            .send(WorkflowHostRequest::SpawnAgent {
+                                operation_id,
                                 opts,
                                 reply: reply_tx,
                             })
@@ -608,11 +692,16 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                                     .get_or_insert_with(|| TERMINAL_DROPPED_REPLY.to_string());
                                 host_terminal_sentinel(TERMINAL_DROPPED_REPLY)
                             }
-                            Ok(Err(
+                            Ok(Err(error @ (
                                 HostError::AgentCallQuotaExceeded { .. }
                                 | HostError::Unsupported(_)
-                                | HostError::Failed(_),
-                            )) => serde_json::Value::Null,
+                                | HostError::Failed(_)
+                            ))) => {
+                                let message = error.to_string();
+                                terminal_error
+                                    .get_or_insert_with(|| runtime_error(message.clone()));
+                                host_error_sentinel(&message)
+                            }
                         };
                         resolved.push((Some((seq, hash)), value));
                     }
@@ -627,8 +716,12 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         continue;
                     };
                     if let Err(error) =
-                        c.borrow_mut()
-                            .record(*seq, "spawn_agent", hash.clone(), value.clone())
+                        c.borrow_mut().complete_operation(
+                            *seq,
+                            "spawn_agent",
+                            hash.clone(),
+                            value.clone(),
+                        )
                     {
                         terminal_error.get_or_insert(error);
                         break;
@@ -746,7 +839,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             &c,
             "budget",
             serde_json::Value::Null,
-            |reply| WorkflowHostRequest::BudgetQuery { reply },
+            |_operation_id, reply| WorkflowHostRequest::BudgetQuery { reply },
             |state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
         )?;
         value_to_dynamic(&value)
@@ -763,7 +856,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 &c,
                 "render_template",
                 payload,
-                |reply| WorkflowHostRequest::RenderTemplate { name, vars, reply },
+                |_operation_id, reply| WorkflowHostRequest::RenderTemplate { name, vars, reply },
                 serde_json::Value::String,
             )?;
             value_to_dynamic(&value)
@@ -780,7 +873,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 &c,
                 "write_scratch_file",
                 payload,
-                |reply| WorkflowHostRequest::WriteScratchFile {
+                |_operation_id, reply| WorkflowHostRequest::WriteScratchFile {
                     name,
                     content,
                     reply,
@@ -801,7 +894,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 &c,
                 "read_scratch_file",
                 payload,
-                |reply| WorkflowHostRequest::ReadScratchFile { name, reply },
+                |_operation_id, reply| WorkflowHostRequest::ReadScratchFile { name, reply },
                 serde_json::Value::String,
             )?;
             value_to_dynamic(&value)
@@ -818,7 +911,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 &c,
                 "git_diff_since",
                 payload,
-                |reply| WorkflowHostRequest::GitDiffSince { commit, reply },
+                |_operation_id, reply| WorkflowHostRequest::GitDiffSince { commit, reply },
                 serde_json::Value::String,
             )?;
             value_to_dynamic(&value)
@@ -1266,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_budget_exceeded_leaves_panel_unjournaled_for_raised_cap_resume() {
+    fn parallel_budget_exceeded_preserves_operation_intents_for_raised_cap_resume() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1296,11 +1389,8 @@ mod tests {
         assert!(second_reply_observed.load(std::sync::atomic::Ordering::SeqCst));
 
         let journal = Journal::load(journal_path).unwrap();
-        assert_eq!(
-            journal.len(),
-            0,
-            "resumable budget terminal must not journal the parallel panel"
-        );
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal.agent_reservation_count(), 2);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let live_again = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1347,11 +1437,9 @@ mod tests {
                 0,
                 "cancelled agent must ReleaseAgentCalls the reserved slot"
             );
-            assert_eq!(
-                Journal::load(journal_path.clone()).unwrap().len(),
-                0,
-                "cancelled agent must leave the spawn unjournaled"
-            );
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            assert_eq!(journal.len(), 1, "cancelled agent keeps its durable intent");
+            assert_eq!(journal.agent_reservation_count(), 1);
         }
 
         {
@@ -1362,11 +1450,9 @@ mod tests {
                     let _ = reply.send(Ok(agent_result("after resume")));
                 }
             });
-            let outcome = run_workflow(params(
-                script,
-                Journal::load(journal_path.clone()).unwrap(),
-                tx,
-            ));
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            agents_used.store(journal.agent_reservation_count(), Ordering::SeqCst);
+            let outcome = run_workflow(params(script, journal, tx));
             drop(host);
             match outcome {
                 WorkflowOutcome::Completed { result } => {
@@ -1412,7 +1498,9 @@ mod tests {
                 0,
                 "cancelled parallel must release live_count reserved slots"
             );
-            assert_eq!(Journal::load(journal_path.clone()).unwrap().len(), 0);
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            assert_eq!(journal.len(), 2);
+            assert_eq!(journal.agent_reservation_count(), 2);
         }
 
         {
@@ -1423,11 +1511,9 @@ mod tests {
                     let _ = reply.send(Ok(agent_result("ok")));
                 }
             });
-            let outcome = run_workflow(params(
-                script,
-                Journal::load(journal_path.clone()).unwrap(),
-                tx,
-            ));
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            agents_used.store(journal.agent_reservation_count(), Ordering::SeqCst);
+            let outcome = run_workflow(params(script, journal, tx));
             drop(host);
             assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
             assert_eq!(
@@ -1468,7 +1554,9 @@ mod tests {
                 0,
                 "budget-exceeded agent must ReleaseAgentCalls the reserved slot"
             );
-            assert_eq!(Journal::load(journal_path.clone()).unwrap().len(), 0);
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            assert_eq!(journal.len(), 1);
+            assert_eq!(journal.agent_reservation_count(), 1);
         }
 
         {
@@ -1479,11 +1567,9 @@ mod tests {
                     let _ = reply.send(Ok(agent_result("after raise")));
                 }
             });
-            let outcome = run_workflow(params(
-                script,
-                Journal::load(journal_path.clone()).unwrap(),
-                tx,
-            ));
+            let journal = Journal::load(journal_path.clone()).unwrap();
+            agents_used.store(journal.agent_reservation_count(), Ordering::SeqCst);
+            let outcome = run_workflow(params(script, journal, tx));
             drop(host);
             match outcome {
                 WorkflowOutcome::Completed { result } => {
@@ -1500,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_journals_soft_failure_null_and_later_success() {
+    fn parallel_journals_failure_and_replays_it_without_respawning_siblings() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1522,16 +1608,22 @@ mod tests {
         "#;
         let outcome = run_workflow(params(script, Journal::new(Some(journal_path.clone())), tx));
         drop(host);
-        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+        match outcome {
+            WorkflowOutcome::Failed { error } => assert!(error.contains("host failure: boom")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
         let journal = Journal::load(journal_path).unwrap();
         assert_eq!(journal.len(), 2);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let replay = run_workflow(params(script, journal, tx));
-        assert!(matches!(replay, WorkflowOutcome::Completed { .. }));
+        match replay {
+            WorkflowOutcome::Failed { error } => assert!(error.contains("host failure: boom")),
+            other => panic!("expected replayed Failed, got {other:?}"),
+        }
         assert!(
             rx.try_recv().is_err(),
-            "dense soft-failure replay must not reexecute either sibling"
+            "failure replay must not reexecute either sibling"
         );
     }
 
@@ -1574,15 +1666,11 @@ mod tests {
     }
 
     #[test]
-    fn parallel_preserves_order_and_nulls_failures() {
+    fn parallel_preserves_result_order() {
         let (tx, rx) = mpsc::unbounded_channel();
         let host = spawn_mock_host(rx, |req| {
-            if let WorkflowHostRequest::SpawnAgent { opts, reply } = req {
-                if opts.prompt.contains("fail") {
-                    let _ = reply.send(Err(HostError::Failed("boom".into())));
-                } else {
-                    let _ = reply.send(Ok(agent_result(&format!("ok:{}", opts.prompt))));
-                }
+            if let WorkflowHostRequest::SpawnAgent { opts, reply, .. } = req {
+                let _ = reply.send(Ok(agent_result(&format!("ok:{}", opts.prompt))));
             }
         });
         let outcome = run_workflow(params(
@@ -1590,10 +1678,10 @@ mod tests {
             let meta = #{ name: "t", description: "d" };
             let results = parallel([
                 #{ prompt: "a" },
-                #{ prompt: "fail-b" },
+                #{ prompt: "b" },
                 #{ prompt: "c" },
             ]);
-            let summary = results.map(|r| if r == () { "null" } else { r.output });
+            let summary = results.map(|r| r.output);
             complete(summary);
             "#,
             Journal::new(None),
@@ -1602,7 +1690,7 @@ mod tests {
         drop(host);
         match outcome {
             WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!(["ok:a", "null", "ok:c"]));
+                assert_eq!(result, serde_json::json!(["ok:a", "ok:b", "ok:c"]));
             }
             other => panic!("expected Completed, got {other:?}"),
         }

@@ -23,8 +23,8 @@ use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::acp::tracker::TurnActivity;
 use crate::app::agent::{
-    AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayPhase,
-    GoalDisplayState, GoalDisplayStatus,
+    AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayState,
+    GoalDisplayStatus,
 };
 use crate::app::subagent::SubagentInfo;
 use crate::notifications::{NotificationEvent, NotificationEventKind};

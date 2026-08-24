@@ -209,22 +209,19 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
-    /// Returns `true` if the session has foreground/queued work or an Active
-    /// Goal whose background stage/idle continuation must remain resident.
-    ///
-    /// Used by the leader's idle-unload decision on client disconnect.
-    /// Falls back to `true` (conservative: keep the session resident, never
-    /// unload) if the actor is unreachable.
-    pub async fn is_busy(&self) -> bool {
+    /// Ask the actor to atomically unload itself if it owns no live work.
+    /// Returns `true` only after the actor has accepted the unload and closed
+    /// its command mailbox. Actor failure is conservative: keep the handle.
+    pub async fn unload_if_idle(&self) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(SessionCommand::IsBusy { respond_to: tx })
+            .send(SessionCommand::UnloadIfIdle { respond_to: tx })
             .is_err()
         {
-            return true;
+            return false;
         }
-        rx.await.unwrap_or(true)
+        rx.await.unwrap_or(false)
     }
     /// List all background tasks.
     /// Routes through the session actor to the ToolBridge's TerminalBackend.

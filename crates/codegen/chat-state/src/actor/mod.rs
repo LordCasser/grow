@@ -44,6 +44,11 @@ pub struct ChatStateActor {
     event_tx: mpsc::UnboundedSender<ChatStateEvent>,
     /// Cancellation token for graceful shutdown.
     cancellation_token: tokio_util::sync::CancellationToken,
+    /// A permanent persistence/integrity failure invalidates the actor's
+    /// writer epoch. Continuing would allow a different event to reuse the
+    /// unaccepted sequence, so the mailbox must close after the current
+    /// command receives its failure.
+    persistence_poisoned: bool,
 }
 
 impl ChatStateActor {
@@ -59,10 +64,10 @@ impl ChatStateActor {
         self.persist_pending_timeline_event(&event).await?;
         let committed = event.clone();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
-        self.state
-            .timeline
-            .accept(event)
-            .map_err(crate::commands::TimelineWriteError::Invalid)?;
+        if let Err(error) = self.state.timeline.accept(event) {
+            self.persistence_poisoned = true;
+            return Err(crate::commands::TimelineWriteError::Invalid(error));
+        }
         self.refresh_prompt_projection(previous_prompt_index);
         Ok(committed)
     }
@@ -77,13 +82,39 @@ impl ChatStateActor {
     ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut retry_delay = std::time::Duration::from_millis(25);
         loop {
-            let result = self.persistence.persist_timeline_event_and_ack(event).await;
+            let acknowledgement = self.persistence.persist_timeline_event_and_ack(event);
+            let result = tokio::select! {
+                biased;
+                _ = self.cancellation_token.cancelled() => {
+                    return Err(crate::commands::TimelineWriteError::Cancelled);
+                }
+                result = acknowledgement => result,
+            };
             let result = match result {
                 Ok(result) => result.map_err(crate::commands::TimelineWriteError::Persistence),
                 Err(_) => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
             };
             match result {
                 Ok(()) => return Ok(()),
+                Err(crate::commands::TimelineWriteError::Persistence(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidData
+                            | std::io::ErrorKind::InvalidInput
+                            | std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::Unsupported
+                            | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    tracing::error!(
+                        %error,
+                        seq = event.seq.get(),
+                        "Timeline persistence entered a permanent failed state"
+                    );
+                    self.persistence_poisoned = true;
+                    return Err(crate::commands::TimelineWriteError::Persistence(error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -111,10 +142,13 @@ impl ChatStateActor {
             return false;
         }
         let previous_prompt_index = self.state.timeline.next_prompt_index();
-        self.state
-            .timeline
-            .accept(event)
-            .expect("an actor-serialized prepared event must remain admissible after persistence");
+        self.state.timeline.accept(event).unwrap_or_else(|error| {
+            self.persistence_poisoned = true;
+            tracing::error!(%error, "persisted Timeline event could not be accepted");
+        });
+        if self.persistence_poisoned {
+            return false;
+        }
         self.refresh_prompt_projection(previous_prompt_index);
         true
     }
@@ -239,6 +273,7 @@ impl ChatStateActor {
             cmd_rx,
             event_tx,
             cancellation_token: actor_cancellation.clone(),
+            persistence_poisoned: false,
         };
 
         tokio::spawn(actor.run());
@@ -267,6 +302,12 @@ impl ChatStateActor {
                         break;
                     };
                     self.handle_command(cmd).await;
+                    if self.persistence_poisoned {
+                        tracing::error!(
+                            "ChatStateActor writer epoch poisoned; closing mailbox"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -530,6 +571,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetTrajectory { reply } => {
                 let _ = reply.send(self.state.timeline.trajectory());
+            }
+            ChatStateCommand::GetTimelineEvents { reply } => {
+                let _ = reply.send(self.state.timeline.events().to_vec());
             }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
                 let materialized = self.state.timeline.events().last().map(|event| {

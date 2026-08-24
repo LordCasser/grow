@@ -8,7 +8,7 @@
 //!
 //! ```json
 //! // Full session (default)
-//! { "sessionId": "...", "cwd": "/path" }
+//! { "sessionId": "..." }
 //! → { "updates": [...], "totalCount": 3000, "hasMore": false }
 //!
 //! // Paginated
@@ -36,7 +36,6 @@
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
 
 use std::io;
-use std::path::Path;
 
 use agent_client_protocol as acp;
 
@@ -47,7 +46,6 @@ use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK_PREFIX};
 #[serde(rename_all = "camelCase")]
 struct Request {
     session_id: String,
-    cwd: String,
     /// Negative offset counts from end (e.g. `-100` = last 100).
     #[serde(default)]
     offset: Option<i64>,
@@ -120,24 +118,16 @@ fn compute_prompt_starts<T: AsRef<str>>(lines: &[T]) -> Vec<usize> {
     starts
 }
 
-fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Option<TailPage>> {
+fn try_stream_tail_page(
+    request: &Request,
+    reader: crate::session::storage::CommittedJsonlLines,
+) -> io::Result<Option<TailPage>> {
     let is_negative_offset = request.offset.is_some_and(|o| o < 0);
     let is_turn_index = request.turn_index.filter(|&n| n > 0).is_some() && request.offset.is_none();
 
     if !is_negative_offset && !is_turn_index {
         return Ok(None);
     }
-
-    let Some(reader) =
-        crate::session::storage::CommittedJsonlLines::open(updates_path, "session updates ledger")?
-    else {
-        return Ok(Some(TailPage {
-            lines: Vec::new(),
-            total_count: 0,
-            has_more: false,
-            prompt_starts: Vec::new(),
-        }));
-    };
 
     if is_turn_index {
         // Single-pass scan: read lines, detect rewinds, and compute prompt
@@ -230,6 +220,29 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
             prompt_starts: vec![],
         }))
     }
+}
+
+fn open_updates_reader(
+    session: &crate::session::storage::ContainedDirectory,
+) -> io::Result<Option<crate::session::storage::CommittedJsonlLines>> {
+    let file = match session.open_regular(
+        std::ffi::OsStr::new(crate::session::storage::UPDATES_FILE),
+        "session updates ledger",
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(
+        crate::session::storage::CommittedJsonlLines::from_open_file_at(
+            file,
+            session
+                .display_path()
+                .join(crate::session::storage::UPDATES_FILE),
+            "session updates ledger",
+            0,
+        )?,
+    ))
 }
 
 fn response_from_page<T: AsRef<str>>(
@@ -341,6 +354,15 @@ pub async fn handle(
     args: &acp::ExtRequest,
     gateway: &acp_transport::AcpAgentGatewaySender,
 ) -> ExtResult {
+    let storage = crate::session::storage::JsonlStorageAdapter::new();
+    handle_with_storage(args, gateway, &storage).await
+}
+
+async fn handle_with_storage(
+    args: &acp::ExtRequest,
+    gateway: &acp_transport::AcpAgentGatewaySender,
+    storage: &crate::session::storage::JsonlStorageAdapter,
+) -> ExtResult {
     let _timer = crate::instrumentation_timer!("session.ext.bulk_updates");
 
     let request: Request = serde_json::from_str(args.params.get())
@@ -352,36 +374,26 @@ pub async fn handle(
         .map(|m| m.client_id.clone())
         .unwrap_or_default();
 
-    let session_info = crate::session::info::Info {
-        id: acp::SessionId::new(request.session_id.clone()),
-        cwd: request.cwd.clone(),
-    };
-    let mut updates_path = crate::session::persistence::session_dir(&session_info)
-        .join(crate::session::storage::UPDATES_FILE);
-
-    // Subagents persist under their own cwd (may differ from the parent cwd
-    // passed here), so fall back to an id scan when the (id, cwd) path misses.
-    if !updates_path.exists()
-        && let Some(found_dir) =
-            crate::session::persistence::find_persisted_session_dir_by_id_result(
-                &request.session_id,
-            )
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
-    {
-        let candidate = found_dir.join(crate::session::storage::UPDATES_FILE);
-        if candidate.exists() {
-            updates_path = candidate;
+    let opened = match storage.open_session_by_id(&request.session_id) {
+        Ok(Some(opened)) => opened,
+        Ok(None) => {
+            if request.stream {
+                return streamed_metadata_response(0, None, 0, &[]);
+            }
+            return empty_response(0);
         }
-    }
-
-    if !updates_path.exists() {
+        Err(error) => return Err(acp::Error::internal_error().data(error.to_string())),
+    };
+    let Some(reader) = open_updates_reader(opened.directory())
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+    else {
         if request.stream {
             return streamed_metadata_response(0, None, 0, &[]);
         }
         return empty_response(0);
-    }
+    };
 
-    if let Some(tail_page) = try_stream_tail_page(&request, &updates_path)
+    if let Some(tail_page) = try_stream_tail_page(&request, reader)
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
     {
         if request.stream {
@@ -410,11 +422,13 @@ pub async fn handle(
         );
     }
 
-    let lines = crate::session::storage::read_committed_jsonl_text_lines(
-        &updates_path,
-        "session updates ledger",
-    )
-    .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let Some(reader) = open_updates_reader(opened.directory())
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+    else {
+        return empty_response(0);
+    };
+    let lines = crate::session::storage::read_committed_jsonl_text_lines_from_reader(reader)
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
     let live_lines =
         crate::session::storage::filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let total_count = live_lines.len();
@@ -504,6 +518,7 @@ fn empty_response(total_count: usize) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::storage::StorageAdapter as _;
 
     fn parse_response(response: acp::ExtResponse) -> serde_json::Value {
         serde_json::from_str(response.0.get()).unwrap()
@@ -545,15 +560,10 @@ mod tests {
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-equivalence";
-        let session_info = crate::session::info::Info {
-            id: acp::SessionId::new(session_id),
-            cwd: cwd.clone(),
-        };
-        let session_dir = crate::session::persistence::session_dir(&session_info);
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("updates.jsonl"),
-            [
+        let (_root, storage) = write_session(
+            session_id,
+            &cwd,
+            &[
                 r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
                 r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
                 r#"{"timestamp":3,"method":"session/update","params":{"seq":3}}"#,
@@ -561,15 +571,18 @@ mod tests {
                 r#"{"timestamp":5,"method":"session/update","params":{"seq":5}}"#,
                 r#"{"timestamp":6,"method":"session/update","params":{"seq":6}}"#,
             ]
-            .join("\n")
-                + "\n",
+            .map(str::to_owned),
         )
-        .unwrap();
+        .await;
 
         let gw = dummy_gateway();
-        let response = handle(&make_request(session_id, &cwd, Some(-3), Some(2)), &gw)
-            .await
-            .unwrap();
+        let response = handle_with_storage(
+            &make_request(session_id, &cwd, Some(-3), Some(2)),
+            &gw,
+            &storage,
+        )
+        .await
+        .unwrap();
         let json = parse_response(response);
 
         assert_eq!(json["totalCount"], 6);
@@ -584,15 +597,10 @@ mod tests {
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-rewind-filter";
-        let session_info = crate::session::info::Info {
-            id: acp::SessionId::new(session_id),
-            cwd: cwd.clone(),
-        };
-        let session_dir = crate::session::persistence::session_dir(&session_info);
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("updates.jsonl"),
-            [
+        let (_root, storage) = write_session(
+            session_id,
+            &cwd,
+            &[
                 r#"{"timestamp":1,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first"}}}}"#,
                 r#"{"timestamp":2,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp1"}}}}"#,
                 r#"{"timestamp":3,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"dead-branch"}}}}"#,
@@ -601,15 +609,18 @@ mod tests {
                 r#"{"timestamp":6,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"replacement"}}}}"#,
                 r#"{"timestamp":7,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replacement-resp"}}}}"#,
             ]
-            .join("\n")
-                + "\n",
+            .map(str::to_owned),
         )
-        .unwrap();
+        .await;
 
         let gw = dummy_gateway();
-        let response = handle(&make_request(session_id, &cwd, Some(-3), None), &gw)
-            .await
-            .unwrap();
+        let response = handle_with_storage(
+            &make_request(session_id, &cwd, Some(-3), None),
+            &gw,
+            &storage,
+        )
+        .await
+        .unwrap();
         let json = parse_response(response);
         let updates = json["updates"].as_array().unwrap();
         let rendered = serde_json::to_string(updates).unwrap();
@@ -633,23 +644,16 @@ mod tests {
         let parent_cwd = parent_cwd_tmp.path().to_string_lossy().to_string();
 
         let session_id = "divergent-cwd-fallback-019f19fe07ea";
-        let child_info = crate::session::info::Info {
-            id: acp::SessionId::new(session_id),
-            cwd: child_cwd.clone(),
-        };
-        let child_dir = crate::session::persistence::session_dir(&child_info);
-        std::fs::create_dir_all(&child_dir).unwrap();
-        std::fs::write(child_dir.join("summary.json"), "{}").unwrap();
-        std::fs::write(
-            child_dir.join("updates.jsonl"),
-            [
+        let (_root, storage) = write_session(
+            session_id,
+            &child_cwd,
+            &[
                 r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
                 r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
             ]
-            .join("\n")
-                + "\n",
+            .map(str::to_owned),
         )
-        .unwrap();
+        .await;
 
         // Sanity: the parent-cwd path must not exist (else the test is moot).
         let parent_info = crate::session::info::Info {
@@ -663,9 +667,13 @@ mod tests {
         );
 
         let gw = dummy_gateway();
-        let response = handle(&make_request(session_id, &parent_cwd, None, None), &gw)
-            .await
-            .unwrap();
+        let response = handle_with_storage(
+            &make_request(session_id, &parent_cwd, None, None),
+            &gw,
+            &storage,
+        )
+        .await
+        .unwrap();
         let json = parse_response(response);
 
         assert_eq!(
@@ -674,8 +682,11 @@ mod tests {
         );
         assert_eq!(json["updates"].as_array().unwrap().len(), 2);
 
-        // Clean up the dir written under the real grow home.
-        let _ = std::fs::remove_dir_all(&child_dir);
+        let child_info = crate::session::info::Info {
+            id: acp::SessionId::new(session_id),
+            cwd: child_cwd,
+        };
+        storage.delete_session(&child_info).await.unwrap();
     }
 
     fn capturing_gateway() -> (
@@ -727,29 +738,25 @@ mod tests {
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "stream-chunks";
-        let session_dir = crate::session::persistence::session_dir(&crate::session::info::Info {
-            id: acp::SessionId::new(session_id),
-            cwd: cwd.clone(),
-        });
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("updates.jsonl"),
-            [
+        let (_root, storage) = write_session(
+            session_id,
+            &cwd,
+            &[
                 r#"{"timestamp":1,"method":"session/update","params":{"seq":1}}"#,
                 r#"{"timestamp":2,"method":"session/update","params":{"seq":2}}"#,
                 r#"{"timestamp":3,"method":"session/update","params":{"seq":3}}"#,
                 r#"{"timestamp":4,"method":"session/update","params":{"seq":4}}"#,
                 r#"{"timestamp":5,"method":"session/update","params":{"seq":5}}"#,
             ]
-            .join("\n")
-                + "\n",
+            .map(str::to_owned),
         )
-        .unwrap();
+        .await;
 
         let (gw, mut rx) = capturing_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_stream_request(session_id, &cwd, true, Some(2), None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -777,11 +784,16 @@ mod tests {
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "stream-empty";
+        let root = tempfile::TempDir::new().unwrap();
+        let storage = crate::session::storage::JsonlStorageAdapter::with_root(
+            root.path().to_path_buf(),
+        );
 
         let (gw, mut rx) = capturing_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_stream_request(session_id, &cwd, true, None, None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -834,14 +846,37 @@ mod tests {
         )
     }
 
-    fn write_session(session_id: &str, cwd: &str, lines: &[String]) {
+    async fn write_session(
+        session_id: &str,
+        cwd: &str,
+        lines: &[String],
+    ) -> (
+        tempfile::TempDir,
+        crate::session::storage::JsonlStorageAdapter,
+    ) {
+        let root = tempfile::TempDir::new().unwrap();
         let session_info = crate::session::info::Info {
             id: acp::SessionId::new(session_id),
             cwd: cwd.to_string(),
         };
-        let session_dir = crate::session::persistence::session_dir(&session_info);
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(session_dir.join("updates.jsonl"), lines.join("\n") + "\n").unwrap();
+        let storage = crate::session::storage::JsonlStorageAdapter::with_root(
+            root.path().to_path_buf(),
+        );
+        storage
+            .init_session(&session_info, acp::ModelId::new("test-model"))
+            .await
+            .unwrap();
+        let opened = storage.open_session(&session_info).unwrap();
+        opened
+            .directory()
+            .write_atomic(
+                std::ffi::OsStr::new(crate::session::storage::UPDATES_FILE),
+                format!("{}\n", lines.join("\n")).as_bytes(),
+                false,
+                true,
+            )
+            .unwrap();
+        (root, storage)
     }
 
     #[tokio::test]
@@ -859,12 +894,13 @@ mod tests {
             user_chunk("p3"),
             agent_chunk("r3"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let gw = dummy_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_turn_index_request(session_id, &cwd, 2, None, None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -896,12 +932,13 @@ mod tests {
             user_chunk("p2"),
             agent_chunk("r2"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let gw = dummy_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_turn_index_request(session_id, &cwd, 100, None, None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -930,12 +967,13 @@ mod tests {
             user_chunk("p3"),
             agent_chunk("r3"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let gw = dummy_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_turn_index_request(session_id, &cwd, 2, None, None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -970,13 +1008,14 @@ mod tests {
             user_chunk("p3"),
             agent_chunk("r3"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let gw = dummy_gateway();
         // offset set → turnIndex should be ignored, offset takes priority
-        let response = handle(
+        let response = handle_with_storage(
             &make_turn_index_request(session_id, &cwd, 1, Some(-2), None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();
@@ -1000,13 +1039,14 @@ mod tests {
             user_chunk("p2"),
             agent_chunk("r2"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let gw = dummy_gateway();
         // Regular request (no turnIndex, no offset)
-        let response = handle(&make_request(session_id, &cwd, None, None), &gw)
-            .await
-            .unwrap();
+        let response =
+            handle_with_storage(&make_request(session_id, &cwd, None, None), &gw, &storage)
+                .await
+                .unwrap();
         let json = parse_response(response);
 
         let ps = json["promptStarts"].as_array().unwrap();
@@ -1025,12 +1065,13 @@ mod tests {
             user_chunk("p2"),
             agent_chunk("r2"),
         ];
-        write_session(session_id, &cwd, &lines);
+        let (_root, storage) = write_session(session_id, &cwd, &lines).await;
 
         let (gw, mut rx) = capturing_gateway();
-        let response = handle(
+        let response = handle_with_storage(
             &make_stream_request(session_id, &cwd, true, Some(64), None),
             &gw,
+            &storage,
         )
         .await
         .unwrap();

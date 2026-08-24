@@ -101,11 +101,10 @@ impl SessionActor {
         &self,
         request: RewindRequest,
     ) -> anyhow::Result<RewindResponse> {
-        // Goal state is a durable workflow blackboard, deliberately independent
-        // from prompt history and file rewind points. Without prompt-indexed
-        // Goal snapshots, rewinding either side would leave its plan or
-        // verification receipt describing state that no longer exists. Require
-        // an explicit clear instead of silently inventing partial rollback
+        // Goal is durable control state independent from prompt history and
+        // file rewind points. Without prompt-indexed Goal snapshots, rewinding
+        // either side would make the objective's evidence boundary ambiguous.
+        // Require an explicit clear instead of inventing partial rollback
         // semantics. Internal cancel/pristine repair does not use this API.
         if self.goal_tracker.lock().snapshot().is_some() {
             return Ok(RewindResponse {
@@ -121,9 +120,6 @@ impl SessionActor {
                 ),
             });
         }
-
-        // Track revert for feedback signals
-        self.signals_handle().mark_reverted();
 
         let target_index = request.target_prompt_index;
         let mode = request.mode;
@@ -162,12 +158,13 @@ impl SessionActor {
 
         // Collect files that would be reverted and detect conflicts.
         // This is read-only — no mutations happen here.
-        let mut files_to_revert: std::collections::HashMap<paths::RelPathBuf, Option<String>> =
-            std::collections::HashMap::new();
+        let all_points = self.file_state_tracker.get_rewind_points().await;
+        let mut files_to_revert: std::collections::BTreeMap<paths::RelPathBuf, Option<String>> =
+            std::collections::BTreeMap::new();
+        let mut current_files =
+            std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
 
         if wants_file_revert {
-            let all_points = self.file_state_tracker.get_rewind_points().await;
-
             for point in all_points.iter().filter(|p| p.prompt_index >= target_index) {
                 for (path, before_snapshot) in &point.file_snapshots {
                     // Only keep the earliest snapshot for each file
@@ -184,7 +181,13 @@ impl SessionActor {
                     .fs
                     .try_read_to_string(path)
                     .await
-                    .unwrap_or(None);
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to read {} before rewind: {error}",
+                            path
+                        )
+                    })?;
+                current_files.insert(path.clone(), current_content.clone());
 
                 // Find the latest after_snapshot for this file (what the agent
                 // most recently left it as) for conflict detection.
@@ -237,37 +240,43 @@ impl SessionActor {
 
         // ── Commit mode (force=true): execute the rewind ─────────────
 
-        // Execute file revert
-        let mut reverted_files = Vec::new();
-        if wants_file_revert {
-            for (rel_path, content) in files_to_revert {
-                match &content {
-                    Some(data) => {
-                        if let Err(e) = self
-                            .tool_context
-                            .fs
-                            .write_file(&rel_path, data.as_bytes())
-                            .await
-                        {
-                            tracing::warn!(?e, "Failed to restore file during rewind");
-                            continue;
-                        }
-                    }
-                    None => {
-                        if self
-                            .tool_context
-                            .fs
-                            .exists(&rel_path)
-                            .await
-                            .unwrap_or(false)
-                            && let Err(e) = self.tool_context.fs.delete_file(&rel_path).await
-                        {
-                            tracing::warn!(?e, "Failed to delete file during rewind");
-                        }
-                    }
-                }
-                reverted_files.push(rel_path.to_string());
-            }
+        let transaction = crate::session::persistence::RewindTransaction {
+            version: crate::session::persistence::REWIND_TRANSACTION_VERSION,
+            target_prompt_index: target_index,
+            pre_prompt_index: current_prompt_index,
+            mode,
+        };
+        self.write_rewind_transaction(transaction).await?;
+
+        let (reverted_files, changed_files) = if wants_file_revert {
+            self.apply_file_rewind(&files_to_revert, &current_files).await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let next_rewind_points = if wants_file_revert {
+            all_points
+                .iter()
+                .filter(|point| point.prompt_index < target_index)
+                .cloned()
+                .collect()
+        } else {
+            workspace::session::file_state::merge_rewind_points_from(
+                all_points.clone(),
+                target_index,
+            )
+        };
+        if let Err(error) = self
+            .persist_rewind_points(next_rewind_points.clone())
+            .await
+        {
+            let rollback = self.rollback_rewind_files(&changed_files, &current_files).await;
+            return Err(match rollback {
+                Ok(()) => error,
+                Err(rollback) => anyhow::anyhow!(
+                    "{error}; file compensation also failed: {rollback}"
+                ),
+            });
         }
 
         // Execute conversation rewind
@@ -281,17 +290,31 @@ impl SessionActor {
                     .map(|record| record.text.clone());
             }
 
-            // Store for edit-and-retry detection in the next prompt() call.
+            // Timeline owns both branch selection and all derived prompt state.
+            // There is no intermediate Chat snapshot to install.
+            if let Err(error) = self
+                .chat_state_handle
+                .rewind_durably(target_index)
+                .await
+            {
+                let projection_rollback = self.persist_rewind_points(all_points.clone()).await;
+                let file_rollback = self
+                    .rollback_rewind_files(&changed_files, &current_files)
+                    .await;
+                let mut message = format!("failed to commit rewind Timeline: {error}");
+                if let Err(rollback) = projection_rollback {
+                    message.push_str(&format!("; rewind-point compensation failed: {rollback}"));
+                }
+                if let Err(rollback) = file_rollback {
+                    message.push_str(&format!("; file compensation failed: {rollback}"));
+                }
+                anyhow::bail!(message);
+            }
+
+            // Store for edit-and-retry detection only after the branch fact is durable.
             if let Ok(mut pending) = self.rewind_pending_prompt.lock() {
                 *pending = prompt_text.clone();
             }
-
-            // Timeline owns both branch selection and all derived prompt state.
-            // There is no intermediate Chat snapshot to install.
-            self.chat_state_handle
-                .rewind_durably(target_index)
-                .await
-                .map_err(|error| anyhow::anyhow!("failed to commit rewind Timeline: {error}"))?;
 
             // Conversation shrank — clear budget-based (size/schema) and stale
             // per-turn suppression so compaction can run against the smaller context.
@@ -316,20 +339,11 @@ impl SessionActor {
             });
         }
 
-        // Update the file state tracker to reflect the rewind.
-        if wants_file_revert {
-            // All/FilesOnly: files were reverted, snapshots are stale — truncate.
-            self.file_state_tracker.truncate_from(target_index).await;
-            let _ = self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::TruncateRewindPoints {
-                    from_index: target_index,
-                });
-        } else if wants_conversation_rewind {
-            // ConversationOnly: files are untouched but the conversation is rewound.
-            self.merge_rewind_tracker_from(target_index).await;
-        }
+        self.file_state_tracker
+            .replace_rewind_points(next_rewind_points)
+            .await;
+        self.clear_rewind_transaction().await?;
+        self.signals_handle().mark_reverted();
 
         Ok(RewindResponse {
             success: true,
@@ -343,27 +357,209 @@ impl SessionActor {
         })
     }
 
-    /// `ConversationOnly` rewind-tracker bookkeeping: merge the discarded
-    /// prompts' file effects (`>= target_index`) into the previous rewind point
-    /// so that (a) `/rewind 0` can still undo all file changes, and (b) a new
-    /// prompt at `target_index` gets a fresh rewind point whose before-snapshots
-    /// reflect current disk state. Files and the conversation are left untouched.
-    ///
-    /// Updates the in-memory tracker, then persists via a disk-authoritative
-    /// merge so a lazily-unloaded or partial tracker can't truncate history off
-    /// disk. Per-turn persistence admits only relative paths.
-    ///
-    /// Shared by local `handle_rewind` (ConversationOnly) and the bridge-mode
-    /// ConversationOnly path, whose conversation rewind lands server-side
-    /// (SessionCommand::ReconcileRewindTracker).
-    pub(super) async fn merge_rewind_tracker_from(&self, target_index: usize) {
-        self.file_state_tracker
-            .merge_and_remove_from(target_index)
-            .await;
-        let _ = self
-            .notifications
+    async fn persist_rewind_points(
+        &self,
+        points: Vec<workspace::session::file_state::RewindPoint>,
+    ) -> anyhow::Result<()> {
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        self.notifications
             .persistence_tx
-            .send(PersistenceMsg::MergeRewindPointsFrom { target_index });
+            .send(PersistenceMsg::ReplaceRewindPointsAndAck { points, respond_to })
+            .map_err(|_| anyhow::anyhow!("rewind persistence actor is unavailable"))?;
+        response
+            .await
+            .map_err(|_| anyhow::anyhow!("rewind persistence acknowledgement was dropped"))??;
+        Ok(())
+    }
+
+    async fn write_rewind_transaction(
+        &self,
+        transaction: crate::session::persistence::RewindTransaction,
+    ) -> anyhow::Result<()> {
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        self.notifications
+            .persistence_tx
+            .send(PersistenceMsg::WriteRewindTransactionAndAck {
+                transaction,
+                respond_to,
+            })
+            .map_err(|_| anyhow::anyhow!("rewind persistence actor is unavailable"))?;
+        response
+            .await
+            .map_err(|_| anyhow::anyhow!("rewind transaction acknowledgement was dropped"))??;
+        Ok(())
+    }
+
+    async fn clear_rewind_transaction(&self) -> anyhow::Result<()> {
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        self.notifications
+            .persistence_tx
+            .send(PersistenceMsg::ClearRewindTransactionAndAck { respond_to })
+            .map_err(|_| anyhow::anyhow!("rewind persistence actor is unavailable"))?;
+        response
+            .await
+            .map_err(|_| anyhow::anyhow!("rewind transaction clear acknowledgement was dropped"))??;
+        Ok(())
+    }
+
+    fn load_rewind_transaction(
+        &self,
+    ) -> anyhow::Result<Option<crate::session::persistence::RewindTransaction>> {
+        let bytes = match self.session_directory.read_bounded(
+            std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
+            "rewind transaction",
+            crate::session::persistence::MAX_REWIND_TRANSACTION_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let transaction = serde_json::from_slice::<
+            crate::session::persistence::RewindTransaction,
+        >(&bytes)?;
+        transaction.validate()?;
+        Ok(Some(transaction))
+    }
+
+    /// Complete a forward-only rewind transaction left by process death.
+    /// File and rewind-point projection steps precede the Timeline branch fact,
+    /// so `current == target` proves the whole transaction committed and only
+    /// the intent clear was lost. Otherwise the old typed points still contain
+    /// everything needed to replay the idempotent forward steps.
+    pub(super) async fn recover_pending_rewind(&self) -> anyhow::Result<()> {
+        let Some(transaction) = self.load_rewind_transaction()? else {
+            return Ok(());
+        };
+        let wants_files = matches!(transaction.mode, RewindMode::All | RewindMode::FilesOnly);
+        let wants_conversation = matches!(
+            transaction.mode,
+            RewindMode::All | RewindMode::ConversationOnly
+        );
+        let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
+        if wants_conversation && current_prompt_index == transaction.target_prompt_index {
+            self.file_state_tracker.get_rewind_points().await;
+            self.clear_rewind_transaction().await?;
+            return Ok(());
+        }
+        if wants_conversation && current_prompt_index != transaction.pre_prompt_index {
+            anyhow::bail!(
+                "pending rewind branch is neither source {} nor target {} (found {})",
+                transaction.pre_prompt_index,
+                transaction.target_prompt_index,
+                current_prompt_index
+            );
+        }
+
+        let all_points = self.file_state_tracker.get_rewind_points().await;
+        let mut desired =
+            std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
+        let mut originals =
+            std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
+        if wants_files {
+            for point in all_points
+                .iter()
+                .filter(|point| point.prompt_index >= transaction.target_prompt_index)
+            {
+                for (path, snapshot) in &point.file_snapshots {
+                    desired
+                        .entry(path.clone())
+                        .or_insert_with(|| snapshot.content.clone());
+                }
+            }
+            for path in desired.keys() {
+                originals.insert(
+                    path.clone(),
+                    self.tool_context.fs.try_read_to_string(path).await?,
+                );
+            }
+            self.apply_file_rewind(&desired, &originals).await?;
+        }
+
+        let next_points = if wants_files {
+            all_points
+                .iter()
+                .filter(|point| point.prompt_index < transaction.target_prompt_index)
+                .cloned()
+                .collect()
+        } else {
+            workspace::session::file_state::merge_rewind_points_from(
+                all_points,
+                transaction.target_prompt_index,
+            )
+        };
+        self.persist_rewind_points(next_points.clone()).await?;
+        if wants_conversation {
+            self.chat_state_handle
+                .rewind_durably(transaction.target_prompt_index)
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to recover rewind Timeline: {error}"))?;
+        }
+        self.file_state_tracker
+            .replace_rewind_points(next_points)
+            .await;
+        self.clear_rewind_transaction().await?;
+        self.signals_handle().mark_reverted();
+        Ok(())
+    }
+
+    async fn apply_file_rewind(
+        &self,
+        desired: &std::collections::BTreeMap<paths::RelPathBuf, Option<String>>,
+        originals: &std::collections::BTreeMap<paths::RelPathBuf, Option<String>>,
+    ) -> anyhow::Result<(Vec<String>, Vec<paths::RelPathBuf>)> {
+        let mut reverted = Vec::with_capacity(desired.len());
+        let mut changed = Vec::new();
+        for (path, content) in desired {
+            let original = originals
+                .get(path)
+                .ok_or_else(|| anyhow::anyhow!("rewind preview omitted {}", path))?;
+            reverted.push(path.to_string());
+            if original == content {
+                continue;
+            }
+            let result = match content {
+                Some(data) => self.tool_context.fs.write_file(path, data.as_bytes()).await,
+                None => self.tool_context.fs.delete_file(path).await,
+            };
+            if let Err(error) = result {
+                let rollback = self.rollback_rewind_files(&changed, originals).await;
+                return Err(match rollback {
+                    Ok(()) => anyhow::anyhow!("failed to restore {} during rewind: {error}", path),
+                    Err(rollback) => anyhow::anyhow!(
+                        "failed to restore {} during rewind: {error}; compensation failed: {rollback}",
+                        path
+                    ),
+                });
+            }
+            changed.push(path.clone());
+        }
+        Ok((reverted, changed))
+    }
+
+    async fn rollback_rewind_files(
+        &self,
+        changed: &[paths::RelPathBuf],
+        originals: &std::collections::BTreeMap<paths::RelPathBuf, Option<String>>,
+    ) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
+        for path in changed.iter().rev() {
+            let Some(original) = originals.get(path) else {
+                failures.push(format!("{} has no captured original", path));
+                continue;
+            };
+            let result = match original {
+                Some(data) => self.tool_context.fs.write_file(path, data.as_bytes()).await,
+                None => self.tool_context.fs.delete_file(path).await,
+            };
+            if let Err(error) = result {
+                failures.push(format!("{}: {error}", path));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(failures.join(", "))
+        }
     }
 
     /// Out-of-band history repair (`grow/session/repair`) for a resident

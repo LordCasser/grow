@@ -30,9 +30,9 @@ fn bench_fork_copy(c: &mut Criterion) {
     let root = TempDir::new().expect("tempdir");
     let source = synthesize_to_target_bytes(root.path(), target_mb * 1024 * 1024);
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-    let updates_len = std::fs::metadata(adapter.updates_file_path(&source).expect("updates path"))
-        .expect("updates.jsonl")
-        .len();
+    let updates_len = adapter
+        .updates_snapshot_len(&source)
+        .expect("updates ledger metadata");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -62,12 +62,8 @@ fn bench_fork_copy(c: &mut Criterion) {
                     ))
                     .expect("fork copy");
                 // Keep each iteration's output dir from accumulating.
-                if let Some(dir) = adapter
-                    .updates_file_path(&target)
-                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                {
-                    std::fs::remove_dir_all(&dir).ok();
-                }
+                rt.block_on(adapter.delete_session(&target))
+                    .expect("delete benchmark target");
                 black_box(result)
             });
         },

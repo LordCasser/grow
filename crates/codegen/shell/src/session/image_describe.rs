@@ -265,14 +265,13 @@ pub fn render_image_files_block(paths: &[String]) -> Option<String> {
 /// path per input, in input order, so callers can render the `<image_files>`
 /// list deterministically.
 pub fn persist_user_images(
-    session_dir: &Path,
+    session: &crate::session::storage::ContainedDirectory,
     images: &[ImageContent],
 ) -> std::io::Result<Vec<PathBuf>> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let assets_dir = crate::session::storage::ContainedDirectory::open(
-        session_dir,
+    let assets_dir = session.open_relative(
         Path::new("assets"),
         "session image asset directory",
         true,
@@ -291,7 +290,7 @@ pub fn persist_user_images(
             std::io::ErrorKind::Unsupported,
             "handle-relative image storage is unsupported on this platform",
         ));
-        out.push(session_dir.join("assets").join(filename));
+        out.push(assets_dir.display_path().join(filename));
     }
     Ok(out)
 }
@@ -374,11 +373,11 @@ pub const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `/home/workdir/attachments/image.png`).
 ///
 pub fn persist_and_prepend_image_files(
-    session_dir: &Path,
+    session: &crate::session::storage::ContainedDirectory,
     images: &[ImageContent],
     original_user_message: &str,
 ) -> std::io::Result<String> {
-    let persisted = persist_user_images(session_dir, images)?;
+    let persisted = persist_user_images(session, images)?;
     let image_paths: Vec<String> = persisted
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
@@ -392,6 +391,16 @@ pub fn persist_and_prepend_image_files(
 mod tests {
     use super::*;
     use sampling_types::conversation::{ConversationItem, UserItem};
+
+    fn test_session(path: &Path) -> crate::session::storage::ContainedDirectory {
+        crate::session::storage::ContainedDirectory::open(
+            path,
+            Path::new(""),
+            "image test session",
+            false,
+        )
+        .unwrap()
+    }
     #[test]
     fn persist_and_prepend_image_files_writes_assets_and_lists_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -403,7 +412,8 @@ mod tests {
             0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]);
         let img = ImageContent::new(png, "image/png");
-        let msg = persist_and_prepend_image_files(dir.path(), &[img], "hello").unwrap();
+        let msg =
+            persist_and_prepend_image_files(&test_session(dir.path()), &[img], "hello").unwrap();
         assert!(msg.contains("<image_files>"));
         assert!(msg.contains("/assets/image-"));
         assert!(msg.ends_with("hello") || msg.contains("\n\nhello"));
@@ -659,7 +669,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(png_bytes),
             "image/png".to_owned(),
         );
-        let persisted = persist_user_images(dir.path(), &[img]).unwrap();
+        let persisted = persist_user_images(&test_session(dir.path()), &[img]).unwrap();
         assert_eq!(persisted.len(), 1);
         let p = &persisted[0];
         assert!(p.starts_with(dir.path().join("assets")));
@@ -677,7 +687,7 @@ mod tests {
             "image/png".to_owned(),
         )
         .uri(Some("https://example.com/x.png".to_owned()));
-        let persisted = persist_user_images(dir.path(), &[img]).unwrap();
+        let persisted = persist_user_images(&test_session(dir.path()), &[img]).unwrap();
         assert_eq!(std::fs::read(&persisted[0]).unwrap(), vec![0u8]);
     }
     #[cfg(unix)]
@@ -694,7 +704,7 @@ mod tests {
             "image/png".to_owned(),
         );
 
-        let error = persist_user_images(dir.path(), &[image])
+        let error = persist_user_images(&test_session(dir.path()), &[image])
             .expect_err("image writes must not traverse a symlinked asset directory");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -702,7 +712,7 @@ mod tests {
     #[test]
     fn persist_user_images_empty_input_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let out = persist_user_images(dir.path(), &[]).unwrap();
+        let out = persist_user_images(&test_session(dir.path()), &[]).unwrap();
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
     }

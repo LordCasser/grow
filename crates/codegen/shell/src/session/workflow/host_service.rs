@@ -37,13 +37,14 @@ pub(crate) type DiagnosticHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Se
 pub(crate) struct WorkflowHostParams {
     pub run_id: String,
     pub cwd: PathBuf,
-    pub scratch_dir: PathBuf,
+    pub scratch_directory: Arc<crate::session::storage::ContainedDirectory>,
     pub tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
     pub store: super::store::WorkflowRunStore,
     pub notify: WorkflowNotifySender,
     pub subagent_event_tx:
         mpsc::UnboundedSender<tools::implementations::grow_build::task::types::SubagentEvent>,
     pub parent_session_id: String,
+    pub parent_timeline: Option<chat_state::ChatStateHandle>,
     pub allow_fork_context: bool,
     pub templates: std::collections::HashMap<String, String>,
     pub diagnostics: DiagnosticHook,
@@ -88,7 +89,7 @@ pub(crate) fn spawn_workflow_host_service(
                     break;
                 }
             };
-            service.clone().dispatch(req);
+            service.clone().dispatch(req).await;
         }
         let drain_outcome = service.cancel_and_drain_children().await;
         let _ = drained_tx.send(drain_outcome);
@@ -159,7 +160,7 @@ impl FinishOnce<'_> {
 }
 
 impl HostService {
-    fn dispatch(self: Arc<Self>, req: WorkflowHostRequest) {
+    async fn dispatch(self: Arc<Self>, req: WorkflowHostRequest) {
         match req {
             WorkflowHostRequest::ReserveAgentCalls { count, reply } => {
                 let reserved = self
@@ -169,7 +170,7 @@ impl HostService {
                     .reserve_agents(&self.params.run_id, count);
                 let result = match reserved {
                     Ok(state) => {
-                        if let Err(error) = self.params.store.persist_now(&state) {
+                        if let Err(error) = self.params.store.persist_ack(&state).await {
                             self.params
                                 .tracker
                                 .lock()
@@ -195,7 +196,7 @@ impl HostService {
                     .release_agents(&self.params.run_id, count);
                 let result = match released {
                     Some(state) => {
-                        if let Err(error) = self.params.store.persist_now(&state) {
+                        if let Err(error) = self.params.store.persist_ack(&state).await {
                             tracing::warn!(
                                 run_id = %self.params.run_id,
                                 %error,
@@ -211,10 +212,14 @@ impl HostService {
                 };
                 let _ = reply.send(result);
             }
-            WorkflowHostRequest::SpawnAgent { opts, reply } => {
+            WorkflowHostRequest::SpawnAgent {
+                operation_id,
+                opts,
+                reply,
+            } => {
                 let svc = self.clone();
                 tokio::spawn(async move {
-                    let result = svc.spawn_agent(opts).await;
+                    let result = svc.spawn_agent(operation_id, opts).await;
                     let _ = reply.send(result);
                 });
             }
@@ -318,7 +323,11 @@ impl HostService {
         self.params.tracker.lock().elapsed_ms(&self.params.run_id)
     }
 
-    async fn spawn_agent(&self, mut opts: AgentOpts) -> Result<AgentResult, HostError> {
+    async fn spawn_agent(
+        &self,
+        operation_id: String,
+        mut opts: AgentOpts,
+    ) -> Result<AgentResult, HostError> {
         if self.params.cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
@@ -350,7 +359,7 @@ impl HostService {
             ));
         }
 
-        let id = uuid::Uuid::now_v7().to_string();
+        let id = operation_id;
         let explicit_label = opts.label.clone();
         let capability_mode = match opts.capability_mode.as_deref() {
             None => None,
@@ -443,8 +452,6 @@ impl HostService {
                     fork_context,
                     owner: SubagentOwner::workflow(&self.params.run_id),
                     goal_context: None,
-                    goal_stage_submit: None,
-                    goal_stage_resume: None,
                     cancel_token: cancel_token.clone(),
                 }
             };
@@ -469,7 +476,7 @@ impl HostService {
             let child_id = if attempts == 1 {
                 id.clone()
             } else {
-                let retry_id = uuid::Uuid::now_v7().to_string();
+                let retry_id = deterministic_retry_id(&id, attempts);
                 row.rebind(&retry_id);
                 retry_id
             };
@@ -480,28 +487,60 @@ impl HostService {
                 fork_context,
             );
 
-            self.active_agents.fetch_add(1, Ordering::Relaxed);
-            self.tick();
-
-            let backend = ChannelBackend::new(self.params.subagent_event_tx.clone());
-            let result_fut = backend.spawn(request);
-            tokio::pin!(result_fut);
-            let result = tokio::select! {
-                result = &mut result_fut => result,
-                _ = self.params.cancel.cancelled() => {
-                    cancel_token.cancel();
-                    self.active_agents.fetch_sub(1, Ordering::Relaxed);
-                    row.finish("cancelled", total_tokens, total_duration);
-                    return Err(HostError::Cancelled);
+            let backend = ChannelBackend::for_session(
+                self.params.subagent_event_tx.clone(),
+                self.params.parent_session_id.clone(),
+            );
+            let durable = if let Some(parent_timeline) = self.params.parent_timeline.as_ref() {
+                match crate::agent::subagent::durable_child_operation(
+                    &self.params.parent_session_id,
+                    &child_id,
+                    parent_timeline,
+                )
+                .await
+                {
+                    Ok(durable) => durable,
+                    Err(error) => {
+                        row.finish("failed", total_tokens, total_duration);
+                        return Err(HostError::Failed(error));
+                    }
                 }
+            } else {
+                crate::agent::subagent::DurableChildOperation::Missing
             };
-            self.active_agents.fetch_sub(1, Ordering::Relaxed);
-
-            let Ok(result) = result else {
-                row.finish("failed", total_tokens, total_duration);
-                return Err(HostError::Failed(
-                    "subagent coordinator channel closed before completion".into(),
-                ));
+            let result = match durable {
+                crate::agent::subagent::DurableChildOperation::Completed(result) => result,
+                crate::agent::subagent::DurableChildOperation::Open => {
+                    row.finish("failed", total_tokens, total_duration);
+                    return Err(HostError::Failed(format!(
+                        "workflow operation {child_id} has an open canonical child; reconcile it before resume"
+                    )));
+                }
+                crate::agent::subagent::DurableChildOperation::Missing => {
+                    self.active_agents.fetch_add(1, Ordering::Relaxed);
+                    self.tick();
+                    let result_fut = backend.spawn(request);
+                    tokio::pin!(result_fut);
+                    let result = tokio::select! {
+                        result = &mut result_fut => result,
+                        _ = self.params.cancel.cancelled() => {
+                            cancel_token.cancel();
+                            self.active_agents.fetch_sub(1, Ordering::Relaxed);
+                            row.finish("cancelled", total_tokens, total_duration);
+                            return Err(HostError::Cancelled);
+                        }
+                    };
+                    self.active_agents.fetch_sub(1, Ordering::Relaxed);
+                    match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            row.finish("failed", total_tokens, total_duration);
+                            return Err(HostError::Failed(format!(
+                                "subagent coordinator failed before completion: {error}"
+                            )));
+                        }
+                    }
+                }
             };
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);
             total_duration += result.duration_ms;
@@ -654,7 +693,7 @@ impl HostService {
         Ok(out)
     }
 
-    fn scratch_paths(&self, name: &str) -> Result<(PathBuf, String), HostError> {
+    fn scratch_name(&self, name: &str) -> Result<(std::ffi::OsString, String), HostError> {
         if name.len() > WORKFLOW_MAX_SCRATCH_NAME_BYTES {
             return Err(HostError::Failed(format!(
                 "scratch file name exceeds {WORKFLOW_MAX_SCRATCH_NAME_BYTES} bytes"
@@ -671,49 +710,29 @@ impl HostService {
             }
         }
         Ok((
-            self.params.scratch_dir.join(name),
+            std::ffi::OsString::from(name),
             format!("{SCRATCH_ARTIFACT_ROOT}/{name}"),
         ))
     }
 
-    fn reject_symlink(path: &Path, what: &str) -> Result<(), HostError> {
-        match std::fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => Err(HostError::Failed(format!(
-                "{what} must not be a symlink: {}",
-                path.display()
-            ))),
-            Ok(meta) if what == "scratch directory" && !meta.is_dir() => {
-                Err(HostError::Failed(format!(
-                    "scratch directory is not a real directory: {}",
-                    path.display()
-                )))
-            }
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(HostError::Failed(format!("{what} metadata: {e}"))),
-        }
-    }
-
-    fn scratch_usage(&self, replacing: &Path) -> Result<(usize, u64), HostError> {
-        let entries = match std::fs::read_dir(&self.params.scratch_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
-            Err(e) => return Err(HostError::Failed(format!("scratch dir listing: {e}"))),
-        };
+    fn scratch_usage(&self, replacing: &std::ffi::OsStr) -> Result<(usize, u64), HostError> {
+        let entries = self
+            .params
+            .scratch_directory
+            .list_names()
+            .map_err(|error| HostError::Failed(format!("scratch dir listing: {error}")))?;
         let mut files = 0usize;
         let mut bytes = 0u64;
-        for entry in entries {
-            let entry = entry.map_err(|e| HostError::Failed(format!("scratch dir entry: {e}")))?;
-            let path = entry.path();
-            let meta = std::fs::symlink_metadata(&path)
-                .map_err(|e| HostError::Failed(format!("scratch metadata: {e}")))?;
-            if meta.file_type().is_symlink() {
-                return Err(HostError::Failed(format!(
-                    "scratch directory contains a symlink: {}",
-                    path.display()
-                )));
-            }
-            if meta.is_file() && path != replacing {
+        for name in entries {
+            let file = self
+                .params
+                .scratch_directory
+                .open_regular(&name, "Workflow scratch file")
+                .map_err(|error| HostError::Failed(format!("scratch entry is invalid: {error}")))?;
+            let meta = file
+                .metadata()
+                .map_err(|error| HostError::Failed(format!("scratch metadata: {error}")))?;
+            if name != replacing {
                 files = files.saturating_add(1);
                 bytes = bytes.saturating_add(meta.len());
             }
@@ -727,19 +746,19 @@ impl HostService {
                 "scratch file exceeds {WORKFLOW_MAX_SCRATCH_FILE_BYTES} byte limit"
             )));
         }
-        let (path, artifact_path) = self.scratch_paths(name)?;
+        let (name, artifact_path) = self.scratch_name(name)?;
         let _io = self.scratch_io.lock().await;
 
-        Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
-        tokio::fs::create_dir_all(&self.params.scratch_dir)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch dir: {e}")))?;
-        Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
-        Self::reject_symlink(&path, "scratch file")?;
-
-        let (other_files, other_bytes) = self.scratch_usage(&path)?;
-        let target_exists = std::fs::symlink_metadata(&path)
-            .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink());
+        let (other_files, other_bytes) = self.scratch_usage(&name)?;
+        let target_exists = match self
+            .params
+            .scratch_directory
+            .open_regular(&name, "Workflow scratch file")
+        {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(HostError::Failed(format!("scratch target is invalid: {error}"))),
+        };
         let resulting_files = other_files.saturating_add(usize::from(!target_exists));
         let resulting_bytes = other_bytes.saturating_add(content.len() as u64);
         if resulting_files > WORKFLOW_MAX_SCRATCH_FILES {
@@ -753,18 +772,16 @@ impl HostService {
             )));
         }
 
-        let scratch_dir = self.params.scratch_dir.clone();
+        let scratch = self
+            .params
+            .scratch_directory
+            .try_clone()
+            .map_err(|error| HostError::Failed(format!("scratch capability clone: {error}")))?;
         let body = content.as_bytes().to_vec();
         tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
-            let mut tmp = tempfile::NamedTempFile::new_in(&scratch_dir)
-                .map_err(|e| HostError::Failed(format!("scratch temp file: {e}")))?;
-            Self::reject_symlink(&scratch_dir, "scratch directory")?;
-            Self::reject_symlink(&path, "scratch file")?;
-            tmp.write_all(&body)
-                .map_err(|e| HostError::Failed(format!("scratch write: {e}")))?;
-            tmp.persist(&path)
-                .map_err(|e| HostError::Failed(format!("scratch atomic persist: {}", e.error)))?;
+            scratch
+                .write_atomic(&name, &body, true, true)
+                .map_err(|error| HostError::Failed(format!("scratch atomic write: {error}")))?;
             Ok::<(), HostError>(())
         })
         .await
@@ -773,31 +790,17 @@ impl HostService {
     }
 
     async fn read_scratch_file(&self, name: &str) -> Result<String, HostError> {
-        let (path, _) = self.scratch_paths(name)?;
+        let (name, _) = self.scratch_name(name)?;
         let _io = self.scratch_io.lock().await;
-        Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
-        Self::reject_symlink(&path, "scratch file")?;
-        let meta = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch read metadata: {e}")))?;
-        if meta.file_type().is_symlink() {
-            return Err(HostError::Failed(
-                "scratch file must not be a symlink".into(),
-            ));
-        }
-        if !meta.is_file() {
-            return Err(HostError::Failed(
-                "scratch path is not a regular file".into(),
-            ));
-        }
-        if meta.len() > WORKFLOW_MAX_SCRATCH_FILE_BYTES as u64 {
-            return Err(HostError::Failed(format!(
-                "scratch file exceeds {WORKFLOW_MAX_SCRATCH_FILE_BYTES} byte read limit"
-            )));
-        }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch read: {e}")))?;
+        let bytes = self
+            .params
+            .scratch_directory
+            .read_bounded(
+                &name,
+                "Workflow scratch file",
+                WORKFLOW_MAX_SCRATCH_FILE_BYTES as u64,
+            )
+            .map_err(|error| HostError::Failed(format!("scratch read: {error}")))?;
         String::from_utf8(bytes)
             .map_err(|e| HostError::Failed(format!("scratch file is not UTF-8: {e}")))
     }
@@ -847,6 +850,15 @@ impl HostService {
     }
 }
 
+fn deterministic_retry_id(operation_id: &str, attempt: u32) -> String {
+    let digest = blake3::hash(format!("{operation_id}:retry:{attempt}").as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,6 +866,23 @@ mod tests {
     use crate::session::workflow::notify::WorkflowNotifySender;
     use crate::session::workflow::store::WorkflowRunStore;
     use crate::session::workflow::tracker::WorkflowTracker;
+
+    fn scratch_directory() -> Arc<crate::session::storage::ContainedDirectory> {
+        let path = std::env::temp_dir().join(format!(
+            "grow-workflow-host-test-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Arc::new(
+            crate::session::storage::ContainedDirectory::open(
+                &path,
+                Path::new(""),
+                "Workflow host test scratch",
+                false,
+            )
+            .unwrap(),
+        )
+    }
 
     #[tokio::test]
     async fn max_concurrency_queues_agents_until_a_permit_is_released() {
@@ -882,12 +911,13 @@ mod tests {
         let params = WorkflowHostParams {
             run_id,
             cwd: std::env::temp_dir(),
-            scratch_dir: std::env::temp_dir().join("wf-scratch-concurrency"),
+            scratch_directory: scratch_directory(),
             tracker,
             store,
             notify,
             subagent_event_tx: subagent_tx,
             parent_session_id: "parent".into(),
+            parent_timeline: None,
             allow_fork_context: false,
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
@@ -901,6 +931,7 @@ mod tests {
         let (second_tx, second_rx) = oneshot::channel();
         host_tx
             .send(WorkflowHostRequest::SpawnAgent {
+                operation_id: uuid::Uuid::now_v7().to_string(),
                 opts: AgentOpts {
                     prompt: "first".into(),
                     ..Default::default()
@@ -910,6 +941,7 @@ mod tests {
             .unwrap();
         host_tx
             .send(WorkflowHostRequest::SpawnAgent {
+                operation_id: uuid::Uuid::now_v7().to_string(),
                 opts: AgentOpts {
                     prompt: "second".into(),
                     ..Default::default()
@@ -1000,12 +1032,13 @@ mod tests {
         let params = WorkflowHostParams {
             run_id: run_id.clone(),
             cwd: std::env::temp_dir(),
-            scratch_dir: std::env::temp_dir().join("wf-scratch-reserve-rollback"),
+            scratch_directory: scratch_directory(),
             tracker: tracker.clone(),
             store,
             notify,
             subagent_event_tx: subagent_tx,
             parent_session_id: "parent".into(),
+            parent_timeline: None,
             allow_fork_context: false,
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
@@ -1035,7 +1068,7 @@ mod tests {
         assert_eq!(
             tracker.lock().get(&run_id).unwrap().agents_used,
             10,
-            "reserve must release_agents(count) when persist_now fails"
+            "reserve must release_agents(count) when durable persistence fails"
         );
 
         drop(host_tx);
@@ -1073,12 +1106,13 @@ mod tests {
         let params = WorkflowHostParams {
             run_id: run_id.clone(),
             cwd: std::env::temp_dir(),
-            scratch_dir: std::env::temp_dir().join("wf-scratch-release-persist"),
+            scratch_directory: scratch_directory(),
             tracker: tracker.clone(),
             store,
             notify,
             subagent_event_tx: subagent_tx,
             parent_session_id: "parent".into(),
+            parent_timeline: None,
             allow_fork_context: false,
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
