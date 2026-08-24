@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 6;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +55,11 @@ impl GoalPauseReason {
 pub struct GoalState {
     pub architecture_version: u8,
     pub goal_id: String,
+    /// Monotonic identity of the user-controlled Goal definition. Runtime
+    /// accounting and lifecycle transitions do not change it, so request
+    /// projection can shadow superseded continuation directives without
+    /// coupling model context to unrelated Control checkpoints.
+    pub definition_revision: u64,
     pub objective: String,
     pub status: GoalStatus,
     pub token_budget: Option<i64>,
@@ -93,12 +98,13 @@ impl GoalTracker {
         }
     }
 
-    /// Goal v6 intentionally has no compatibility projection. Old
+    /// Goal v7 intentionally has no compatibility projection. Old
     /// planner/blackboard snapshots are rejected instead of reviving two
     /// lifecycle models in one session.
     pub fn from_snapshot(snapshot: GoalState) -> Option<Self> {
         if snapshot.architecture_version != GOAL_ARCHITECTURE_VERSION
             || snapshot.goal_id.trim().is_empty()
+            || snapshot.definition_revision == 0
             || snapshot.objective.trim().is_empty()
             || snapshot.token_budget.is_some_and(|budget| budget <= 0)
             || snapshot.token_baseline < 0
@@ -170,6 +176,7 @@ impl GoalTracker {
         self.goal = Some(GoalState {
             architecture_version: GOAL_ARCHITECTURE_VERSION,
             goal_id,
+            definition_revision: 1,
             objective: objective.to_string(),
             status: GoalStatus::Active,
             token_budget,
@@ -202,8 +209,20 @@ impl GoalTracker {
         if !changed {
             return false;
         }
+        let definition_changed = goal.objective != objective || goal.token_budget != token_budget;
+        let next_definition_revision = if definition_changed {
+            let Some(next) = goal.definition_revision.checked_add(1) else {
+                return false;
+            };
+            Some(next)
+        } else {
+            None
+        };
         goal.objective = objective.to_string();
         goal.token_budget = token_budget;
+        if let Some(next) = next_definition_revision {
+            goal.definition_revision = next;
+        }
         goal.status = GoalStatus::Active;
         goal.status_message = None;
         goal.updated_at = now();
@@ -297,7 +316,11 @@ impl GoalTracker {
         if goal.status == GoalStatus::Complete || goal.token_budget == budget {
             return false;
         }
+        let Some(next_definition_revision) = goal.definition_revision.checked_add(1) else {
+            return false;
+        };
         goal.token_budget = budget;
+        goal.definition_revision = next_definition_revision;
         if goal.status == GoalStatus::BudgetLimited {
             goal.status = GoalStatus::Paused;
             goal.status_message = Some(
@@ -409,13 +432,47 @@ mod tests {
     #[test]
     fn pause_restart_edit_and_complete_are_explicit() {
         let mut tracker = tracker();
+        let initial_revision = tracker.snapshot().unwrap().definition_revision;
         assert!(tracker.pause(GoalPauseReason::User));
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
         assert!(tracker.restart());
+        assert_eq!(
+            tracker.snapshot().unwrap().definition_revision,
+            initial_revision,
+            "lifecycle transitions must not invalidate an unchanged definition"
+        );
         assert!(tracker.revise_goal("ship safely".into(), Some(200)));
         assert_eq!(tracker.objective(), Some("ship safely"));
+        assert_eq!(
+            tracker.snapshot().unwrap().definition_revision,
+            initial_revision + 1
+        );
         assert!(tracker.complete());
+        assert_eq!(
+            tracker.snapshot().unwrap().definition_revision,
+            initial_revision + 1
+        );
         assert_eq!(tracker.status(), Some(GoalStatus::Complete));
+    }
+
+    #[test]
+    fn budget_changes_advance_the_goal_definition_once() {
+        let mut tracker = tracker();
+        assert_eq!(tracker.snapshot().unwrap().definition_revision, 1);
+        assert!(tracker.set_token_budget(Some(200)));
+        assert_eq!(tracker.snapshot().unwrap().definition_revision, 2);
+        assert!(!tracker.set_token_budget(Some(200)));
+        assert_eq!(tracker.snapshot().unwrap().definition_revision, 2);
+    }
+
+    #[test]
+    fn definition_revision_exhaustion_rejects_definition_mutation() {
+        let mut tracker = tracker();
+        tracker.snapshot_mut().unwrap().definition_revision = u64::MAX;
+        assert!(!tracker.revise_goal("different".into(), Some(100)));
+        assert!(!tracker.set_token_budget(Some(200)));
+        assert_eq!(tracker.objective(), Some("ship it"));
+        assert_eq!(tracker.token_budget(), Some(100));
     }
 
     #[test]

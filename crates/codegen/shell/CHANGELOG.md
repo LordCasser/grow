@@ -6,6 +6,7 @@
 
 - Goal now persists one objective, lifecycle status, budget, usage, and timestamps. Planner/verifier stages, Markdown boards, Goal-specific task types, and finalization turns were removed.
 - Active Goals continue only after foreground and user FIFO are idle. Every continuation audits the full objective before creating the next ordinary task/todo slice.
+- Goal v7 gives the user-controlled definition its own revision. Provider and compaction request assembly expand only the latest current continuation directive and shadow older copies without rewriting Timeline history.
 - `/goal edit`, `pause`, `restart`, `budget`, and `clear` provide the user control plane; `create_goal`, `get_goal`, and `update_goal` are the complete model lifecycle API.
 - Goal and Behavior transitions commit through one versioned Timeline Control snapshot and roll back on persistence failure.
 - Pager Goal UI and Timeline updates now show durable lifecycle state only; streaming phase/progress noise is not persisted.

@@ -116,42 +116,17 @@ pub enum SyntheticReason {
     WorkingDirectorySwitch,
 }
 
-/// Semantic role of a Goal-scoped synthetic directive.
-///
-/// The role is structural metadata: request and compaction projection must not
-/// infer Goal lifecycle policy by parsing reminder text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalDirectiveKind {
-    Context,
-    Autonomy,
-    PausedInteraction,
-    ControlNotice,
-    Continuation,
-}
-
 /// Identity carried by a synthetic Goal directive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalDirectiveTag {
     pub goal_id: String,
     pub definition_revision: u64,
-    pub kind: GoalDirectiveKind,
 }
 
-/// Goal directive projection applied to a model or compaction request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GoalConversationProjection<'a> {
-    Exclude,
-    Active {
-        goal_id: &'a str,
-        definition_revision: u64,
-        include_autonomy: bool,
-    },
-    Paused {
-        goal_id: &'a str,
-        definition_revision: u64,
-    },
-}
+/// Request-only placeholder for a durable Goal continuation that has been
+/// superseded by a later directive. Keeping the user-role item preserves turn
+/// structure while avoiding repeated objective/audit text in provider input.
+pub const SUPERSEDED_GOAL_DIRECTIVE: &str = "[Previous Goal continuation superseded.]";
 
 impl SyntheticReason {
     /// Whether a user item with this reason **starts a prompt turn** — i.e.
@@ -269,54 +244,35 @@ pub struct UserItem {
     pub prompt_index: Option<usize>,
 }
 
-/// Project Goal-owned synthetic directives for one request without mutating
-/// the persisted conversation.
+/// Project Goal-owned continuation directives for one model request without
+/// mutating the persisted conversation.
+///
+/// The latest directive matching the active Goal definition remains verbatim.
+/// Every other Goal directive becomes a small shadow in-place. This preserves
+/// the user/assistant/tool chronology while ensuring that an old objective or
+/// completion audit cannot remain live beside the current one. With no active
+/// scope, all Goal directives are shadowed.
 pub fn project_conversation_for_goal_scope(
-    items: Vec<ConversationItem>,
-    projection: GoalConversationProjection<'_>,
+    mut items: Vec<ConversationItem>,
+    active: Option<&GoalDirectiveTag>,
 ) -> Vec<ConversationItem> {
-    items
-        .into_iter()
-        .filter(|item| {
-            let ConversationItem::User(user) = item else {
-                return true;
-            };
-            let Some(tag) = user.goal_directive.as_ref() else {
-                return true;
-            };
-            match &projection {
-                GoalConversationProjection::Exclude => false,
-                GoalConversationProjection::Active {
-                    goal_id,
-                    definition_revision,
-                    include_autonomy,
-                } => {
-                    tag.goal_id == *goal_id
-                        && tag.definition_revision == *definition_revision
-                        && match tag.kind {
-                            GoalDirectiveKind::Context
-                            | GoalDirectiveKind::ControlNotice
-                            | GoalDirectiveKind::Continuation => true,
-                            GoalDirectiveKind::Autonomy => *include_autonomy,
-                            GoalDirectiveKind::PausedInteraction => false,
-                        }
-                }
-                GoalConversationProjection::Paused {
-                    goal_id,
-                    definition_revision,
-                } => {
-                    tag.goal_id == *goal_id
-                        && tag.definition_revision == *definition_revision
-                        && matches!(
-                            tag.kind,
-                            GoalDirectiveKind::Context
-                                | GoalDirectiveKind::ControlNotice
-                                | GoalDirectiveKind::PausedInteraction
-                        )
-                }
-            }
+    let current = active.and_then(|active| {
+        items.iter().rposition(|item| {
+            matches!(item, ConversationItem::User(user) if user.goal_directive.as_ref() == Some(active))
         })
-        .collect()
+    });
+
+    for (index, item) in items.iter_mut().enumerate() {
+        let ConversationItem::User(user) = item else {
+            continue;
+        };
+        if user.goal_directive.is_some() && Some(index) != current {
+            user.content = vec![ContentPart::Text {
+                text: Arc::from(SUPERSEDED_GOAL_DIRECTIVE),
+            }];
+        }
+    }
+    items
 }
 
 /// Assistant response with tool calls.
@@ -3470,67 +3426,63 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
 
-    fn goal_directive(goal_id: &str, revision: u64, kind: GoalDirectiveKind) -> ConversationItem {
-        let mut item = ConversationItem::user(format!("{goal_id}:{revision}:{kind:?}"));
+    fn goal_directive(goal_id: &str, revision: u64, text: &str) -> ConversationItem {
+        let mut item = ConversationItem::user(text);
         let ConversationItem::User(user) = &mut item else {
             unreachable!();
         };
         user.goal_directive = Some(GoalDirectiveTag {
             goal_id: goal_id.to_string(),
             definition_revision: revision,
-            kind,
         });
         item
     }
 
     #[test]
-    fn goal_scope_projection_filters_revision_and_autonomy_by_turn_kind() {
+    fn goal_scope_projection_expands_only_the_latest_current_directive() {
+        let mut first = goal_directive("g", 2, "first current directive");
+        first.set_prompt_index(7);
         let items = vec![
             ConversationItem::user("ordinary"),
-            goal_directive("g", 1, GoalDirectiveKind::Context),
-            goal_directive("g", 1, GoalDirectiveKind::Autonomy),
-            goal_directive("g", 1, GoalDirectiveKind::PausedInteraction),
-            goal_directive("g", 1, GoalDirectiveKind::ControlNotice),
-            goal_directive("g", 1, GoalDirectiveKind::Continuation),
-            goal_directive("g", 0, GoalDirectiveKind::Context),
-            goal_directive("other", 1, GoalDirectiveKind::Context),
+            goal_directive("g", 1, "old definition"),
+            first,
+            ConversationItem::assistant("work from first"),
+            goal_directive("other", 1, "other goal"),
+            goal_directive("g", 2, "latest current directive"),
         ];
+        let active = GoalDirectiveTag {
+            goal_id: "g".into(),
+            definition_revision: 2,
+        };
 
-        let active = project_conversation_for_goal_scope(
-            items.clone(),
-            GoalConversationProjection::Active {
-                goal_id: "g",
-                definition_revision: 1,
-                include_autonomy: true,
-            },
+        let projected = project_conversation_for_goal_scope(items.clone(), Some(&active));
+        assert_eq!(
+            projected.len(),
+            items.len(),
+            "projection preserves chronology"
         );
-        assert_eq!(active.len(), 5); // ordinary + context/autonomy/control/continuation
+        assert_eq!(projected[0].text_content(), "ordinary");
+        assert_eq!(
+            projected[1].text_content(),
+            SUPERSEDED_GOAL_DIRECTIVE
+        );
+        assert_eq!(
+            projected[2].text_content(),
+            SUPERSEDED_GOAL_DIRECTIVE
+        );
+        assert_matches!(&projected[2], ConversationItem::User(user) => {
+            assert_eq!(user.prompt_index, Some(7));
+        });
+        assert_eq!(
+            projected[4].text_content(),
+            SUPERSEDED_GOAL_DIRECTIVE
+        );
+        assert_eq!(projected[5].text_content(), "latest current directive");
 
-        let active_user_turn = project_conversation_for_goal_scope(
-            items.clone(),
-            GoalConversationProjection::Active {
-                goal_id: "g",
-                definition_revision: 1,
-                include_autonomy: false,
-            },
-        );
-        assert_eq!(active_user_turn.len(), 4); // ordinary + context/control/continuation
-
-        let paused = project_conversation_for_goal_scope(
-            items.clone(),
-            GoalConversationProjection::Paused {
-                goal_id: "g",
-                definition_revision: 1,
-            },
-        );
-        assert_eq!(paused.len(), 4); // ordinary + context/control/paused
-
-        let excluded =
-            project_conversation_for_goal_scope(items, GoalConversationProjection::Exclude);
-        assert_eq!(excluded.len(), 1);
-        assert!(
-            matches!(&excluded[0], ConversationItem::User(user) if user.goal_directive.is_none())
-        );
+        let stopped = project_conversation_for_goal_scope(items, None);
+        for item in [&stopped[1], &stopped[2], &stopped[4], &stopped[5]] {
+            assert_eq!(item.text_content(), SUPERSEDED_GOAL_DIRECTIVE);
+        }
     }
 
     #[test]

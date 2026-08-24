@@ -1,4 +1,4 @@
-# Long-term Goal runtime v6
+# Long-term Goal runtime v7
 
 Goal is one durable objective plus the right to request another turn after the session becomes idle. It is not a plan executor and owns no blackboard, task graph, planner/verifier child, or finalization phase.
 
@@ -17,6 +17,7 @@ enum GoalStatus {
 struct GoalState {
     architecture_version: u8,
     goal_id: String,
+    definition_revision: u64,
     objective: String,
     status: GoalStatus,
     token_budget: Option<i64>,
@@ -33,7 +34,7 @@ struct GoalState {
 
 Goal and the selected Behavior are written together in the versioned Timeline `Control` snapshot. The Timeline is the only persistence authority. A transition publishes UI state only after the durable append succeeds; failure restores the prior in-memory Goal. Create, edit, restart, complete, and clear therefore cannot expose a half-applied Goal/Behavior pair.
 
-Goal architecture v6 deliberately rejects older snapshots. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
+Goal architecture v7 deliberately rejects older snapshots. `definition_revision` advances only when the user-controlled objective or token budget changes; lifecycle and accounting checkpoints cannot invalidate model context. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
 
 ## Lifecycle ownership
 
@@ -59,13 +60,15 @@ The Goal continuation is an internal regular turn with structured `PromptOrigin:
 
 Every continuation directive requires this order:
 
-1. Audit the complete objective against conversation, workspace, tests, and other concrete evidence.
+1. Treat completion as unproven and audit every concrete requirement in the complete objective against authoritative current evidence.
 2. If fully satisfied, call `update_goal(status=complete)` and report the evidence.
 3. Otherwise choose the next small, verifiable slice.
 4. Track that slice with ordinary `todo_write` state and use `task` for bounded delegation or an independent check.
 5. Verify the slice, then leave the Goal Active for the next idle continuation unless the full objective is complete or a genuine impasse exists.
 
 Todo and task state is short-lived execution context. It is not copied into GoalState, cannot narrow the objective, and finishing it does not complete the Goal.
+
+The full continuation directive is a durable Timeline message. Provider and compaction request assembly expand only the newest directive matching the active `goal_id + definition_revision`; every older Goal directive is projected as a small shadow in the same user-message position. This keeps turn/tool chronology intact, prevents old objectives and completion audits from remaining simultaneously active or leaking back through a summary, and leaves the canonical Timeline untouched for debugging. Paused, completed, cleared, and superseded Goal directives are all shadowed.
 
 ## Delegation and capabilities
 

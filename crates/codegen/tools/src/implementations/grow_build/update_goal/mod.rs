@@ -35,7 +35,9 @@ pub enum GoalUpdateStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateGoalInput {
-    #[schemars(description = "Set complete only when the objective is achieved; set blocked only at a genuine impasse.")]
+    #[schemars(
+        description = "Set complete only when current evidence proves the entire objective is achieved. Set blocked only when the same genuine impasse has recurred for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change."
+    )]
     pub status: GoalUpdateStatus,
 }
 
@@ -284,7 +286,7 @@ pub struct UpdateGoalTool;
 goal_metadata!(
     UpdateGoalTool,
     ToolKind::GoalLifecycleUpdate,
-    "Mark the current Goal complete when fully achieved, or blocked only at a genuine impasse. Pause, resume, edit, budget, and clear are user-owned controls."
+    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. Pause, resume, edit, budget, and clear are user-owned controls."
 );
 
 impl tool_runtime::Tool for UpdateGoalTool {

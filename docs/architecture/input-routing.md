@@ -126,4 +126,4 @@ rewrite is shared by the session. `ImageDropped` reports whether images were
 all converted, all removed, or mixed. No OCR backend participates in this
 recovery path.
 
-An Active Goal reload restores the v6 objective, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v6 snapshots are rejected without migration instead of reviving a second lifecycle model.
+An Active Goal reload restores the v7 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v7 snapshots are rejected without migration instead of reviving a second lifecycle model.

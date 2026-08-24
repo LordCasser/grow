@@ -198,7 +198,8 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
                     2,
                     73,
                 )
-                .await;
+                .await
+                .unwrap();
 
             let live = actor.chat_state_handle.get_sampling_config().await.unwrap();
             assert_eq!(live.base_url, "https://reloaded.example/v2");

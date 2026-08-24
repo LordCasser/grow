@@ -563,7 +563,11 @@ impl SessionActor {
         };
         let source_surface_revision = materialized.surface_revision;
         let compaction_input_ref = materialized.input_ref;
-        let full_conversation = materialized.surface;
+        let active_goal = self.active_goal_directive_tag();
+        let full_conversation = sampling_types::project_conversation_for_goal_scope(
+            materialized.surface,
+            active_goal.as_ref(),
+        );
         let system_message = full_conversation
             .iter()
             .find(|item| matches!(item, ConversationItem::System(_)))

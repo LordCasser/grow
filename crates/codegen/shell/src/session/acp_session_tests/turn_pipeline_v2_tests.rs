@@ -107,6 +107,10 @@ async fn every_continuation_audits_the_full_goal_before_planning_a_local_slice()
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Goal);
+            actor
                 .goal_tracker
                 .lock()
                 .create_goal(
@@ -122,20 +126,30 @@ async fn every_continuation_audits_the_full_goal_before_planning_a_local_slice()
                 .render_goal_continuation(0)
                 .expect("active Goal continuation");
             assert!(directive.contains("BEGIN WITH A COMPLETION AUDIT"));
-            assert!(directive.contains("entire objective"));
+            assert!(directive.contains("complete objective"));
             assert!(directive.contains("todo_write"));
             assert!(directive.contains("task tool"));
             assert!(directive.contains("not a second Goal state"));
-            assert!(directive.contains("must not replace or narrow the full objective"));
-            assert!(directive.contains("full objective is achieved"));
+            assert!(directive.contains("narrow or replace the full objective"));
+            assert!(directive.contains("authoritative current evidence"));
+            assert!(directive.contains("three consecutive Goal turns"));
+            assert!(directive.contains("token budget: unlimited"));
             assert!(!directive.contains("planner"));
             assert!(!directive.contains("verifier"));
+            assert_eq!(
+                actor
+                    .active_goal_directive_tag()
+                    .expect("active Goal projection")
+                    .definition_revision,
+                1
+            );
 
             actor
                 .goal_tracker
                 .lock()
                 .pause(crate::session::goal_tracker::GoalPauseReason::User);
             assert!(actor.render_goal_continuation(0).is_none());
+            assert!(actor.active_goal_directive_tag().is_none());
         })
         .await;
 }

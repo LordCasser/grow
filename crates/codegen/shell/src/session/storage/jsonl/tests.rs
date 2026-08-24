@@ -3031,6 +3031,7 @@ async fn timeline_control_roundtrips_goal_through_light_session_load() {
         goal.architecture_version,
         crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,
     );
+    assert_eq!(goal.definition_revision, 1);
 }
 
 #[tokio::test]

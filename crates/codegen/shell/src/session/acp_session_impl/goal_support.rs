@@ -265,18 +265,18 @@ impl SessionActor {
         enabled
     }
 
-    pub(super) fn current_goal_directive_tag(
-        &self,
-        kind: sampling_types::GoalDirectiveKind,
-    ) -> Option<sampling_types::GoalDirectiveTag> {
+    pub(super) fn active_goal_directive_tag(&self) -> Option<sampling_types::GoalDirectiveTag> {
+        if self.behavior.lock().behavior() != tool_types::BehaviorId::Goal {
+            return None;
+        }
         let tracker = self.goal_tracker.lock();
         let goal = tracker.snapshot()?;
+        if goal.status != crate::session::goal_tracker::GoalStatus::Active {
+            return None;
+        }
         Some(sampling_types::GoalDirectiveTag {
             goal_id: goal.goal_id.clone(),
-            definition_revision: self
-                .control_revision
-                .load(std::sync::atomic::Ordering::Relaxed),
-            kind,
+            definition_revision: goal.definition_revision,
         })
     }
 
@@ -284,9 +284,8 @@ impl SessionActor {
         &self,
         content: impl Into<String>,
         reason: sampling_types::SyntheticReason,
-        kind: sampling_types::GoalDirectiveKind,
     ) -> ConversationItem {
-        match self.current_goal_directive_tag(kind) {
+        match self.active_goal_directive_tag() {
             Some(tag) => ConversationItem::goal_directive(content, reason, tag),
             None => ConversationItem::system_reminder(content),
         }

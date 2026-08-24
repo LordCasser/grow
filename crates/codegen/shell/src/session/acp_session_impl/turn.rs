@@ -724,7 +724,6 @@ impl SessionActor {
                 super::super::PromptOrigin::GoalContinuation { .. } => self.goal_directive_item(
                     user_message,
                     sampling_types::SyntheticReason::SystemReminder,
-                    sampling_types::GoalDirectiveKind::Continuation,
                 ),
                 super::super::PromptOrigin::SchedulerFired => {
                     ConversationItem::scheduler_fired(user_message)
@@ -1985,6 +1984,11 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            let active_goal = self.active_goal_directive_tag();
+            request.items = sampling_types::project_conversation_for_goal_scope(
+                request.items,
+                active_goal.as_ref(),
+            );
             if structured_output_native {
                 request.json_output = json_schema
                     .clone()
