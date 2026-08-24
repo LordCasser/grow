@@ -638,14 +638,23 @@ fn surface_id_exists(parent: &crate::Timeline, id: crate::SurfaceId) -> bool {
         .ok()
         .and_then(|index| parent.events().get(index))
         .is_some_and(|event| {
-            event.seq == id.event
-                && matches!(
-                    &event.kind,
-                    crate::TimelineEventKind::Messages(messages)
-                        if usize::try_from(id.item)
-                            .ok()
-                            .is_some_and(|item| item < messages.items.len())
-                )
+            if event.seq != id.event {
+                return false;
+            }
+            match &event.kind {
+                crate::TimelineEventKind::Messages(messages) => usize::try_from(id.item)
+                    .ok()
+                    .is_some_and(|item| item < messages.items.len()),
+                // Control transitions and re-projections are first-class
+                // Surface facts. Their model context is one synthetic item
+                // anchored at item 0, including when a transition was held
+                // until the enclosing turn ended.
+                crate::TimelineEventKind::Control(crate::ControlEvent {
+                    model_context: Some(_),
+                    ..
+                }) => id.item == 0,
+                _ => false,
+            }
         })
 }
 
@@ -968,5 +977,77 @@ mod tests {
             sideband.validate_parent("parent", &parent, spawn_event.seq.get(), &spawn),
             Err(SidebandError::ParentMaterializationMismatch)
         ));
+    }
+
+    #[test]
+    fn recall_parent_validation_accepts_control_owned_surface_coordinates() {
+        let mut parent = crate::Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("current task"),
+        ])
+        .unwrap();
+        parent
+            .record(crate::TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "goal" }),
+                model_context: Some(crate::ControlContext {
+                    layer: crate::ControlContextLayer::Behavior,
+                    activation: crate::ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder(
+                        "<behavior-context>goal</behavior-context>",
+                    ),
+                }),
+            }))
+            .unwrap();
+        let source_ref = TimelineRangeRef {
+            timeline_id: "parent".into(),
+            first_seq: 0,
+            last_seq: parent.events().last().unwrap().seq.get(),
+        };
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let spawn = SidebandSpawnEvent {
+            sideband_id: sideband_id.clone(),
+            purpose: SidebandPurpose::ContextRecall,
+            source_refs: vec![source_ref.clone()],
+        };
+        let spawn_event = parent
+            .record(crate::TimelineEventKind::Sideband(spawn.clone()))
+            .unwrap();
+        let mut sideband = SidebandTimeline::new(sideband_id.clone()).unwrap();
+        for kind in [
+            SidebandEventKind::Request(SidebandRequest {
+                purpose: SidebandPurpose::ContextRecall,
+                prompt: "recall a decision".into(),
+                source_refs: vec![source_ref],
+                route: SidebandRoute {
+                    model: "test-model".into(),
+                    backend: "responses".into(),
+                },
+                initiator_ref: format!("t:parent/sideband:{sideband_id}"),
+                executor: "main".into(),
+                output_schema: None,
+            }),
+            SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: Vec::new(),
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "hybrid-causal-units".into(),
+                    strategy_version: 1,
+                    source_revision: Some(parent.surface_revision()),
+                    context_surface_ids: parent.surface_ids().to_vec(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }),
+        ] {
+            let event = sideband.prepare(kind).unwrap();
+            sideband.accept(event).unwrap();
+        }
+
+        sideband
+            .validate_parent("parent", &parent, spawn_event.seq.get(), &spawn)
+            .unwrap();
     }
 }
