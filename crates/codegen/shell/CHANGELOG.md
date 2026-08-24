@@ -22,6 +22,7 @@
 - A Behavior transition now atomically commits its Control snapshot and model-visible live-tail item. The item remains at its causal Surface position across requests, while later switches append a new transition and Normal explicitly retires older special protocols; system-head rewriting is gone.
 - Tool-result shedding now has one path: auto-compaction emits a pre-prune plan and the chat-state actor commits one validated Timeline replacement. Request-copy and turn-age pruning were removed.
 - Text-only model recovery now records route-scoped ImageShadows with Sideband provenance. Original images remain canonical, another model route sees them immediately, and only the request projection is image-free.
+- Context recall now applies the relevance gate even when the entire unloaded archive fits its evidence budget; a query with no lexical candidate returns locally instead of sampling unrelated history. Sideband replay also accepts Control-owned Behavior/Goal Surface coordinates as first-class context identities.
 - Timeline schema v12 rejects all earlier logs; no compatibility projection is retained.
 
 ## Workflow

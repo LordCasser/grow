@@ -625,16 +625,6 @@ fn select_recall_archive(
         .enumerate()
         .map(|(index, unit)| recall_candidate_tokens(index, unit))
         .collect::<Vec<_>>();
-    let total_tokens = candidate_costs.iter().sum::<u64>();
-    if total_tokens <= token_budget {
-        return assemble_recall_selection(
-            timeline_id,
-            &units,
-            (0..units.len()).collect(),
-            token_budget,
-        );
-    }
-
     let terms = recall_terms(query);
     let exact = query.trim().to_lowercase();
     let documents = units
@@ -1142,6 +1132,24 @@ mod tests {
 
         assert_eq!(selected.selected_surface_ids, expected);
         assert!(!selected.content.contains("button is blue"));
+    }
+
+    #[test]
+    fn unrelated_archive_is_not_sampled_just_because_it_fits() {
+        let transcript = vec![
+            ConversationItem::user("frontend color cleanup"),
+            ConversationItem::assistant("Use the blue palette."),
+        ];
+        let selected = select_for_test(
+            transcript,
+            "active",
+            "database migration transaction strategy",
+            10_000,
+        );
+
+        assert!(selected.content.is_empty());
+        assert!(selected.input_refs.is_empty());
+        assert!(selected.selected_surface_ids.is_empty());
     }
 
     #[test]
