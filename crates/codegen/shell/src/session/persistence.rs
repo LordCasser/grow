@@ -2236,6 +2236,10 @@ pub(crate) async fn load_light(
         workflow_runs: persisted.workflow_runs,
     };
 
+    if !claim_writer {
+        return Ok((persisted_info, PersistenceHandle::noop()));
+    }
+
     let (handle, rx) = actor_channel(Some(session_directory));
 
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);

@@ -247,16 +247,6 @@ impl ContainedDirectory {
     }
 
     pub(crate) fn list_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
-        self.list_names_up_to(usize::MAX).map(|(names, _)| names)
-    }
-
-    /// Return at most `limit` child names and whether more entries existed.
-    /// Callers doing best-effort maintenance can therefore bound both memory
-    /// and latency without reopening this pinned directory through a path.
-    pub(crate) fn list_names_up_to(
-        &self,
-        limit: usize,
-    ) -> io::Result<(Vec<std::ffi::OsString>, bool)> {
         use std::os::unix::ffi::OsStringExt as _;
 
         let owned: std::os::fd::OwnedFd = self.handle.try_clone()?.into();
@@ -266,13 +256,31 @@ impl ContainedDirectory {
             let entry = entry.map_err(io::Error::from)?;
             let name = entry.file_name().to_bytes();
             if name != b"." && name != b".." {
-                if names.len() == limit {
-                    return Ok((names, true));
-                }
                 names.push(std::ffi::OsString::from_vec(name.to_vec()));
             }
         }
-        Ok((names, false))
+        Ok(names)
+    }
+
+    /// Visit child names without materializing the directory. Maintenance
+    /// callers can apply their own bounded batching while retaining this
+    /// directory's pinned filesystem authority.
+    pub(crate) fn visit_names(
+        &self,
+        mut visit: impl FnMut(&std::ffi::OsStr) -> io::Result<()>,
+    ) -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let owned: std::os::fd::OwnedFd = self.handle.try_clone()?.into();
+        let mut directory = nix::dir::Dir::from_fd(owned).map_err(io::Error::from)?;
+        for entry in directory.iter() {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                visit(std::ffi::OsStr::from_bytes(name))?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn create_child(
@@ -850,22 +858,23 @@ impl ContainedDirectory {
     }
 
     pub(crate) fn list_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
-        self.list_names_up_to(usize::MAX).map(|(names, _)| names)
-    }
-
-    /// Return at most `limit` child names and whether more entries existed.
-    pub(crate) fn list_names_up_to(
-        &self,
-        limit: usize,
-    ) -> io::Result<(Vec<std::ffi::OsString>, bool)> {
         let mut names = Vec::new();
         for entry in self.handle.entries()? {
-            if names.len() == limit {
-                return Ok((names, true));
-            }
             names.push(entry?.file_name());
         }
-        Ok((names, false))
+        Ok(names)
+    }
+
+    /// Visit child names without materializing the directory.
+    pub(crate) fn visit_names(
+        &self,
+        mut visit: impl FnMut(&std::ffi::OsStr) -> io::Result<()>,
+    ) -> io::Result<()> {
+        for entry in self.handle.entries()? {
+            let name = entry?.file_name();
+            visit(&name)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn create_child(

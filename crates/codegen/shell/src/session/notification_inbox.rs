@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 const ARTIFACT_DIRECTORY: &str = "artifacts/notifications";
-const ORPHAN_SWEEP_BATCH_SIZE: usize = 1024;
+const ORPHAN_SWEEP_BATCH_SIZE: usize = 256;
 
 pub(crate) fn write_payload(
     session: &crate::session::storage::ContainedDirectory,
@@ -92,38 +92,66 @@ pub(crate) fn remove_payload(
     }
 }
 
-/// Reclaim well-formed payload artifacts that have no pending Timeline
-/// receipt. The Timeline projection is the only liveness authority; unknown
-/// files are left untouched so garbage collection never broadens its scope.
-pub(crate) fn sweep_orphaned_payloads(
+/// Stream well-formed payload hashes in bounded batches. Unknown files are
+/// ignored but never stop the iterator, so they cannot starve later payloads.
+pub(crate) fn visit_payload_hash_batches(
     session: &crate::session::storage::ContainedDirectory,
-    retained_hashes: &std::collections::BTreeSet<String>,
-) -> io::Result<(usize, bool)> {
+    mut visit: impl FnMut(Vec<String>) -> io::Result<()>,
+) -> io::Result<()> {
     let directory = match session.open_relative(
         Path::new(ARTIFACT_DIRECTORY),
         "notification payload directory",
         false,
     ) {
         Ok(directory) => directory,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((0, false)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut batch = Vec::with_capacity(ORPHAN_SWEEP_BATCH_SIZE);
+    directory.visit_names(|name| {
+        if let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".txt"))
+            && hash.len() == 64
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            batch.push(hash.to_owned());
+            if batch.len() == ORPHAN_SWEEP_BATCH_SIZE {
+                visit(std::mem::take(&mut batch))?;
+                batch.reserve(ORPHAN_SWEEP_BATCH_SIZE);
+            }
+        }
+        Ok(())
+    })?;
+    if !batch.is_empty() {
+        visit(batch)?;
+    }
+    Ok(())
+}
+
+/// Remove one candidate batch after its caller has excluded hashes retained
+/// by the current Timeline projection.
+pub(crate) fn remove_payload_hashes(
+    session: &crate::session::storage::ContainedDirectory,
+    hashes: &[String],
+) -> io::Result<usize> {
+    let directory = match session.open_relative(
+        Path::new(ARTIFACT_DIRECTORY),
+        "notification payload directory",
+        false,
+    ) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error),
     };
     let mut removed = 0usize;
-    let (names, truncated) = directory.list_names_up_to(ORPHAN_SWEEP_BATCH_SIZE)?;
-    for name in names {
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let Some(hash) = name.strip_suffix(".txt") else {
-            continue;
-        };
-        if hash.len() != 64
-            || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || retained_hashes.contains(hash)
-        {
-            continue;
+    for hash in hashes {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "notification payload hash is invalid",
+            ));
         }
-        match directory.remove_file(std::ffi::OsStr::new(name), false) {
+        let name = format!("{hash}.txt");
+        match directory.remove_file(std::ffi::OsStr::new(&name), false) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -132,7 +160,7 @@ pub(crate) fn sweep_orphaned_payloads(
     if removed > 0 {
         directory.sync()?;
     }
-    Ok((removed, truncated))
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -156,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_sweep_keeps_only_timeline_referenced_payloads() {
+    fn orphan_cleanup_keeps_only_timeline_referenced_payloads() {
         let temp = tempfile::tempdir().unwrap();
         let session = crate::session::storage::ContainedDirectory::open(
             temp.path(),
@@ -170,11 +198,14 @@ mod tests {
         let artifact_dir = temp.path().join(ARTIFACT_DIRECTORY);
         std::fs::write(artifact_dir.join("unrelated.file"), b"leave me").unwrap();
 
-        let retained_hashes = std::collections::BTreeSet::from([retained.blake3.clone()]);
-        assert_eq!(
-            sweep_orphaned_payloads(&session, &retained_hashes).unwrap(),
-            (1, false)
-        );
+        let mut candidates = Vec::new();
+        visit_payload_hash_batches(&session, |batch| {
+            candidates.extend(batch);
+            Ok(())
+        })
+        .unwrap();
+        candidates.retain(|hash| hash != &retained.blake3);
+        assert_eq!(remove_payload_hashes(&session, &candidates).unwrap(), 1);
         assert_eq!(
             read_payload(&session, &retained).unwrap(),
             "pending receipt"
@@ -190,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_sweep_bounds_each_maintenance_batch() {
+    fn payload_hash_stream_is_bounded_and_unknown_files_do_not_starve_orphans() {
         let temp = tempfile::tempdir().unwrap();
         let session = crate::session::storage::ContainedDirectory::open(
             temp.path(),
@@ -201,13 +232,25 @@ mod tests {
         .unwrap();
         let artifact_dir = temp.path().join(ARTIFACT_DIRECTORY);
         std::fs::create_dir_all(&artifact_dir).unwrap();
+        let mut expected = std::collections::BTreeSet::new();
         for index in 0..=ORPHAN_SWEEP_BATCH_SIZE {
-            std::fs::write(artifact_dir.join(format!("{index:064x}.txt")), b"orphan").unwrap();
+            std::fs::write(artifact_dir.join(format!("unknown-{index}")), b"keep").unwrap();
+            let hash = format!("{index:064x}");
+            std::fs::write(artifact_dir.join(format!("{hash}.txt")), b"orphan").unwrap();
+            expected.insert(hash);
         }
 
-        let (removed, truncated) = sweep_orphaned_payloads(&session, &Default::default()).unwrap();
-        assert_eq!(removed, ORPHAN_SWEEP_BATCH_SIZE);
-        assert!(truncated);
-        assert_eq!(std::fs::read_dir(artifact_dir).unwrap().count(), 1);
+        let mut batches = Vec::new();
+        visit_payload_hash_batches(&session, |batch| {
+            assert!(batch.len() <= ORPHAN_SWEEP_BATCH_SIZE);
+            batches.push(batch);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches.concat().into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
     }
 }

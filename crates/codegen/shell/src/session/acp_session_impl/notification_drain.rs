@@ -3,20 +3,9 @@
 use super::*;
 
 impl SessionActor {
-    /// Reconcile a bounded batch of write-ahead payload artifacts against the
-    /// Timeline projection held by this session's exclusive writer epoch.
+    /// Stream write-ahead payload candidates and reconcile each bounded batch
+    /// against the current Timeline projection within this writer epoch.
     pub(super) async fn reconcile_notification_payloads(&self) {
-        let _artifact_guard = self.notification_artifact_gate.lock().await;
-        let Some(pending) = self.chat_state_handle.pending_notifications().await else {
-            tracing::warn!(
-                "notification payload reconciliation skipped because Timeline is unavailable"
-            );
-            return;
-        };
-        let retained_hashes = pending
-            .into_iter()
-            .map(|notification| notification.payload_ref.blake3)
-            .collect::<std::collections::BTreeSet<_>>();
         let directory = match self.session_directory.try_clone() {
             Ok(directory) => directory,
             Err(error) => {
@@ -24,31 +13,71 @@ impl SessionActor {
                 return;
             }
         };
-        match tokio::task::spawn_blocking(move || {
-            crate::session::notification_inbox::sweep_orphaned_payloads(
+        let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<Vec<String>>(1);
+        let producer = tokio::task::spawn_blocking(move || {
+            crate::session::notification_inbox::visit_payload_hash_batches(
                 &directory,
-                &retained_hashes,
+                |batch| {
+                    batch_tx.blocking_send(batch).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "notification payload reconciler stopped",
+                        )
+                    })
+                },
             )
-        })
-        .await
-        {
-            Ok(Ok((removed, truncated))) => {
-                if removed > 0 {
-                    tracing::info!(removed, "reclaimed orphaned notification payloads");
+        });
+        let mut removed_total = 0usize;
+        while let Some(mut hashes) = batch_rx.recv().await {
+            let _artifact_guard = self.notification_artifact_gate.lock().await;
+            let Some(pending) = self.chat_state_handle.pending_notifications().await else {
+                tracing::warn!(
+                    "notification payload reconciliation stopped because Timeline is unavailable"
+                );
+                break;
+            };
+            let retained_hashes = pending
+                .into_iter()
+                .map(|notification| notification.payload_ref.blake3)
+                .collect::<std::collections::BTreeSet<_>>();
+            hashes.retain(|hash| !retained_hashes.contains(hash));
+            if hashes.is_empty() {
+                continue;
+            }
+            let directory = match self.session_directory.try_clone() {
+                Ok(directory) => directory,
+                Err(error) => {
+                    tracing::warn!(%error, "notification payload cleanup directory unavailable");
+                    break;
                 }
-                if truncated {
-                    tracing::debug!(
-                        removed,
-                        "notification payload reconciliation reached its bounded batch size"
-                    );
+            };
+            match tokio::task::spawn_blocking(move || {
+                crate::session::notification_inbox::remove_payload_hashes(&directory, &hashes)
+            })
+            .await
+            {
+                Ok(Ok(removed)) => removed_total += removed,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "notification payload reconciliation failed");
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "notification payload reconciliation task failed");
+                    break;
                 }
             }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "notification payload reconciliation failed")
-            }
-            Err(error) => {
-                tracing::warn!(%error, "notification payload reconciliation task failed")
-            }
+            drop(_artifact_guard);
+            tokio::task::yield_now().await;
+        }
+        drop(batch_rx);
+        match producer.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Ok(Err(error)) => tracing::warn!(%error, "notification payload enumeration failed"),
+            Err(error) => tracing::warn!(%error, "notification payload enumerator failed"),
+        }
+        if removed_total > 0 {
+            tracing::info!(removed = removed_total, "reclaimed orphaned notification payloads");
         }
     }
 
@@ -814,6 +843,61 @@ mod tests {
                     !orphan_path.exists(),
                     "failed admission must not strand its write-ahead payload"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reconciliation_streams_past_unknown_files_and_keeps_pending_payloads() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "retained-notification".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "retained result".into(),
+                    )
+                    .await
+                    .expect("pending notification");
+                let retained = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .expect("pending projection")[0]
+                    .payload_ref
+                    .clone();
+                let orphan = crate::session::notification_inbox::write_payload(
+                    &actor.session_directory,
+                    "orphaned result",
+                )
+                .unwrap();
+                let artifact_dir = actor.session_dir.join("artifacts/notifications");
+                for index in 0..300 {
+                    std::fs::write(artifact_dir.join(format!("unknown-{index}")), b"keep").unwrap();
+                }
+
+                actor.reconcile_notification_payloads().await;
+
+                assert_eq!(
+                    crate::session::notification_inbox::read_payload(
+                        &actor.session_directory,
+                        &retained,
+                    )
+                    .unwrap(),
+                    "retained result"
+                );
+                assert!(matches!(
+                    crate::session::notification_inbox::read_payload(
+                        &actor.session_directory,
+                        &orphan,
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ));
             })
             .await;
     }

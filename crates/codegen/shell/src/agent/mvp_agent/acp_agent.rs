@@ -611,7 +611,11 @@ impl acp::Agent for MvpAgent {
                 Some(&current_session_dir),
             );
         });
-        let session_exists = self.sessions.borrow().contains_key(&session_id);
+        let session_exists = self
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .is_some_and(|handle| !handle.cmd_tx.is_closed());
         if session_exists {
             tracing::info!(
                 session_id = %session_id.0,
@@ -641,13 +645,38 @@ impl acp::Agent for MvpAgent {
             );
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
-        let (persistence_info, persistence) = crate::session::persistence::load_light(
+        let claim_writer = !session_exists;
+        let (observed_info, observed_persistence) = crate::session::persistence::load_light(
                 &session_info,
                 Some(self.gateway.clone()),
-                !session_exists,
+                claim_writer,
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
+        // A resident actor can terminate while its observational replay is in
+        // flight. Never let that stale observer snapshot fall through into a
+        // writer spawn: reacquire the writer epoch and replay from scratch
+        // before deriving any runtime state.
+        let (persistence_info, persistence, spawn_new_actor) =
+            if !claim_writer
+                && self
+                    .sessions
+                    .borrow()
+                    .get(&session_id)
+                    .is_none_or(|handle| handle.cmd_tx.is_closed())
+            {
+                drop(observed_persistence);
+                let (owned_info, owned_persistence) = crate::session::persistence::load_light(
+                        &session_info,
+                        Some(self.gateway.clone()),
+                        true,
+                    )
+                    .await
+                    .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
+                (owned_info, owned_persistence, true)
+            } else {
+                (observed_info, observed_persistence, claim_writer)
+            };
         drop(persistence_timer);
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
@@ -908,7 +937,7 @@ impl acp::Agent for MvpAgent {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| summary.prompt_display_cwd.clone());
-        if self.sessions.borrow().get(&session_id).is_none() {
+        if spawn_new_actor {
             tracing::info!(
                 session_id = %session_id.0,
                 "load_session: spawning new session actor (session not in memory)"
@@ -958,6 +987,15 @@ impl acp::Agent for MvpAgent {
                 )
                 .await?;
             drop(spawn_timer);
+        } else if self
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .is_none_or(|handle| handle.cmd_tx.is_closed())
+        {
+            return Err(acp::Error::internal_error().data(
+                "Resident session ended during reconnect; retry the session load.",
+            ));
         } else if !mcp_servers.is_empty() {
             tracing::info!(
                 session_id = %session_id.0,

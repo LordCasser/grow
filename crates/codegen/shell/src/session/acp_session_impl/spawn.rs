@@ -2757,9 +2757,9 @@ pub(crate) async fn spawn_session_actor(
     }
     {
         // The persisted adapter already owns the cross-process writer epoch.
-        // Reconcile in a bounded background batch so maintenance never extends
-        // the session spawn critical path; the actor-local gate serializes it
-        // with live notification admission and resolution.
+        // Reconcile in bounded background batches so maintenance never extends
+        // the session spawn critical path; the actor-local gate serializes each
+        // batch with live notification admission and resolution.
         let reconciliation_session = session.clone();
         tokio::task::spawn_local(async move {
             reconciliation_session
