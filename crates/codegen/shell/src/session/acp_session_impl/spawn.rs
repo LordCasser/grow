@@ -139,7 +139,9 @@ mod permission_audit_tests {
             subagent_type: Some("software-coder".into()),
             subagent_description: Some("verify the change".into()),
             permission_mode: Some("auto".into()),
-            requested_permission_mode: Some("auto".into()),
+            requested_permission_mode: Some(
+                workspace::permission::types::RequestPermissionMode::Auto,
+            ),
             capability_target: None,
             capability_purpose: None,
             decision_reason: Some("auto_classifier_allow".into()),
@@ -1569,7 +1571,7 @@ pub(crate) async fn spawn_session_actor(
         let backend = crate::session::subagent_capability::ShellToolAccessGrantBackend {
             state: state.clone(),
             permissions: permissions.clone(),
-            request_mode: startup_hints.subagent_permission_mode.unwrap_or_default(),
+            request_mode: startup_hints.permission_request_mode().unwrap_or_default(),
             session_id: session_info.id.0.to_string(),
             acp_session_id: session_info.id.clone(),
             execution_cwd: std::path::PathBuf::from(session_info.cwd.as_str()),

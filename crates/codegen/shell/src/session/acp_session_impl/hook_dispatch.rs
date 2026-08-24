@@ -175,11 +175,7 @@ impl SessionActor {
     /// The session's current permission mode. Behavior is intentionally
     /// independent and never masquerades as an approval policy.
     pub(super) fn permission_mode_label(&self) -> &'static str {
-        let request_mode = self
-            .startup_hints
-            .is_subagent
-            .then_some(self.startup_hints.subagent_permission_mode)
-            .flatten();
+        let request_mode = self.startup_hints.permission_request_mode();
         match self.permissions.effective_request_mode(request_mode) {
             workspace::permission::types::EffectivePermissionMode::AlwaysApprove => {
                 "always-approve"

@@ -338,7 +338,7 @@ dimensions = 1024                     # vector dimensions
 [subagents]
 enabled = true
 max_depth = 1
-permission_mode = "auto"              # auto | ask | always-approve | follow
+permission_mode = "auto"              # auto | ask | always-approve
 classifier_input = "context"          # context | request_only
 
 [subagents.toggle]
@@ -349,7 +349,7 @@ plan = false
 explore = "deepseek/deepseek-chat"   # route to a configured provider/model
 ```
 
-To pin the model a subagent uses, set its entry under `[subagents.models]`. `permission_mode` independently controls both dynamic capability grants and actual child tool calls; it defaults to `auto` and does not inherit the primary mode unless set to `follow`.
+To pin the model a subagent uses, set its entry under `[subagents.models]`. `permission_mode` independently controls both dynamic capability grants and actual child tool calls; it defaults to `auto` and never follows the primary session's live mode.
 
 `classifier_input` selects the input scope for the rare child Auto request that explicitly crosses its capability fence. `context` (the default) judges the request against an ephemeral, read-only snapshot of the primary task context. `request_only` sends only the structured proposed action and classifier policy, reducing token use when the deployment intentionally does not need task intent. Neither mode writes the judgment prompt or result into the primary conversation.
 

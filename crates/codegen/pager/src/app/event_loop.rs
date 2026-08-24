@@ -2274,7 +2274,6 @@ pub(crate) async fn run(
                             ok,
                             foreground.map(|snapshot| snapshot.prompt_id),
                         );
-                        crate::app::dispatch::sync_follow_subagent_permission_modes(agent);
                     }
                 }
 

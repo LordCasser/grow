@@ -1648,11 +1648,7 @@ impl SessionActor {
             };
             let diagnostic_subagent_type = self.subagent_type_label();
             let within_capability_fence = self.subagent_capabilities.is_some();
-            let child_permission_mode = self
-                .startup_hints
-                .is_subagent
-                .then_some(self.startup_hints.subagent_permission_mode)
-                .flatten();
+            let child_permission_mode = self.startup_hints.permission_request_mode();
             let effective_mode = self
                 .permissions
                 .effective_request_mode(child_permission_mode);

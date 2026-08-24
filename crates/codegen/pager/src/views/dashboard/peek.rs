@@ -459,7 +459,8 @@ pub struct PeekModeBadge {
 /// [`PeekFields`]) so it always reflects session configuration changes. A
 /// subagent shows its own model when its view is loaded, else the parent's.
 /// Its permission badge uses the child's effective mode; only an explicit
-/// `follow` route projects the live parent mode. Subagents have no plan mode.
+/// Subagents project their independently resolved permission mode and have no
+/// plan mode.
 /// All-default for a vanished agent or a roster-only row.
 pub fn peek_model_and_mode(
     row: &DashboardRowId,
@@ -505,25 +506,19 @@ pub fn peek_model_and_mode(
                     .and_then(|c| c.session_agent_name.clone())
                     .or_else(|| parent_agent.session_agent_name.clone())
                     .or_else(|| Some("grow".into()));
-                let follows_parent =
-                    info.and_then(|info| info.permission_mode.as_deref()) == Some("follow");
-                let permission_mode = if follows_parent {
-                    parent_agent.session.permission_mode()
-                } else {
-                    child
-                        .map(|child| child.session.permission_mode())
-                        .or_else(|| {
-                            info.and_then(|info| match info.effective_permission_mode.as_deref() {
-                                Some("always-approve") => {
-                                    Some(diagnostics::enums::PermissionMode::AlwaysApprove)
-                                }
-                                Some("auto") => Some(diagnostics::enums::PermissionMode::Auto),
-                                Some("ask") => Some(diagnostics::enums::PermissionMode::Ask),
-                                _ => None,
-                            })
+                let permission_mode = child
+                    .map(|child| child.session.permission_mode())
+                    .or_else(|| {
+                        info.and_then(|info| match info.effective_permission_mode.as_deref() {
+                            Some("always-approve") => {
+                                Some(diagnostics::enums::PermissionMode::AlwaysApprove)
+                            }
+                            Some("auto") => Some(diagnostics::enums::PermissionMode::Auto),
+                            Some("ask") => Some(diagnostics::enums::PermissionMode::Ask),
+                            _ => None,
                         })
-                        .unwrap_or(diagnostics::enums::PermissionMode::Ask)
-                };
+                    })
+                    .unwrap_or(diagnostics::enums::PermissionMode::Ask);
                 PeekModeBadge {
                     agent,
                     model,

@@ -935,8 +935,8 @@ impl PermissionHandle {
         }
     }
 
-    /// Resolve the request-local mode with the same live primary-mode and
-    /// managed-policy clamp used by the permission actor.
+    /// Resolve an explicit child route, or the live primary mode when the
+    /// request has no child route, with the actor's managed-policy clamp.
     pub fn effective_request_mode(
         &self,
         request_mode: Option<RequestPermissionMode>,
@@ -1133,8 +1133,9 @@ impl PermissionHandle {
         access: AccessKind,
         tool_call_update: acp::ToolCallUpdate,
         edit_path_context: Option<EditPathContext>,
-        context: PermissionRequestContext,
+        mut context: PermissionRequestContext,
     ) -> Decision {
+        context.request_mode = explicit_request_mode(&context.source, context.request_mode);
         match self {
             PermissionHandle::AllowAll => Decision::Allow,
             PermissionHandle::Actor {
@@ -1192,7 +1193,19 @@ fn resolve_request_mode(
         ),
         Some(RequestPermissionMode::Auto) => diagnostics::enums::PermissionMode::Auto,
         Some(RequestPermissionMode::Ask) => diagnostics::enums::PermissionMode::Ask,
-        Some(RequestPermissionMode::Follow) | None => primary_mode,
+        None => primary_mode,
+    }
+}
+
+fn explicit_request_mode(
+    source: &crate::permission::types::PermissionRequestSource,
+    request_mode: Option<crate::permission::types::RequestPermissionMode>,
+) -> Option<crate::permission::types::RequestPermissionMode> {
+    match source {
+        crate::permission::types::PermissionRequestSource::Child { .. } => {
+            Some(request_mode.unwrap_or_default())
+        }
+        crate::permission::types::PermissionRequestSource::Primary { .. } => request_mode,
     }
 }
 
@@ -1728,15 +1741,7 @@ fn spawn_permission_manager_with_pin(
                                 permission_mode: Some(
                                     permission_mode_artifact_str(permission_mode).to_string(),
                                 ),
-                                requested_permission_mode: request_mode.map(|mode| {
-                                    match mode {
-                                        RequestPermissionMode::Ask => "ask",
-                                        RequestPermissionMode::Auto => "auto",
-                                        RequestPermissionMode::AlwaysApprove => "always-approve",
-                                        RequestPermissionMode::Follow => "follow",
-                                    }
-                                    .to_owned()
-                                }),
+                                requested_permission_mode: request_mode,
                                 capability_target: capability_target.clone(),
                                 capability_purpose: capability_purpose.clone(),
                                 decision_reason: decision_reason.map(|s| s.to_string()),
@@ -2976,7 +2981,7 @@ mod tests {
     }
 
     #[test]
-    fn request_mode_override_and_follow_are_explicit() {
+    fn child_request_mode_override_is_independent_from_primary() {
         use crate::permission::types::RequestPermissionMode;
         assert_eq!(
             resolve_request_mode(
@@ -2990,13 +2995,20 @@ mod tests {
             resolve_request_mode(Some(RequestPermissionMode::Ask), PermissionMode::Auto, None,),
             PermissionMode::Ask
         );
+        assert_eq!(resolve_request_mode(None, PermissionMode::Auto, None), PermissionMode::Auto);
+    }
+
+    #[test]
+    fn missing_child_request_mode_normalizes_to_auto_not_primary_mode() {
+        use crate::permission::types::{PermissionRequestSource, RequestPermissionMode};
+        let source = PermissionRequestSource::Child {
+            session_id: "child".into(),
+            subagent_type: Some("explore".into()),
+            subagent_description: None,
+        };
         assert_eq!(
-            resolve_request_mode(
-                Some(RequestPermissionMode::Follow),
-                PermissionMode::Auto,
-                None,
-            ),
-            PermissionMode::Auto
+            explicit_request_mode(&source, None),
+            Some(RequestPermissionMode::Auto)
         );
     }
 
@@ -9323,9 +9335,9 @@ mod tests {
                     let event = events.try_recv().expect("policy event");
                     let expected_reason = match mode {
                         RequestPermissionMode::AlwaysApprove => reasons::ALWAYS_APPROVE,
-                        RequestPermissionMode::Auto
-                        | RequestPermissionMode::Ask
-                        | RequestPermissionMode::Follow => reasons::POLICY_ALLOW,
+                        RequestPermissionMode::Auto | RequestPermissionMode::Ask => {
+                            reasons::POLICY_ALLOW
+                        }
                     };
                     assert_eq!(event.decision_reason.as_deref(), Some(expected_reason));
                 }

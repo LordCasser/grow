@@ -376,6 +376,18 @@ pub struct StartupHints {
     pub preserve_inherited_system: bool,
 }
 
+impl StartupHints {
+    /// Primary requests have no child route. Every child request has an
+    /// independent explicit route; a missing internal hint fails into the
+    /// canonical child default (`Auto`), never the primary session's mode.
+    pub(crate) fn permission_request_mode(
+        &self,
+    ) -> Option<workspace::permission::types::RequestPermissionMode> {
+        self.is_subagent
+            .then(|| self.subagent_permission_mode.unwrap_or_default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +404,28 @@ mod tests {
     }
 
     use serde_json::json;
+
+    #[test]
+    fn startup_hints_never_inherit_primary_permission_mode_for_a_child() {
+        use workspace::permission::types::RequestPermissionMode;
+        let mut hints = StartupHints {
+            subagent_permission_mode: Some(RequestPermissionMode::AlwaysApprove),
+            ..Default::default()
+        };
+        assert_eq!(hints.permission_request_mode(), None);
+
+        hints.is_subagent = true;
+        hints.subagent_permission_mode = None;
+        assert_eq!(
+            hints.permission_request_mode(),
+            Some(RequestPermissionMode::Auto)
+        );
+        hints.subagent_permission_mode = Some(RequestPermissionMode::Ask);
+        assert_eq!(
+            hints.permission_request_mode(),
+            Some(RequestPermissionMode::Ask)
+        );
+    }
 
     // ── RewindMode serialization ──────────────────────────────────────
 

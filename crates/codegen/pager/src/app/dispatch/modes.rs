@@ -5,7 +5,6 @@ use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
-use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
@@ -225,7 +224,6 @@ pub(crate) fn downgrade_displayed_auto_if_gated(app: &mut AppView) {
     for agent in app.agents.values_mut() {
         if agent.session.is_auto() {
             agent.session.permission_mode = shell::util::config::PermissionMode::Ask;
-            sync_follow_subagent_permission_modes(agent);
         }
     }
     if app.current_ui.permission_mode.as_deref() == Some("auto") {
@@ -267,7 +265,6 @@ fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config
     // doc-comment). Do NOT reorder these without re-reading the
     // contract.
     agent.session.permission_mode = mode;
-    sync_follow_subagent_permission_modes(agent);
 
     if mode.is_always_approve() {
         // always-approve ON: auto-approve only permissions owned by this root session.
@@ -388,22 +385,6 @@ pub(super) fn set_permission_mode(
         canonical: kind.as_canonical(),
         session_id,
     }]
-}
-
-pub(crate) fn sync_follow_subagent_permission_modes(agent: &mut AgentView) {
-    let parent_mode = agent.session.permission_mode();
-    let follow_children = agent
-        .subagent_sessions
-        .iter()
-        .filter_map(|(session_id, info)| {
-            (info.permission_mode.as_deref() == Some("follow")).then_some(session_id.clone())
-        })
-        .collect::<Vec<_>>();
-    for session_id in follow_children {
-        if let Some(child) = agent.subagent_views.get_mut(&session_id) {
-            child.session.permission_mode = parent_mode;
-        }
-    }
 }
 
 /// Persist the default permission for future sessions. This deliberately does

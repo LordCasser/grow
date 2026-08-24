@@ -240,8 +240,7 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub max_depth: Option<i64>,
     /// Permission route for all subagent capability requests and tool calls.
-    /// This is intentionally independent of the primary session unless set
-    /// to `follow`.
+    /// It is always independent of the primary session's live mode.
     #[serde(default)]
     pub permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Input scope for child Auto escalation judgments.

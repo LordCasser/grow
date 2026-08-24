@@ -49,10 +49,9 @@ pub struct PermissionEvent {
     /// `config.ui.permission_mode` in the same trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    /// Request-local route before resolving `follow` against the primary
-    /// session: "ask" | "auto" | "always-approve" | "follow".
+    /// Request-local child route: "ask" | "auto" | "always-approve".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_permission_mode: Option<String>,
+    pub requested_permission_mode: Option<RequestPermissionMode>,
     /// Structured capability target for capability-grant events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_target: Option<String>,
@@ -204,8 +203,6 @@ pub enum RequestPermissionMode {
     #[default]
     Auto,
     AlwaysApprove,
-    /// Resolve against the shared primary session's live mode.
-    Follow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,7 +561,7 @@ mod tests {
             subagent_type: Some("explore".into()),
             subagent_description: Some("Find endpoints".into()),
             permission_mode: Some("ask".into()),
-            requested_permission_mode: Some("follow".into()),
+            requested_permission_mode: Some(RequestPermissionMode::Auto),
             capability_target: None,
             capability_purpose: None,
             decision_reason: Some("needs_user".into()),
@@ -577,12 +574,12 @@ mod tests {
             wait_ms: Some(1234),
             queue_depth: Some(3),
         };
-        let json = serde_json::to_value(&event).unwrap();
+        let mut json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["subagent_session_id"], "child-1");
         assert_eq!(json["subagent_type"], "explore");
         assert_eq!(json["subagent_description"], "Find endpoints");
         assert_eq!(json["permission_mode"], "ask");
-        assert_eq!(json["requested_permission_mode"], "follow");
+        assert_eq!(json["requested_permission_mode"], "auto");
         assert_eq!(json["decision_reason"], "needs_user");
         assert_eq!(json["classifier_source"], "llm");
         assert_eq!(json["classifier_verdict"], "allow");
@@ -592,6 +589,11 @@ mod tests {
         assert_eq!(json["auto_denials_total"], 5);
         assert_eq!(json["wait_ms"], 1234);
         assert_eq!(json["queue_depth"], 3);
+        json["requested_permission_mode"] = serde_json::Value::String("follow".into());
+        assert!(
+            serde_json::from_value::<PermissionEvent>(json).is_err(),
+            "retired permission modes must not re-enter through replay"
+        );
     }
     #[test]
     fn permission_event_skips_none_optional_fields() {

@@ -125,14 +125,15 @@ Managed policy, hooks, and protected interactive boundaries remain authoritative
 
 ```toml
 [subagents]
-permission_mode = "auto"       # auto | ask | always-approve | follow
+permission_mode = "auto"       # auto | ask | always-approve
 classifier_input = "context"   # context | request_only
 ```
 
 - `auto` classifies only explicit capability-boundary requests. Normal calls already admitted by the live fence do not invoke the classifier.
 - `ask` routes the request to the real child-session approval UI.
 - `always-approve` still applies managed-policy clamps.
-- `follow` reads the primary session's current decision mode for each request; it does not copy remembered grants.
+
+The child mode is resolved when the child is created and never follows later primary-session mode changes. A missing internal child route resolves to `auto`; it is not interpreted as permission inheritance.
 
 Classifier input and verdicts are ephemeral and never become primary model history. Invalid output, timeout exhaustion, or a non-retryable provider failure denies only the requested expansion.
 

@@ -33,10 +33,7 @@ mod task_result;
 mod transcript;
 mod turn;
 
-pub(crate) use modes::{
-    downgrade_displayed_auto_if_gated, inherit_permission_mode,
-    sync_follow_subagent_permission_modes,
-};
+pub(crate) use modes::{downgrade_displayed_auto_if_gated, inherit_permission_mode};
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::drain_root_permission_queue;
 pub(crate) use permissions::{resolve_permission_queue_transition, respond_permission};
