@@ -9,6 +9,7 @@ description = "Pure data types for Grow's sampling and chat-completion layer"
 async-openai = { workspace = true }
 blake3 = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+jsonschema = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }

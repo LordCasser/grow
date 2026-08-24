@@ -698,7 +698,7 @@ mod tests {
                 },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:{parent_id}/sideband:{sideband_id}"),
                 executor: "main".into(),

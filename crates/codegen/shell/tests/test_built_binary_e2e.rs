@@ -1052,7 +1052,7 @@ async fn invalid_json_schema_disables_structured_output_and_surfaces_error() {
             "--model",
             CHAT_COMPLETIONS_MODEL,
             // Valid JSON object, but `pattern` is an invalid regex → schema
-            // compilation (`jsonschema::validator_for`) fails.
+            // compilation by the shared bounded schema compiler fails.
             "--json-schema",
             r#"{"type":"string","pattern":"["}"#,
             "--max-turns",

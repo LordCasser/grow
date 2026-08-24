@@ -116,12 +116,10 @@ pub(crate) fn build_session_title_request(
         )),
     ])
     .with_model(model);
-    request.json_output = Some(match backend {
-        sampling_types::ApiBackend::ChatCompletions => JsonOutputFormat::JsonObject,
-        sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages => {
-            JsonOutputFormat::JsonSchema(session_title_output_schema())
-        }
-    });
+    request.json_output = Some(JsonOutputFormat::portable_schema_for_backend(
+        backend,
+        session_title_output_schema(),
+    ));
     request
 }
 

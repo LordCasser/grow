@@ -9,23 +9,6 @@ const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
 const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
 const PERMISSION_JUDGMENT_RETRY_MESSAGE: &str = "The previous permission judgment attempt returned an empty or invalid structured response, timed out, or failed with a transient provider error. Retry once. Return exactly one JSON object with no Markdown or prose: {\"decision\":\"allow\"|\"deny\",\"reason\":\"brief explanation\"}.";
 
-fn permission_judgment_json_output(
-    backend: sampling_types::ApiBackend,
-) -> sampling_types::JsonOutputFormat {
-    match backend {
-        // Chat Completions is a provider-neutral compatibility backend.
-        // DeepSeek and BigModel expose JSON Object mode but not OpenAI's
-        // `json_schema` wire shape, so use the common contract and validate
-        // the exact permission schema locally.
-        sampling_types::ApiBackend::ChatCompletions => sampling_types::JsonOutputFormat::JsonObject,
-        sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages => {
-            sampling_types::JsonOutputFormat::JsonSchema(
-                workspace::permission::classifier_output_json_schema(),
-            )
-        }
-    }
-}
-
 fn permission_judgment_needs_retry(text: &str) -> bool {
     workspace::permission::parse_classifier_model_text(text)
         == workspace::permission::ClassifierVerdict::Unavailable
@@ -392,7 +375,7 @@ impl SessionActor {
                         chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                         chat_state::SidebandRoute {
                             model: model.clone(),
-                            backend: sideband_backend(client.api_backend()).into(),
+                            backend: client.api_backend(),
                         },
                         None,
                     )
@@ -407,6 +390,7 @@ impl SessionActor {
                 if let Err(error) = sideband
                     .attempt_selected(
                         &request,
+                        client.api_backend(),
                         vec![input_ref.clone()],
                         Some(materialized.surface_revision),
                         vec![shadow.source],
@@ -1160,7 +1144,10 @@ impl SessionActor {
                             (items, Vec::new())
                         };
                         let json_output =
-                            permission_judgment_json_output(sampling_client.api_backend());
+                            sampling_types::JsonOutputFormat::portable_schema_for_backend(
+                                sampling_client.api_backend(),
+                                workspace::permission::classifier_output_json_schema(),
+                            );
                         Ok::<_, workspace::permission::ClassifierFailure>((
                             sampling_client,
                             model,
@@ -1198,7 +1185,7 @@ impl SessionActor {
                             budget_policy,
                             chat_state::SidebandRoute {
                                 model: model.clone(),
-                                backend: sideband_backend(sampling_client.api_backend()).into(),
+                                backend: sampling_client.api_backend(),
                             },
                             Some(workspace::permission::classifier_output_json_schema()),
                         )
@@ -1233,7 +1220,11 @@ impl SessionActor {
                                 ..ConversationRequest::default()
                             };
                             sideband
-                                .attempt_all_sources(&request, feedback.take())
+                                .attempt_all_sources(
+                                    &request,
+                                    sampling_client.api_backend(),
+                                    feedback.take(),
+                                )
                                 .await
                                 .map_err(|error| {
                                     workspace::permission::ClassifierFailure::TransportError(

@@ -687,10 +687,7 @@ impl SessionActor {
                 },
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
-                    backend: crate::session::sideband::sideband_backend(
-                        sampling_client.api_backend(),
-                    )
-                    .into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )

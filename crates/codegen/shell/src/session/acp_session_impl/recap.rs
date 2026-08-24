@@ -133,7 +133,7 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&base_request, 3),
                 chat_state::SidebandRoute {
                     model: model.clone(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
@@ -147,7 +147,11 @@ impl SessionActor {
         let mut feedback = None;
         let result = loop {
             sideband
-                .attempt_all_sources(&base_request, feedback.take())
+                .attempt_all_sources(
+                    &base_request,
+                    sampling_client.api_backend(),
+                    feedback.take(),
+                )
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
             match sampling_client
@@ -329,7 +333,7 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: model.clone(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
@@ -345,7 +349,10 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
+        if let Err(error) = sideband
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
+            .await
+        {
             tracing::warn!(%error, "recap: failed to commit Sideband attempt");
             clear_in_flight();
             if !auto {
@@ -545,13 +552,16 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
             .await
             .ok()?;
-        sideband.attempt_all_sources(&request, None).await.ok()?;
+        sideband
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
+            .await
+            .ok()?;
 
         let result = match sampling_client.api_backend() {
             crate::sampling::ApiBackend::ChatCompletions => {
@@ -723,13 +733,16 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
             .await
             .ok()?;
-        sideband.attempt_all_sources(&request, None).await.ok()?;
+        sideband
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
+            .await
+            .ok()?;
 
         let response = match sampling_client.conversation_collect(request).await {
             Ok(r) => r,

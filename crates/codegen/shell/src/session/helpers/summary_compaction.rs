@@ -121,7 +121,7 @@ impl CompactionSampler for ShellCompactionSampler {
         self.sideband
             .lock()
             .await
-            .attempt_all_sources(&audit_request, feedback)
+            .attempt_all_sources(&audit_request, self.client.api_backend(), feedback)
             .await
             .map_err(sideband_error_to_sample_error)?;
 

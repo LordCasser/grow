@@ -528,7 +528,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
             },
             route: chat_state::SidebandRoute {
                 model: "test-model".into(),
-                backend: "responses".into(),
+                backend: sampling_types::ApiBackend::Responses,
             },
             initiator_ref: format!("t:{}/sideband:{sideband_id}", info.id),
             executor: "main".into(),
@@ -702,7 +702,7 @@ async fn sideband_writer_rejects_symlinked_directory_roots() {
                 },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:{}/0", info.id),
                 executor: "main".into(),
@@ -3297,7 +3297,7 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
                 },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:test-session-123/sideband:{id}"),
                 executor: "main".into(),
@@ -3360,7 +3360,7 @@ async fn session_load_closes_an_interrupted_sideband_once() {
                 },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:{}/sideband:{id}", info.id),
                 executor: "main".into(),

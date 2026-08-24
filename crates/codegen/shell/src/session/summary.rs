@@ -57,7 +57,7 @@ impl SessionActor {
         input_ref: chat_state::TimelineRangeRef,
     ) {
         use crate::session::helpers::session_title;
-        use crate::session::sideband::{sideband_backend, sideband_finish, sideband_usage};
+        use crate::session::sideband::{sideband_finish, sideband_usage};
 
         let request = session_title::build_session_title_request(
             &user_text,
@@ -72,7 +72,7 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: route.model.clone(),
-                    backend: sideband_backend(route.client.api_backend()).into(),
+                    backend: route.client.api_backend(),
                 },
                 Some(session_title::session_title_output_schema()),
             )
@@ -85,7 +85,10 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
+        if let Err(error) = sideband
+            .attempt_all_sources(&request, route.client.api_backend(), None)
+            .await
+        {
             tracing::warn!(%error, "session title: failed to commit Sideband attempt");
             self.session_title_route.replace(Some(route));
             return;

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sampling_types::{ConversationItem, ConversationRequest};
 use serde::{Deserialize, Serialize};
 
-pub const SIDEBAND_SCHEMA_VERSION: u8 = 5;
+pub const SIDEBAND_SCHEMA_VERSION: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -130,7 +130,7 @@ impl SidebandSpawnEvent {
 #[serde(deny_unknown_fields)]
 pub struct SidebandRoute {
     pub model: String,
-    pub backend: String,
+    pub backend: sampling_types::ApiBackend,
 }
 
 /// Cross-attempt admission envelope frozen by request seq 0.
@@ -294,10 +294,12 @@ pub enum SidebandError {
     ParentMaterializationMismatch,
     #[error("sideband request must be seq 0 and unique")]
     InvalidRequestBoundary,
-    #[error("sideband request route and executor must be non-empty")]
+    #[error("sideband request model, initiator, and executor must be non-empty")]
     IncompleteRequest,
     #[error("sideband request budget policy is invalid")]
     InvalidBudgetPolicy,
+    #[error("sideband output schema is invalid: {0}")]
+    InvalidOutputSchema(String),
     #[error("sideband attempt input is not covered by the request source refs")]
     InputOutsideSource,
     #[error("sideband attempt assembly manifest is invalid")]
@@ -306,6 +308,10 @@ pub enum SidebandError {
     AttemptBudgetExceeded,
     #[error("sideband requests cannot advertise tools or a tool choice")]
     ToolCapabilityForbidden,
+    #[error("sideband provider output constraint does not match its durable request")]
+    OutputConstraintMismatch,
+    #[error("sideband provider model or backend does not match its durable route")]
+    RouteMismatch,
     #[error("sideband attempt selected Surface ids are not canonical or covered by input refs")]
     InvalidSurfaceSelection,
     #[error("sideband attempt requires an open request")]
@@ -320,6 +326,10 @@ pub enum SidebandError {
     InvalidResultSources { attempt: u64 },
     #[error("sideband result is empty")]
     EmptyResult,
+    #[error("sideband result is missing the structured output required by its request")]
+    MissingStructuredOutput,
+    #[error("sideband structured output is invalid: {0}")]
+    StructuredOutputSchemaMismatch(String),
     #[error("sideband result evidence is not covered by the successful attempt input refs")]
     EvidenceOutsideInput,
     #[error("sideband already has a result")]
@@ -515,7 +525,6 @@ impl SidebandTimeline {
                     return Err(SidebandError::InvalidRequestBoundary);
                 }
                 if request.route.model.trim().is_empty()
-                    || request.route.backend.trim().is_empty()
                     || request.initiator_ref.trim().is_empty()
                     || request.executor.trim().is_empty()
                 {
@@ -529,6 +538,10 @@ impl SidebandTimeline {
                 }
                 for source_ref in &request.source_refs {
                     source_ref.validate()?;
+                }
+                if let Some(schema) = &request.output_schema {
+                    sampling_types::compile_output_schema(schema)
+                        .map_err(SidebandError::InvalidOutputSchema)?;
                 }
             }
             SidebandEventKind::Attempt(attempt) => {
@@ -627,6 +640,19 @@ impl SidebandTimeline {
                     {
                         return Err(SidebandError::EvidenceOutsideInput);
                     }
+                }
+                let SidebandEventKind::Request(request) = &self.events[0].kind else {
+                    unreachable!("an accepted attempt always follows request seq 0")
+                };
+                if let Some(schema) = &request.output_schema {
+                    let structured = result
+                        .structured_output
+                        .as_ref()
+                        .ok_or(SidebandError::MissingStructuredOutput)?;
+                    let validator = sampling_types::compile_output_schema(schema)
+                        .map_err(SidebandError::InvalidOutputSchema)?;
+                    sampling_types::validate_output_value(&validator, structured)
+                        .map_err(SidebandError::StructuredOutputSchemaMismatch)?;
                 }
                 self.result_seq = Some(event.seq);
             }
@@ -757,7 +783,7 @@ mod tests {
             },
             route: SidebandRoute {
                 model: "test-model".into(),
-                backend: "responses".into(),
+                backend: sampling_types::ApiBackend::Responses,
             },
             initiator_ref: "t:parent/5".into(),
             executor: "main".into(),
@@ -784,6 +810,19 @@ mod tests {
             },
             feedback: None,
         }
+    }
+
+    fn timeline_with_attempt(request: SidebandRequest) -> SidebandTimeline {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut timeline = SidebandTimeline::new(id).unwrap();
+        for kind in [
+            SidebandEventKind::Request(request),
+            SidebandEventKind::Attempt(attempt(1, 32, Some(16))),
+        ] {
+            let event = timeline.prepare(kind).unwrap();
+            timeline.accept(event).unwrap();
+        }
+        timeline
     }
 
     #[test]
@@ -943,6 +982,59 @@ mod tests {
                 Err(SidebandError::InvalidBudgetPolicy)
             ));
         }
+    }
+
+    #[test]
+    fn request_rejects_a_non_self_contained_output_schema() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let timeline = SidebandTimeline::new(id).unwrap();
+        let mut invalid = request();
+        invalid.output_schema = Some(serde_json::json!({
+            "$ref": "https://example.com/schema.json"
+        }));
+
+        let error = timeline
+            .prepare(SidebandEventKind::Request(invalid))
+            .unwrap_err();
+        assert!(matches!(error, SidebandError::InvalidOutputSchema(_)));
+    }
+
+    #[test]
+    fn schema_bound_result_requires_structured_output() {
+        let timeline = timeline_with_attempt(request());
+        let error = timeline
+            .prepare(SidebandEventKind::Result(SidebandResult {
+                raw_output: "{}".into(),
+                structured_output: None,
+                usage: SidebandUsage::default(),
+                finish: "stop".into(),
+                source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
+            }))
+            .unwrap_err();
+
+        assert!(matches!(error, SidebandError::MissingStructuredOutput));
+    }
+
+    #[test]
+    fn schema_bound_result_must_conform_before_it_is_durable() {
+        let timeline = timeline_with_attempt(request());
+        let error = timeline
+            .prepare(SidebandEventKind::Result(SidebandResult {
+                raw_output: r#""not an object""#.into(),
+                structured_output: Some(serde_json::json!("not an object")),
+                usage: SidebandUsage::default(),
+                finish: "stop".into(),
+                source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
+            }))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SidebandError::StructuredOutputSchemaMismatch(_)
+        ));
+        assert_eq!(timeline.events().len(), 2);
     }
 
     #[test]
@@ -1131,7 +1223,7 @@ mod tests {
                 },
                 route: SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:parent/sideband:{sideband_id}"),
                 executor: "main".into(),
@@ -1210,7 +1302,7 @@ mod tests {
                 },
                 route: SidebandRoute {
                     model: "test-model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:parent/sideband:{sideband_id}"),
                 executor: "main".into(),

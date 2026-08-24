@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tools::implementations::context_recall::{ContextRecallBackend, ContextRecallOutput};
 
 use crate::session::SessionActor;
-use crate::session::sideband::{SidebandSource, sideband_backend, sideband_finish, sideband_usage};
+use crate::session::sideband::{SidebandSource, sideband_finish, sideband_usage};
 
 const CONTEXT_RECALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ARCHIVE_ITEM_CHARS: usize = 12_000;
@@ -227,7 +227,7 @@ impl SessionActor {
                 },
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 Some(recall_synthesis_schema()),
             )
@@ -302,7 +302,12 @@ impl SessionActor {
                 model: Some(sampling_config.model.clone()),
                 temperature: None,
                 max_output_tokens: Some(output_budget),
-                json_output: Some(recall_json_output(sampling_client.api_backend())),
+                json_output: Some(
+                    sampling_types::JsonOutputFormat::portable_schema_for_backend(
+                        sampling_client.api_backend(),
+                        recall_synthesis_schema(),
+                    ),
+                ),
                 ..ConversationRequest::default()
             };
             if !context_recall_attempt_fits(context_window, &request, u64::from(output_budget)) {
@@ -326,6 +331,7 @@ impl SessionActor {
             sideband
                 .attempt_selected(
                     &request,
+                    sampling_client.api_backend(),
                     attempt_input_refs,
                     Some(materialized.surface_revision),
                     need_context.surface_ids.clone(),
@@ -576,15 +582,6 @@ fn recall_synthesis_schema() -> serde_json::Value {
         },
         "additionalProperties": false
     })
-}
-
-fn recall_json_output(backend: sampling_types::ApiBackend) -> sampling_types::JsonOutputFormat {
-    match backend {
-        sampling_types::ApiBackend::ChatCompletions => sampling_types::JsonOutputFormat::JsonObject,
-        sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages => {
-            sampling_types::JsonOutputFormat::JsonSchema(recall_synthesis_schema())
-        }
-    }
 }
 
 fn parse_recall_synthesis(

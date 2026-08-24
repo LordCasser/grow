@@ -114,6 +114,7 @@ impl SidebandRun {
     pub(crate) async fn attempt_all_sources(
         &mut self,
         request: &ConversationRequest,
+        backend: sampling_types::ApiBackend,
         feedback: Option<String>,
     ) -> Result<(), SidebandRunError> {
         let source_refs = self
@@ -129,6 +130,7 @@ impl SidebandRun {
             .ok_or(chat_state::SidebandError::AttemptWithoutRequest)?;
         self.attempt_selected(
             request,
+            backend,
             source_refs,
             None,
             Vec::new(),
@@ -142,6 +144,7 @@ impl SidebandRun {
     pub(crate) async fn attempt_selected(
         &mut self,
         request: &ConversationRequest,
+        backend: sampling_types::ApiBackend,
         input_refs: Vec<chat_state::TimelineRangeRef>,
         source_revision: Option<u64>,
         context_surface_ids: Vec<chat_state::SurfaceId>,
@@ -151,6 +154,39 @@ impl SidebandRun {
     ) -> Result<(), SidebandRunError> {
         if !request.tools.is_empty() || request.tool_choice.is_some() {
             let error = chat_state::SidebandError::ToolCapabilityForbidden;
+            self.append(chat_state::SidebandEventKind::End(
+                chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    error: Some(error.to_string()),
+                },
+            ))
+            .await?;
+            return Err(error.into());
+        }
+        let recorded_request = self
+            .timeline
+            .events()
+            .first()
+            .and_then(|event| match &event.kind {
+                chat_state::SidebandEventKind::Request(request) => Some(request),
+                _ => None,
+            })
+            .ok_or(chat_state::SidebandError::AttemptWithoutRequest)?;
+        if request.model.as_deref() != Some(recorded_request.route.model.as_str())
+            || backend != recorded_request.route.backend
+        {
+            let error = chat_state::SidebandError::RouteMismatch;
+            self.append(chat_state::SidebandEventKind::End(
+                chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    error: Some(error.to_string()),
+                },
+            ))
+            .await?;
+            return Err(error.into());
+        }
+        if !output_constraint_matches(recorded_request, request) {
+            let error = chat_state::SidebandError::OutputConstraintMismatch;
             self.append(chat_state::SidebandEventKind::End(
                 chat_state::SidebandEnd {
                     outcome: chat_state::SidebandOutcome::Failed,
@@ -205,17 +241,32 @@ impl SidebandRun {
                 matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)).then_some(event.seq)
             })
             .ok_or(chat_state::SidebandError::ResultWithoutAttempt)?;
-        self.append(chat_state::SidebandEventKind::Result(
-            chat_state::SidebandResult {
-                raw_output,
-                structured_output,
-                usage,
-                finish,
-                source_event_seqs: [0, attempt_seq],
-                evidence_refs,
-            },
-        ))
-        .await?;
+        let result = chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
+            raw_output,
+            structured_output,
+            usage,
+            finish,
+            source_event_seqs: [0, attempt_seq],
+            evidence_refs,
+        });
+        if let Err(error) = self.append(result).await {
+            if matches!(
+                &error,
+                SidebandRunError::Invalid(
+                    chat_state::SidebandError::MissingStructuredOutput
+                        | chat_state::SidebandError::StructuredOutputSchemaMismatch(_)
+                )
+            ) {
+                self.append(chat_state::SidebandEventKind::End(
+                    chat_state::SidebandEnd {
+                        outcome: chat_state::SidebandOutcome::Failed,
+                        error: Some(error.to_string()),
+                    },
+                ))
+                .await?;
+            }
+            return Err(error);
+        }
         let result_ref = chat_state::TimelineRangeRef {
             timeline_id: self.timeline.sideband_id().to_owned(),
             first_seq: attempt_seq + 1,
@@ -288,6 +339,23 @@ impl SidebandRun {
     }
 }
 
+fn output_constraint_matches(
+    recorded: &chat_state::SidebandRequest,
+    provider: &ConversationRequest,
+) -> bool {
+    match (&recorded.output_schema, &provider.json_output) {
+        (None, None) => true,
+        (Some(schema), Some(actual)) => {
+            actual
+                == &sampling_types::JsonOutputFormat::portable_schema_for_backend(
+                    recorded.route.backend.clone(),
+                    schema.clone(),
+                )
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
 async fn append_sideband_exact(
     persistence: &NotificationSender,
     event: chat_state::SidebandEvent,
@@ -342,19 +410,13 @@ pub(crate) fn sideband_finish(response: &ConversationResponse) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-pub(crate) fn sideband_backend(backend: sampling_types::ApiBackend) -> &'static str {
-    match backend {
-        sampling_types::ApiBackend::ChatCompletions => "chat_completions",
-        sampling_types::ApiBackend::Responses => "responses",
-        sampling_types::ApiBackend::Messages => "messages",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_run() -> (
+    fn test_run_with_schema(
+        output_schema: Option<serde_json::Value>,
+    ) -> (
         SidebandRun,
         tokio::sync::mpsc::UnboundedReceiver<crate::session::persistence::PersistenceMsg>,
     ) {
@@ -373,11 +435,11 @@ mod tests {
                     },
                     route: chat_state::SidebandRoute {
                         model: "test-model".into(),
-                        backend: "responses".into(),
+                        backend: sampling_types::ApiBackend::Responses,
                     },
                     initiator_ref: format!("t:parent/sideband:{sideband_id}"),
                     executor: "main".into(),
-                    output_schema: None,
+                    output_schema,
                 },
             ))
             .unwrap();
@@ -401,12 +463,30 @@ mod tests {
         )
     }
 
+    fn test_run() -> (
+        SidebandRun,
+        tokio::sync::mpsc::UnboundedReceiver<crate::session::persistence::PersistenceMsg>,
+    ) {
+        test_run_with_schema(None)
+    }
+
+    fn provider_request() -> ConversationRequest {
+        ConversationRequest {
+            model: Some("test-model".into()),
+            ..ConversationRequest::default()
+        }
+    }
+
     #[tokio::test]
     async fn cancelled_append_recovers_exact_event_without_swallowing_new_operation() {
         let (mut run, mut persistence_rx) = test_run();
-        let request = ConversationRequest::default();
+        let request = provider_request();
 
-        let mut first = Box::pin(run.attempt_all_sources(&request, Some("first".into())));
+        let mut first = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            Some("first".into()),
+        ));
         let first_message = tokio::select! {
             message = persistence_rx.recv() => message.unwrap(),
             result = &mut first => panic!("append unexpectedly completed: {result:?}"),
@@ -421,7 +501,11 @@ mod tests {
         drop(first);
         drop(respond_to);
 
-        let mut retry = Box::pin(run.attempt_all_sources(&request, Some("different".into())));
+        let mut retry = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            Some("different".into()),
+        ));
         let retry_message = tokio::select! {
             message = persistence_rx.recv() => message.unwrap(),
             result = &mut retry => panic!("retry unexpectedly completed: {result:?}"),
@@ -462,17 +546,21 @@ mod tests {
                     description: None,
                     parameters: serde_json::json!({"type": "object"}),
                 }],
-                ..ConversationRequest::default()
+                ..provider_request()
             },
             ConversationRequest {
                 tool_choice: Some(sampling_types::ConversationToolChoice::None),
-                ..ConversationRequest::default()
+                ..provider_request()
             },
         ];
 
         for request in requests {
             let (mut run, mut persistence_rx) = test_run();
-            let mut rejected = Box::pin(run.attempt_all_sources(&request, None));
+            let mut rejected = Box::pin(run.attempt_all_sources(
+                &request,
+                sampling_types::ApiBackend::Responses,
+                None,
+            ));
             let message = tokio::select! {
                 message = persistence_rx.recv() => message.unwrap(),
                 result = &mut rejected => panic!("rejection returned before its terminal fact was durable: {result:?}"),
@@ -516,5 +604,214 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn provider_output_constraint_must_equal_the_durable_contract() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["decision"],
+            "properties": { "decision": { "type": "string" } }
+        });
+        let request = chat_state::SidebandRequest {
+            purpose: chat_state::SidebandPurpose::PermissionJudgment,
+            prompt: "judge".into(),
+            source_refs: Vec::new(),
+            budget_policy: chat_state::SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 32,
+                max_output_tokens_per_attempt: None,
+            },
+            route: chat_state::SidebandRoute {
+                model: "test-model".into(),
+                backend: sampling_types::ApiBackend::Responses,
+            },
+            initiator_ref: "parent".into(),
+            executor: "main".into(),
+            output_schema: Some(schema.clone()),
+        };
+
+        assert!(output_constraint_matches(
+            &request,
+            &ConversationRequest {
+                json_output: Some(sampling_types::JsonOutputFormat::JsonSchema(schema.clone())),
+                ..ConversationRequest::default()
+            }
+        ));
+        assert!(!output_constraint_matches(
+            &request,
+            &ConversationRequest::default()
+        ));
+        assert!(!output_constraint_matches(
+            &request,
+            &ConversationRequest {
+                json_output: Some(sampling_types::JsonOutputFormat::JsonSchema(
+                    serde_json::json!({"type": "array"}),
+                )),
+                ..ConversationRequest::default()
+            }
+        ));
+
+        let mut chat_request = request;
+        chat_request.route.backend = sampling_types::ApiBackend::ChatCompletions;
+        assert!(output_constraint_matches(
+            &chat_request,
+            &ConversationRequest {
+                json_output: Some(sampling_types::JsonOutputFormat::JsonObject),
+                ..ConversationRequest::default()
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn output_constraint_mismatch_is_terminal_before_attempt_persistence() {
+        let (mut run, mut persistence_rx) =
+            test_run_with_schema(Some(serde_json::json!({"type": "object"})));
+        let request = provider_request();
+        let mut rejected = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            None,
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut rejected => panic!("rejection returned before its terminal fact was durable: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event,
+            respond_to,
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        assert!(matches!(
+            event.kind,
+            chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Failed,
+                ..
+            })
+        ));
+        respond_to.send(Ok(())).unwrap();
+        assert!(matches!(
+            rejected.await,
+            Err(SidebandRunError::Invalid(
+                chat_state::SidebandError::OutputConstraintMismatch
+            ))
+        ));
+        assert_eq!(
+            run.timeline
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn route_mismatch_is_terminal_before_attempt_persistence() {
+        let (mut run, mut persistence_rx) = test_run();
+        let request = provider_request();
+        let mut rejected =
+            Box::pin(run.attempt_all_sources(&request, sampling_types::ApiBackend::Messages, None));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut rejected => panic!("rejection returned before its terminal fact was durable: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event,
+            respond_to,
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        assert!(matches!(
+            event.kind,
+            chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Failed,
+                ..
+            })
+        ));
+        respond_to.send(Ok(())).unwrap();
+        assert!(matches!(
+            rejected.await,
+            Err(SidebandRunError::Invalid(
+                chat_state::SidebandError::RouteMismatch
+            ))
+        ));
+        assert!(
+            !run.timeline
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn impossible_schema_result_is_terminal_without_a_result_fact() {
+        let schema = serde_json::json!({"type": "object"});
+        let (mut run, mut persistence_rx) = test_run_with_schema(Some(schema.clone()));
+        let request = ConversationRequest {
+            model: Some("test-model".into()),
+            json_output: Some(sampling_types::JsonOutputFormat::JsonSchema(schema)),
+            ..ConversationRequest::default()
+        };
+
+        let mut attempted = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            None,
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut attempted => panic!("attempt returned before its fact was durable: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to.send(Ok(())).unwrap();
+        attempted.await.unwrap();
+
+        let mut rejected = Box::pin(run.complete(
+            "[]".into(),
+            Some(serde_json::json!([])),
+            chat_state::SidebandUsage::default(),
+            "stop".into(),
+            Vec::new(),
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut rejected => panic!("rejection returned before its terminal fact was durable: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event,
+            respond_to,
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        assert!(matches!(
+            event.kind,
+            chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Failed,
+                ..
+            })
+        ));
+        respond_to.send(Ok(())).unwrap();
+        assert!(matches!(
+            rejected.await,
+            Err(SidebandRunError::Invalid(
+                chat_state::SidebandError::StructuredOutputSchemaMismatch(_)
+            ))
+        ));
+        assert!(
+            !run.timeline
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, chat_state::SidebandEventKind::Result(_)))
+        );
     }
 }

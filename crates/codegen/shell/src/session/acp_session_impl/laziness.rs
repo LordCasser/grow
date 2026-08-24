@@ -564,7 +564,7 @@ impl SessionActor {
         // so backend trace correlation can distinguish "classifier
         // fired in session X" from background traffic.
         let session_id_str = self.session_info.id.to_string();
-        let request = ConversationRequest {
+        let mut request = ConversationRequest {
             items,
             tools: vec![],
             tool_choice: None,
@@ -611,6 +611,22 @@ impl SessionActor {
                 return;
             }
         };
+        let output_schema = serde_json::json!({
+            "type": "object",
+            "required": ["category", "confidence", "evidence"],
+            "properties": {
+                "category": { "type": "string" },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "evidence": { "type": "string" }
+            },
+            "additionalProperties": false
+        });
+        request.json_output = Some(
+            sampling_types::JsonOutputFormat::portable_schema_for_backend(
+                sampling_client.api_backend(),
+                output_schema.clone(),
+            ),
+        );
         let mut sideband = match self
             .begin_sideband(
                 chat_state::SidebandPurpose::LazinessJudgment,
@@ -619,18 +635,9 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: model_id.clone(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
-                Some(serde_json::json!({
-                    "type": "object",
-                    "required": ["category", "confidence", "evidence"],
-                    "properties": {
-                        "category": { "type": "string" },
-                        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                        "evidence": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                })),
+                Some(output_schema),
             )
             .await
         {
@@ -653,7 +660,10 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
+        if let Err(error) = sideband
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
+            .await
+        {
             let detail = error.to_string();
             let elapsed_ms = started.elapsed().as_millis() as u64;
             self.maybe_write_laziness_debug_log(

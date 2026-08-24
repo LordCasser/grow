@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::rs;
 use crate::types::{
-    ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage, FinishReason,
-    ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, Usage,
+    ApiBackend, ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage,
+    FinishReason, ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition,
+    Usage,
 };
 
 // ============================================================================
@@ -684,6 +685,71 @@ impl From<ToolDefinition> for ToolSpec {
 pub enum JsonOutputFormat {
     JsonObject,
     JsonSchema(serde_json::Value),
+}
+
+impl JsonOutputFormat {
+    /// Select the strongest portable wire constraint for one exact schema.
+    /// Chat Completions providers share JSON Object mode but not a common
+    /// `json_schema` shape, so exact validation remains local there.
+    pub fn portable_schema_for_backend(backend: ApiBackend, schema: serde_json::Value) -> Self {
+        match backend {
+            ApiBackend::ChatCompletions => Self::JsonObject,
+            ApiBackend::Responses | ApiBackend::Messages => Self::JsonSchema(schema),
+        }
+    }
+}
+
+const OUTPUT_SCHEMA_MAX_BYTES: usize = 256 * 1024;
+const OUTPUT_SCHEMA_REGEX_SIZE_LIMIT: usize = 256 * 1024;
+const OUTPUT_SCHEMA_REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+
+pub type OutputSchemaValidator = jsonschema::Validator;
+
+#[derive(Debug)]
+struct RejectExternalSchemaRefs;
+
+impl jsonschema::Retrieve for RejectExternalSchemaRefs {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external JSON Schema references are disabled: {uri}").into())
+    }
+}
+
+/// Compile one bounded, self-contained provider output contract.
+///
+/// Every structured-output surface uses this compiler so live validation and
+/// durable replay agree on schema validity. External references are rejected:
+/// validation must never acquire network or filesystem authority.
+pub fn compile_output_schema(schema: &serde_json::Value) -> Result<OutputSchemaValidator, String> {
+    let schema_len = serde_json::to_vec(schema)
+        .map_err(|error| format!("output schema cannot be serialized: {error}"))?
+        .len();
+    if schema_len > OUTPUT_SCHEMA_MAX_BYTES {
+        return Err(format!(
+            "output schema is too large ({schema_len} bytes; maximum is {OUTPUT_SCHEMA_MAX_BYTES})"
+        ));
+    }
+
+    jsonschema::options()
+        .with_retriever(RejectExternalSchemaRefs)
+        .with_pattern_options(
+            jsonschema::PatternOptions::regex()
+                .size_limit(OUTPUT_SCHEMA_REGEX_SIZE_LIMIT)
+                .dfa_size_limit(OUTPUT_SCHEMA_REGEX_DFA_SIZE_LIMIT),
+        )
+        .build(schema)
+        .map_err(|error| format!("output schema is not valid and self-contained: {error}"))
+}
+
+pub fn validate_output_value(
+    validator: &OutputSchemaValidator,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    validator
+        .validate(value)
+        .map_err(|error| format!("output does not match the required schema: {error}"))
 }
 
 /// A complete conversation request that can be sent to either API.

@@ -40,16 +40,13 @@ enum StructuredOutputStep {
 /// the model on retry and to the client as `structuredOutputError`). A `validator`
 /// of `Err` means the user's schema itself was invalid.
 fn validate_structured_output(
-    validator: &Result<jsonschema::Validator, String>,
+    validator: &Result<sampling_types::OutputSchemaValidator, String>,
     raw: &str,
 ) -> Result<serde_json::Value, String> {
     let validator = validator.as_ref().map_err(Clone::clone)?;
     let value: serde_json::Value = serde_json::from_str(raw.trim())
         .map_err(|e| format!("model output was not valid JSON: {e}"))?;
-    match validator.validate(&value) {
-        Ok(()) => Ok(value),
-        Err(e) => Err(format!("output does not match the required schema: {e}")),
-    }
+    sampling_types::validate_output_value(validator, &value).map(|()| value)
 }
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
@@ -1610,7 +1607,7 @@ impl SessionActor {
     async fn handle_structured_output_tool_call(
         &self,
         tool_calls: &mut Vec<sampling_types::conversation::ToolCall>,
-        validator: &Result<jsonschema::Validator, String>,
+        validator: &Result<sampling_types::OutputSchemaValidator, String>,
         retries: &mut u32,
     ) -> StructuredOutputStep {
         let Some(pos) = tool_calls
@@ -1807,7 +1804,8 @@ impl SessionActor {
         let mut structured_output_retries: u32 = 0;
         let mut image_projection_retries: u8 = 0;
         let structured_output_validator = json_schema.as_ref().map(|schema| {
-            jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
+            sampling_types::compile_output_schema(schema)
+                .map_err(|error| format!("invalid output schema: {error}"))
         });
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
@@ -2816,14 +2814,14 @@ mod user_echo_broadcast_tests {
 #[cfg(test)]
 mod structured_output_validation_tests {
     use super::validate_structured_output;
-    fn validator() -> Result<jsonschema::Validator, String> {
+    fn validator() -> Result<sampling_types::OutputSchemaValidator, String> {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
             "required": ["name", "age"],
             "additionalProperties": false,
         });
-        jsonschema::validator_for(&schema).map_err(|e| e.to_string())
+        sampling_types::compile_output_schema(&schema)
     }
     #[test]
     fn accepts_conforming_json() {
@@ -2842,7 +2840,8 @@ mod structured_output_validation_tests {
     }
     #[test]
     fn surfaces_invalid_schema_error() {
-        let bad: Result<jsonschema::Validator, String> = Err("invalid output schema: boom".into());
+        let bad: Result<sampling_types::OutputSchemaValidator, String> =
+            Err("invalid output schema: boom".into());
         let err = validate_structured_output(&bad, r#"{"name":"alice","age":1}"#).unwrap_err();
         assert_eq!(err, "invalid output schema: boom");
     }

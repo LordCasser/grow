@@ -1947,7 +1947,7 @@ mod tests {
                 },
                 route: chat_state::SidebandRoute {
                     model: "model".into(),
-                    backend: "backend".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: "parent/1".into(),
                 executor: "executor".into(),
@@ -2533,7 +2533,7 @@ mod tests {
                 },
                 route: chat_state::SidebandRoute {
                     model: "model".into(),
-                    backend: "responses".into(),
+                    backend: sampling_types::ApiBackend::Responses,
                 },
                 initiator_ref: format!("t:session/sideband:{sideband_id}"),
                 executor: "main".into(),

@@ -327,7 +327,7 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
@@ -337,7 +337,7 @@ impl SessionActor {
                     .data(format!("dream Sideband could not start: {error}"))
             })?;
         sideband
-            .attempt_all_sources(&request, None)
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
             .await
             .map_err(|error| {
                 acp::Error::internal_error()
@@ -508,7 +508,7 @@ impl SessionActor {
                     chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                     chat_state::SidebandRoute {
                         model,
-                        backend: sideband_backend(sampling_client.api_backend()).into(),
+                        backend: sampling_client.api_backend(),
                     },
                     None,
                 )
@@ -517,10 +517,14 @@ impl SessionActor {
                     acp::Error::internal_error()
                         .data(format!("memory flush Sideband could not start: {error}"))
                 })?;
-            sideband.attempt_all_sources(&request, None).await.map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("memory flush Sideband attempt could not commit: {error}"))
-            })?;
+            sideband
+                .attempt_all_sources(&request, sampling_client.api_backend(), None)
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "memory flush Sideband attempt could not commit: {error}"
+                    ))
+                })?;
             match sampling_client.conversation_collect(request).await {
                 Ok(response) => Ok((response, sideband)),
                 Err(error) => {
@@ -836,14 +840,14 @@ impl SessionActor {
                 chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
-                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                    backend: sampling_client.api_backend(),
                 },
                 None,
             )
             .await
             .map_err(|error| format!("rewrite Sideband could not start: {error}"))?;
         sideband
-            .attempt_all_sources(&request, None)
+            .attempt_all_sources(&request, sampling_client.api_backend(), None)
             .await
             .map_err(|error| format!("rewrite Sideband attempt could not commit: {error}"))?;
         let response = match tokio::time::timeout(

@@ -9,48 +9,16 @@ pub(crate) fn contract_prompt(prompt: &str, schema: &serde_json::Value) -> Strin
     )
 }
 
-const SCHEMA_MAX_BYTES: usize = 256 * 1024;
 const CONTRACT_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
-const SCHEMA_REGEX_SIZE_LIMIT: usize = 256 * 1024;
-const SCHEMA_REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
-
-#[derive(Debug)]
-struct RejectExternalSchemaRefs;
-
-impl jsonschema::Retrieve for RejectExternalSchemaRefs {
-    fn retrieve(
-        &self,
-        uri: &jsonschema::Uri<String>,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        Err(format!("external JSON Schema references are disabled: {uri}").into())
-    }
-}
 
 pub(crate) fn compile_contract_schema(
     schema: &serde_json::Value,
-) -> Result<jsonschema::Validator, String> {
-    let schema_len = serde_json::to_vec(schema)
-        .map_err(|e| format!("output_schema cannot be serialized: {e}"))?
-        .len();
-    if schema_len > SCHEMA_MAX_BYTES {
-        return Err(format!(
-            "output_schema is too large ({schema_len} bytes; maximum is {SCHEMA_MAX_BYTES})"
-        ));
-    }
-
-    jsonschema::options()
-        .with_retriever(RejectExternalSchemaRefs)
-        .with_pattern_options(
-            jsonschema::PatternOptions::regex()
-                .size_limit(SCHEMA_REGEX_SIZE_LIMIT)
-                .dfa_size_limit(SCHEMA_REGEX_DFA_SIZE_LIMIT),
-        )
-        .build(schema)
-        .map_err(|e| format!("output_schema is not a valid self-contained JSON Schema: {e}"))
+) -> Result<sampling_types::OutputSchemaValidator, String> {
+    sampling_types::compile_output_schema(schema)
 }
 
 pub(crate) fn validate_contract_output(
-    validator: &jsonschema::Validator,
+    validator: &sampling_types::OutputSchemaValidator,
     final_text: &str,
 ) -> Result<serde_json::Value, String> {
     if final_text.len() > CONTRACT_OUTPUT_MAX_BYTES {
@@ -78,11 +46,7 @@ pub(crate) fn validate_contract_output(
     for cand in candidates {
         match serde_json::from_str::<serde_json::Value>(cand) {
             Ok(value) => {
-                let verdict = match validator.validate(&value) {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(format!("output does not match the required schema: {e}")),
-                };
-                return verdict.map(|()| value);
+                return sampling_types::validate_output_value(validator, &value).map(|()| value);
             }
             Err(e) => {
                 if parse_err.is_empty() {
@@ -100,7 +64,7 @@ pub(crate) fn validate_contract_output(
 mod contract_tests {
     use super::{compile_contract_schema, validate_contract_output};
 
-    fn v() -> jsonschema::Validator {
+    fn v() -> sampling_types::OutputSchemaValidator {
         compile_contract_schema(&serde_json::json!({
             "type": "object", "required": ["ok"],
             "properties": { "ok": { "type": "boolean" } }
