@@ -635,16 +635,16 @@ async fn timeline_round_trip_folds_the_current_surface() {
 }
 
 #[cfg(unix)]
-#[test]
-fn sideband_reader_rejects_symlinked_directory_roots() {
+#[tokio::test]
+async fn sideband_reader_rejects_symlinked_directory_roots() {
     use std::os::unix::fs::symlink;
 
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
     let session_dir = adapter.session_dir(&info);
     let outside = temp_dir.path().join("outside-sidebands");
-    std::fs::create_dir_all(&session_dir).unwrap();
     std::fs::create_dir(&outside).unwrap();
     symlink(
         &outside,
