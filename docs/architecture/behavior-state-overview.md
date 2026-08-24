@@ -16,6 +16,8 @@ enum ForegroundState {
 
 完成顺序固定为：结算 exact foreground owner → 排队持久化唯一 `TurnCompleted` → 提升用户 FIFO → 若仍 idle 再运行专用 runtime hook。Goal continuation 不进入 FIFO，synthetic work必须携带结构化 origin/lease。
 
+普通采样的 `prompt_cache_key` 由 Timeline identity、最新 rewind 分支锚点和完整 model route（backend/base URL/model）派生。普通 append、Behavior 切换和 Agent 选择不改变血统键；fork、rewind 与 model route 切换改变。血统键只负责 provider 粘性路由，不能替代 provider-visible 前缀相等校验。
+
 ```mermaid
 flowchart LR
     U["User FIFO"] --> A["Turn admission"]

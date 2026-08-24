@@ -542,6 +542,7 @@ impl ChatStateActor {
             // `BuildConversationRequest` retains the guard because it is only
             // ever issued by the agent loop between turns, never by background tasks.
             ChatStateCommand::BuildConversationRequest {
+                timeline_id,
                 tool_definitions,
                 memory_reminder,
                 persist_memory_reminder,
@@ -549,6 +550,7 @@ impl ChatStateActor {
             } => {
                 let result = self
                     .build_conversation_request(
+                        &timeline_id,
                         tool_definitions,
                         memory_reminder,
                         persist_memory_reminder,

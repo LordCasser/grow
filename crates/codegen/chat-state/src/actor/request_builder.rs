@@ -33,6 +33,7 @@ impl ChatStateActor {
     /// clone — those would be O(n) no-ops.
     pub(super) async fn build_conversation_request(
         &mut self,
+        timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
@@ -129,11 +130,58 @@ impl ChatStateActor {
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.output_limit,
             top_p: self.state.sampling_config.top_p,
-            prompt_cache_key: None,
+            prompt_cache_key: Some(prompt_cache_key(
+                timeline_id,
+                &self.state.timeline,
+                &self.state.sampling_config,
+            )),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_output: None,
         })
     }
+}
+
+/// Build the sticky provider route from causal lineage and model identity.
+///
+/// Appending to one branch deliberately leaves the key unchanged. Rewind is a
+/// branch operation, so the latest rewind event becomes the branch anchor;
+/// forks already have a distinct `timeline_id`. Provider/backend/base URL are
+/// included with the model name so equal display names cannot share a route.
+fn prompt_cache_key(
+    timeline_id: &str,
+    timeline: &crate::Timeline,
+    sampling: &sampling_types::SamplingConfig,
+) -> String {
+    let branch_anchor = timeline
+        .events()
+        .iter()
+        .rev()
+        .find_map(|event| {
+            event
+                .messages()
+                .filter(|messages| messages.cause == MessageCause::Rewind)
+                .map(|_| event.seq.get())
+        })
+        .map_or_else(|| "root".to_owned(), |seq| seq.to_string());
+    let backend = match sampling.api_backend {
+        sampling_types::ApiBackend::ChatCompletions => "chat_completions",
+        sampling_types::ApiBackend::Responses => "responses",
+        sampling_types::ApiBackend::Messages => "messages",
+    };
+    let mut hasher = blake3::Hasher::new();
+    for component in [
+        "grow-prompt-cache-v1",
+        timeline_id,
+        branch_anchor.as_str(),
+        backend,
+        sampling.base_url.as_str(),
+        sampling.model.as_str(),
+    ] {
+        hasher.update(component.as_bytes());
+        hasher.update(&[0]);
+    }
+    let digest = hasher.finalize().to_hex();
+    format!("grow-{}", &digest.as_str()[..32])
 }
 
 // ============================================================================

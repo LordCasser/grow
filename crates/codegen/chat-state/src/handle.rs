@@ -432,12 +432,14 @@ impl ChatStateHandle {
     /// Prunes, repairs, injects memory, and returns a ready-to-send request.
     pub async fn build_request(
         &self,
+        timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
     ) -> Result<ConversationRequest, TimelineWriteError> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
+                timeline_id: timeline_id.to_owned(),
                 tool_definitions,
                 memory_reminder,
                 persist_memory_reminder,

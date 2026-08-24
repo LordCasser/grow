@@ -9,6 +9,7 @@ description = "Actor-based chat state management"
 default-bazel = []
 
 [dependencies]
+blake3 = { workspace = true }
 indexmap = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

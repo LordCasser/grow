@@ -1969,7 +1969,12 @@ impl SessionActor {
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle
-                .build_request(effective_tools, memory_reminder, self.memory.is_enabled())
+                .build_request(
+                    self.session_info.id.0.as_ref(),
+                    effective_tools,
+                    memory_reminder,
+                    self.memory.is_enabled(),
+                )
                 .await
                 .map_err(|error| {
                     acp::Error::internal_error()

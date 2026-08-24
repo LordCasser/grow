@@ -313,6 +313,9 @@ pub enum ChatStateCommand {
     /// Clones the conversation, prunes old tool results, repairs dangling
     /// tool calls, injects memory reminder, and assembles the request.
     BuildConversationRequest {
+        /// Stable identity of the Timeline lineage root. Rewind generation and
+        /// model route are folded into the provider key by the actor.
+        timeline_id: String,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
@@ -588,6 +591,7 @@ mod tests {
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::BuildConversationRequest {
+            timeline_id: "main".into(),
             tool_definitions: vec![],
             memory_reminder: None,
             persist_memory_reminder: false,

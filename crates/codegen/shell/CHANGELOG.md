@@ -16,6 +16,10 @@
 - Subagent capability resolution now has one default (`read-write`) and one parent-confinement rule: the requested/Agent mode is intersected with the immediate parent's immutable delegation ceiling before child resources are created. The former implicit `all` and spawn-rejection path were removed.
 - Subagent permission modes are now strictly independent `ask`, `auto`, or `always-approve` routes. The retired `follow` mode, primary-mode broadcasts, and implicit child inheritance were removed.
 
+## Context projection
+
+- Ordinary sampling requests now carry a stable cache-lineage key derived from Timeline identity, rewind branch, and the full model route. Appends preserve it; fork, rewind, or model-route changes invalidate it.
+
 完整发布说明见 [changelogs/1.1.11.md](changelogs/1.1.11.md)。
 
 # 1.1.5 — 2026-08-09
