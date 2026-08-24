@@ -1676,7 +1676,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 json_schema,
                 model: args.model,
                 rules: args.rules,
-                system_prompt_override: args.system_prompt_override.clone(),
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,

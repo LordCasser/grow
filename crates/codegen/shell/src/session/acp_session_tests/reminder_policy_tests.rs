@@ -5,7 +5,7 @@ use super::{
 use crate::session::persistence::PersistenceMsg;
 use crate::util::config::RemoteSettings;
 use agent::AgentDefinition;
-use agent::prompt::context::{PromptAudience, TemplateOverride};
+use agent::prompt::context::PromptAudience;
 use agent::system_reminder::{DEFAULT_TODO_GATE_MAX_FIRES, ReminderPolicy, TodoGateConfig};
 /// Helper: a `RemoteSettings` whose only non-default fields are the
 /// TodoGate knobs we want to vary. Mirrors `Default::default()` for
@@ -114,11 +114,6 @@ fn remote_settings_preserves_false_and_zero_todo_gate_fields() {
     assert_eq!(settings.todo_gate_enabled, Some(false));
     assert_eq!(settings.todo_gate_max_fires_per_prompt, Some(0));
 }
-fn def_with_template(tpl: TemplateOverride) -> AgentDefinition {
-    let mut def = AgentDefinition::default_grow_build();
-    def.system_prompt = tpl;
-    def
-}
 fn policy_with_gate(enabled: bool) -> ReminderPolicy {
     let mut p = ReminderPolicy::default();
     p.todo_gate.enabled = enabled;
@@ -127,7 +122,7 @@ fn policy_with_gate(enabled: bool) -> ReminderPolicy {
 use crate::session::goal_tracker::GoalStatus;
 #[test]
 fn laziness_injection_active_predicate_matrix() {
-    let def = def_with_template(TemplateOverride::None);
+    let def = AgentDefinition::default_grow_build();
     let policy_on = policy_with_gate(true);
     for (goal_runtime_available, goal_status, expect) in [
         (false, None, false),
@@ -156,7 +151,7 @@ fn laziness_injection_active_predicate_matrix() {
 }
 #[test]
 fn todo_gate_active_predicate_matrix() {
-    let def = def_with_template(TemplateOverride::None);
+    let def = AgentDefinition::default_grow_build();
     let policy_off = policy_with_gate(false);
     let policy_on = policy_with_gate(true);
     for (policy, audience, goal_runtime_available, goal_status, expect) in [
@@ -217,18 +212,12 @@ fn todo_gate_active_predicate_matrix() {
             "non-active status {status:?} must not enable gate"
         );
     }
-    let mut templates = vec![
-        TemplateOverride::None,
-        TemplateOverride::Custom("custom".into()),
-    ];
-    for tpl in templates {
-        let def = def_with_template(tpl);
-        for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
-            assert!(
-                !todo_gate_active(&policy_on, audience, &def, true, None),
-                "built-in template without active goal must not enable gate"
-            );
-        }
+    let def = AgentDefinition::default_grow_build();
+    for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
+        assert!(
+            !todo_gate_active(&policy_on, audience, &def, true, None),
+            "built-in template without active goal must not enable gate"
+        );
     }
 }
 use chrono::NaiveDate;

@@ -115,9 +115,6 @@ impl SessionActor {
         &self,
         model_id: acp::ModelId,
         sampling_config: sampler::SamplerConfig,
-        use_concise: bool,
-        apply_prompt_override: bool,
-        skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
         self.commit_model_change(&model_id, &sampling_config, "user_selection")
@@ -173,32 +170,6 @@ impl SessionActor {
         self.invalidate_model_auth_memo();
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
-        if apply_prompt_override && !skip_prompt_rewrite {
-            let system_prompt = if use_concise {
-                agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_owned()
-            } else {
-                self.agent.borrow().system_prompt().to_owned()
-            };
-            self.chat_state_handle
-                .replace_system_head(&system_prompt)
-                .await
-                .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("model context was not durably recorded: {error}"))
-                })?;
-        } else if !apply_prompt_override {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                model_id = %model_id.0,
-                "handle_set_session_model: skipping prompt override (apply_prompt_override=false)"
-            );
-        } else {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                model_id = %model_id.0,
-                "handle_set_session_model: skipping prompt rewrite (just rebuilt harness)"
-            );
-        }
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self
             .notifications
@@ -361,47 +332,6 @@ impl SessionActor {
             "handle_rebuild_agent_for_definition: harness rebuild complete"
         );
         Ok(())
-    }
-    /// Apply a client-supplied `systemPromptOverride` on session attach without
-    /// wiping user/assistant history: swap only the leading `System` message,
-    /// atomically inside the `ChatStateActor` (see
-    /// `ChatStateCommand::ReplaceSystemHead` for the serialization guarantees).
-    /// Skipped entirely on a verbatim mirror-fork (`preserve_inherited_system`).
-    pub(super) async fn handle_replace_system_prompt(&self, system_prompt: String) {
-        if self.startup_hints.preserve_inherited_system {
-            tracing::debug!(
-                session_id = %self.session_info.id.0,
-                "handle_replace_system_prompt: skipped (preserve_inherited_system)"
-            );
-            return;
-        }
-        let changed = match self
-            .chat_state_handle
-            .replace_system_head(&system_prompt)
-            .await
-        {
-            Ok(changed) => changed,
-            Err(error) => {
-                tracing::error!(
-                session_id = %self.session_info.id.0,
-                %error,
-                "handle_replace_system_prompt: durable replacement failed; override not applied"
-                );
-                return;
-            }
-        };
-        if changed {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                prompt_len = system_prompt.len(),
-                "handle_replace_system_prompt: client override applied"
-            );
-        } else {
-            tracing::debug!(
-                session_id = %self.session_info.id.0,
-                "handle_replace_system_prompt: head already matches, no-op"
-            );
-        }
     }
 }
 

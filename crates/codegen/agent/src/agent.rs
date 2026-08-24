@@ -29,7 +29,7 @@ pub struct Agent {
     /// Stored for inspection, re-rendering, and serialization.
     prompt_context: PromptContext,
 
-    /// The rendered stable system prompt (cached from prompt_context.render()).
+    /// The rendered stable system prompt (cached from `PromptContext::render`).
     system_prompt: String,
 
     /// The rendered Agent-authored role. The shell projects this through an
@@ -101,13 +101,6 @@ impl Agent {
     /// Rendered Agent-authored role for the Timeline `system.role` layer.
     pub fn role_prompt(&self) -> Option<&str> {
         self.role_prompt.as_deref()
-    }
-
-    /// Compact system prompt for post-compaction use.
-    ///
-    /// Returns a static string — the compact prompt never changes at runtime.
-    pub fn compact_system_prompt(&self) -> &str {
-        crate::prompt::template::COMPACT_SYSTEM_PROMPT
     }
 
     /// The tool bridge for this agent.
@@ -184,16 +177,6 @@ impl Agent {
         // Mid-session policy updates are not yet supported in the new architecture.
     }
 
-    /// Re-render the system prompt from current ToolBridge state
-    /// (tool name overrides, disabled tools). Called by hosts after
-    /// mid-session tool-override updates.
-    pub async fn finalize_prompt(&mut self) {
-        self.system_prompt = self
-            .prompt_context
-            .render(&self.tool_bridge)
-            .await
-            .unwrap_or_default();
-    }
 }
 
 #[cfg(test)]

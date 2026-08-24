@@ -448,51 +448,19 @@ fn read_session_or_init_meta_str_ignores_non_string_values() {
     );
 }
 #[test]
-fn system_prompt_override_from_meta_prefers_session_and_rejects_empty() {
-    let session = serde_json::json!({ "systemPromptOverride": "from session" });
-    let init = serde_json::json!({ "systemPromptOverride": "from init" });
+fn session_rules_are_separate_from_the_system_head() {
+    let session = serde_json::json!({ "rules": " session rule </human_rules> " });
+    let init = serde_json::json!({ "rules": "init rule" });
     assert_eq!(
-        system_prompt_override_from_meta(session.as_object(), init.as_object()),
-        Some("from session")
+        session_rules_from_meta(session.as_object(), init.as_object()).as_deref(),
+        Some("<human_rules>\nsession rule <\\/human_rules>\n</human_rules>")
     );
     assert_eq!(
-        system_prompt_override_from_meta(None, init.as_object()),
-        Some("from init")
-    );
-    let empty = serde_json::json!({ "systemPromptOverride": "" });
-    assert_eq!(
-        system_prompt_override_from_meta(empty.as_object(), None),
+        session_rules_from_meta(
+            serde_json::json!({ "rules": "  " }).as_object(),
+            None,
+        ),
         None
-    );
-    assert_eq!(system_prompt_override_from_meta(None, None), None);
-}
-#[test]
-fn enqueue_replace_system_prompt_override_sends_when_present() {
-    use crate::session::SessionCommand;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let session = serde_json::json!({ "systemPromptOverride": "from session" });
-    let init = serde_json::json!({ "systemPromptOverride": "from init" });
-    enqueue_replace_system_prompt_override(&tx, session.as_object(), init.as_object());
-    match rx.try_recv() {
-        Ok(SessionCommand::ReplaceSystemPrompt { system_prompt }) => {
-            assert_eq!(system_prompt, "from session", "session meta wins over init");
-        }
-        _ => panic!("expected a ReplaceSystemPrompt command"),
-    }
-}
-#[test]
-fn enqueue_replace_system_prompt_override_noop_when_absent_or_empty() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    enqueue_replace_system_prompt_override(
-        &tx,
-        serde_json::json!({ "systemPromptOverride": "" }).as_object(),
-        None,
-    );
-    enqueue_replace_system_prompt_override(&tx, serde_json::json!({}).as_object(), None);
-    enqueue_replace_system_prompt_override(&tx, None, None);
-    assert!(
-        rx.try_recv().is_err(),
-        "no command should be enqueued without a non-empty override"
     );
 }
 /// End-to-end test: config -> resolve -> override -> finalize -> tool_definitions.
@@ -1443,7 +1411,6 @@ fn find_model_by_catalog_id_never_matches_routing_slug() {
             context_window: std::num::NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            use_concise: false,
             agent_type: config::default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,

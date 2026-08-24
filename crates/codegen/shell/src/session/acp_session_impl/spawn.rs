@@ -899,6 +899,13 @@ pub(crate) async fn spawn_session_actor(
             (Some(timeline.clone()), Some(timeline), surface)
         }
     };
+    if validated_timeline.is_some()
+        && !matches!(conversation.first(), Some(ConversationItem::System(_)))
+    {
+        return Err(agent::AgentBuildError::InvalidConfig(
+            "persisted Timeline has no stable System head".to_string(),
+        ));
+    }
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     tracing::info!(
         "Session '{}' created with {} MCP servers",
@@ -1658,15 +1665,10 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
     let system_prompt = agent.system_prompt().to_string();
-    let is_subagent_spawn = startup_hints.is_subagent;
-    install_system_prompt(
-        &mut conversation,
-        &mut startup_hints.inherited_prefix_len,
-        is_subagent_spawn,
-        startup_hints.preserve_inherited_system,
-        &system_prompt,
-    );
-    if let Some(capabilities) = &subagent_capabilities {
+    let mut initial_context_changed = false;
+    if resumed_timeline.is_some()
+        && let Some(capabilities) = &subagent_capabilities
+    {
         install_subagent_capability_catalog(
             &mut conversation,
             &mut startup_hints.inherited_prefix_len,
@@ -1677,8 +1679,10 @@ pub(crate) async fn spawn_session_actor(
                 crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
             ),
         );
+        initial_context_changed = true;
     }
-    if !startup_hints.preserve_inherited_system
+    if resumed_timeline.is_some()
+        && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
     {
@@ -1690,6 +1694,7 @@ pub(crate) async fn spawn_session_actor(
         if let Some(ref mut len) = startup_hints.inherited_prefix_len {
             *len += 1;
         }
+        initial_context_changed = true;
     }
     if let Some(section) = agent.agents_md_section()
         && should_set_classifier_project_instructions(
@@ -1702,22 +1707,24 @@ pub(crate) async fn spawn_session_actor(
             permissions.set_project_instructions(Some(body));
         }
     }
-    let (_, source_surface_revision) = chat_state_handle
-        .get_conversation_with_revision()
-        .await
-        .ok_or_else(|| {
-            agent::AgentBuildError::InvalidConfig(
-                "chat state actor stopped before initial context commit".into(),
-            )
-        })?;
-    chat_state_handle
-        .replace_context_durably(conversation, source_surface_revision)
-        .await
-        .map_err(|error| {
-            agent::AgentBuildError::InvalidConfig(format!(
-                "initial context was not durably recorded: {error}"
-            ))
-        })?;
+    if initial_context_changed {
+        let (_, source_surface_revision) = chat_state_handle
+            .get_conversation_with_revision()
+            .await
+            .ok_or_else(|| {
+                agent::AgentBuildError::InvalidConfig(
+                    "chat state actor stopped before initial context commit".into(),
+                )
+            })?;
+        chat_state_handle
+            .replace_context_durably(conversation, source_surface_revision)
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::InvalidConfig(format!(
+                    "initial context was not durably recorded: {error}"
+                ))
+            })?;
+    }
     let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
     tokio::spawn(signals_actor.run());
     if let Some(persisted) = persisted_signals {

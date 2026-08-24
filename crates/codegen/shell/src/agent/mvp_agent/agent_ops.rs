@@ -1874,11 +1874,6 @@ impl MvpAgent {
         self.push_roster_delta_upserted(&session_info.id);
         if is_new_session {
             let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
-            let system_prompt = build_spawn_system_prompt(
-                session_meta,
-                init_meta,
-                &agent_system_prompt,
-            );
             tracing::debug!(
                 session_id = %session_info.id.0,
                 "built system prompt"
@@ -1886,7 +1881,8 @@ impl MvpAgent {
             let _ = handle
                 .cmd_tx
                 .send(SessionCommand::Initialize {
-                    system_prompt,
+                    system_prompt: agent_system_prompt,
+                    session_rules: session_rules_from_meta(session_meta, init_meta),
                 });
             tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
         }

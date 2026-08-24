@@ -41,10 +41,11 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .await
         .expect("compaction input must materialize");
     let input_ref = materialized.input_ref;
+    let shadowed = materialized.surface_ids[1..].to_vec();
     let target = chat_state::SurfaceRange {
-        start: *materialized.surface_ids.first().unwrap(),
-        end: *materialized.surface_ids.last().unwrap(),
-        shadowed: materialized.surface_ids,
+        start: *shadowed.first().unwrap(),
+        end: *shadowed.last().unwrap(),
+        shadowed,
     };
     let sideband_id = uuid::Uuid::now_v7().to_string();
     actor
@@ -81,7 +82,6 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .replace_compaction_range(
             target,
             vec![
-                ConversationItem::system("SYS"),
                 ConversationItem::user("UI1"),
                 ConversationItem::user("SUMMARY"),
             ],
@@ -95,7 +95,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
             chat_state::CompactionEvent::Completed {
                 id: "compact-5".into(),
                 source_items: 7,
-                result_items: 3,
+                result_items: 2,
                 duration_ms: 1,
             },
         ))

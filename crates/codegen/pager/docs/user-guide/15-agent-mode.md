@@ -167,7 +167,6 @@ Optional fields on `session/new`:
 | Field | Description |
 | ----- | ----------- |
 | `rules` | Extra rules appended to the system prompt. |
-| `systemPromptOverride` | Replacement system prompt. |
 | `agentProfile` | Agent profile name or JSON object. |
 | `permissionMode` | Session permission mode: `ask`, `auto`, or `always-approve`. |
 

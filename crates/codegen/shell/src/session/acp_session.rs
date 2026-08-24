@@ -967,8 +967,6 @@ mod read_file_image_description_tests;
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
 mod record_response_token_usage_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/replace_system_prompt_tests.rs"]
-mod replace_system_prompt_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reverse_request_session_id_tests.rs"]
 mod reverse_request_session_id_tests;

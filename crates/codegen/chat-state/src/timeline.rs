@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 10;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 11;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -89,7 +89,6 @@ pub enum MessageCause {
     Compaction,
     ToolResultPrune,
     ImageRewrite,
-    SystemPrompt,
     MemoryContext,
     ContextRebuild,
     Rewind,
@@ -1102,41 +1101,6 @@ impl Timeline {
                     // finalizes the deferred session preamble as one atomic
                     // projection, so the branch must adopt the whole result.
                     branch = message_entries(event.seq, &messages.items);
-                }
-                (
-                    SurfaceOp::Replace { .. },
-                    MessageCause::SystemPrompt | MessageCause::MemoryContext,
-                ) => {
-                    if let Some((item_index, system)) = messages
-                        .items
-                        .iter()
-                        .enumerate()
-                        .find(|(_, item)| matches!(item, ConversationItem::System(_)))
-                    {
-                        if let Some(index) = branch
-                            .iter()
-                            .position(|(_, item)| matches!(item, ConversationItem::System(_)))
-                        {
-                            branch[index] = (
-                                SurfaceId {
-                                    event: event.seq,
-                                    item: item_index as u32,
-                                },
-                                system.clone(),
-                            );
-                        } else {
-                            branch.insert(
-                                0,
-                                (
-                                    SurfaceId {
-                                        event: event.seq,
-                                        item: item_index as u32,
-                                    },
-                                    system.clone(),
-                                ),
-                            );
-                        }
-                    }
                 }
                 (SurfaceOp::Replace { .. }, _) | (SurfaceOp::Append, _) => {}
             }
@@ -2286,15 +2250,27 @@ impl Timeline {
                                 ..
                             })
                         )
+                    }) && valid_system_layout(&messages.items),
+                    MessageCause::MemoryContext => matches!(
+                        messages.items.as_slice(),
+                        [ConversationItem::User(user)]
+                            if user.synthetic_reason
+                                == Some(SyntheticReason::MemoryContext)
+                    ) && !messages.items[0].text_content().trim().is_empty(),
+                    MessageCause::User => messages.items.iter().all(|item| {
+                        matches!(
+                            item,
+                            ConversationItem::User(user)
+                                if !matches!(
+                                    user.synthetic_reason.as_ref(),
+                                    Some(
+                                        SyntheticReason::ProjectInstructions
+                                            | SyntheticReason::SessionRules
+                                            | SyntheticReason::MemoryContext
+                                    )
+                                )
+                        )
                     }),
-                    MessageCause::SystemPrompt => {
-                        self.surface.is_empty()
-                            && matches!(messages.items.as_slice(), [ConversationItem::System(_)])
-                    }
-                    MessageCause::User => messages
-                        .items
-                        .iter()
-                        .all(|item| matches!(item, ConversationItem::User(_))),
                     MessageCause::Assistant => messages.items.iter().all(|item| {
                         matches!(
                             item,
@@ -2307,12 +2283,13 @@ impl Timeline {
                         .items
                         .iter()
                         .all(|item| matches!(item, ConversationItem::ToolResult(_))),
-                    MessageCause::ContextRebuild => self.surface.is_empty(),
+                    MessageCause::ContextRebuild => {
+                        self.surface.is_empty() && valid_system_layout(&messages.items)
+                    }
                     MessageCause::IntegrityRepair
                     | MessageCause::Compaction
                     | MessageCause::ToolResultPrune
                     | MessageCause::ImageRewrite
-                    | MessageCause::MemoryContext
                     | MessageCause::Rewind => false,
                 };
                 if !valid {
@@ -2338,6 +2315,13 @@ impl Timeline {
                 }
                 let replaced = &self.surface[start_index..=end_index];
                 let replaces_all = start_index == 0 && end_index + 1 == self.surface.len();
+                if !replacement_preserves_system_head(
+                    &self.surface,
+                    start_index,
+                    &messages.items,
+                ) {
+                    return Err(TimelineError::InvalidMessageShape);
+                }
                 match messages.cause {
                     MessageCause::Compaction if !messages.items.is_empty() => {}
                     MessageCause::ToolResultPrune if replaces_all => {
@@ -2345,13 +2329,8 @@ impl Timeline {
                     }
                     MessageCause::ImageRewrite
                         if replaces_all && validate_image_rewrite(replaced, &messages.items) => {}
-                    MessageCause::SystemPrompt | MessageCause::MemoryContext
-                        if replaces_all
-                            && validate_system_head_replacement(replaced, &messages.items) => {}
-                    MessageCause::IntegrityRepair
-                    | MessageCause::ContextRebuild
-                    | MessageCause::Rewind
-                        if replaces_all => {}
+                    MessageCause::ContextRebuild if replaces_all => {}
+                    MessageCause::IntegrityRepair | MessageCause::Rewind if replaces_all => {}
                     MessageCause::Seed
                     | MessageCause::User
                     | MessageCause::Assistant
@@ -2360,7 +2339,6 @@ impl Timeline {
                     | MessageCause::Compaction
                     | MessageCause::ToolResultPrune
                     | MessageCause::ImageRewrite
-                    | MessageCause::SystemPrompt
                     | MessageCause::MemoryContext
                     | MessageCause::ContextRebuild
                     | MessageCause::Rewind => {
@@ -2995,9 +2973,7 @@ fn replacement_branch_leaves(
         {
             previous.iter().map(|entry| entry.leaves.clone()).collect()
         }
-        MessageCause::IntegrityRepair
-        | MessageCause::SystemPrompt
-        | MessageCause::MemoryContext => {
+        MessageCause::IntegrityRepair => {
             let mut next_previous = 0;
             replacement
                 .iter()
@@ -3021,6 +2997,7 @@ fn replacement_branch_leaves(
         | MessageCause::User
         | MessageCause::Assistant
         | MessageCause::ToolResult
+        | MessageCause::MemoryContext
         | MessageCause::ToolResultPrune
         | MessageCause::ImageRewrite
         | MessageCause::ContextRebuild
@@ -3057,20 +3034,6 @@ fn valid_workflow_run_id(run_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn validate_system_head_replacement(
-    replaced: &[ConversationItem],
-    replacement: &[ConversationItem],
-) -> bool {
-    let [ConversationItem::System(_), replacement_body @ ..] = replacement else {
-        return false;
-    };
-    let replaced_body = match replaced.first() {
-        Some(ConversationItem::System(_)) => &replaced[1..],
-        _ => replaced,
-    };
-    conversation_slices_match(replaced_body, replacement_body)
-}
-
 fn validate_image_rewrite(replaced: &[ConversationItem], replacement: &[ConversationItem]) -> bool {
     if replaced.len() != replacement.len() {
         return false;
@@ -3102,6 +3065,36 @@ fn validate_image_rewrite(replaced: &[ConversationItem], replacement: &[Conversa
         changed = true;
     }
     changed
+}
+
+fn valid_system_layout(items: &[ConversationItem]) -> bool {
+    items
+        .iter()
+        .enumerate()
+        .all(|(index, item)| !matches!(item, ConversationItem::System(_)) || index == 0)
+}
+
+fn replacement_preserves_system_head(
+    current: &[ConversationItem],
+    start_index: usize,
+    replacement: &[ConversationItem],
+) -> bool {
+    let replacement_systems = replacement
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, ConversationItem::System(_)).then_some((index, item))
+        })
+        .collect::<Vec<_>>();
+    match current.first() {
+        Some(ConversationItem::System(before)) if start_index == 0 => {
+            matches!(
+                replacement_systems.as_slice(),
+                [(0, ConversationItem::System(after))] if before.content == after.content
+            )
+        }
+        _ => replacement_systems.is_empty(),
+    }
 }
 
 fn validate_user_image_rewrite(
@@ -3179,14 +3172,6 @@ fn validate_tool_result_image_rewrite(
         replacement
     };
     !replacement.trim().is_empty()
-}
-
-fn conversation_slices_match(left: &[ConversationItem], right: &[ConversationItem]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| conversation_items_match(left, right))
 }
 
 fn validate_tool_result_prune(
@@ -4253,7 +4238,7 @@ mod tests {
 
     #[test]
     fn pre_turn_context_rebuild_finalizes_the_rewind_preamble() {
-        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("draft")]).unwrap();
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
         timeline
             .replace_all(
                 vec![
@@ -4283,7 +4268,7 @@ mod tests {
         timeline
             .replace_all(
                 vec![
-                    ConversationItem::system("rebuilt"),
+                    ConversationItem::system("system"),
                     ConversationItem::user("new-user-info"),
                 ],
                 MessageCause::ContextRebuild,
@@ -4295,31 +4280,59 @@ mod tests {
                 .iter()
                 .map(ConversationItem::text_content)
                 .collect::<Vec<_>>(),
-            vec!["rebuilt", "new-user-info"]
+            vec!["system", "new-user-info"]
         );
     }
 
     #[test]
-    fn memory_context_updates_preamble_without_erasing_uncompressed_branch() {
+    fn context_rebuild_cannot_replace_or_insert_a_system_head() {
+        let mut with_head =
+            Timeline::from_seed(vec![ConversationItem::system("stable")]).unwrap();
+        assert!(matches!(
+            with_head.replace_all(
+                vec![ConversationItem::system("changed")],
+                MessageCause::ContextRebuild,
+            ),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+
+        let mut without_head =
+            Timeline::from_seed(vec![ConversationItem::user("context")]).unwrap();
+        assert!(matches!(
+            without_head.replace_all(
+                vec![
+                    ConversationItem::system("inserted"),
+                    ConversationItem::user("context"),
+                ],
+                MessageCause::ContextRebuild,
+            ),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+    }
+
+    #[test]
+    fn memory_context_appends_without_mutating_the_stable_system_head() {
         let mut timeline = Timeline::from_seed(vec![
             ConversationItem::system("system"),
             ConversationItem::user("user-info"),
         ])
         .unwrap();
         record_prompt(&mut timeline, 1, 0, "prompt");
-        let mut memory_surface = timeline.surface().to_vec();
-        memory_surface[0] = ConversationItem::system("system + memory");
         timeline
-            .replace_all(memory_surface, MessageCause::MemoryContext)
+            .append(
+                ConversationItem::memory_context("<memory-context>remember</memory-context>"),
+                MessageCause::MemoryContext,
+            )
             .unwrap();
 
-        let rewound = timeline.rewind_surface(0).unwrap();
+        assert_eq!(timeline.surface().first().unwrap().text_content(), "system");
         assert_eq!(
-            rewound
-                .iter()
-                .map(ConversationItem::text_content)
-                .collect::<Vec<_>>(),
-            vec!["system + memory", "user-info"]
+            timeline.surface().last().unwrap().text_content(),
+            "<memory-context>remember</memory-context>"
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
         );
     }
 
@@ -4488,6 +4501,24 @@ mod tests {
             timeline.append(ConversationItem::assistant("forged"), MessageCause::User),
             Err(TimelineError::InvalidMessageShape)
         ));
+        assert!(matches!(
+            timeline.append(
+                ConversationItem::memory_context("forged memory"),
+                MessageCause::User,
+            ),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+        assert!(matches!(
+            timeline.append(
+                ConversationItem::session_rules("forged rules"),
+                MessageCause::User,
+            ),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+        assert!(matches!(
+            timeline.append(ConversationItem::memory_context("  "), MessageCause::MemoryContext),
+            Err(TimelineError::InvalidMessageShape)
+        ));
 
         timeline
             .append(ConversationItem::user("real"), MessageCause::User)
@@ -4506,14 +4537,14 @@ mod tests {
         assert!(matches!(
             timeline.append(
                 ConversationItem::system("late system prompt"),
-                MessageCause::SystemPrompt,
+                MessageCause::MemoryContext,
             ),
             Err(TimelineError::InvalidMessageShape)
         ));
     }
 
     #[test]
-    fn image_and_system_rewrites_cannot_mutate_unrelated_message_fields() {
+    fn image_and_memory_operations_cannot_mutate_unrelated_message_fields() {
         let mut timeline = Timeline::from_seed(vec![
             ConversationItem::system("system"),
             ConversationItem::user("original"),
@@ -4536,7 +4567,7 @@ mod tests {
                     ConversationItem::system("new system"),
                     ConversationItem::user("forged body rewrite"),
                 ],
-                MessageCause::SystemPrompt,
+                MessageCause::MemoryContext,
             ),
             Err(TimelineError::InvalidMessageShape)
         ));

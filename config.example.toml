@@ -166,7 +166,6 @@ context_window = 128000             # 仅用于本地上下文管理与自动压
 # output_limit = 65536               # 可选：作为 max_tokens/max_output_tokens 发送
 auto_compact_threshold_percent = 85
 system_prompt_label = "Grow"
-use_concise = false
 inference_idle_timeout_secs = 300
 max_retries = 3
 hidden = false

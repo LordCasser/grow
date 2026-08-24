@@ -979,19 +979,6 @@ impl acp::Agent for MvpAgent {
                 "load_session: reconnecting to existing session (feedback manager already initialized)"
             );
         }
-        {
-            let init_meta = self
-                .initialize_request
-                .get()
-                .and_then(|init| init.meta.as_ref());
-            if let Some(handle) = self.sessions.borrow().get(&session_id) {
-                enqueue_replace_system_prompt_override(
-                    &handle.cmd_tx,
-                    request_meta.as_ref(),
-                    init_meta,
-                );
-            }
-        }
         if session_exists
             && let Some(hooks) = crate::extensions::hooks::reconnect_client_hooks(
                 request_meta.as_ref(),

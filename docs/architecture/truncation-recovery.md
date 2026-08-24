@@ -749,8 +749,8 @@ SamplingError variants or new ACP error codes.
   length-equivalent stop reason beyond `incomplete`, and the session branches are backend-
   agnostic (they only read `response.stop_reason`).
 - `context_window_exceeded_triggers_compaction` needs (a) a System item in chat state
-  (`replace_system_head`; production session startup injects it, the bare test actor does
-  not), (b) a summary text clearing the sampler's `is_degenerate_summary` gate
+  (production session startup injects it; the bare test actor seeds it explicitly),
+  (b) a summary text clearing the sampler's `is_degenerate_summary` gate
   (>= 500 chars), and (c) asserts the summary in history via full-text scan — compaction
   persists it as a `User(CompactionMeta)` item, not an Assistant item.
 - Test-wire fixes discovered during implementation: `messages_turn` start events must carry

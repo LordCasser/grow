@@ -344,11 +344,11 @@ async fn run_user_turn(
 /// Partial compaction needs an old closed range and a recent verbatim tail;
 /// the current overflow turn alone is deliberately never summarized whole.
 async fn seed_closed_compaction_range(actor: &SessionActor) {
-    actor
-        .chat_state_handle
-        .replace_system_head("test system prompt")
-        .await
-        .expect("system head must be replaceable");
+    replace_test_surface(
+        &actor.chat_state_handle,
+        vec![ConversationItem::system("test system prompt")],
+    )
+    .await;
     actor
         .chat_state_handle
         .push_user_message(ConversationItem::user("old closed turn"));

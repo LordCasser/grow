@@ -511,7 +511,6 @@ mod tests {
             context_window: Some(200_000),
             auto_compact_threshold_percent: Some(80),
             system_prompt_label: Some("label".into()),
-            use_concise: Some(true),
             agent_type: Some("agent".into()),
             inference_idle_timeout_secs: Some(60),
             max_retries: Some(3),

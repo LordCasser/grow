@@ -361,9 +361,6 @@ pub struct PagerArgs {
     /// Extra rules to append to the system prompt.
     #[clap(long = "rules")]
     pub rules: Option<String>,
-    /// Override the agent's system prompt.
-    #[clap(long = "system-prompt-override", value_name = "PROMPT")]
-    pub system_prompt_override: Option<String>,
     /// Resume a session by ID or title, or the most recent if omitted.
     /// Non-ID values match session titles for the current directory
     /// (ignoring letter case; a sole renamed match wins among duplicates,

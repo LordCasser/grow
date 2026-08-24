@@ -11,15 +11,19 @@ use tools::types::memory_backend::{MemorySearchResult, format_staleness_note};
 /// Maximum characters to include per snippet in the injection.
 const SNIPPET_MAX_CHARS: usize = 500;
 
-/// Returns `true` if a memory-context block is already persisted in the
-/// leading system message. Callers reuse a persisted block verbatim instead
-/// of re-searching: a re-scored block would mutate the system-prompt prefix
-/// and bust the KV cache for the whole downstream conversation.
+/// Returns `true` if memory evidence is already persisted as its typed
+/// synthetic Timeline item. Callers reuse it instead of re-searching: the
+/// initial retrieval is one stable session fact, not a mutable system-head
+/// fragment.
 pub fn conversation_has_memory_context(items: &[ConversationItem]) -> bool {
-    matches!(
-        items.first(),
-        Some(ConversationItem::System(sys)) if sys.content.contains(MEMORY_CONTEXT_OPEN_TAG)
-    )
+    items.iter().any(|item| {
+        matches!(
+            item,
+            ConversationItem::User(user)
+                if user.synthetic_reason
+                    == Some(sampling_types::SyntheticReason::MemoryContext)
+        )
+    })
 }
 
 /// Format memory search results as a markdown section for system-reminder injection.
@@ -204,12 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn test_detects_persisted_block_in_system_message() {
+    fn test_detects_persisted_typed_memory_item() {
         let block = format_memory_reminder(&[sample_result()]).unwrap();
-        let system_content = format!("You are a helpful assistant.\n\n{block}");
         let conversation = vec![
-            ConversationItem::system(system_content),
+            ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("help me fix the auth bug"),
+            ConversationItem::memory_context(block),
         ];
         assert!(
             conversation_has_memory_context(&conversation),
@@ -218,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_block_when_system_lacks_marker() {
+    fn test_no_block_without_typed_memory_item() {
         let conversation = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("hi"),
@@ -227,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_block_when_no_leading_system_message() {
+    fn test_no_block_for_an_ordinary_user_message() {
         let conversation = vec![ConversationItem::user("hi")];
         assert!(!conversation_has_memory_context(&conversation));
     }

@@ -72,11 +72,13 @@ description: What this agent does
 # ... additional config fields
 ---
 
-System prompt body goes here...
+Agent role body goes here...
 ```
 
 The **frontmatter** (between `---` delimiters) is YAML configuration.
-The **body** (after the closing `---`) is the system prompt content.
+The **body** (after the closing `---`) is Agent-scoped role content. It is
+rendered into the typed `system.role` Timeline layer, never into the stable
+system head.
 The Agent ID comes from its relative path, not `name`: for example,
 `review/backend.md` is selected as `review/backend`. A frontmatter `name`
 is accepted for interoperability but does not override that stable ID.
@@ -96,17 +98,17 @@ You are a senior code reviewer. Analyze code and provide
 actionable feedback organized by severity.
 ```
 
-With `promptComposition: extend` (the default), the body is appended after
-the mandatory foundation, audience, and standard guidance. Active Behavior and
-the memory session extension are added after the role. The author only writes
-role-specific content.
+With `promptComposition: extend` (the default), the typed Agent layer contains
+standard guidance followed by the body and any tool-dependent session
+extension. The stable mandatory foundation and audience remain in the system
+head; active Behavior is a separate Control layer.
 
-### Full prompt override
+### Full role composition
 
 ```markdown
 ---
 name: custom-agent
-description: Agent with full control over the system prompt
+description: Agent whose role omits standard guidance
 promptComposition: full
 tools:
   - read_file
@@ -124,9 +126,10 @@ Use ${{ tools.run_terminal_cmd }} for shell commands.
 ${%- endif %}
 ```
 
-With `promptComposition: full`, the body replaces the optional standard/role
-guidance and is rendered through MiniJinja. Mandatory foundation, audience,
-active Behavior, and the memory session extension remain in force.
+With `promptComposition: full`, the typed Agent layer omits optional standard
+guidance and renders the body through MiniJinja. Mandatory foundation and
+audience remain in the stable system head; Behavior remains a separate Control
+layer; tool-dependent session extensions remain in the Agent layer.
 
 ### With a completion requirement
 
@@ -184,14 +187,16 @@ single source of truth and are embedded into the binary at compile time; no
 prompt files or generation step are required at runtime.
 
 ```
-promptComposition: extend              promptComposition: full
-─────────────────────────              ────────────────────────
-1. Mandatory Core                      1. Mandatory Core
-2. Audience                            2. Audience
-3. Standard guidance                   3. Markdown role body
-4. Markdown role body                  4. Active Behavior
-5. Active Behavior                     5. Session Extensions
-6. Session Extensions
+Stable system head
+1. Mandatory Core
+2. Audience
+
+Typed Agent Control layer
+extend: Standard guidance + Markdown role body + tool-dependent extensions
+full:   Markdown role body + tool-dependent extensions
+
+Typed Behavior Control layer
+Active Behavior protocol
 ```
 
 The system prompt does not carry mutable runtime facts. The shell appends one

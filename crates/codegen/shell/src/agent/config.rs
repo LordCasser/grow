@@ -2078,7 +2078,6 @@ pub struct ConfigModelOverride {
     pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity; not merged into `ModelInfo` (tiered resolve).
     pub system_prompt_label: Option<String>,
-    pub use_concise: Option<bool>,
     pub agent_type: Option<String>,
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
@@ -2128,9 +2127,6 @@ impl ConfigModelOverride {
         }
         if let Some(cw) = self.context_window.and_then(NonZeroU64::new) {
             entry.info.context_window = cw;
-        }
-        if let Some(v) = self.use_concise {
-            entry.info.use_concise = v;
         }
         if let Some(ref at) = self.agent_type {
             entry.info.agent_type.clone_from(at);
@@ -2207,9 +2203,6 @@ pub struct ModelInfo {
     /// Per-model system-prompt identity (not UI picker `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
-    /// When true, this model uses concise mode (compact system prompt,
-    /// concise tool output, concise user message prefix, reduced toolset).
-    pub use_concise: bool,
     /// The type of agent configuration to use for this model.
     /// Always has a value; defaults to `"grow"` when the server
     /// or user config doesn't specify one.
@@ -2263,7 +2256,6 @@ impl ModelInfo {
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            use_concise: false,
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
@@ -3502,7 +3494,6 @@ reasoning_effort = "low"
                 context_window: NonZeroU64::new(200_000).unwrap(),
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
-                use_concise: false,
                 agent_type: default_agent_type(),
                 inference_idle_timeout_secs: None,
                 max_retries: None,
@@ -5056,7 +5047,6 @@ default = "grow-4.5"
                 query_params: IndexMap::new(),
                 env_http_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(context_window).unwrap(),
-                use_concise: false,
                 agent_type: default_agent_type(),
                 inference_idle_timeout_secs: None,
                 max_retries: None,

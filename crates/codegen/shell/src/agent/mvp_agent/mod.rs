@@ -587,8 +587,8 @@ pub fn warm_async_http_client() {
 }
 /// Read a string field from `session_meta` first, falling back to
 /// `init_meta`. The session path bypasses the `initialize_request`
-/// `OnceLock`, so a fresh client can supply `rules` / `systemPromptOverride`
-/// even when the leader has been warmed by an earlier client.
+/// `OnceLock`, so a fresh client can supply session-scoped values even when
+/// the leader has been warmed by an earlier client.
 fn read_session_or_init_meta_str<'a>(
     session_meta: Option<&'a acp::Meta>,
     init_meta: Option<&'a acp::Meta>,
@@ -599,67 +599,20 @@ fn read_session_or_init_meta_str<'a>(
     };
     read(session_meta).or_else(|| read(init_meta))
 }
-/// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.
-/// A blank string (empty or whitespace-only) is treated as "no override" so a
-/// client cannot accidentally blank the system prompt.
-fn system_prompt_override_from_meta<'a>(
-    session_meta: Option<&'a acp::Meta>,
-    init_meta: Option<&'a acp::Meta>,
-) -> Option<&'a str> {
-    read_session_or_init_meta_str(session_meta, init_meta, "systemPromptOverride")
-        .filter(|s| !s.trim().is_empty())
-}
-/// Compose the system prompt for a *fresh* session: a full `systemPromptOverride`
-/// verbatim, else the agent template with `_meta.rules` folded into
-/// `<human_rules>`. Note: `rules` is applied at creation only — resumed sessions
-/// sync `systemPromptOverride` (see `enqueue_replace_system_prompt_override`) but
-/// not `rules`, by design.
-fn build_spawn_system_prompt(
+/// Render non-empty user rules as one stable, typed Timeline item. The rules
+/// never replace or extend the stable system head, and closing tags are escaped
+/// so the wrapper has one unambiguous boundary.
+fn session_rules_from_meta(
     session_meta: Option<&acp::Meta>,
     init_meta: Option<&acp::Meta>,
-    agent_system_prompt: &str,
-) -> String {
-    if let Some(override_prompt) = system_prompt_override_from_meta(
-        session_meta,
-        init_meta,
-    ) {
-        override_prompt.to_owned()
-    } else {
-        let mut prompt = agent_system_prompt.to_owned();
-        if let Some(rules) = read_session_or_init_meta_str(
-            session_meta,
-            init_meta,
-            "rules",
-        ) {
-            prompt.push_str("\n\n<human_rules>\n");
-            prompt.push_str(rules);
-            prompt.push_str("\n</human_rules>");
-        }
-        prompt
+) -> Option<String> {
+    let rules = read_session_or_init_meta_str(session_meta, init_meta, "rules")?
+        .trim();
+    if rules.is_empty() {
+        return None;
     }
-}
-/// Enqueue a `ReplaceSystemPrompt` for a resident session actor. No-op when
-/// the client sent no (non-empty) `systemPromptOverride`, or when the head
-/// already matches.
-///
-/// Note: only `systemPromptOverride` is synced on attach. `_meta.rules` is
-/// folded into the prompt at session creation only (see
-/// `build_spawn_system_prompt`); resumed sessions keep their original prompt
-/// unless a full override is supplied. Updating `rules` mid-session is out of
-/// scope by design.
-fn enqueue_replace_system_prompt_override(
-    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
-    session_meta: Option<&acp::Meta>,
-    init_meta: Option<&acp::Meta>,
-) {
-    let Some(override_prompt) = system_prompt_override_from_meta(session_meta, init_meta)
-    else {
-        return;
-    };
-    let _ = cmd_tx
-        .send(crate::session::SessionCommand::ReplaceSystemPrompt {
-            system_prompt: override_prompt.to_owned(),
-        });
+    let rules = rules.replace("</human_rules>", "<\\/human_rules>");
+    Some(format!("<human_rules>\n{rules}\n</human_rules>"))
 }
 /// Warn that a `ValidateType` arrived for an evicted/unknown parent session,
 /// so ops can diagnose "Unknown subagent type" errors for project agents.

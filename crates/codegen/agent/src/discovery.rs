@@ -12,7 +12,6 @@ use tools::types::config_source::ConfigSource;
 
 use crate::config::{AgentDefinition, AgentScope, BuiltinAgentName};
 use crate::error::AgentBuildError;
-use crate::prompt::context::TemplateOverride;
 
 const PROJECT_AGENT_SUBDIR: &str = ".grow/agents";
 
@@ -537,11 +536,9 @@ fn load_plugin_agent_definition(
 /// body so the model receives absolute paths,
 /// matching the expected load-time resolution for these variables.
 fn substitute_plugin_vars(def: &mut AgentDefinition, plugin: &crate::plugins::LoadedPlugin) {
-    // Untrusted plugins are loaded frontmatter-only (body is None), and most
-    // agents use a built-in system prompt. Skip computing root/data paths when
-    // there is nothing to expand.
-    let has_custom_prompt = matches!(def.system_prompt, TemplateOverride::Custom(_));
-    if def.prompt_body.is_none() && !has_custom_prompt {
+    // Untrusted plugins are loaded frontmatter-only (body is None). Skip
+    // computing root/data paths when there is no Agent role to expand.
+    if def.prompt_body.is_none() {
         return;
     }
     let (root, data) = (plugin.root_str(), plugin.data_dir_str());
@@ -549,11 +546,6 @@ fn substitute_plugin_vars(def: &mut AgentDefinition, plugin: &crate::plugins::Lo
         def.prompt_body = Some(crate::plugins::manifest::substitute_env_vars(
             &body, &root, &data,
         ));
-    }
-    if let TemplateOverride::Custom(tpl) = &def.system_prompt {
-        def.system_prompt = TemplateOverride::Custom(
-            crate::plugins::manifest::substitute_env_vars(tpl, &root, &data),
-        );
     }
 }
 
@@ -1282,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_agent_with_removed_color_field_is_rejected() {
+    fn plugin_agent_with_unknown_color_keeps_the_agent_without_an_accent() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
         let home = tmp.path().join("home");
@@ -1306,18 +1298,17 @@ mod tests {
             Some(&home),
             Some(&home.join(".grow")),
         );
-        assert!(!entries.iter().any(|e| e.name == "plugin-one:painter"));
+        assert!(entries.iter().any(|entry| entry.name == "plugin-one:painter"));
 
-        assert!(
-            by_name_in_cwd_with_plugins_and_home(
-                "plugin-one:painter",
-                &cwd,
-                Some(&registry),
-                Some(&home),
-                Some(&home.join(".grow")),
-            )
-            .is_none()
-        );
+        let definition = by_name_in_cwd_with_plugins_and_home(
+            "plugin-one:painter",
+            &cwd,
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grow")),
+        )
+        .expect("Agent lookup should ignore an unknown presentation color");
+        assert_eq!(definition.color, None);
     }
 
     #[test]
@@ -1404,31 +1395,6 @@ mod tests {
             "expected resolved root in: {qualified_body}"
         );
         assert!(!qualified_body.contains("${GROW_PLUGIN_ROOT}"));
-    }
-
-    #[test]
-    fn test_substitute_plugin_vars_resolves_custom_system_prompt() {
-        // `system_prompt` is internal (not frontmatter-driven), so construct the
-        // definition directly to exercise the `TemplateOverride::Custom` branch.
-        let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![]);
-        let plugin = registry.get("plugin-one").unwrap();
-
-        let mut def = AgentDefinition::default_grow_build();
-        def.prompt_body = Some("Body ${GROW_PLUGIN_ROOT}/x".to_string());
-        def.system_prompt = TemplateOverride::Custom("Data at ${GROW_PLUGIN_DATA}/db".to_string());
-
-        substitute_plugin_vars(&mut def, plugin);
-
-        let expected_body = format!("Body {}/x", plugin.root_str());
-        let expected_prompt = format!("Data at {}/db", plugin.data_dir_str());
-        assert_eq!(def.prompt_body.as_deref(), Some(expected_body.as_str()));
-        match &def.system_prompt {
-            TemplateOverride::Custom(tpl) => {
-                assert_eq!(tpl, &expected_prompt);
-                assert!(!tpl.contains("${GROW_PLUGIN_DATA}"));
-            }
-            other => panic!("expected Custom system_prompt, got {other:?}"),
-        }
     }
 
     #[test]

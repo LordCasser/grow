@@ -11,18 +11,6 @@ use crate::prompt::template::{
     SUBAGENT_AUDIENCE_PROMPT,
 };
 use serde::{Deserialize, Serialize};
-/// Selects which base template to use for `Extend` mode rendering.
-///
-/// Built-in variants select one of the Markdown prompts embedded at compile time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TemplateOverride {
-    /// Use the standard base template (or subagent template based on audience).
-    #[default]
-    None,
-    /// A caller-provided custom template string.
-    Custom(String),
-}
 /// Controls which base template and catalog sections are rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +21,6 @@ pub enum PromptAudience {
     /// Child/subagent session with a compact base template.
     Subagent,
 }
-use tools::bridge::ToolBridge;
 use tools::types::template_renderer::TemplateRenderer;
 /// Agent-specific inputs for system prompt rendering.
 ///
@@ -50,10 +37,6 @@ pub struct PromptContext {
     /// In Full mode the optional standard guidance is omitted, while the
     /// mandatory foundation and audience layers remain.
     pub prompt_body: Option<String>,
-    /// Which base template to use for `Extend` mode.
-    /// `TemplateOverride::None` = standard base/subagent template.
-    /// `TemplateOverride::Custom` = caller-provided template string.
-    pub system_prompt: TemplateOverride,
     /// AGENTS.md files discovered during build, in precedence order
     /// (repo root → CWD; deeper files override).
     pub agents_md_files: Vec<AgentConfigFile>,
@@ -79,7 +62,6 @@ impl Default for PromptContext {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::default(),
             prompt_body: None,
-            system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             memory_enabled: false,
             is_non_interactive: false,
@@ -112,30 +94,24 @@ impl PromptContext {
             "system_prompt_label": self.system_prompt_label.as_str(),
         })
     }
-    /// Render the stable system prompt via `ToolBridge`.
+    /// Render the stable system head without consulting mutable tool state.
     ///
-    /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the
-    /// `TemplateRenderer` inside the bridge. Agent-specific fields
-    /// (`memory_enabled`, `is_non_interactive`, and the system label) are
-    /// passed as placeholders.
-    ///
-    /// The mutable Agent role is deliberately excluded; use
+    /// The head contains only the mandatory core and fixed audience. Mutable
+    /// Agent policy, tool guidance, memory capability, and role prose are
+    /// deliberately excluded; use
     /// [`Self::render_role`] for the Timeline control projection.
-    pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
-        let renderer = tool_bridge.template_renderer_snapshot().await?;
+    pub fn render(&self) -> Option<String> {
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
         self.render_with_renderer(&renderer)
     }
 
-    /// Render the mutable Agent role through the same finalized tool-name
-    /// renderer as the stable system prompt.
-    pub async fn render_role(&self, tool_bridge: &ToolBridge) -> Option<String> {
+    /// Render mutable Agent-scoped guidance through the finalized tool-name
+    /// renderer for its Timeline control projection.
+    pub async fn render_role(&self, tool_bridge: &tools::bridge::ToolBridge) -> Option<String> {
         let renderer = tool_bridge.template_renderer_snapshot().await?;
         self.render_role_with_renderer(&renderer)
     }
-    /// Render the stable system prompt from a finalized tool-name renderer.
-    ///
-    /// Hosts that do not own a [`ToolBridge`] use this path so they still
-    /// consume the production base-template and prompt-body composition.
+    /// Render the stable system head from a finalized renderer.
     pub fn render_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
         let placeholders = self.placeholders();
         let render = |template: &str| renderer.render_with_extra(template, &placeholders).ok();
@@ -144,14 +120,6 @@ impl PromptContext {
             PromptAudience::Primary => PRIMARY_AUDIENCE_PROMPT,
             PromptAudience::Subagent => SUBAGENT_AUDIENCE_PROMPT,
         })?);
-        if self.prompt_composition == PromptComposition::Extend {
-            let standard = match &self.system_prompt {
-                TemplateOverride::Custom(template) => template.as_str(),
-                TemplateOverride::None => STANDARD_PROMPT,
-            };
-            sections.push(render(standard)?);
-        }
-        sections.push(render(SESSION_EXTENSIONS_PROMPT)?);
         let prompt = sections
             .into_iter()
             .filter(|section| !section.trim().is_empty())
@@ -160,14 +128,31 @@ impl PromptContext {
         Some(prompt)
     }
 
-    /// Render only the Agent-authored role layer.
+    /// Render the complete mutable Agent layer. `Extend` includes Grow's
+    /// standard guidance before the authored role; `Full` omits that optional
+    /// guidance. Session extensions live here because Agent switches can
+    /// change the available tools.
     pub fn render_role_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
-        let body = self.prompt_body.as_ref()?;
-        Some(
+        let placeholders = self.placeholders();
+        let render = |template: &str| {
             renderer
-                .render_with_extra(body, &self.placeholders())
-                .unwrap_or_else(|_| body.clone()),
-        )
+                .render_with_extra(template, &placeholders)
+                .unwrap_or_else(|_| template.to_owned())
+        };
+        let mut sections = Vec::new();
+        if self.prompt_composition == PromptComposition::Extend {
+            sections.push(render(STANDARD_PROMPT));
+        }
+        if let Some(body) = self.prompt_body.as_deref() {
+            sections.push(render(body));
+        }
+        sections.push(render(SESSION_EXTENSIONS_PROMPT));
+        let prompt = sections
+            .into_iter()
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!prompt.is_empty()).then_some(prompt)
     }
 }
 #[cfg(test)]
@@ -178,35 +163,10 @@ mod tests {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Primary,
             prompt_body: None,
-            system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             memory_enabled: false,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
-        }
-    }
-    #[test]
-    fn test_template_override_deserialize_new_format() {
-        let v: TemplateOverride = serde_json::from_str(r#""none""#).unwrap();
-        assert_eq!(v, TemplateOverride::None);
-        let v: TemplateOverride = serde_json::from_str(r#"{"custom": "my template"}"#).unwrap();
-        assert_eq!(v, TemplateOverride::Custom("my template".to_string()));
-    }
-    #[test]
-    fn test_template_override_rejects_untagged_custom_string() {
-        assert!(
-            serde_json::from_str::<TemplateOverride>(r#""You are a coding agent...""#).is_err()
-        );
-    }
-    #[test]
-    fn test_template_override_round_trip() {
-        for original in [
-            TemplateOverride::None,
-            TemplateOverride::Custom("my custom prompt".to_string()),
-        ] {
-            let json = serde_json::to_string(&original).unwrap();
-            let loaded: TemplateOverride = serde_json::from_str(&json).unwrap();
-            assert_eq!(original, loaded);
         }
     }
     #[test]
@@ -267,7 +227,6 @@ mod tests {
     #[test]
     fn agents_md_user_reminder_included_for_default_template() {
         let mut ctx = test_context();
-        ctx.system_prompt = TemplateOverride::None;
         ctx.agents_md_files = vec![AgentConfigFile {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
@@ -285,7 +244,6 @@ mod tests {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Subagent,
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
-            system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             memory_enabled: true,
             is_non_interactive: false,
@@ -371,14 +329,6 @@ mod tests {
         );
     }
     #[test]
-    fn child_prompt_has_no_system_prompt_override() {
-        let ctx = child_general_purpose_context();
-        assert!(
-            ctx.system_prompt == TemplateOverride::None,
-            "CURRENT: child has no custom system_prompt (uses BASE_TEMPLATE)"
-        );
-    }
-    #[test]
     fn parent_vs_child_section_differences() {
         let parent = test_context();
         let child = child_general_purpose_context();
@@ -395,7 +345,6 @@ mod tests {
         assert!(matches!(ctx.prompt_composition, PromptComposition::Extend));
         assert_eq!(ctx.audience, super::PromptAudience::Subagent);
         assert!(ctx.memory_enabled);
-        assert!(ctx.system_prompt == TemplateOverride::None);
         let p = ctx.placeholders();
         assert!(p.get("memory_enabled").is_some());
     }
@@ -667,12 +616,34 @@ mod tests {
         );
         let prompt = ctx.render_with_renderer(&renderer).unwrap();
         assert!(!prompt.contains("ROLE_LAYER_SENTINEL"), "{prompt}");
+        assert!(!prompt.contains("Work with the user"), "{prompt}");
         assert!(!prompt.contains("<runtime_context>"), "{prompt}");
         assert!(!prompt.contains("<behavior-context>"), "{prompt}");
-        assert_eq!(
-            ctx.render_role_with_renderer(&renderer).as_deref(),
-            Some("ROLE_LAYER_SENTINEL")
+        let role = ctx.render_role_with_renderer(&renderer).unwrap();
+        assert!(role.contains("Work with the user"), "{role}");
+        assert!(role.contains("ROLE_LAYER_SENTINEL"), "{role}");
+    }
+
+    #[test]
+    fn full_role_composition_does_not_mutate_the_stable_head() {
+        let renderer = tools::types::template_renderer::TemplateRenderer::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         );
+        let mut extend = test_context();
+        extend.prompt_body = Some("ROLE_LAYER_SENTINEL".to_string());
+        let mut full = extend.clone();
+        full.prompt_composition = PromptComposition::Full;
+
+        assert_eq!(
+            extend.render_with_renderer(&renderer),
+            full.render_with_renderer(&renderer)
+        );
+        let extend_role = extend.render_role_with_renderer(&renderer).unwrap();
+        let full_role = full.render_role_with_renderer(&renderer).unwrap();
+        assert!(extend_role.contains("Work with the user"));
+        assert!(!full_role.contains("Work with the user"));
+        assert!(full_role.contains("ROLE_LAYER_SENTINEL"));
     }
     /// Verify that AGENTS.md file paths rewritten to the display cwd are
     /// rendered into the system prompt correctly. When `AgentConfigFile.file_path`

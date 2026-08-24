@@ -3,25 +3,26 @@
 Grow composes an Agent session from independent layers. The layers have a fixed order and later layers may only narrow capabilities established earlier.
 
 ```text
-Mandatory Core
+Stable System Head
+  + Mandatory Core
   + Audience (primary | subagent)
-  + Standard Guidance (extend only)
-  + Session Extensions (memory)
 
 Timeline Surface
-  + Control-event-anchored Agent Role transition items in the live tail
+  + Control-event-anchored Agent policy/role transition items in the live tail
   + Control-event-anchored Active Behavior transition items in the live tail
+  + Runtime, project, skill, capability, and session-rule context items
+  + Retrieved memory evidence in the live tail
 ```
 
-Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` removes the optional standard guidance and uses the Agent Markdown body as the complete role layer; it does not replace Mandatory Core, Audience, Timeline-anchored Behavior transitions, or Session Extensions.
+Mandatory Core contains instruction priority, action safety, generic tool-use rules, project-instruction scoping, output rules, and Grow client context. Together with the fixed Audience it forms the one stable system head. The head contains no Agent tool names, role prose, retrieved memory, client rules, model-specific concise variant, or Behavior. It is seeded once; model changes, Agent switches, client attach, memory retrieval, and compaction never replace it. `promptComposition: full` only removes optional standard guidance from the typed Agent layer and uses the Agent Markdown body as that layer's authored role; it cannot replace the stable head.
 
-Runtime facts do not belong to the system prompt. At session start, the shell renders one typed `RuntimeContextSnapshot` as a user-role message containing the visible workspace, OS, shell, local date, and optional VCS snapshot, then durably appends it to Timeline. Agent definitions cannot override its shape. Skills, project instructions, MCP catalogs, capability changes, and reminders each publish their own Timeline-backed messages instead of being copied into either the system prompt or the runtime snapshot.
+Runtime facts do not belong to the system prompt. At session start, the shell renders one typed `RuntimeContextSnapshot` as a user-role message containing the visible workspace, OS, shell, local date, and optional VCS snapshot, then durably appends it to Timeline. Agent definitions cannot override its shape. Skills, project instructions, MCP catalogs, capability changes, client-supplied session rules, and reminders each publish their own typed Timeline-backed messages instead of being copied into either the system prompt or the runtime snapshot. Retrieved memory has one path: an append-only `MemoryContext` item at the live tail, durably committed before the request is assembled and idempotent for identical evidence.
 
 Every ordinary model request carries one provider-routing cache key derived from Timeline identity, the latest rewind branch anchor, and the concrete backend/base URL/model route. Appending messages, changing Behavior, or selecting another Agent does not create a new lineage key; fork, rewind, and model-route changes do. The key is routing metadata, not a content fingerprint: provider-visible content still determines whether a prefix actually matches.
 
 Audience defines ownership boundaries: the primary Agent owns the user-facing result, the task-wide understanding needed to produce it, and the integration of delegated results, while a subagent owns only its delegated task. Primary ownership cannot be transferred wholesale: delegation may extend coverage or isolate bounded work, but the primary Agent directly examines central evidence, retains cross-cutting synthesis, and continues independent work while children run whenever useful work remains. Audience never declares a role, toolset, or Behavior.
 
-Built-in and user-defined Agents are Markdown files with YAML frontmatter. The Markdown body is the role and use-case prompt. The rendered role is not copied into the system head: the initial selection and every later switch append one typed `system.role` Control context whose snapshot carries the same Agent identity. A role-less Agent emits an explicit reset, so selecting it retires earlier role instructions rather than leaving them active by omission. Tool configuration is explicit and independent:
+Built-in and user-defined Agents are Markdown files with YAML frontmatter. The Markdown body is the role and use-case prompt. The rendered Agent layer contains optional standard guidance, the authored role, and tool-dependent session extensions; it is never copied into the system head. The initial selection and every later switch append one typed `system.role` Control context whose snapshot carries the same Agent identity. A role-less `full` Agent with no extension emits an explicit reset, so selecting it retires earlier Agent instructions rather than leaving them active by omission. Tool configuration is explicit and independent:
 
 ```yaml
 promptComposition: extend

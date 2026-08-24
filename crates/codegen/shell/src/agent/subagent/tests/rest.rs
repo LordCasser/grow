@@ -74,7 +74,7 @@ fn normalize_forked_context_consecutive_users() {
         panic!("expected User at position 1");
     }
 }
-/// End-to-end test: after normalization + system prompt replacement,
+/// End-to-end test: after normalization + Timeline seed composition,
 /// the conversation shape is [System(child's), BackgroundContext].
 /// Then the Prompt command appends the task as [2], giving:
 /// [System(child's), BackgroundContext, Task].
@@ -92,11 +92,15 @@ fn end_to_end_normalized_conversation_shape() {
     );
     assert_eq!(prefix_len, 2);
     assert_eq!(conv.len(), 2);
-    if let ConversationItem::System(ref mut sys) = conv[0] {
-        sys.content = "child system prompt with tool guidance".into();
-    } else {
-        panic!("expected System at position 0");
-    }
+    let mut seeded_prefix_len = Some(prefix_len);
+    seed_child_system_head(
+        &InitialContextSource::Forked,
+        false,
+        &mut conv,
+        &mut seeded_prefix_len,
+        "child system prompt with tool guidance",
+    )
+    .unwrap();
     if let ConversationItem::System(ref sys) = conv[0] {
         assert_eq!(
                 sys.content.as_ref(),
@@ -139,6 +143,7 @@ fn end_to_end_normalized_conversation_shape() {
         assert_eq!(text, task, "last user message should be the task");
     }
     assert_eq!(prefix_len, 2);
+    assert_eq!(seeded_prefix_len, Some(2));
     assert!(prefix_len < conv.len(), "prefix should not cover the task");
 }
 /// Verify that the task prompt (not background context) would be the
@@ -217,109 +222,6 @@ fn last_user_message_is_task_after_normalization() {
             Some(task),
             "last user message should be the task, not background context"
         );
-}
-/// Simulate compaction preserving the inherited prefix.
-/// The compactor produces [System, UserPrefix, Summary, ...]. The prefix
-/// preservation logic takes [System, BackgroundContext] from the original
-/// conversation and skips the compacted System, resulting in:
-/// [System(inherited), BackgroundContext(inherited), UserPrefix(compacted), Summary, ...]
-#[test]
-fn compaction_preserves_inherited_prefix() {
-    use sampling_types::conversation::ConversationItem;
-    let parent_conv = vec![
-            ConversationItem::system("parent sys"),
-            ConversationItem::user("parent question"),
-            ConversationItem::assistant("parent answer"),
-        ];
-    let (conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
-        parent_conv,
-    );
-    assert_eq!(prefix_len, 2);
-    let mut full_conv = conv;
-    if let ConversationItem::System(ref mut sys) = full_conv[0] {
-        sys.content = "child system prompt".into();
-    }
-    full_conv.push(ConversationItem::user("do the thing"));
-    full_conv.push(ConversationItem::assistant("done"));
-    let compacted_history = vec![
-            ConversationItem::system("fresh system prompt after compaction"),
-            ConversationItem::user("user prefix"),
-            ConversationItem::user("<compacted_summary>summary of work</compacted_summary>"),
-        ];
-    let inherited: Vec<_> = full_conv[..prefix_len].to_vec();
-    let child_items: Vec<_> = compacted_history
-        .into_iter()
-        .skip_while(|i| matches!(i, ConversationItem::System(_)))
-        .collect();
-    let mut preserved = inherited;
-    preserved.extend(child_items);
-    assert_eq!(preserved.len(), 4);
-    if let ConversationItem::System(ref sys) = preserved[0] {
-        assert_eq!(sys.content.as_ref(), "child system prompt");
-    } else {
-        panic!("expected System at [0]");
-    }
-    if let ConversationItem::User(ref u) = preserved[1] {
-        let text: String = u
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                sampling_types::conversation::ContentPart::Text { text } => {
-                    Some(text.as_ref())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(
-                text.contains("<background_context>"),
-                "background context should be preserved across compaction"
-            );
-    } else {
-        panic!("expected BackgroundContext User at [1]");
-    }
-    let system_count = preserved
-        .iter()
-        .filter(|i| matches!(i, ConversationItem::System(_)))
-        .count();
-    assert_eq!(
-            system_count, 1,
-            "should have exactly one System after compaction"
-        );
-    let bg_count = preserved
-        .iter()
-        .filter(|i| {
-            if let ConversationItem::User(u) = i {
-                u.content
-                    .iter()
-                    .any(|p| {
-                        matches!(
-                    p,
-                    sampling_types::conversation::ContentPart::Text { text } if text.contains("<background_context>")
-                )
-                    })
-            } else {
-                false
-            }
-        })
-        .count();
-    assert_eq!(
-            bg_count, 1,
-            "should have exactly one background_context after compaction"
-        );
-}
-/// Verify that compaction with prefix_len=0 (non-forked) passes through unchanged.
-#[test]
-fn compaction_no_prefix_passes_through() {
-    use sampling_types::conversation::ConversationItem;
-    let compacted = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("summary"),
-        ];
-    let prefix_len: usize = 0;
-    let result = if prefix_len > 0 { unreachable!() } else { compacted.clone() };
-    assert_eq!(result.len(), 2);
-    assert!(matches!(result[0], ConversationItem::System(_)));
 }
 #[test]
 fn subagent_worktree_snapshot_gate_defaults_off() {
@@ -425,16 +327,6 @@ fn resume_prefix_len_is_zero_without_system_head() {
             ConversationItem::assistant("done"),
         ];
     assert_eq!(resume_inherited_prefix_len(&conversation), 0);
-}
-#[test]
-fn resume_prefix_len_counts_consecutive_system_head() {
-    use sampling_types::conversation::ConversationItem;
-    let conversation = vec![
-            ConversationItem::system("sys a"),
-            ConversationItem::system("sys b"),
-            ConversationItem::user("work"),
-        ];
-    assert_eq!(resume_inherited_prefix_len(&conversation), 2);
 }
 #[test]
 fn resume_source_worktree_reuse() {
@@ -546,25 +438,30 @@ fn select_override_cwd_fresh_spawn_uses_request_cwd() {
     assert_eq!(select_override_cwd(None, Some("/x")), Some("/x"));
 }
 #[test]
-fn resumed_session_uses_current_runtime_contract() {
+fn resumed_session_preserves_its_seeded_system_head() {
     use sampling_types::conversation::ConversationItem;
-    let mut conversation = [
+    let mut conversation = vec![
         ConversationItem::system("old source system prompt"),
         ConversationItem::user("task 1"),
         ConversationItem::assistant("done"),
     ];
-    let current_prompt = "freshly rendered current system prompt";
-    if let Some(ConversationItem::System(sys)) = conversation.first_mut() {
-        sys.content = current_prompt.into();
-    }
+    let mut prefix_len = Some(1);
+    seed_child_system_head(
+        &InitialContextSource::Resumed,
+        false,
+        &mut conversation,
+        &mut prefix_len,
+        "freshly rendered current system prompt",
+    )
+    .unwrap();
     match &conversation[0] {
         ConversationItem::System(sys) => {
-            assert_eq!(sys.content.as_ref(), current_prompt);
-            assert!(!sys.content.contains("old source"));
+            assert_eq!(sys.content.as_ref(), "old source system prompt");
         }
         _ => panic!("first item should be System"),
     }
     assert_eq!(conversation.len(), 3);
+    assert_eq!(prefix_len, Some(1));
 }
 #[test]
 fn token_estimation_for_window_safety() {

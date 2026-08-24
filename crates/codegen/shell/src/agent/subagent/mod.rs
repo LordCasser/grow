@@ -599,10 +599,9 @@ pub(crate) fn present_child_completion(
 /// applied by the caller (`run_shell_child`) BEFORE this function
 /// runs, so it is not handled here.
 ///
-/// NOTE: `agent_type` and `use_concise` on the resolved model are
-/// intentionally ignored. Subagent prompt/toolset is always determined by
-/// the `AgentDefinition`, not the model. See design spec
-/// "Behavioral Rules section 3".
+/// NOTE: `agent_type` on the resolved model is intentionally ignored.
+/// Subagent prompt/toolset is always determined by the `AgentDefinition`, not
+/// the model. See design spec "Behavioral Rules section 3".
 async fn resolve_subagent_sampling_config(
     agent_name: &str,
     ctx: &SubagentSpawnContext,
@@ -835,16 +834,15 @@ fn resolve_model_override_to_config(
     );
     Some((config, canonical_model_id))
 }
-/// Leading items to preserve across compaction on resume: the System head only, so the
-/// resumed body (the child's own work) stays compactable. Returns 0 when there's no
-/// leading System; the spawn path then inserts one and bumps the prefix to 1.
+/// Preserve the single stable System head on resume so the child's own work
+/// remains compactable. A missing head is reported later by seed validation.
 pub(crate) fn resume_inherited_prefix_len(
     conversation: &[sampling_types::conversation::ConversationItem],
 ) -> usize {
-    conversation
-        .iter()
-        .take_while(|i| matches!(i, ConversationItem::System(_)))
-        .count()
+    usize::from(matches!(
+        conversation.first(),
+        Some(ConversationItem::System(_))
+    ))
 }
 /// How a subagent's initial conversation was bootstrapped.
 #[derive(Debug)]
@@ -857,6 +855,39 @@ struct InitialContext {
     /// True only for a verbatim mirror-fork (parent conversation copied
     /// byte-for-byte before child-only runtime context is applied).
     verbatim_fork: bool,
+}
+
+/// Establish the child Timeline's stable System head before its seed is
+/// persisted. Resumes and verbatim mirror-forks keep their original head;
+/// new and normalized children receive the current child-audience head.
+fn seed_child_system_head(
+    source: &InitialContextSource,
+    verbatim_fork: bool,
+    conversation: &mut Vec<ConversationItem>,
+    prefix_len: &mut Option<usize>,
+    child_system_head: &str,
+) -> Result<(), String> {
+    if verbatim_fork && !matches!(source, InitialContextSource::Forked) {
+        return Err("verbatim child context is not a fork".to_string());
+    }
+    let preserves_source_head =
+        matches!(source, InitialContextSource::Resumed) || verbatim_fork;
+    if preserves_source_head {
+        return matches!(conversation.first(), Some(ConversationItem::System(_)))
+            .then_some(())
+            .ok_or_else(|| "inherited child Surface has no stable System head".to_string());
+    }
+
+    match conversation.first_mut() {
+        Some(ConversationItem::System(system)) => {
+            system.content = std::sync::Arc::<str>::from(child_system_head);
+        }
+        _ => {
+            conversation.insert(0, ConversationItem::system(child_system_head.to_owned()));
+            *prefix_len = Some(prefix_len.unwrap_or_default() + 1);
+        }
+    }
+    Ok(())
 }
 /// Resume bootstrap: preserve only the System head (see `resume_inherited_prefix_len`).
 fn resume_initial_context_with_ref(

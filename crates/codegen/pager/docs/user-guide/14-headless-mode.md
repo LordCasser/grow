@@ -653,7 +653,6 @@ These flags supplement the [Command-Line Options](#command-line-options) table a
 | ----------------------------- | ------------------------------------------------- |
 | `--agent <NAME>`              | Agent name or definition file path                |
 | `--agents <JSON>`             | Inline subagent definitions as JSON               |
-| `--system-prompt-override`    | Override the agent's system prompt                |
 | `--no-plan`                   | Disable plan mode                                 |
 | `--no-subagents`              | Disable subagent spawning                         |
 | `--no-memory`                 | Disable cross-session memory                      |

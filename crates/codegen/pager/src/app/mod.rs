@@ -631,7 +631,6 @@ pub async fn run(
         fs_write: args.fs_write,
         installer: args.installer.clone(),
         remote_settings: remote_settings.clone(),
-        system_prompt_override: args.system_prompt_override.clone(),
         rules: args.rules.clone(),
         reasoning_effort_override: args
             .reasoning_effort

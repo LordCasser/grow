@@ -1,4 +1,4 @@
-//! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
+//! ConversationRequest assembly — image compaction, pruning, repair, memory projection.
 
 use sampling_types::{ContentPart, ConversationItem, ConversationRequest, ToolSpec};
 
@@ -21,9 +21,8 @@ impl ChatStateActor {
     ///
     /// 1. Evict oldest inline images when the inline-image bytes near 50 MB
     /// 2. Prune old tool results if over 50% context utilization
-    /// 3. Optionally persist the memory reminder into actor state
-    /// 4. Inject memory reminder into the request clone (if needed)
-    /// 5. Assemble and return the `ConversationRequest`
+    /// 3. Append retrieved memory context to Timeline exactly once
+    /// 4. Assemble and return the `ConversationRequest`
     ///
     /// # Repair invariant
     ///
@@ -36,7 +35,6 @@ impl ChatStateActor {
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
-        persist_memory_reminder: bool,
     ) -> Result<ConversationRequest, crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(
             sampling_types::DanglingToolCallReason::UserCancelled,
@@ -46,16 +44,29 @@ impl ChatStateActor {
             self.state.total_tokens,
             self.state.sampling_config.context_window,
         );
-        let mut memory_reminder = memory_reminder;
-        if let Some(reminder) = memory_reminder.as_deref()
-            && persist_memory_reminder
+        if let Some(reminder) = memory_reminder
+            .as_deref()
+            .map(str::trim)
+            .filter(|reminder| !reminder.is_empty())
         {
-            let mut conversation = self.state.timeline.surface().to_vec();
-            let injected = inject_memory_reminder(&mut conversation, reminder);
-            if injected {
-                self.replace_conversation_durably(conversation, MessageCause::MemoryContext)
-                    .await?;
-                memory_reminder = None;
+            let item = ConversationItem::memory_context(reminder);
+            let already_present = self.state.timeline.surface().iter().any(|existing| {
+                matches!(
+                    existing,
+                    ConversationItem::User(user)
+                        if user.synthetic_reason
+                            == Some(sampling_types::SyntheticReason::MemoryContext)
+                            && existing.text_content() == item.text_content()
+                )
+            });
+            if !already_present {
+                let mut candidate = self.state.timeline.clone();
+                let event = candidate.append(item.clone(), MessageCause::MemoryContext)?;
+                self.commit_timeline_event(event).await?;
+                self.state.estimated_tokens_since_model = self
+                    .state
+                    .estimated_tokens_since_model
+                    .saturating_add(super::state::estimate_item_tokens(&item));
             }
         }
         // Measure the exact serialized body and evict only once it approaches
@@ -68,7 +79,7 @@ impl ChatStateActor {
         let body_bytes = conversation_body_bytes(self.state.timeline.surface());
         let inline_images = inline_image_count(self.state.timeline.surface());
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
-        let needs_mutation = needs_prune || memory_reminder.is_some() || needs_image_compaction;
+        let needs_mutation = needs_prune || needs_image_compaction;
 
         // Only allocate the mutable working copy when a mutation path is taken.
         let mut eviction: Option<ImageEvictionOutcome> = None;
@@ -93,14 +104,9 @@ impl ChatStateActor {
                 prune_conversation(&mut items, &self.pruning_config);
             }
 
-            // Step 3: Inject memory reminder into the system message
-            if let Some(reminder) = memory_reminder {
-                inject_memory_reminder(&mut items, &reminder);
-            }
-
             items
         } else {
-            // Hot path: no pruning, no memory reminder, no old images —
+            // Hot path: no pruning and no old images —
             // clone directly into the request without any intermediate mutation passes.
             self.state.timeline.surface().to_vec()
         };
@@ -487,61 +493,6 @@ pub(crate) fn compact_images_to_byte_budget(
 }
 
 // ============================================================================
-// Memory reminder injection
-// ============================================================================
-
-use crate::types::MEMORY_CONTEXT_OPEN_TAG;
-
-/// Upsert a memory reminder into the conversation's system message.
-///
-/// If the first item is a `System` message, any previously injected memory
-/// reminder section is replaced in-place; otherwise the reminder is appended.
-/// If no system message exists, a new `System` item is prepended.
-///
-/// Returns `true` when the conversation was changed.
-pub(super) fn inject_memory_reminder(items: &mut Vec<ConversationItem>, reminder: &str) -> bool {
-    let reminder = reminder.trim();
-    if reminder.is_empty() {
-        return false;
-    }
-
-    if let Some(ConversationItem::System(sys)) = items.first_mut() {
-        upsert_memory_reminder_text(&mut sys.content, reminder)
-    } else {
-        items.insert(0, ConversationItem::system(reminder));
-        true
-    }
-}
-
-fn upsert_memory_reminder_text(system_prompt: &mut std::sync::Arc<str>, reminder: &str) -> bool {
-    let existing_start = system_prompt
-        .find(MEMORY_CONTEXT_OPEN_TAG)
-        .map(|idx| system_prompt[..idx].trim_end_matches('\n').len());
-
-    let updated: String = if let Some(prefix_len) = existing_start {
-        let prefix = system_prompt[..prefix_len].trim_end_matches('\n');
-        if prefix.is_empty() {
-            reminder.to_string()
-        } else {
-            format!("{prefix}\n\n{reminder}")
-        }
-    } else if system_prompt.trim_end() == reminder {
-        system_prompt.as_ref().to_owned()
-    } else if system_prompt.is_empty() {
-        reminder.to_string()
-    } else {
-        format!("{}\n\n{reminder}", system_prompt.trim_end_matches('\n'))
-    };
-
-    if system_prompt.as_ref() == updated.as_str() {
-        false
-    } else {
-        *system_prompt = std::sync::Arc::<str>::from(updated);
-        true
-    }
-}
-
-// ============================================================================
 // String helpers
 // ============================================================================
 
@@ -581,28 +532,6 @@ mod tests {
         if let ConversationItem::ToolResult(ref tr) = conv[0] {
             assert_eq!(tr.content.len(), 10_000);
         }
-    }
-
-    #[test]
-    fn inject_memory_into_existing_system() {
-        let mut items = vec![
-            ConversationItem::system("You are helpful."),
-            ConversationItem::user("hi"),
-        ];
-        inject_memory_reminder(&mut items, "Remember: user likes rust");
-        if let ConversationItem::System(ref sys) = items[0] {
-            assert!(sys.content.contains("Remember: user likes rust"));
-            assert!(sys.content.starts_with("You are helpful."));
-        }
-        assert_eq!(items.len(), 2); // no new item added
-    }
-
-    #[test]
-    fn inject_memory_prepends_when_no_system() {
-        let mut items = vec![ConversationItem::user("hi")];
-        inject_memory_reminder(&mut items, "Remember: user likes rust");
-        assert_eq!(items.len(), 2);
-        assert!(matches!(&items[0], ConversationItem::System(_)));
     }
 
     // -- image size-gated compaction tests --

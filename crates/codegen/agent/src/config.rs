@@ -1,6 +1,5 @@
 //! Agent definition types — parsed from `.grow/agents/*.md` files.
 use crate::error::AgentBuildError;
-use crate::prompt::context::TemplateOverride;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -526,8 +525,6 @@ pub struct AgentDefinition {
     pub session_tools_denylist: Option<Vec<String>>,
     #[serde(skip)]
     pub prompt_body: Option<String>,
-    #[serde(skip)]
-    pub system_prompt: TemplateOverride,
     /// Where this definition was loaded from, optional if built in agent definition
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -575,13 +572,13 @@ pub struct ToolRetryConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptComposition {
-    /// Body is appended after the mandatory foundation, audience, and
-    /// standard guidance. Default.
+    /// The typed Agent layer contains standard guidance followed by the body.
+    /// Default.
     #[default]
     Extend,
-    /// Skip optional standard guidance and use the body as the complete role
-    /// layer. Mandatory foundation, audience, active Behavior, and session
-    /// extensions still apply.
+    /// Skip optional standard guidance and use the body as the authored role.
+    /// The stable system head is never replaced; tool-dependent extensions
+    /// still share this typed Agent layer.
     Full,
 }
 fn default_prompt_composition() -> PromptComposition {
@@ -1053,7 +1050,6 @@ impl AgentDefinition {
         def.resolve_declared_toolset()?;
         def.name = file_stem_agent_id(path)?;
         def.prompt_body = None;
-        def.system_prompt = TemplateOverride::None;
         def.source_path = Some(path.to_path_buf());
         def.plugin_name = None;
         def.scope = Self::scope_from_path(path);
@@ -1227,15 +1223,10 @@ impl AgentDefinition {
     ) -> bool {
         false
     }
-    /// True iff this agent's wire format is non-interchangeable with the
-    /// stock harness, so a client-supplied `_meta.agentProfile` must NOT
-    /// override it. Strict iff either the system prompt is bespoke or the
-    /// toolset is curated (`!inject_default_tools`).
+    /// True iff this Agent's curated tool schema must not be replaced by a
+    /// client-selected generic profile.
     pub fn is_strict_harness(&self) -> bool {
-        use crate::prompt::context::TemplateOverride;
-        let prompt_is_custom = !matches!(self.system_prompt, TemplateOverride::None);
-        let toolset_is_curated = !self.inject_default_tools;
-        prompt_is_custom || toolset_is_curated
+        !self.inject_default_tools
     }
     /// Swap the definition's file tools for the equivalents in `file_tools`
     /// (hashline vs standard), slot by slot — never granting a slot the
@@ -1292,7 +1283,6 @@ impl AgentDefinition {
             session_tools_denylist: None,
             completion_requirement: None,
             prompt_body: None,
-            system_prompt: TemplateOverride::None,
             source_path: None,
             scope: AgentScope::BuiltIn,
         }
@@ -1923,7 +1913,6 @@ unknownField: value
     #[test]
     fn test_unsupported_frontmatter_fields_are_rejected() {
         for field in [
-            "color",
             "initialPrompt",
             "mode",
             "model",
@@ -2257,28 +2246,18 @@ description: Test default tool config
         let recovered = AgentDefinition::from_json(&serialized).unwrap();
         assert_eq!(recovered.mcp_inheritance, def.mcp_inheritance);
     }
-    fn def_with_template(tpl: crate::prompt::context::TemplateOverride) -> AgentDefinition {
-        let mut def = AgentDefinition::default_grow_build();
-        def.system_prompt = tpl;
-        def
-    }
     #[test]
-    fn carries_discipline_false_for_every_template_and_audience() {
-        for tpl in [
-            crate::prompt::context::TemplateOverride::None,
-            crate::prompt::context::TemplateOverride::Custom("fake".to_string()),
+    fn carries_discipline_false_for_every_audience() {
+        let def = AgentDefinition::default_grow_build();
+        for audience in [
+            crate::prompt::context::PromptAudience::Primary,
+            crate::prompt::context::PromptAudience::Subagent,
         ] {
-            let def = def_with_template(tpl.clone());
-            for audience in [
-                crate::prompt::context::PromptAudience::Primary,
-                crate::prompt::context::PromptAudience::Subagent,
-            ] {
-                assert!(
-                    !def.carries_task_completion_discipline(audience),
-                    "discipline block was removed; helper must return false \
-                     (template: {tpl:?}, audience: {audience:?})"
-                );
-            }
+            assert!(
+                !def.carries_task_completion_discipline(audience),
+                "discipline block was removed; helper must return false \
+                 (audience: {audience:?})"
+            );
         }
     }
 }

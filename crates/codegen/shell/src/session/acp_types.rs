@@ -369,9 +369,10 @@ pub struct StartupHints {
     /// Child assignment shown to the permission classifier and ask UI.
     #[serde(skip)]
     pub subagent_description: Option<String>,
-    /// Set on a fork spawn so `install_system_prompt` does NOT overwrite the
-    /// inherited System at `conversation[0]`: the verbatim parent copy already
-    /// holds the parent's System and overwriting it would bust the cache prefix.
+    /// Set for a verbatim mirror-fork whose Timeline seed already contains the
+    /// exact parent prefix. Runtime prefix materialization must preserve that
+    /// System head and must not inject a fresh project-instructions item into
+    /// the inherited cache prefix.
     #[serde(default)]
     pub preserve_inherited_system: bool,
 }

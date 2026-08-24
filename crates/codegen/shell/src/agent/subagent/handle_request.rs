@@ -431,8 +431,8 @@ pub(crate) async fn run_shell_child(
     let InitialContext {
         source: context_source,
         source_ref,
-        prefix_len: inherited_prefix_len,
-        conversation: forked_conversation,
+        prefix_len: mut inherited_prefix_len,
+        conversation: mut forked_conversation,
         prompt_blobs: inherited_prompt_blobs,
         verbatim_fork: context_verbatim_fork,
     } = match bootstrap_initial_context(
@@ -455,6 +455,25 @@ pub(crate) async fn run_shell_child(
     };
     let verbatim_mirror_fork =
         context_source == InitialContextSource::Forked && context_verbatim_fork;
+    let Some(child_system_head) = (agent::PromptContext {
+        audience: agent::prompt::context::PromptAudience::Subagent,
+        ..Default::default()
+    })
+    .render() else {
+        return child_run_output(
+            failure_result(&request, "failed to render the stable child System head"),
+            completion_data,
+        );
+    };
+    if let Err(message) = seed_child_system_head(
+        &context_source,
+        verbatim_mirror_fork,
+        &mut forked_conversation,
+        &mut inherited_prefix_len,
+        &child_system_head,
+    ) {
+        return child_run_output(failure_result(&request, &message), completion_data);
+    }
     let task_prompt_text = prompt.clone();
     let inherited_prefix_len = inherited_prefix_len.unwrap_or(0);
     let effective_source_str = match &context_source {

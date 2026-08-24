@@ -473,11 +473,11 @@ pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
 
 pub fn format_agent_detail(entry: &AgentListEntry) -> Vec<String> {
     let definition = &entry.definition;
-    let mode = match definition.prompt_composition {
+    let composition = match definition.prompt_composition {
         agent::config::PromptComposition::Extend => "extend",
         agent::config::PromptComposition::Full => "full",
     };
-    let mut lines = vec![format!("  Prompt mode: {mode}")];
+    let mut lines = vec![format!("  Role composition: {composition}")];
     if definition.tool_config.tools.is_empty() {
         lines.push("  Tools: (none)".to_string());
     } else {

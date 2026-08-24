@@ -1560,7 +1560,7 @@ impl SessionActor {
         if crate::session::helpers::memory_context::conversation_has_memory_context(&conversation) {
             tracing::info!(
                 target: ::diagnostics::memory_log::TARGET,
-                "MEMORY_INJECT: existing memory-context block present in system message -- skipping re-injection to preserve prompt cache"
+                "MEMORY_INJECT: typed memory-context item already present -- skipping re-injection"
             );
             return None;
         }
@@ -1971,7 +1971,6 @@ impl SessionActor {
                     self.session_info.id.0.as_ref(),
                     effective_tools,
                     memory_reminder,
-                    self.memory.is_enabled(),
                 )
                 .await
                 .map_err(|error| {

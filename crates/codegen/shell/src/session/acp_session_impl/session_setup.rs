@@ -27,18 +27,27 @@ impl SessionActor {
         }
         map_sampling_err_to_acp(err)
     }
-    /// Set up `[system, skill_reminder?]` — prefix is deferred to background.
-    pub(super) async fn initialize(&self, system_prompt: String) {
+    /// Set up `[system, session_rules?, skill_reminder?]` — prefix is deferred
+    /// to background. Session rules are a typed Timeline item and never mutate
+    /// the stable system head.
+    pub(super) async fn initialize(
+        &self,
+        system_prompt: String,
+        session_rules: Option<String>,
+    ) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
         let system_message = ConversationItem::system(system_prompt);
         let mut messages = vec![system_message];
+        if let Some(rules) = session_rules {
+            messages.push(ConversationItem::session_rules(rules));
+        }
         if let Some(effects) = self.inject_baseline_skill_reminder(&mut messages).await
             && effects.send_available_commands
         {
             self.send_available_commands_update().await;
         }
-        let Some((_, source_surface_revision)) = self
+        let Some((current, source_surface_revision)) = self
             .chat_state_handle
             .get_conversation_with_revision()
             .await
@@ -46,6 +55,13 @@ impl SessionActor {
             tracing::error!("failed to publish initial context: chat-state actor stopped");
             return;
         };
+        if !current.is_empty() {
+            tracing::error!(
+                items = current.len(),
+                "refusing to initialize a Timeline that already has a stable seed"
+            );
+            return;
+        }
         if let Err(error) = self
             .chat_state_handle
             .replace_context_durably(messages, source_surface_revision)

@@ -81,6 +81,13 @@ pub enum SyntheticReason {
     /// session spawn. Invariant: once placed, never replaced (would bust the
     /// KV-cache prefix).
     ProjectInstructions,
+    /// User-supplied session rules carried by the client at session creation.
+    /// They are a stable synthetic Timeline item, not part of the system head
+    /// and not a real prompt turn.
+    SessionRules,
+    /// Retrieved memory evidence appended to the live Timeline tail. It never
+    /// mutates the stable system head and does not start a prompt turn.
+    MemoryContext,
     /// Injected by the auto-continue logic after compaction so the agent
     /// keeps working.  Not real user input.
     AutoContinue,
@@ -147,6 +154,8 @@ impl SyntheticReason {
             Self::CompactionMeta
             | Self::SystemReminder
             | Self::ProjectInstructions
+            | Self::SessionRules
+            | Self::MemoryContext
             | Self::AutoContinue
             | Self::AutoRecovery
             | Self::TruncationContinue
@@ -1185,6 +1194,38 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::ProjectInstructions),
+            permission_evidence: None,
+            goal_directive: None,
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Stable user-supplied session rules, structurally distinct from project
+    /// instructions so one cannot suppress or impersonate the other.
+    pub fn session_rules(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::SessionRules),
+            permission_evidence: None,
+            goal_directive: None,
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Retrieved memory evidence projected as a synthetic user-role context
+    /// item rather than spliced into the stable system prompt.
+    pub fn memory_context(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::MemoryContext),
             permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
@@ -8311,6 +8352,32 @@ mod tests {
             );
         } else {
             panic!("expected User variant after round-trip");
+        }
+    }
+
+    #[test]
+    fn session_rules_and_memory_context_are_distinct_non_turn_items() {
+        for (item, reason, wire) in [
+            (
+                ConversationItem::session_rules("rules"),
+                SyntheticReason::SessionRules,
+                "session_rules",
+            ),
+            (
+                ConversationItem::memory_context("memory"),
+                SyntheticReason::MemoryContext,
+                "memory_context",
+            ),
+        ] {
+            assert!(!reason.starts_prompt_turn());
+            let json = serde_json::to_value(&item).expect("serialize typed context");
+            assert_eq!(json["synthetic_reason"], serde_json::json!(wire));
+            let back: ConversationItem =
+                serde_json::from_value(json).expect("deserialize typed context");
+            assert!(matches!(
+                back,
+                ConversationItem::User(user) if user.synthetic_reason == Some(reason)
+            ));
         }
     }
 

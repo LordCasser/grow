@@ -55,7 +55,6 @@ pub struct HeadlessOptions {
     pub json_schema: Option<serde_json::Value>,
     pub model: Option<String>,
     pub rules: Option<String>,
-    pub system_prompt_override: Option<String>,
     pub continue_last_session: bool,
     /// Fork on resume/continue (`--fork-session`).
     pub fork_session: bool,
@@ -465,7 +464,6 @@ async fn authenticate(
 
 fn build_headless_init_request(
     rules: Option<&str>,
-    system_prompt_override: Option<&str>,
 ) -> acp::InitializeRequest {
     let mut meta = serde_json::json!({
         "clientType": HEADLESS_CLIENT_TYPE,
@@ -473,9 +471,6 @@ fn build_headless_init_request(
     });
     if let Some(rules) = rules {
         meta["rules"] = serde_json::json!(rules);
-    }
-    if let Some(system_prompt_override) = system_prompt_override {
-        meta["systemPromptOverride"] = serde_json::json!(system_prompt_override);
     }
     meta["startupHints"] = serde_json::json!({
         "nonInteractive": true,
@@ -801,10 +796,7 @@ pub async fn run_single_turn(
     );
     crate::unified_log::flush();
 
-    let init_req = build_headless_init_request(
-        options.rules.as_deref(),
-        options.system_prompt_override.as_deref(),
-    );
+    let init_req = build_headless_init_request(options.rules.as_deref());
     let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
         Ok(r) => r,
         Err(e) => {

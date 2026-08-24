@@ -222,11 +222,11 @@ fn big_tool_text() -> String {
 /// Push `count` well-formed (assistant tool_use → tool result) rounds into the
 /// conversation, then barrier on a round-trip so all pushes are processed.
 async fn seed_tool_result_rounds(actor: &SessionActor, count: usize) {
-    actor
-        .chat_state_handle
-        .replace_system_head("test system prompt")
-        .await
-        .expect("system head must be replaceable");
+    replace_test_surface(
+        &actor.chat_state_handle,
+        vec![ConversationItem::system("test system prompt")],
+    )
+    .await;
     for i in 0..count {
         actor
             .chat_state_handle
@@ -253,11 +253,11 @@ async fn seed_tool_result_rounds(actor: &SessionActor, count: usize) {
 /// Seed one eligible closed turn followed by a large verbatim tail. Partial
 /// compaction must summarize the first turn and preserve the second.
 async fn seed_closed_compaction_range(actor: &SessionActor, retained_tail_chars: usize) {
-    actor
-        .chat_state_handle
-        .replace_system_head("test system prompt")
-        .await
-        .expect("system head must be replaceable");
+    replace_test_surface(
+        &actor.chat_state_handle,
+        vec![ConversationItem::system("test system prompt")],
+    )
+    .await;
     actor
         .chat_state_handle
         .push_user_message(ConversationItem::user("old closed turn"));
@@ -1133,7 +1133,14 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         );
         // Contrast: a durable context replacement emits reset/token events,
         // proving the channel is live and the silence above is meaningful.
-        replace_test_surface(&handle, vec![ConversationItem::system("s")]).await;
+        replace_test_surface(
+            &handle,
+            vec![
+                ConversationItem::system("test system prompt"),
+                ConversationItem::user("rebuilt"),
+            ],
+        )
+        .await;
         let mut saw_reset = false;
         let mut saw_tokens = false;
         while let Ok(event) = event_rx.try_recv() {

@@ -131,13 +131,7 @@ pub struct TaskWakeAdmission {
 pub enum SessionCommand {
     Initialize {
         system_prompt: String,
-    },
-    /// Non-destructive system-prompt sync on session attach: swaps only the
-    /// leading `System` message, keeping user/assistant turns. Backed by the
-    /// atomic `ChatStateCommand::ReplaceSystemHead` (see its doc for the
-    /// serialization guarantees); no-op when the live head already matches.
-    ReplaceSystemPrompt {
-        system_prompt: String,
+        session_rules: Option<String>,
     },
     /// Install an immutable Goal snapshot before a delegated child turn is
     /// admitted. The snapshot is read-only and never follows parent revisions.
@@ -214,18 +208,6 @@ pub enum SessionCommand {
         /// `sampling_config.model`, which is the provider-facing wire name.
         model_id: acp::ModelId,
         sampling_config: sampler::SamplerConfig,
-        use_concise: bool,
-        /// When `false`, skip the system prompt rewrite (concise/default swap).
-        /// Set to `false` for forked sessions so mid-session model switches
-        /// cannot contaminate the inherited prompt configuration.
-        apply_prompt_override: bool,
-        /// When `true`, suppress the system prompt rewrite even though
-        /// `apply_prompt_override` may be `true`. Set by the model-switch
-        /// orchestrator immediately after a successful
-        /// `RebuildAgentForDefinition` so the fresh harness's prompt
-        /// (already installed by the rebuild handler) is not clobbered by
-        /// the concise/default swap below.
-        skip_prompt_rewrite: bool,
         /// Re-resolved auto-compact threshold for the new model. Computed
         /// by `MvpAgent` against the new model id so per-model remote settings
         /// and per-model user TOML overrides target the right model after a

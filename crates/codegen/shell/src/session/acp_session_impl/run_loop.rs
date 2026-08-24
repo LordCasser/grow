@@ -767,16 +767,13 @@ pub(super) async fn run_session(
                 };
 
                 match cmd {
-                    SessionCommand::Initialize { system_prompt } => {
-                        session.initialize(system_prompt).await;
+                    SessionCommand::Initialize { system_prompt, session_rules } => {
+                        session.initialize(system_prompt, session_rules).await;
                         let s = session.clone();
                         let handle = tokio::task::spawn_local(async move {
                             s.build_prefix_background().await
                         });
                         session.deferred_prefix.arm(handle);
-                    }
-                    SessionCommand::ReplaceSystemPrompt { system_prompt } => {
-                        session.handle_replace_system_prompt(system_prompt).await;
                     }
                     SessionCommand::SetGoalContextSnapshot { snapshot } => {
                         session
@@ -1010,8 +1007,8 @@ pub(super) async fn run_session(
                         .await;
                         let _ = responds_to.send(outcome);
                     }
-                    SessionCommand::SetSessionModel { model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                        let updated_model_id = session.handle_set_session_model(model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                    SessionCommand::SetSessionModel { model_id, sampling_config, auto_compact_threshold_percent, responds_to } => {
+                        let updated_model_id = session.handle_set_session_model(model_id, sampling_config, auto_compact_threshold_percent).await;
                         let _ = responds_to.send(updated_model_id);
                     }
                     SessionCommand::ReloadModelConfig {

@@ -11,25 +11,10 @@ Investigate unexpected files, branches, configuration, or external state before 
 </action_safety>
 
 <tool_calling>
-Use only tools actually made available in this session. A prompt instruction never grants a missing tool. Prefer specialized tools for their intended operations.${%- if tools.by_kind.read %} Use `${{ tools.by_kind.read }}` for file reading instead of shell text utilities.${%- endif %}${%- if tools.by_kind.edit %} Use `${{ tools.by_kind.edit }}` for ordinary file creation and editing instead of shell rewriting.${%- endif %}${%- if tools.by_kind.execute %} Reserve `${{ tools.by_kind.execute }}` for genuine terminal work.${%- endif %} Never use tool calls, shell echo, or shell output as a substitute for communicating with the user.
+Use only tools actually made available in this session. A prompt instruction never grants a missing tool. Prefer specialized capabilities for their intended operations, and never use tool calls or tool output as a substitute for communicating with the user.
 
 Tool calls remain subject to the Agent's resolved allow/deny policy, subagent capability and depth limits, active Behavior restrictions, and session permission decisions. A later layer cannot restore a call rejected by an earlier layer.
-${%- if tools.by_kind.read == "hashline_read" and tools.by_kind.edit and tools.by_kind.search %}
-
-For hashline file tools, locate targets with `${{ tools.by_kind.search }}`, edit with fresh anchors returned by `${{ tools.by_kind.read }}` or `${{ tools.by_kind.edit }}`, and never fabricate or alter anchors. Edit batches are atomic: if one anchor is stale, retry the complete batch with refreshed anchors.
-${%- endif %}
 </tool_calling>
-
-${%- if tools.by_kind.execute and tools.by_kind.background_task_action %}
-<background_tasks>
-For long-running commands, use the execution tool's background option and inspect progress with `${{ tools.by_kind.background_task_action }}`.
-</background_tasks>
-${%- endif %}
-${%- if tools.by_kind.monitor %}
-<background_tasks>
-For watch processes, polling, and ongoing observation, use `${{ tools.by_kind.monitor }}`; it streams each stdout line back as a chat notification.
-</background_tasks>
-${%- endif %}
 
 <project_instructions_spec>
 Each `AGENTS.md` applies to the directory tree rooted where it lives. More deeply nested instructions override broader project instructions when they conflict, and direct user instructions override project files. Check for an applicable nested `AGENTS.md` before changing files in another directory.

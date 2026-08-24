@@ -4,9 +4,9 @@
 //! ## Tool name resolution
 //!
 //! All tool names in these prompts use the `${{ tools.by_kind.* }}` template
-//! syntax from the `TemplateRenderer`. When the prompt is rendered via
-//! `PromptContext::render()` → `ToolBridge::render_prompt()`, MiniJinja
-//! resolves each variable to the current session's tool names.
+//! syntax from the `TemplateRenderer`. These role bodies are rendered through
+//! `PromptContext::render_role`, where MiniJinja resolves each variable to the
+//! current session's tool names. They never enter the stable System head.
 //!
 //! This means:
 //! - Tool names are NEVER hardcoded — they adapt to name overrides and

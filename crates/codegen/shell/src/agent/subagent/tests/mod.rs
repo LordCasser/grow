@@ -9,6 +9,84 @@ use crate::test_support::lsp_runtime::{
 use tools::implementations::grow_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
+
+#[test]
+fn normalized_child_seeds_its_system_head_before_timeline_creation() {
+    let mut conversation = vec![
+        ConversationItem::system("parent head"),
+        ConversationItem::user("<background_context>summary</background_context>"),
+    ];
+    let mut prefix_len = Some(2);
+
+    seed_child_system_head(
+        &InitialContextSource::Forked,
+        false,
+        &mut conversation,
+        &mut prefix_len,
+        "child head",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &conversation[0],
+        ConversationItem::System(system) if system.content.as_ref() == "child head"
+    ));
+    assert_eq!(prefix_len, Some(2));
+}
+
+#[test]
+fn new_child_system_head_is_part_of_the_preserved_prefix() {
+    let mut conversation = Vec::new();
+    let mut prefix_len = None;
+
+    seed_child_system_head(
+        &InitialContextSource::New,
+        false,
+        &mut conversation,
+        &mut prefix_len,
+        "child head",
+    )
+    .unwrap();
+
+    assert!(matches!(conversation.first(), Some(ConversationItem::System(_))));
+    assert_eq!(prefix_len, Some(1));
+}
+
+#[test]
+fn inherited_child_context_requires_and_preserves_its_system_head() {
+    for (source, verbatim) in [
+        (InitialContextSource::Resumed, false),
+        (InitialContextSource::Forked, true),
+    ] {
+        let mut conversation = vec![ConversationItem::system("inherited head")];
+        let mut prefix_len = Some(1);
+        seed_child_system_head(
+            &source,
+            verbatim,
+            &mut conversation,
+            &mut prefix_len,
+            "fresh child head",
+        )
+        .unwrap();
+        assert!(matches!(
+            conversation.first(),
+            Some(ConversationItem::System(system))
+                if system.content.as_ref() == "inherited head"
+        ));
+
+        let mut missing = vec![ConversationItem::user("legacy headless context")];
+        assert!(
+            seed_child_system_head(
+                &source,
+                verbatim,
+                &mut missing,
+                &mut prefix_len,
+                "fresh child head",
+            )
+            .is_err()
+        );
+    }
+}
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
     let totals = chat_state::UsageTotals {
@@ -1780,7 +1858,6 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             context_window: std::num::NonZeroU64::new(256_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            use_concise: false,
             agent_type: crate::agent::config::default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,

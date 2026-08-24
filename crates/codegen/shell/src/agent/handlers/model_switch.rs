@@ -30,7 +30,6 @@ pub(crate) async fn apply(
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
-    let use_concise = false;
     let previous_model_id = handle.model_id.clone();
     let mut model_sampling =
         agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
@@ -55,7 +54,6 @@ pub(crate) async fn apply(
         }
     }
     let applied_effort = model_sampling.reasoning_effort;
-    let model_unchanged = previous_model_id == model_id;
     let new_threshold = {
         let cfg = agent.cfg.borrow();
         let models = agent.models_manager.models();
@@ -70,9 +68,6 @@ pub(crate) async fn apply(
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         model_id: model_id.clone(),
         sampling_config: model_sampling,
-        use_concise,
-        apply_prompt_override: false,
-        skip_prompt_rewrite: model_unchanged,
         auto_compact_threshold_percent: new_threshold,
         responds_to: tx,
     });

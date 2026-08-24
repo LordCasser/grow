@@ -84,10 +84,19 @@ async fn record_compaction_summary(
         .materialize_timeline("test-timeline".into())
         .await
         .expect("test Timeline must materialize");
+    let compactable_start = usize::from(matches!(
+        materialized.surface.first(),
+        Some(ConversationItem::System(_))
+    ));
+    assert!(
+        compactable_start < materialized.surface_ids.len(),
+        "compaction requires body items after the stable System head"
+    );
+    let shadowed = materialized.surface_ids[compactable_start..].to_vec();
     let target = crate::SurfaceRange {
-        start: *materialized.surface_ids.first().expect("non-empty Surface"),
-        end: *materialized.surface_ids.last().expect("non-empty Surface"),
-        shadowed: materialized.surface_ids,
+        start: *shadowed.first().expect("compactable Surface body"),
+        end: *shadowed.last().expect("compactable Surface body"),
+        shadowed,
     };
     let (spawn, summary) = compaction_summary_facts(id, target.clone());
     handle
@@ -269,6 +278,11 @@ async fn replace_test_surface(
         .unwrap();
 }
 
+async fn seed_test_system(handle: &crate::handle::ChatStateHandle, content: impl Into<String>) {
+    assert_eq!(handle.get_conversation_len().await, 0);
+    replace_test_surface(handle, vec![ConversationItem::system(content)]).await;
+}
+
 async fn commit_compaction_range(
     handle: &crate::handle::ChatStateHandle,
     items: Vec<ConversationItem>,
@@ -310,12 +324,15 @@ async fn commit_compaction_range(
 
 #[tokio::test]
 async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("system"),
+        ConversationItem::user("body"),
+    ]);
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
             crate::CompactionEvent::Started {
                 id: "stale-compaction".into(),
-                source_items: 1,
+                source_items: 2,
                 prompt_index: 0,
             },
         ))
@@ -337,7 +354,7 @@ async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
         .handle
         .replace_compaction_range(
             target,
-            vec![ConversationItem::system("stale summary")],
+            vec![ConversationItem::user("stale summary")],
             source_revision,
         )
         .await
@@ -358,8 +375,8 @@ async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
         .await
         .unwrap();
     let surface = h.handle.get_conversation().await;
-    assert_eq!(surface.len(), 2);
-    assert_eq!(surface[1].text_content(), "arrived during compaction");
+    assert_eq!(surface.len(), 3);
+    assert_eq!(surface[2].text_content(), "arrived during compaction");
 }
 
 // ============================================================================
@@ -944,7 +961,7 @@ async fn replace_conversation_persists_and_emits_reset() {
     let _ = h.handle.get_conversation().await; // sync point
     h.drain_persistence();
 
-    let new_items = vec![ConversationItem::system("compacted")];
+    let new_items = vec![ConversationItem::user("rebuilt")];
     replace_test_surface(&h.handle, new_items).await;
 
     let conv = h.handle.get_conversation().await;
@@ -1383,7 +1400,7 @@ async fn conditional_tool_result_rejects_stale_recall_and_closes_the_call() {
         crate::ConditionalToolResultOutcome::RejectedSurfaceChanged
     );
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     let recall_results = request
         .items
         .iter()
@@ -1430,7 +1447,7 @@ async fn conditional_tool_result_rechecks_headroom_at_commit() {
         crate::ConditionalToolResultOutcome::RejectedHeadroom
     );
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     let result = request
         .items
         .iter()
@@ -1450,10 +1467,7 @@ async fn compaction_reseed_carries_provider_overhead() {
         .push_user_message(ConversationItem::user("x".repeat(4000)));
     h.handle.record_token_usage(51_000);
 
-    let compacted = vec![
-        ConversationItem::system("sys"),
-        ConversationItem::user("summary ".repeat(500)),
-    ];
+    let compacted = vec![ConversationItem::user("summary ".repeat(500))];
     commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
@@ -1549,10 +1563,7 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
         "test setup must actually prune ({pruned_estimate} vs {estimate_at_response})"
     );
 
-    let compacted = vec![
-        ConversationItem::system("sys"),
-        ConversationItem::user("z".repeat(8_000)),
-    ];
+    let compacted = vec![ConversationItem::user("z".repeat(8_000))];
     let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
     commit_compaction_range(&h.handle, compacted).await;
 
@@ -1658,121 +1669,6 @@ async fn get_total_tokens_returns_zero_initially() {
     let h = TestHarness::new();
     let tokens = h.handle.get_total_tokens().await;
     assert_eq!(tokens, 0);
-}
-
-#[tokio::test]
-async fn replace_system_head_swaps_head_and_preserves_turns() {
-    let h = TestHarness::with_conversation(vec![
-        ConversationItem::system("old"),
-        ConversationItem::user("hi"),
-        ConversationItem::assistant("yo"),
-    ]);
-    let changed = h.handle.replace_system_head("new prompt").await;
-    assert!(matches!(changed, Ok(true)));
-    let conv = h.handle.get_conversation().await;
-    assert_eq!(conv.len(), 3, "must not wipe user/assistant turns");
-    assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "new prompt"));
-    assert!(matches!(conv[1], ConversationItem::User(_)));
-    assert!(matches!(conv[2], ConversationItem::Assistant(_)));
-}
-
-#[tokio::test]
-async fn replace_system_head_noop_when_head_matches_modulo_newline() {
-    let mut h = TestHarness::with_conversation(vec![
-        ConversationItem::system("same\n"),
-        ConversationItem::user("hi"),
-    ]);
-    let _ = h.drain_persistence(); // clear any seed writes
-    let changed = h.handle.replace_system_head("same").await;
-    assert!(
-        matches!(changed, Ok(false)),
-        "trailing-newline-only diff is a no-op"
-    );
-    let conv = h.handle.get_conversation().await;
-    assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "same\n"));
-    assert!(
-        h.drain_persistence().is_empty(),
-        "a no-op must not re-persist"
-    );
-}
-
-#[tokio::test]
-async fn replace_system_head_inserts_when_absent() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::user("hi")]);
-    let changed = h.handle.replace_system_head("sys").await;
-    assert!(matches!(changed, Ok(true)));
-    let conv = h.handle.get_conversation().await;
-    assert_eq!(conv.len(), 2, "inserts System at head, keeps the user turn");
-    assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "sys"));
-    assert!(matches!(conv[1], ConversationItem::User(_)));
-}
-
-/// Lost-update safety: an item pushed just before the head swap survives, because
-/// both operations serialize through the actor mailbox — the swap acts on the
-/// actor's current conversation, never a stale caller-side snapshot. This is the
-/// property that makes a mid-turn reconnect safe.
-#[tokio::test]
-async fn replace_system_head_retains_concurrently_pushed_item() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::system("old")]);
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("in-flight turn output"));
-    let changed = h.handle.replace_system_head("new").await;
-    assert!(matches!(changed, Ok(true)));
-    let conv = h.handle.get_conversation().await;
-    assert_eq!(
-        conv.len(),
-        2,
-        "the item pushed before the swap must not be lost"
-    );
-    assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "new"));
-    assert!(matches!(conv[1], ConversationItem::Assistant(_)));
-}
-
-/// A head swap during an active turn capture must not drop the in-flight
-/// turn's captured tail (regression: `mem::take`ing the conversation before
-/// `replace_conversation` snapshotted it emptied the tail — a `debug_assert`
-/// panic in dev, a silently truncated capture in release).
-#[tokio::test]
-async fn replace_system_head_preserves_active_turn_capture() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::system("old")]);
-    h.handle.begin_turn_capture();
-    h.handle.push_user_message(ConversationItem::user("hello"));
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("in-flight"));
-
-    let changed = h.handle.replace_system_head("new prompt").await;
-    assert!(matches!(changed, Ok(true)));
-
-    let capture = h
-        .handle
-        .take_turn_messages()
-        .await
-        .expect("capture was active");
-    assert_eq!(
-        capture.messages.len(),
-        2,
-        "mid-turn head swap must not drop the captured turn tail"
-    );
-    assert!(matches!(&capture.messages[0], ConversationItem::User(_)));
-    assert!(matches!(
-        &capture.messages[1],
-        ConversationItem::Assistant(_)
-    ));
-}
-
-#[tokio::test]
-async fn replace_system_head_retries_an_uncertain_commit() {
-    let original = vec![
-        ConversationItem::system("old"),
-        ConversationItem::user("keep me"),
-    ];
-    let mut h = TestHarness::with_manual_timeline_ack(original.clone());
-    let handle = h.handle.clone();
-    let replace = async move { handle.replace_system_head("new").await };
-    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
-    let (result, ()) = tokio::join!(replace, retry);
-    assert_eq!(result.unwrap(), true);
-    assert_eq!(h.handle.get_conversation().await[0].text_content(), "new");
 }
 
 #[tokio::test]
@@ -1899,11 +1795,14 @@ async fn multiple_push_and_query_interleave() {
 
 #[tokio::test]
 async fn completed_compaction_is_reflected_in_snapshot() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("system"),
+        ConversationItem::user("body"),
+    ]);
     for text in ["one", "two", "three"] {
         record_prompt(&h.handle, text).await;
     }
-    commit_compaction_range(&h.handle, vec![ConversationItem::system("compacted")]).await;
+    commit_compaction_range(&h.handle, vec![ConversationItem::user("compacted")]).await;
     let snap = h.handle.snapshot().await.unwrap();
     assert_eq!(snap.last_compaction_prompt_index, Some(3));
 }
@@ -1913,7 +1812,7 @@ async fn truncate_removes_items_after_target_prompt_index() {
     let mut h = TestHarness::new();
 
     // Build 3 turns: system + 3x (user + assistant)
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(marked_user("q1", 0));
     record_prompt(&h.handle, "q1").await;
     h.handle
@@ -1965,7 +1864,7 @@ async fn truncate_removes_items_after_target_prompt_index() {
 async fn truncate_to_zero_keeps_only_system() {
     let mut h = TestHarness::new();
 
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(marked_user("q1", 0));
     record_prompt(&h.handle, "q1").await;
     h.handle
@@ -2076,19 +1975,19 @@ async fn with_initial_conversation_preserves_items() {
 #[tokio::test]
 async fn build_request_includes_all_messages() {
     let h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("hello"));
     // Sync point
     let _ = h.handle.get_conversation().await;
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(request.items.len(), 2);
 }
 
 #[tokio::test]
 async fn build_request_with_empty_conversation() {
     let h = TestHarness::new();
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert!(request.items.is_empty());
 }
 
@@ -2098,7 +1997,7 @@ async fn build_request_preserves_system_message() {
         ConversationItem::system("You are a coding assistant."),
         ConversationItem::user("hi"),
     ]);
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(request.items.len(), 2);
     if let ConversationItem::System(ref sys) = request.items[0] {
         assert_eq!(sys.content.as_ref(), "You are a coding assistant.");
@@ -2119,17 +2018,20 @@ async fn build_request_injects_memory_reminder() {
             "test-timeline",
             vec![],
             Some("Remember: user prefers Rust".to_string()),
-            false,
         )
         .await
         .unwrap();
 
-    if let ConversationItem::System(ref sys) = request.items[0] {
-        assert!(sys.content.contains("Remember: user prefers Rust"));
-        assert!(sys.content.starts_with("You are helpful."));
-    } else {
-        panic!("expected System item");
-    }
+    assert_eq!(request.items[0].text_content(), "You are helpful.");
+    assert_eq!(request.items.len(), 3);
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason
+                == Some(sampling_types::SyntheticReason::MemoryContext)
+                && request.items.last().unwrap().text_content()
+                    == "Remember: user prefers Rust"
+    ));
 }
 
 #[tokio::test]
@@ -2137,12 +2039,18 @@ async fn build_request_injects_memory_when_no_system() {
     let h = TestHarness::with_conversation(vec![ConversationItem::user("hi")]);
     let request = h
         .handle
-        .build_request("test-timeline", vec![], Some("Remember this".to_string()), false)
+        .build_request("test-timeline", vec![], Some("Remember this".to_string()))
         .await
         .unwrap();
 
-    assert_eq!(request.items.len(), 2); // new System + original User
-    assert!(matches!(&request.items[0], ConversationItem::System(_)));
+    assert_eq!(request.items.len(), 2);
+    assert_eq!(request.items[0].text_content(), "hi");
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason
+                == Some(sampling_types::SyntheticReason::MemoryContext)
+    ));
 }
 
 #[tokio::test]
@@ -2162,7 +2070,7 @@ async fn build_request_repairs_dangling_tool_calls() {
         // No ToolResult for call_1 — repaired by ChatState::new() before any command.
     ]);
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // Synthetic ToolResult present (inserted at construction, not at request time).
     assert_eq!(request.items.len(), 4);
@@ -2184,7 +2092,7 @@ async fn build_request_with_tool_definitions() {
         parameters: serde_json::json!({"type": "object"}),
     }];
 
-    let request = h.handle.build_request("test-timeline", tools, None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", tools, None).await.unwrap();
 
     assert_eq!(request.tools.len(), 1);
     assert_eq!(request.tools[0].name, "read_file");
@@ -2208,7 +2116,7 @@ async fn build_request_uses_sampling_config() {
     };
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_eq!(request.model, Some("grow-3".to_string()));
     assert_eq!(request.temperature, Some(0.7));
@@ -2217,24 +2125,19 @@ async fn build_request_uses_sampling_config() {
 }
 
 #[tokio::test]
-async fn build_request_does_not_mutate_actor_state() {
+async fn build_request_without_memory_does_not_mutate_actor_state() {
     let h = TestHarness::with_conversation(vec![
         ConversationItem::system("sys"),
         ConversationItem::user("hi"),
     ]);
 
-    // Build request (which clones + potentially mutates the clone)
-    let _ = h
-        .handle
-        .build_request("test-timeline", vec![], Some("injected memory".to_string()), false)
-        .await
-        .unwrap();
+    let _ = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // Actor's own conversation should be unchanged
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 2);
     if let ConversationItem::System(ref sys) = conv[0] {
-        assert_eq!(sys.content.as_ref(), "sys"); // no memory injected into original
+        assert_eq!(sys.content.as_ref(), "sys");
     }
 }
 
@@ -2251,28 +2154,31 @@ async fn build_request_can_persist_memory_into_actor_state() {
             "test-timeline",
             vec![],
             Some("<memory-context>\nRemember this\n</memory-context>".to_string()),
-            true,
         )
         .await
         .unwrap();
 
-    if let ConversationItem::System(ref sys) = request.items[0] {
-        assert!(sys.content.contains("Remember this"));
-    } else {
-        panic!("expected System item in request");
-    }
+    assert_eq!(request.items[0].text_content(), "sys");
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason
+                == Some(sampling_types::SyntheticReason::MemoryContext)
+    ));
 
     let conv = h.handle.get_conversation().await;
-    if let ConversationItem::System(ref sys) = conv[0] {
-        assert!(sys.content.contains("Remember this"));
-    } else {
-        panic!("expected persisted System item");
-    }
+    assert_eq!(conv[0].text_content(), "sys");
+    assert!(conv.last().unwrap().text_content().contains("Remember this"));
 
     let records = h.drain_persistence();
     assert!(records.iter().filter_map(persisted_messages).any(|event| {
         event.cause == crate::MessageCause::MemoryContext
-            && matches!(event.items.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Remember this"))
+            && matches!(
+                event.items.first(),
+                Some(ConversationItem::User(user))
+                    if user.synthetic_reason
+                        == Some(sampling_types::SyntheticReason::MemoryContext)
+            )
     }));
 }
 
@@ -2283,7 +2189,7 @@ async fn persistent_memory_context_retries_an_uncertain_commit() {
     let handle = h.handle.clone();
     let build = async move {
         handle
-            .build_request("test-timeline", vec![], Some("remember".to_owned()), true)
+            .build_request("test-timeline", vec![], Some("remember".to_owned()))
             .await
     };
     let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
@@ -2319,7 +2225,7 @@ async fn build_request_with_multiple_tool_calls_and_results() {
         ConversationItem::assistant("Done!"),
     ]);
 
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // All items should pass through (no dangling calls, no pruning needed)
     assert_eq!(request.items.len(), 6);
@@ -2354,9 +2260,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
 
     // ── Turn setup ──────────────────────────────────────────────────────
     // System prompt
-    h.handle.push_user_message(ConversationItem::system(
-        "You are a helpful coding assistant.",
-    ));
+    seed_test_system(&h.handle, "You are a helpful coding assistant.").await;
 
     // User asks the model to do something complex
     h.handle.push_user_message(ConversationItem::user(
@@ -2509,7 +2413,7 @@ async fn parallel_tool_calls_with_rejection_has_no_dangling_calls() {
 
     let h = TestHarness::new();
 
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle
         .push_user_message(ConversationItem::user("do things"));
 
@@ -2544,7 +2448,7 @@ async fn parallel_tool_calls_with_rejection_has_no_dangling_calls() {
     ));
 
     // Build request — should NOT add any synthetic ToolResults
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // 2 (sys+user) + 1 (assistant) + 3 (tool results) = 6
     assert_eq!(
@@ -2583,7 +2487,7 @@ async fn parallel_tool_calls_with_rejection_persists_all_items() {
 
     let mut h = TestHarness::new();
 
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle
         .push_user_message(ConversationItem::user("do things"));
     h.handle
@@ -2737,7 +2641,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
     );
 
     // build_request should also see 6 items (no double-repair)
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(
         request.items.len(),
         6,
@@ -2781,7 +2685,7 @@ async fn dangling_tool_calls_repair_is_consistent_between_state_and_request() {
     );
 
     // build_request should match (no extra synthetic results)
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(
         request.items.len(),
         5,
@@ -2854,7 +2758,7 @@ async fn all_tool_calls_dangling_after_crash() {
     }
 
     // build_request should also see 6 items — no double-repair
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(request.items.len(), 6);
 }
 
@@ -2879,8 +2783,7 @@ async fn live_cancel_before_any_tool_execution_repairs_on_next_user_message() {
     let h = TestHarness::new();
 
     // ── Turn 1: normal conversation ─────────────────────────────────────
-    h.handle
-        .push_user_message(ConversationItem::system("You are a helpful assistant."));
+    seed_test_system(&h.handle, "You are a helpful assistant.").await;
     h.handle.push_user_message(ConversationItem::user("Hello"));
     h.handle
         .push_assistant_response(ConversationItem::assistant("Hi! How can I help?"));
@@ -2967,7 +2870,7 @@ async fn live_cancel_before_any_tool_execution_repairs_on_next_user_message() {
     );
 
     // build_request should work cleanly — no dangling calls, no double-repair
-    let request = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let request = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
     assert_eq!(request.items.len(), 9);
 }
 
@@ -2979,7 +2882,7 @@ async fn live_cancel_after_partial_tool_results_repairs_remaining() {
 
     let h = TestHarness::new();
 
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle
         .push_user_message(ConversationItem::user("do everything"));
 
@@ -3101,7 +3004,7 @@ async fn turn_capture_survives_compaction_and_flags_it() {
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
 
-    commit_compaction_range(&h.handle, vec![ConversationItem::system("compacted")]).await;
+    commit_compaction_range(&h.handle, vec![ConversationItem::user("compacted")]).await;
 
     h.handle.push_user_message(marked_user("q2", 1));
 
@@ -3128,7 +3031,7 @@ async fn replace_conversation_without_compaction_does_not_set_flag() {
     h.handle.begin_turn_capture();
     h.handle.push_user_message(ConversationItem::user("q1"));
 
-    replace_test_surface(&h.handle, vec![ConversationItem::system("new state")]).await;
+    replace_test_surface(&h.handle, vec![ConversationItem::user("new state")]).await;
 
     let capture = h
         .handle
@@ -3295,9 +3198,9 @@ async fn integrity_repair_does_not_flag_compaction() {
 }
 
 #[tokio::test]
-async fn turn_capture_survives_persisted_memory_reminder_prepend() {
-    // No leading System item, so the persisted memory inject prepends one via
-    // `items.insert(0, ..)`, shifting every index by one under an active capture.
+async fn turn_capture_records_persisted_memory_context_append() {
+    // Retrieved memory is a durable typed append, never a synthetic System
+    // prepend or a rewrite of captured turn messages.
     let h = TestHarness::with_conversation(vec![ConversationItem::user("hi")]);
 
     h.handle.begin_turn_capture();
@@ -3305,15 +3208,18 @@ async fn turn_capture_survives_persisted_memory_reminder_prepend() {
     h.handle
         .push_assistant_response(ConversationItem::assistant("turn-a"));
 
-    // Persist path injects into the LIVE conversation; without the snapshot +
-    // rebase the prepend shifts every index but not the offset, so the off-by-one
-    // tail over-reads past the turn boundary (the len check below catches it).
     let request = h
         .handle
-        .build_request("test-timeline", vec![], Some("Remember this".to_string()), true)
+        .build_request("test-timeline", vec![], Some("Remember this".to_string()))
         .await
         .unwrap();
-    assert!(matches!(&request.items[0], ConversationItem::System(_)));
+    assert_eq!(request.items[0].text_content(), "hi");
+    assert!(matches!(
+        request.items.last(),
+        Some(ConversationItem::User(user))
+            if user.synthetic_reason
+                == Some(sampling_types::SyntheticReason::MemoryContext)
+    ));
 
     let capture = h
         .handle
@@ -3321,12 +3227,17 @@ async fn turn_capture_survives_persisted_memory_reminder_prepend() {
         .await
         .expect("capture was active");
 
-    // Exactly the two turn items, in order.
-    assert_eq!(capture.messages.len(), 2);
+    assert_eq!(capture.messages.len(), 3);
     assert!(matches!(&capture.messages[0], ConversationItem::User(_)));
     assert!(matches!(
         &capture.messages[1],
         ConversationItem::Assistant(a) if a.content.as_ref() == "turn-a"
+    ));
+    assert!(matches!(
+        &capture.messages[2],
+        ConversationItem::User(user)
+            if user.synthetic_reason
+                == Some(sampling_types::SyntheticReason::MemoryContext)
     ));
 }
 
@@ -3465,7 +3376,7 @@ async fn get_first_user_text_empty_conversation() {
 #[tokio::test]
 async fn get_first_user_text_returns_first_user_text() {
     let h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle
         .push_user_message(ConversationItem::user("hello world"));
     h.handle.push_user_message(ConversationItem::user("second"));
@@ -3477,8 +3388,7 @@ async fn get_first_user_text_returns_first_user_text() {
 #[tokio::test]
 async fn get_first_user_text_no_user_messages() {
     let h = TestHarness::new();
-    h.handle
-        .push_user_message(ConversationItem::system("sys only"));
+    seed_test_system(&h.handle, "sys only").await;
 
     assert!(h.handle.get_first_user_text().await.is_none());
 }
@@ -3493,7 +3403,7 @@ async fn get_conversation_item_at_out_of_bounds() {
 #[tokio::test]
 async fn get_conversation_item_at_returns_correct_item() {
     let h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("hello"));
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
@@ -3516,7 +3426,7 @@ async fn get_conversation_item_at_returns_correct_item() {
 #[tokio::test]
 async fn get_conversation_item_at_does_not_mutate_state() {
     let h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("q"));
 
     // Fetching item[1] should not change what get_conversation returns
@@ -3634,7 +3544,7 @@ async fn get_conversation_counts_empty() {
 #[tokio::test]
 async fn get_conversation_counts_mixed() {
     let h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("q1"));
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
@@ -3661,8 +3571,7 @@ async fn get_system_message_none_when_absent() {
 #[tokio::test]
 async fn get_system_message_returns_first_system() {
     let h = TestHarness::new();
-    h.handle
-        .push_user_message(ConversationItem::system("You are helpful."));
+    seed_test_system(&h.handle, "You are helpful.").await;
     h.handle.push_user_message(ConversationItem::user("hi"));
 
     let sys = h.handle.get_system_message().await.unwrap();
@@ -3670,22 +3579,16 @@ async fn get_system_message_returns_first_system() {
 }
 
 // ============================================================================
-// Subagent bootstrap regression tests
-//
-// These verify that `replace_conversation` correctly syncs the system prompt
-// into a ChatStateActor that was spawned before the prompt was built — the
-// exact sequence used by `spawn_session_actor` for subagents.
+// Stable System seed regression tests.
 // ============================================================================
 
 #[tokio::test]
-async fn fresh_subagent_bootstrap_has_system_message_after_replace() {
-    // Simulate a fresh (non-forked) subagent: actor starts with an empty conversation.
+async fn fresh_timeline_can_be_seeded_with_a_system_message() {
     let h = TestHarness::new(); // spawns with vec![]
 
     // At this point the actor has no system message, mirroring the bug.
     assert!(h.handle.get_system_message().await.is_none());
 
-    // Build the system prompt and inject it (mirrors acp_session.rs lines 1287-1295).
     let system_prompt = "You are a helpful subagent.".to_string();
     let conversation = vec![ConversationItem::system(system_prompt.clone())];
     replace_test_surface(&h.handle, conversation).await;
@@ -3699,7 +3602,7 @@ async fn fresh_subagent_bootstrap_has_system_message_after_replace() {
 }
 
 #[tokio::test]
-async fn forked_subagent_bootstrap_replaces_parent_system_message() {
+async fn an_existing_timeline_rejects_system_head_replacement() {
     let parent_prompt = "You are the parent agent.".to_string();
     let child_prompt = "You are the child subagent.".to_string();
 
@@ -3715,23 +3618,31 @@ async fn forked_subagent_bootstrap_replaces_parent_system_message() {
     let sys = h.handle.get_system_message().await.unwrap();
     assert!(matches!(&sys, ConversationItem::System(s) if s.content.as_ref() == parent_prompt));
 
-    // Build the child's system prompt and replace the first System item
-    // (mirrors acp_session.rs lines 1287-1295).
     let mut conversation = vec![
-        ConversationItem::system(parent_prompt),
+        ConversationItem::system(parent_prompt.clone()),
         ConversationItem::user("hello"),
         ConversationItem::assistant("hi"),
     ];
     if let Some(ConversationItem::System(sys)) = conversation.first_mut() {
         sys.content = child_prompt.clone().into();
     }
-    replace_test_surface(&h.handle, conversation).await;
+    let (_, source_revision) = h
+        .handle
+        .get_conversation_with_revision()
+        .await
+        .expect("actor must provide Surface revision");
+    assert!(
+        h.handle
+            .replace_context_durably(conversation, source_revision)
+            .await
+            .is_err(),
+        "a child head must be chosen before Timeline creation"
+    );
 
-    // The system message must now be the child's prompt, not the parent's.
     let sys = h.handle.get_system_message().await.unwrap();
     assert!(
-        matches!(&sys, ConversationItem::System(s) if s.content.as_ref() == child_prompt),
-        "expected child prompt after replace_conversation, got {sys:?}"
+        matches!(&sys, ConversationItem::System(s) if s.content.as_ref() == parent_prompt),
+        "the persisted System head must remain unchanged, got {sys:?}"
     );
 
     // The rest of the conversation must be preserved.
@@ -4171,14 +4082,13 @@ async fn sampling_config_survives_compaction_replacement() {
     assert_eq!(pre_meta.resolved_model_id.as_deref(), Some("grow-4.5"));
     assert_eq!(pre_meta.model_fingerprint.as_deref(), Some("fp_abc123"));
 
-    // Simulate compaction: replace conversation with compacted history.
-    // The compacted history has system + user summary, NO AssistantItem.
+    // Simulate compaction: shadow only the body with a user summary. The
+    // stable System head remains outside the compaction range.
     commit_compaction_range(
         &h.handle,
-        vec![
-            ConversationItem::system("You are a helpful assistant."),
-            ConversationItem::user("Compaction summary: user asked to fix a bug..."),
-        ],
+        vec![ConversationItem::user(
+            "Compaction summary: user asked to fix a bug...",
+        )],
     )
     .await;
 
@@ -4259,14 +4169,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     );
 
     // Compaction replaces conversation — no AssistantItem in compacted history.
-    commit_compaction_range(
-        &h.handle,
-        vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("compacted summary"),
-        ],
-    )
-    .await;
+    commit_compaction_range(&h.handle, vec![ConversationItem::user("compacted summary")]).await;
 
     // Metadata gone.
     let meta = h.handle.get_last_model_metadata().await;
@@ -4481,14 +4384,14 @@ async fn prefix_stable_across_user_assistant_turns() {
         ConversationItem::user("Hello"),
     ]);
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("Hi there!"));
     h.handle
         .push_user_message(ConversationItem::user("How are you?"));
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "turn 1 -> turn 2");
 
@@ -4496,7 +4399,7 @@ async fn prefix_stable_across_user_assistant_turns() {
         .push_assistant_response(ConversationItem::assistant("I'm well!"));
     h.handle.push_user_message(ConversationItem::user("Great"));
 
-    let req3 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req3 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(&req2, &req3, "turn 2 -> turn 3");
 }
@@ -4513,7 +4416,7 @@ async fn prefix_stable_with_consistent_memory_injection() {
 
     let req1 = h
         .handle
-        .build_request("test-timeline", vec![], Some("Remember: user likes Rust".to_string()), false)
+        .build_request("test-timeline", vec![], Some("Remember: user likes Rust".to_string()))
         .await
         .unwrap();
 
@@ -4524,7 +4427,7 @@ async fn prefix_stable_with_consistent_memory_injection() {
 
     let req2 = h
         .handle
-        .build_request("test-timeline", vec![], Some("Remember: user likes Rust".to_string()), false)
+        .build_request("test-timeline", vec![], Some("Remember: user likes Rust".to_string()))
         .await
         .unwrap();
 
@@ -4544,7 +4447,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         ConversationItem::user("u1"),
     ]);
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // Push Reasoning sibling + Assistant (the new ordering produced by
     // `response_to_conversation_items`: Reasoning before Assistant).
@@ -4554,7 +4457,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         .push_assistant_response(ConversationItem::assistant("response 1"));
     h.handle.push_user_message(ConversationItem::user("u2"));
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "Reasoning sibling turn 1 -> turn 2");
 
@@ -4565,7 +4468,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         .push_assistant_response(ConversationItem::assistant("response 2"));
     h.handle.push_user_message(ConversationItem::user("u3"));
 
-    let req3 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req3 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(
         &req2,
@@ -4591,7 +4494,7 @@ async fn prefix_stable_after_tool_schema_change() {
         parameters: serde_json::json!({"type": "object"}),
     }];
 
-    let req1 = h.handle.build_request("test-timeline", tools_v1, None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", tools_v1, None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("read it"));
@@ -4611,7 +4514,7 @@ async fn prefix_stable_after_tool_schema_change() {
         },
     ];
 
-    let req2 = h.handle.build_request("test-timeline", tools_v2, None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", tools_v2, None).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "tool schema v1 -> v2");
 }
@@ -4625,7 +4528,7 @@ async fn prefix_stable_after_model_switch() {
         ConversationItem::user("hello"),
     ]);
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
@@ -4638,7 +4541,7 @@ async fn prefix_stable_after_model_switch() {
     };
     h.handle.update_sampling_config(new_config);
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "model switch");
 }
@@ -4646,14 +4549,13 @@ async fn prefix_stable_after_model_switch() {
 #[tokio::test]
 async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
     let h = TestHarness::new();
-    h.handle
-        .push_user_message(ConversationItem::system("system"));
+    seed_test_system(&h.handle, "system").await;
     h.handle.push_user_message(marked_user("q1", 0));
     record_prompt(&h.handle, "q1").await;
 
     let first = h
         .handle
-        .build_request("timeline-a", vec![], None, false)
+        .build_request("timeline-a", vec![], None)
         .await
         .unwrap();
     let first_key = first.prompt_cache_key.expect("normal requests need a key");
@@ -4664,7 +4566,7 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
     record_prompt(&h.handle, "q2").await;
     let appended = h
         .handle
-        .build_request("timeline-a", vec![], None, false)
+        .build_request("timeline-a", vec![], None)
         .await
         .unwrap();
     assert_eq!(
@@ -4679,7 +4581,7 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
     });
     let other_model = h
         .handle
-        .build_request("timeline-a", vec![], None, false)
+        .build_request("timeline-a", vec![], None)
         .await
         .unwrap();
     assert_ne!(other_model.prompt_cache_key.as_deref(), Some(first_key.as_str()));
@@ -4688,14 +4590,14 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
     h.handle.rewind_durably(1).await.unwrap();
     let rewound = h
         .handle
-        .build_request("timeline-a", vec![], None, false)
+        .build_request("timeline-a", vec![], None)
         .await
         .unwrap();
     assert_ne!(rewound.prompt_cache_key.as_deref(), Some(first_key.as_str()));
 
     let fork = h
         .handle
-        .build_request("timeline-b", vec![], None, false)
+        .build_request("timeline-b", vec![], None)
         .await
         .unwrap();
     assert_ne!(fork.prompt_cache_key, rewound.prompt_cache_key);
@@ -4711,7 +4613,7 @@ async fn prefix_stable_with_synthetic_user_messages() {
         ConversationItem::user("hello"),
     ]);
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
@@ -4723,7 +4625,7 @@ async fn prefix_stable_with_synthetic_user_messages() {
     h.handle
         .push_user_message(ConversationItem::auto_continue("keep going"));
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "with synthetic user messages");
 }
@@ -4762,7 +4664,7 @@ async fn prefix_stable_after_image_pruning() {
         ConversationItem::user("u2"),
     ]);
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("a2"));
@@ -4781,7 +4683,7 @@ async fn prefix_stable_after_image_pruning() {
             ..Default::default()
         }));
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // Image stripping mutates the old user turn's content, so full
     // byte-level prefix stability cannot hold at that item. We verify:
@@ -4856,7 +4758,7 @@ async fn build_request_preserves_small_old_images() {
         ConversationItem::user("follow up question"),
     ]);
 
-    let req = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     // The old user turn's image must survive (small payload, far under 50 MB),
     // so the KV-cache prefix stays byte-stable instead of being rewritten.
@@ -4878,7 +4780,7 @@ async fn build_request_preserves_small_old_images() {
 async fn prefix_stable_after_tool_result_pruning() {
     let h = TestHarness::with_context_window(10_000);
 
-    h.handle.push_user_message(ConversationItem::system("sys"));
+    seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("q1"));
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
@@ -4886,7 +4788,7 @@ async fn prefix_stable_after_tool_result_pruning() {
         .push_tool_result(ConversationItem::tool_result("c1", "x".repeat(500)));
     h.handle.push_user_message(ConversationItem::user("q2"));
 
-    let req1 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req1 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("a2"));
@@ -4895,7 +4797,7 @@ async fn prefix_stable_after_tool_result_pruning() {
     h.handle.push_user_message(ConversationItem::user("q3"));
     h.handle.record_token_usage(6000); // > 50% of 10k context
 
-    let req2 = h.handle.build_request("test-timeline", vec![], None, false).await.unwrap();
+    let req2 = h.handle.build_request("test-timeline", vec![], None).await.unwrap();
 
     let body1 = serialize_via_public_api(&req1);
     let body2 = serialize_via_public_api(&req2);

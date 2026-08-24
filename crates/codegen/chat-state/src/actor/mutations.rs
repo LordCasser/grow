@@ -23,14 +23,26 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
     }
 }
 
-fn message_cause(item: &ConversationItem) -> MessageCause {
+fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::TimelineError> {
     match item {
-        ConversationItem::System(_) => MessageCause::SystemPrompt,
-        ConversationItem::User(_) => MessageCause::User,
+        ConversationItem::System(_) => Err(crate::TimelineError::InvalidMessageShape),
+        ConversationItem::User(user)
+            if matches!(
+                user.synthetic_reason.as_ref(),
+                Some(
+                    sampling_types::SyntheticReason::ProjectInstructions
+                        | sampling_types::SyntheticReason::SessionRules
+                        | sampling_types::SyntheticReason::MemoryContext
+                )
+            ) =>
+        {
+            Err(crate::TimelineError::InvalidMessageShape)
+        }
+        ConversationItem::User(_) => Ok(MessageCause::User),
         ConversationItem::Assistant(_)
         | ConversationItem::BackendToolCall(_)
-        | ConversationItem::Reasoning(_) => MessageCause::Assistant,
-        ConversationItem::ToolResult(_) => MessageCause::ToolResult,
+        | ConversationItem::Reasoning(_) => Ok(MessageCause::Assistant),
+        ConversationItem::ToolResult(_) => Ok(MessageCause::ToolResult),
     }
 }
 
@@ -46,7 +58,13 @@ pub(super) const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n
 
 impl ChatStateActor {
     async fn append_message_fact(&mut self, item: ConversationItem) -> bool {
-        let cause = message_cause(&item);
+        let Ok(cause) = message_cause(&item) else {
+            tracing::error!(
+                item_kind = item_kind_str(&item),
+                "rejected message outside its Timeline-owned write path"
+            );
+            return false;
+        };
         let mut candidate = self.state.timeline.clone();
         let event = candidate
             .append(item.clone(), cause)
@@ -234,7 +252,7 @@ impl ChatStateActor {
     ) -> Result<(), crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(DanglingToolCallReason::UserCancelled)
             .await?;
-        let cause = message_cause(&item);
+        let cause = message_cause(&item)?;
         let mut candidate = self.state.timeline.clone();
         let event = candidate.append(item.clone(), cause)?;
         self.commit_timeline_event(event).await?;
@@ -409,7 +427,7 @@ impl ChatStateActor {
     /// Runs inside the actor's command loop, so it cannot interleave with
     /// `PushToolResult` / `PushAssistantResponse` mid-turn — unlike a
     /// `GetConversation` + `ReplaceConversation` read-modify-write, which can
-    /// lose concurrently appended items (the `ReplaceSystemHead` lesson).
+    /// lose concurrently appended items.
     ///
     /// # UI, logging, and turn capture
     ///
@@ -815,31 +833,6 @@ impl ChatStateActor {
             return None;
         }
         Some(report)
-    }
-
-    /// Atomically swap the leading `System` message with `prompt` (or insert one
-    /// if absent), persisting when changed. Runs inside the actor's command loop
-    /// so it serializes with turn pushes — no lost-update race on a mid-turn
-    /// reconnect. Returns whether the conversation changed.
-    ///
-    /// The surface is cloned (items are `Arc`-backed, so the clone is shallow)
-    /// and committed as one replacement event.
-    pub(super) async fn replace_system_head(
-        &mut self,
-        prompt: &str,
-    ) -> Result<bool, crate::commands::TimelineWriteError> {
-        if let Some(ConversationItem::System(sys)) = self.state.timeline.surface().first()
-            && crate::conversation_util::canonical_system_prompt_eq(sys.content.as_ref(), prompt)
-        {
-            return Ok(false);
-        }
-        let mut conversation = self.state.timeline.surface().to_vec();
-        let changed =
-            crate::conversation_util::replace_or_insert_system_head(&mut conversation, prompt);
-        debug_assert!(changed, "head mismatch must produce a change");
-        self.replace_conversation_durably(conversation, MessageCause::SystemPrompt)
-            .await?;
-        Ok(changed)
     }
 
     /// Seed provider-reported accounting without mutating Timeline-derived

@@ -16,9 +16,6 @@ pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = MANDATORY_CORE_PROMPT;
 #[cfg(test)]
 pub(crate) const SUBAGENT_SYSTEM_PROMPT: &str = SUBAGENT_AUDIENCE_PROMPT;
 
-/// The compact system prompt used after conversation compaction.
-pub const COMPACT_SYSTEM_PROMPT: &str = include_str!("../../prompts/compact.md");
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +63,18 @@ mod tests {
         renderer
             .render_with_extra(SUBAGENT_SYSTEM_PROMPT, placeholders)
             .expect("subagent template render failed")
+    }
+
+    fn render_extend_layer(
+        renderer: &TemplateRenderer,
+        placeholders: &serde_json::Value,
+    ) -> String {
+        [STANDARD_PROMPT, SESSION_EXTENSIONS_PROMPT]
+            .into_iter()
+            .filter_map(|template| renderer.render_with_extra(template, placeholders).ok())
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     // ── Variable substitution ───────────────────────────────────────
@@ -144,22 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_base_template_contains_resolved_tool_names() {
-        let prompt = render_base(&default_renderer(), &default_placeholders());
-        // The minimal prompt only resolves the read/edit tool names, inside
-        // <tool_calling>. (todo_write / run_terminal_command lived in sections
-        // that the trimmed prompt no longer renders.)
-        assert!(prompt.contains("read_file"), "Should contain 'read_file'");
-        assert!(
-            prompt.contains("search_replace"),
-            "Should contain 'search_replace'"
-        );
-        assert!(!prompt.contains("${{"), "No unresolved template variables");
-        assert!(!prompt.contains("${%"), "No unresolved template blocks");
-    }
-
-    #[test]
-    fn test_base_template_with_overridden_tool_names() {
+    fn stable_head_is_independent_of_agent_tool_names() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "view_file".to_string()),
             (ToolKind::Edit, "edit".to_string()),
@@ -173,36 +167,11 @@ mod tests {
         ]
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
-        assert!(
-            prompt.contains("`view_file`"),
-            "Should use overridden 'view_file'"
-        );
-        assert!(prompt.contains("`edit`"), "Should use overridden 'edit'");
-        assert!(
-            !prompt.contains("`read_file`"),
-            "Should NOT contain canonical 'read_file'"
-        );
-    }
-
-    #[test]
-    fn test_base_template_plan_absent_omits_task_management() {
-        // Renderer without Plan tool
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "read_file".to_string()),
-            (ToolKind::Execute, "run_terminal_cmd".to_string()),
-            (
-                ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
-            ),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
-        assert!(
-            !prompt.contains("Task Management"),
-            "Task Management section should be omitted"
-        );
+        let standard = render_base(&default_renderer(), &default_placeholders());
+        let renamed = render_base(&r, &default_placeholders());
+        assert_eq!(standard, renamed);
+        assert!(!renamed.contains("view_file"));
+        assert!(!renamed.contains("edit"));
     }
 
     #[test]
@@ -210,7 +179,7 @@ mod tests {
         // Renderer without Execute tool
         let tools: HashMap<ToolKind, String> = [(ToolKind::Plan, "todo_write".to_string())].into();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let prompt = render_extend_layer(&r, &default_placeholders());
         assert!(
             !prompt.contains("background_tasks"),
             "background_tasks section should be omitted"
@@ -228,7 +197,7 @@ mod tests {
         .into_iter()
         .collect();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let prompt = render_extend_layer(&r, &default_placeholders());
         assert!(
             prompt.contains("For watch processes"),
             "monitor section should render when Monitor tool is present"
@@ -253,7 +222,7 @@ mod tests {
         .into_iter()
         .collect();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let prompt = render_extend_layer(&r, &default_placeholders());
         assert!(
             !prompt.contains("For watch processes"),
             "monitor section should NOT render without Monitor tool"
@@ -278,37 +247,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_prompt_matches_expected() {
-        assert_eq!(
-            COMPACT_SYSTEM_PROMPT,
-            include_str!("../../prompts/compact.md"),
-        );
-    }
-
-    // ── Mid-session mode switching ──────────────────────────────────
-
-    #[test]
-    fn test_mid_session_switch_concise_to_full() {
-        let compact = COMPACT_SYSTEM_PROMPT;
-        assert!(!compact.contains("read_file"), "Compact has no tool names");
-        assert!(
-            !compact.contains("<tool_calling>"),
-            "Compact has no tool section"
-        );
-
-        let full = render_base(&default_renderer(), &default_placeholders());
-        assert!(
-            full.contains("<tool_calling>"),
-            "Full prompt has tool section"
-        );
-        assert!(full.contains("read_file"), "Full prompt has read_file");
-        assert!(
-            full.contains("search_replace"),
-            "Full prompt has search_replace"
-        );
-    }
-
-    #[test]
     fn test_mid_session_switch_preserves_tool_names() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "view".to_string()),
@@ -322,7 +260,7 @@ mod tests {
         ]
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let prompt = render_extend_layer(&r, &default_placeholders());
         assert!(prompt.contains("`edit`"), "Should use overridden 'edit'");
         assert!(prompt.contains("`view`"), "Should use overridden 'view'");
         assert!(
@@ -379,7 +317,7 @@ mod tests {
         // No plan, no execute
         let tools: HashMap<ToolKind, String> = [(ToolKind::Read, "read_file".to_string())].into();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let prompt = render_extend_layer(&r, &default_placeholders());
         assert!(
             !prompt.contains("Task Management"),
             "Task Management must be omitted"
@@ -393,11 +331,7 @@ mod tests {
     // ── Memory section ──────────────────────────────────────────────
 
     #[test]
-    fn test_memory_enabled_does_not_render_memory_section() {
-        // The <memory> section was removed from the minimal base prompt.
-        // Even when the memory tools are registered AND memory_enabled=true,
-        // the trimmed template must not render a memory section. (Complements
-        // test_memory_disabled_omits_memory_section, which covers the default.)
+    fn memory_capability_renders_only_in_the_agent_layer() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "read_file".to_string()),
             (ToolKind::MemorySearch, "memory_search".to_string()),
@@ -407,23 +341,13 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let mut p = default_placeholders();
         p["memory_enabled"] = serde_json::json!(true);
-        let prompt = render_base(&r, &p);
-        assert!(
-            !prompt.contains("<memory>"),
-            "Memory section was removed from the minimal prompt"
-        );
-        assert!(
-            !prompt.contains("### Memory Management"),
-            "Memory Management section was removed from the minimal prompt"
-        );
-        assert!(
-            !prompt.contains("memory_search"),
-            "memory tool names must not appear once the memory section is gone"
-        );
-        assert!(
-            !prompt.contains("memory_get"),
-            "memory tool names must not appear once the memory section is gone"
-        );
+        let head = render_base(&r, &p);
+        let layer = render_extend_layer(&r, &p);
+        assert!(!head.contains("<memory>"));
+        assert!(!head.contains("memory_search"));
+        assert!(layer.contains("<memory>"));
+        assert!(layer.contains("memory_search"));
+        assert!(layer.contains("memory_get"));
     }
 
     #[test]

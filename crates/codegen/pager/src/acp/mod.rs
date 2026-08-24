@@ -96,8 +96,6 @@ pub struct ConnectFlags {
     pub installer: Option<String>,
     /// Remote settings from early prefetch (used for memory config resolution).
     pub remote_settings: Option<shell::util::config::RemoteSettings>,
-    /// Override the entire system prompt.
-    pub system_prompt_override: Option<String>,
     /// Extra rules appended to the system prompt (from `--rules`).
     pub rules: Option<String>,
     /// Override reasoning effort for all models.
@@ -327,9 +325,6 @@ fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
         "clientType": client_type,
         "clientVersion": PAGER_CLIENT_VERSION,
     });
-    if let Some(spo) = &flags.system_prompt_override {
-        meta["systemPromptOverride"] = serde_json::Value::String(spo.clone());
-    }
     if let Some(rules) = &flags.rules {
         meta["rules"] = serde_json::Value::String(rules.clone());
     }
@@ -647,16 +642,6 @@ mod tests {
             meta.get("rules").is_none(),
             "rules key must be absent when --rules is not set; meta={meta:?}"
         );
-    }
-
-    #[test]
-    fn build_initialize_meta_carries_system_prompt_override() {
-        let flags = ConnectFlags {
-            system_prompt_override: Some("YOU ARE A PIRATE.".into()),
-            ..Default::default()
-        };
-        let meta = build_initialize_meta(&flags);
-        assert_eq!(meta["systemPromptOverride"], "YOU ARE A PIRATE.");
     }
 
     #[test]

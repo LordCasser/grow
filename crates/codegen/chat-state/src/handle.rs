@@ -352,19 +352,6 @@ impl ChatStateHandle {
         .await
     }
 
-    /// Atomically align the leading `System` message with `prompt` (insert one
-    /// if absent), persisting when changed. Serializes with turn pushes inside
-    /// the actor, so a mid-turn reconnect can't drop concurrent updates.
-    /// Returns only after the replacement is durable.
-    pub async fn replace_system_head(&self, prompt: &str) -> Result<bool, TimelineWriteError> {
-        let prompt = prompt.to_owned();
-        self.query("ReplaceSystemHead", |reply| {
-            ChatStateCommand::ReplaceSystemHead { prompt, reply }
-        })
-        .await
-        .ok_or(TimelineWriteError::AcknowledgementLost)?
-    }
-
     /// Flush pending persistence writes to disk.
     pub fn flush(&self) {
         let _ = self.cmd_tx.send(ChatStateCommand::Flush);
@@ -435,14 +422,12 @@ impl ChatStateHandle {
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
-        persist_memory_reminder: bool,
     ) -> Result<ConversationRequest, TimelineWriteError> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
                 timeline_id: timeline_id.to_owned(),
                 tool_definitions,
                 memory_reminder,
-                persist_memory_reminder,
                 reply,
             }
         })

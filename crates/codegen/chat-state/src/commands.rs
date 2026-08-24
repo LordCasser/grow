@@ -281,21 +281,6 @@ pub enum ChatStateCommand {
         >,
     },
 
-    /// Atomically align the leading `System` message with `prompt` (inserting
-    /// one if absent), persisting the conversation. Executed inside the actor so
-    /// it serializes with concurrent turn pushes (`PushAssistantResponse` /
-    /// `PushToolResult`) — a mid-turn reconnect cannot lose those updates the
-    /// way a read-modify-write via `GetConversation` + `ReplaceConversation`
-    /// would. Replies `true` iff the conversation changed (no-op when the head
-    /// already matches modulo trailing newlines). A changed head goes through
-    /// the Timeline Surface replacement, which re-bases `total_tokens` to a fresh static
-    /// estimate — acceptable because a changed head invalidates the KV prefix
-    /// anyway.
-    ReplaceSystemHead {
-        prompt: String,
-        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
-    },
-
     /// Flush pending persistence writes to disk (end of turn).
     Flush,
 
@@ -318,7 +303,6 @@ pub enum ChatStateCommand {
         timeline_id: String,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
-        persist_memory_reminder: bool,
         reply: oneshot::Sender<Result<ConversationRequest, TimelineWriteError>>,
     },
 
@@ -594,7 +578,6 @@ mod tests {
             timeline_id: "main".into(),
             tool_definitions: vec![],
             memory_reminder: None,
-            persist_memory_reminder: false,
             reply: tx,
         };
 

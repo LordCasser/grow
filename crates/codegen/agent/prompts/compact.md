@@ -1,1 +1,0 @@
-Continue the current user request using the retained conversation summary, applicable constraints, and the tools available in this session. Preserve established decisions, investigate missing facts when possible, and do not broaden the scope or authority of the Agent.

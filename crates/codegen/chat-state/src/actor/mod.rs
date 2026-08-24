@@ -515,10 +515,6 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
-            ChatStateCommand::ReplaceSystemHead { prompt, reply } => {
-                let result = self.replace_system_head(&prompt).await;
-                let _ = reply.send(result);
-            }
             ChatStateCommand::Flush => {
                 self.persistence.flush();
             }
@@ -545,7 +541,6 @@ impl ChatStateActor {
                 timeline_id,
                 tool_definitions,
                 memory_reminder,
-                persist_memory_reminder,
                 reply,
             } => {
                 let result = self
@@ -553,7 +548,6 @@ impl ChatStateActor {
                         &timeline_id,
                         tool_definitions,
                         memory_reminder,
-                        persist_memory_reminder,
                     )
                     .await;
                 let _ = reply.send(result);

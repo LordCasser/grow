@@ -870,16 +870,12 @@ impl AgentBuilder {
             prompt_composition: definition.prompt_composition.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
-            system_prompt: definition.system_prompt.clone(),
             agents_md_files,
             memory_enabled: self.memory_enabled,
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
         };
-        let system_prompt = prompt_context
-            .render(&tool_bridge)
-            .await
-            .unwrap_or_default();
+        let system_prompt = prompt_context.render().unwrap_or_default();
         let role_prompt = prompt_context.render_role(&tool_bridge).await;
         if let Some(rendered) = tool_bridge
             .render_prompt(&definition.description, &prompt_context.placeholders())
