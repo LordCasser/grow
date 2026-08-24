@@ -25,6 +25,7 @@
 - Context recall now applies the relevance gate even when the entire unloaded archive fits its evidence budget; a query with no lexical candidate returns locally instead of sampling unrelated history. Sideband replay also accepts Control-owned Behavior/Goal Surface coordinates as first-class context identities.
 - Recall Sidebands now materialize a bounded current-task need context from the same atomic Surface snapshot as the archive. Attempt refs cover both actual input planes, retry/refine requests are rechecked against the sideband window, and the final actor guard receives a frozen bound for the complete ToolResult rather than content alone.
 - Sideband schema v5 freezes one request-level budget policy before provider emission. Every auxiliary purpose now durably caps its attempt count and per-attempt input/output configuration, so retries and refinements cannot silently expand an admitted transaction.
+- Sideband requests are now protocol-level tool-free. `/btw`, recap, compaction, and session-title generation no longer inherit the primary Agent tool catalog; titles use native structured JSON output, and the obsolete `compaction_tool_choice` switch was removed rather than retained as an inactive compatibility path.
 - Timeline schema v12 rejects all earlier logs; no compatibility projection is retained.
 
 ## Workflow

@@ -296,8 +296,6 @@ mcp_auto_restart = true
 mcp_push_server_status = true
 mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监听
 
-# compaction_tool_choice 的值取决于当前 backend；不确定时保持未配置。
-# compaction_tool_choice = "auto"
 
 # -----------------------------------------------------------------------------
 # 会话搜索索引开关（默认开启）。关闭后本进程不再读写搜索索引，且本进程内不可

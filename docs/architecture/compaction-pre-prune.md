@@ -117,7 +117,7 @@ immediately; the outer turn loop proceeds to sampling.
 | `[compaction] pre_prune_token_budget` (user TOML) / remote `compaction_pre_prune_token_budget` | u64 \| none | `None` (derive 5% of window) | `GROW_COMPACTION_PRE_PRUNE_TOKEN_BUDGET` | Per-item pruning token budget |
 
 Resolution chain (env > user config > remote > default), mirroring
-`resolve_compaction_tool_choice_from` / `resolve_compaction_verbatim_input`
+`resolve_compaction_verbatim_input`
 (see `shell/src/util/config/resolve/compaction.rs`). A budget value that fails
 to parse or is `0` falls through to `None` (default derivation). Runtime state
 lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`

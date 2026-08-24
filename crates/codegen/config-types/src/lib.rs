@@ -749,8 +749,6 @@ pub struct RemoteSettings {
     /// remote settings verbatim-input flag; env (`GROW_COMPACTION_VERBATIM_INPUT`) and config override it. `None` = default (true).
     #[serde(default)]
     pub compaction_verbatim_input: Option<bool>,
-    #[serde(default)]
-    pub compaction_tool_choice: Option<String>,
     /// Pre-prune (model-free tool-result pruning before summary compaction)
     /// from remote settings. Env (`GROW_COMPACTION_PRE_PRUNE`) and user config
     /// override it. `None` = default (true).

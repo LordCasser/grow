@@ -1503,7 +1503,6 @@ impl MvpAgent {
             .cfg
             .borrow()
             .resolve_compaction_verbatim_input();
-        let compaction_tool_choice = self.cfg.borrow().resolve_compaction_tool_choice();
         let compaction_pre_prune = self.cfg.borrow().resolve_compaction_pre_prune();
         let compaction_pre_prune_token_budget = self
             .cfg
@@ -1789,7 +1788,6 @@ impl MvpAgent {
                     auto_compact_threshold_percent,
                     system_prompt_label,
                     compaction_verbatim_input,
-                    compaction_tool_choice,
                     compaction_pre_prune,
                     compaction_pre_prune_token_budget,
                     buffering_settings,

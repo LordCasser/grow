@@ -316,18 +316,6 @@ impl SubagentSpawnContext {
             .resolve()
             .value
     }
-    pub fn resolve_compaction_tool_choice(&self) -> crate::util::config::CompactionToolChoice {
-        crate::util::config::resolve_compaction_tool_choice_from(
-            crate::agent::config::env_string(crate::util::config::ENV_COMPACTION_TOOL_CHOICE)
-                .as_deref(),
-            self.agent_config
-                .as_ref()
-                .and_then(|c| c.features.compaction_tool_choice.as_deref()),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_tool_choice.as_deref()),
-        )
-    }
     /// Subagent pre-prune flag, mirroring `Config::resolve_compaction_pre_prune`
     /// (env > config `[compaction] pre_prune` > remote settings > default `true`).
     pub fn resolve_compaction_pre_prune(&self) -> bool {

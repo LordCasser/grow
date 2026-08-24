@@ -971,7 +971,6 @@ pub(crate) async fn run_shell_child(
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
         agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         ctx.resolve_compaction_verbatim_input(),
-        ctx.resolve_compaction_tool_choice(),
         ctx.resolve_compaction_pre_prune(),
         ctx.resolve_compaction_pre_prune_token_budget(),
         None,

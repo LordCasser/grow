@@ -77,12 +77,7 @@ fn inference_request(server: &MockInferenceServer) -> Value {
         .find(|body| {
             body.get("tools")
                 .and_then(Value::as_array)
-                .is_some_and(|tools| {
-                    !tools.is_empty()
-                        && !tools
-                            .iter()
-                            .any(|tool| request_tool_name(tool) == Some("session_title"))
-                })
+                .is_some_and(|tools| !tools.is_empty())
         })
         .expect("mock server should receive a main inference request with tools")
 }

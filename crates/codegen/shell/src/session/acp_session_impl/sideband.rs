@@ -149,6 +149,17 @@ impl SidebandRun {
         strategy: &str,
         feedback: Option<String>,
     ) -> Result<(), SidebandRunError> {
+        if !request.tools.is_empty() || request.tool_choice.is_some() {
+            let error = chat_state::SidebandError::ToolCapabilityForbidden;
+            self.append(chat_state::SidebandEventKind::End(
+                chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    error: Some(error.to_string()),
+                },
+            ))
+            .await?;
+            return Err(error.into());
+        }
         let attempt_no = u32::try_from(
             self.timeline
                 .events()
@@ -440,5 +451,70 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn tool_capability_is_rejected_before_attempt_persistence() {
+        let requests = [
+            ConversationRequest {
+                tools: vec![sampling_types::ToolSpec {
+                    name: "read_file".into(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                ..ConversationRequest::default()
+            },
+            ConversationRequest {
+                tool_choice: Some(sampling_types::ConversationToolChoice::None),
+                ..ConversationRequest::default()
+            },
+        ];
+
+        for request in requests {
+            let (mut run, mut persistence_rx) = test_run();
+            let mut rejected = Box::pin(run.attempt_all_sources(&request, None));
+            let message = tokio::select! {
+                message = persistence_rx.recv() => message.unwrap(),
+                result = &mut rejected => panic!("rejection returned before its terminal fact was durable: {result:?}"),
+            };
+            let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+                event,
+                respond_to,
+            } = message
+            else {
+                panic!("unexpected persistence message");
+            };
+            assert!(matches!(
+                event.kind,
+                chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    ..
+                })
+            ));
+            respond_to.send(Ok(())).unwrap();
+            assert!(matches!(
+                rejected.await,
+                Err(SidebandRunError::Invalid(
+                    chat_state::SidebandError::ToolCapabilityForbidden
+                ))
+            ));
+            assert_eq!(
+                run.timeline
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)))
+                    .count(),
+                0
+            );
+            assert!(matches!(
+                run.timeline.events().last().map(|event| &event.kind),
+                Some(chat_state::SidebandEventKind::End(
+                    chat_state::SidebandEnd {
+                        outcome: chat_state::SidebandOutcome::Failed,
+                        ..
+                    }
+                ))
+            ));
+        }
     }
 }

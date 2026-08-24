@@ -731,14 +731,15 @@ async fn recap_request_rides_parent_prompt_cache() {
                 Some(actor.session_info.id.to_string().as_str()),
                 "prompt_cache_key must be the parent session id for sticky routing"
             );
-            let main_turn_specs =
-                actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
-            assert!(!main_turn_specs.is_empty(), "test env must expose tools");
-            let tools = body["tools"].as_array().expect("tools must be present");
-            assert_eq!(
-                tools.len(),
-                main_turn_specs.len(),
-                "recap must send exactly the main turn's tool specs"
+            assert!(
+                body.get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(Vec::is_empty),
+                "recap Sideband must not advertise the main Agent's tools"
+            );
+            assert!(
+                body.get("tool_choice").is_none(),
+                "recap Sideband must not advertise a tool choice"
             );
         })
         .await;

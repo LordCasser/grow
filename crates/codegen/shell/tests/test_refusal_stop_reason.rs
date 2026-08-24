@@ -45,22 +45,17 @@ async fn refusal_messages_server() -> MockInferenceServer {
 }
 
 /// `/v1/messages` requests belonging to the prompt turn. The session also
-/// fires a one-shot title-generation call on the first user message; it is
-/// identified (and excluded) by its forced `session_title` tool.
+/// fires a tool-free one-shot title-generation call on the first user message;
+/// its purpose prompt identifies it independently of the Agent tool catalog.
 fn turn_messages_request_count(server: &MockInferenceServer) -> usize {
     server
         .requests()
         .iter()
         .filter(|e| e.path == "/v1/messages")
         .filter(|e| {
-            !e.body.as_ref().is_some_and(|b| {
-                b.get("tools")
-                    .and_then(|t| t.as_array())
-                    .is_some_and(|tools| {
-                        tools.iter().any(|t| {
-                            t.get("name").and_then(|n| n.as_str()) == Some("session_title")
-                        })
-                    })
+            !e.body.as_ref().is_some_and(|body| {
+                body.to_string()
+                    .contains("You are tasked with generating the session title")
             })
         })
         .count()

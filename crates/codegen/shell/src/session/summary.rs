@@ -59,7 +59,11 @@ impl SessionActor {
         use crate::session::helpers::session_title;
         use crate::session::sideband::{sideband_backend, sideband_finish, sideband_usage};
 
-        let request = session_title::build_session_title_request(&user_text, &route.model);
+        let request = session_title::build_session_title_request(
+            &user_text,
+            &route.model,
+            route.client.api_backend(),
+        );
         let mut sideband = match self
             .begin_sideband(
                 chat_state::SidebandPurpose::SessionTitle,
@@ -129,8 +133,9 @@ impl SessionActor {
             }
         };
 
-        let (title, raw_output) = match session_title::parse_session_title_response(&response) {
-            Ok(parsed) => parsed,
+        let raw_output = response.assistant_text();
+        let title = match session_title::parse_session_title_output(&raw_output) {
+            Ok(title) => title,
             Err(error) => {
                 let terminal_ref = match sideband
                     .fail(chat_state::SidebandOutcome::Failed, error.to_string())

@@ -304,6 +304,8 @@ pub enum SidebandError {
     InvalidAssemblyManifest,
     #[error("sideband attempt exceeds the frozen request budget policy")]
     AttemptBudgetExceeded,
+    #[error("sideband requests cannot advertise tools or a tool choice")]
+    ToolCapabilityForbidden,
     #[error("sideband attempt selected Surface ids are not canonical or covered by input refs")]
     InvalidSurfaceSelection,
     #[error("sideband attempt requires an open request")]

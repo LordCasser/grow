@@ -1696,17 +1696,6 @@ impl Config {
             .resolve()
             .value
     }
-    pub(crate) fn resolve_compaction_tool_choice(
-        &self,
-    ) -> crate::util::config::CompactionToolChoice {
-        crate::util::config::resolve_compaction_tool_choice_from(
-            env_string(crate::util::config::ENV_COMPACTION_TOOL_CHOICE).as_deref(),
-            self.features.compaction_tool_choice.as_deref(),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_tool_choice.as_deref()),
-        )
-    }
     /// Resolve pre-prune (session-side tool-result pruning) flag: env
     /// `GROW_COMPACTION_PRE_PRUNE` > config `[compaction] pre_prune` > remote
     /// settings > default `true`.
@@ -2487,8 +2476,6 @@ pub struct Features {
     /// Feed the summarizer the verbatim conversation instead of the lossy rewrite; `None` = defer to env/remote settings/default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_verbatim_input: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_tool_choice: Option<String>,
     /// Snapshot a completed subagent's isolated worktree into a durable git ref
     /// and delete its directory (resume rehydrates from the ref). This is the
     /// per-deployment rollout lever (set in managed_config.toml `[features]`).

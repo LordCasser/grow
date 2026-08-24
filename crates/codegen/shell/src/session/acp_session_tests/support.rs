@@ -378,7 +378,6 @@ pub(crate) async fn create_test_actor_ex(
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
             verbatim_input: true,
-            tool_choice: crate::util::config::CompactionToolChoice::Auto,
             pre_prune: std::cell::Cell::new(true),
             pre_prune_token_budget: std::cell::Cell::new(None),
             cancel: Default::default(),

@@ -2,8 +2,7 @@
 //! gets passed to the next turn of the model
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, ConversationItem, ConversationRequest,
-    ConversationToolChoice, SamplingClient as OaiCompatClient, SamplingError, ToolChoice,
-    ToolDefinition, ToolSpec, conversation_to_chat_messages,
+    SamplingClient as OaiCompatClient, SamplingError, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -302,13 +301,9 @@ mod compact_cancel_await_tests {
 /// user message — use [`build_compaction_request_surface`] to construct it. The
 /// split lets callers persist the exact request payload before issuing it.
 ///
-/// `tools` are the same effective definitions the turn loop
-/// attaches to normal requests. Tool definitions are serialized into the
-/// prompt prefix by every backend, so omitting them would shift the entire
-/// prefix and force a full prefill on the summarizer call — attaching them
-/// keeps the request prefix byte-identical to the turn requests so the
-/// engine reuses the session's KV cache (the whole point of the verbatim
-/// input path).
+/// The provider request is deliberately tool-free: compaction is a Sideband derivation, not an
+/// Agent turn. The conversation prefix may still reuse cached message tokens,
+/// but the primary Agent's mutable capability catalog is outside this request.
 ///
 /// Errors carry a [`CompactFailure`] classification so the caller can
 /// short-circuit retries on deterministic failures (4xx schema violations,
@@ -316,44 +311,22 @@ mod compact_cancel_await_tests {
 /// network blips, rate limits).
 pub(crate) async fn generate_session_compact(
     input_surface: Vec<ConversationItem>,
-    tools: Vec<ToolSpec>,
     client: OaiCompatClient,
-    session_id: acp::SessionId,
     sampling_config: &SamplingConfig,
     idle_timeout: std::time::Duration,
     wall_clock_budget_secs: u64,
-    tool_choice: crate::util::config::CompactionToolChoice,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CompactOutput, CompactFailure> {
     if cancel.is_cancelled() {
         return Err(CompactFailure::Cancelled);
     }
     let num_messages = input_surface.len();
-    let wire_tool_choice = match tool_choice {
-        crate::util::config::CompactionToolChoice::Auto => ToolChoice::auto(),
-        crate::util::config::CompactionToolChoice::None => ToolChoice::none(),
-    };
-    let conversation_tool_choice = match tool_choice {
-        crate::util::config::CompactionToolChoice::Auto => ConversationToolChoice::Auto,
-        crate::util::config::CompactionToolChoice::None => ConversationToolChoice::None,
-    };
     let output = match sampling_config.api_backend {
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(input_surface);
-            let mut message =
+            let message =
                 ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages);
-            if !tools.is_empty() {
-                message = message
-                    .with_tools(
-                        tools
-                            .into_iter()
-                            .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
-                            .collect(),
-                    )
-                    .with_tool_choice(wire_tool_choice);
-            }
-            let sid = session_id.to_string();
             tracing::info!(
                 compact_model = %sampling_config.model,
                 num_messages = num_messages,
@@ -451,8 +424,6 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Responses => {
             let request = ConversationRequest {
                 items: input_surface,
-                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
-                tools,
                 model: Some(sampling_config.model.to_owned()),
                 ..Default::default()
             };
@@ -601,7 +572,6 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Messages => {
             let request = ConversationRequest {
                 items: input_surface,
-                tools,
                 model: Some(sampling_config.model.to_owned()),
                 ..Default::default()
             };
@@ -1044,13 +1014,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let output = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_secs(30),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -1129,13 +1096,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_secs(30),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1145,7 +1109,7 @@ mod reasoning_compaction_regression_tests {
         let _ = shutdown_tx.send(());
     }
     #[tokio::test]
-    async fn chat_completions_compaction_attaches_tools_with_tool_choice_auto() {
+    async fn chat_completions_compaction_is_tool_free() {
         use std::sync::{Arc, Mutex};
         let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = captured.clone();
@@ -1183,60 +1147,27 @@ mod reasoning_compaction_regression_tests {
             ConversationItem::assistant("I fixed it."),
             ConversationItem::user("Summarize the conversation so far."),
         ];
-        let tools = vec![ToolSpec {
-            name: "read_file".to_string(),
-            description: Some("Reads a file".to_string()),
-            parameters: json!({"type": "object", "properties": {}}),
-        }];
-        let client = SamplingClient::new(config.clone()).unwrap();
-        generate_session_compact(
-            input_surface.clone(),
-            tools,
-            client,
-            acp::SessionId::new("test-session"),
-            &config,
-            std::time::Duration::from_secs(30),
-            0,
-            crate::util::config::CompactionToolChoice::Auto,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("compaction with tools must succeed"));
         let client = SamplingClient::new(config.clone()).unwrap();
         generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_secs(30),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .unwrap_or_else(|_| panic!("compaction without tools must succeed"));
+        .unwrap_or_else(|_| panic!("tool-free compaction must succeed"));
         let bodies = captured.lock().unwrap();
-        assert_eq!(bodies.len(), 2, "mock must have served both requests");
-        let with_tools = &bodies[0];
-        assert_eq!(
-            with_tools["tool_choice"],
-            json!("auto"),
-            "default compaction tool_choice is auto"
-        );
-        let sent_tools = with_tools["tools"]
-            .as_array()
-            .expect("tools must be attached for prefix-cache alignment");
-        assert_eq!(sent_tools.len(), 1);
-        assert_eq!(sent_tools[0]["function"]["name"], json!("read_file"));
-        let without_tools = &bodies[1];
+        assert_eq!(bodies.len(), 1, "mock must receive one request");
+        let request = &bodies[0];
         assert!(
-            without_tools.get("tools").is_none(),
-            "no tools key when none are passed"
+            request.get("tools").is_none(),
+            "Sideband compaction must not advertise tools"
         );
         assert!(
-            without_tools.get("tool_choice").is_none(),
-            "tool_choice without tools is rejected by OpenAI-compat backends"
+            request.get("tool_choice").is_none(),
+            "Sideband compaction must not advertise tool_choice"
         );
         let _ = shutdown_tx.send(());
     }
@@ -1291,7 +1222,7 @@ mod reasoning_compaction_regression_tests {
         config
     }
     #[tokio::test]
-    async fn responses_compaction_attaches_tools_with_tool_choice_auto() {
+    async fn responses_compaction_is_tool_free() {
         use std::sync::{Arc, Mutex};
         let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = captured.clone();
@@ -1329,69 +1260,30 @@ mod reasoning_compaction_regression_tests {
             ConversationItem::assistant("I fixed it."),
             ConversationItem::user("Summarize the conversation so far."),
         ];
-        let tools = vec![ToolSpec {
-            name: "read_file".to_string(),
-            description: Some("Reads a file".to_string()),
-            parameters: json!({"type": "object", "properties": {}}),
-        }];
-        let client = SamplingClient::new(config.clone()).unwrap();
-        generate_session_compact(
-            input_surface.clone(),
-            tools,
-            client,
-            acp::SessionId::new("test-session"),
-            &config,
-            std::time::Duration::from_secs(30),
-            0,
-            crate::util::config::CompactionToolChoice::Auto,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("Responses compaction with tools must succeed"));
         let client = SamplingClient::new(config.clone()).unwrap();
         generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_secs(30),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .unwrap_or_else(|_| panic!("Responses compaction without tools must succeed"));
+        .unwrap_or_else(|_| panic!("tool-free Responses compaction must succeed"));
         let bodies = captured.lock().unwrap();
-        assert_eq!(bodies.len(), 2, "mock must have served both requests");
-        let with_tools = &bodies[0];
-        assert_eq!(
-            with_tools["tool_choice"],
-            json!("auto"),
-            "default Responses compaction tool_choice is auto"
-        );
-        let sent_tools = with_tools["tools"]
-            .as_array()
-            .expect("tools must be attached for prefix-cache alignment");
-        let has_read_file = sent_tools.iter().any(|t| {
-            t.get("name") == Some(&json!("read_file"))
-                || t.pointer("/name") == Some(&json!("read_file"))
-        });
+        assert_eq!(bodies.len(), 1, "mock must receive one request");
+        let request = &bodies[0];
         assert!(
-            has_read_file,
-            "client function tool must be present: {sent_tools:?}"
-        );
-        let without_tools = &bodies[1];
-        assert!(
-            without_tools
+            request
                 .get("tools")
                 .map(|t| t.as_array().is_none_or(|a| a.is_empty()))
                 .unwrap_or(true),
-            "no tools when none are passed"
+            "Sideband compaction must not advertise tools"
         );
         assert!(
-            without_tools.get("tool_choice").is_none(),
-            "tool_choice without tools should be omitted"
+            request.get("tool_choice").is_none(),
+            "Sideband compaction must not advertise tool_choice"
         );
         let _ = shutdown_tx.send(());
     }
@@ -1424,13 +1316,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_millis(150),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1505,13 +1394,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_millis(150),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1583,13 +1469,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_millis(150),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1658,13 +1541,10 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             input_surface,
-            vec![],
             client,
-            acp::SessionId::new("test-session"),
             &config,
             std::time::Duration::from_millis(150),
             0,
-            crate::util::config::CompactionToolChoice::Auto,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;

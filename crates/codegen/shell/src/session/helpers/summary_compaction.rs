@@ -31,7 +31,7 @@ use compaction::{
     SummaryAttemptOutcome, SummaryObserver,
 };
 use sampler::SamplerConfig as SamplingConfig;
-use sampling_types::{ConversationItem, ConversationRequest, ToolSpec};
+use sampling_types::{ConversationItem, ConversationRequest};
 
 use crate::sampling::SamplingClient;
 use crate::session::helpers::session_compact::{
@@ -42,8 +42,8 @@ use crate::session::sideband::{SidebandRun, SidebandRunError};
 /// Wraps `generate_session_compact` as the shared engine's
 /// [`CompactionSampler`] for grow-build's range-summary pass.
 ///
-/// Holds the per-call request context the seam does not carry (tools, client,
-/// session, config) and stashes the last successful [`CompactOutput`] so the
+/// Holds the per-call request context the seam does not carry (client and
+/// config) and stashes the last successful [`CompactOutput`] so the
 /// caller can recover the streaming diagnostics not modeled by
 /// [`LlmCompactionOutput`].
 ///
@@ -52,9 +52,7 @@ use crate::session::sideband::{SidebandRun, SidebandRunError};
 /// retain the exact frozen input reference, prompt, attempts, and outcome.
 pub(crate) struct ShellCompactionSampler {
     user_context: Option<String>,
-    tools: Vec<ToolSpec>,
     client: SamplingClient,
-    session_id: acp::SessionId,
     sampling_config: SamplingConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`: a stalled
     /// summarizer stream (no model-output chunk for this long) fails instead of
@@ -63,7 +61,6 @@ pub(crate) struct ShellCompactionSampler {
     /// Wall-clock budget (secs) forwarded to `generate_session_compact` as the
     /// reasoning-runaway backstop; `0` disables it.
     wall_clock_budget_secs: u64,
-    tool_choice: crate::util::config::CompactionToolChoice,
     cancel: tokio_util::sync::CancellationToken,
     sideband: std::sync::Arc<tokio::sync::Mutex<SidebandRun>>,
     sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
@@ -75,26 +72,20 @@ impl ShellCompactionSampler {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         user_context: Option<String>,
-        tools: Vec<ToolSpec>,
         client: SamplingClient,
-        session_id: acp::SessionId,
         sampling_config: SamplingConfig,
         idle_timeout: Duration,
         wall_clock_budget_secs: u64,
-        tool_choice: crate::util::config::CompactionToolChoice,
         cancel: tokio_util::sync::CancellationToken,
         sideband: std::sync::Arc<tokio::sync::Mutex<SidebandRun>>,
         sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             user_context,
-            tools,
             client,
-            session_id,
             sampling_config,
             idle_timeout,
             wall_clock_budget_secs,
-            tool_choice,
             cancel,
             sideband,
             sideband_feedback,
@@ -124,7 +115,6 @@ impl CompactionSampler for ShellCompactionSampler {
             build_compaction_request_surface(turns.to_vec(), self.user_context.as_deref());
         let audit_request = ConversationRequest {
             items: request_surface.clone(),
-            tools: self.tools.clone(),
             model: Some(self.sampling_config.model.clone()),
             ..ConversationRequest::default()
         };
@@ -137,13 +127,10 @@ impl CompactionSampler for ShellCompactionSampler {
 
         match generate_session_compact(
             request_surface,
-            self.tools.clone(),
             self.client.clone(),
-            self.session_id.clone(),
             &self.sampling_config,
             self.idle_timeout,
             self.wall_clock_budget_secs,
-            self.tool_choice,
             &self.cancel,
         )
         .await

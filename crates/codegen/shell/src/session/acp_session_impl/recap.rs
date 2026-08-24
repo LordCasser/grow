@@ -103,9 +103,6 @@ impl SessionActor {
         );
         items.push(ConversationItem::user(wrapped_question.clone()));
 
-        let tool_definitions = self.prepare_tool_definitions().await;
-        let tool_specs: Vec<ToolSpec> = tool_definitions.into_iter().map(ToolSpec::from).collect();
-
         let model = self
             .chat_state_handle
             .get_sampling_config()
@@ -123,7 +120,6 @@ impl SessionActor {
         // are rare, so the success path pays exactly one clone).
         let base_request = ConversationRequest {
             items,
-            tools: tool_specs,
             model: Some(model.clone()),
             temperature: None,
             ..Default::default()
@@ -317,12 +313,8 @@ impl SessionActor {
         // dropping the recap. The recap instruction keeps the body to
         // ~25–40 words, and `clean_recap_text` caps it at a generous
         // RECAP_MAX_CHARS safety net, so an explicit token cap isn't needed.
-        // Main-turn tool specs: tools serialize into the cached token prefix.
-        let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
         let request = ConversationRequest {
             items,
-            tools,
             model: Some(model.clone()),
             temperature: None,
             prompt_cache_key: Some(self.session_info.id.to_string()),

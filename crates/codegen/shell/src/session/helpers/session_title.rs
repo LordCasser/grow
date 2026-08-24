@@ -1,8 +1,6 @@
 //! Pure request/response boundary for session-title generation.
 
-use crate::sampling::{
-    ConversationItem, ConversationRequest, ConversationResponse, ConversationToolChoice, ToolSpec,
-};
+use crate::sampling::{ConversationItem, ConversationRequest, JsonOutputFormat};
 use crate::session::helpers::text::floor_char_boundary;
 
 /// Upper bound on the user text that feeds title generation; titles only need
@@ -16,7 +14,8 @@ A short and distinctive 5-10 word descriptive title for the session. Super info 
 
 You will be given the user query below encapsulated in <user_query></user_query>.
 
-Just generate the session_title and nothing else"#;
+Return exactly one JSON object matching this shape and nothing else:
+{"session_title":"your title"}"#;
 
 pub(crate) const SESSION_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -28,10 +27,8 @@ struct SessionTitle {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SessionTitleResponseError {
-    #[error("response did not contain the session_title tool call")]
-    MissingToolCall,
-    #[error("session_title arguments are invalid: {0}")]
-    InvalidArguments(#[from] serde_json::Error),
+    #[error("session_title output is invalid JSON: {0}")]
+    InvalidJson(#[from] serde_json::Error),
     #[error("session_title is empty")]
     EmptyTitle,
     #[error("session_title exceeds 160 characters")]
@@ -103,9 +100,13 @@ pub(crate) fn session_title_output_schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn build_session_title_request(user_message: &str, model: &str) -> ConversationRequest {
+pub(crate) fn build_session_title_request(
+    user_message: &str,
+    model: &str,
+    backend: sampling_types::ApiBackend,
+) -> ConversationRequest {
     let clean_message = title_source_text(&user_message);
-    ConversationRequest::from_items(vec![
+    let mut request = ConversationRequest::from_items(vec![
         ConversationItem::system(SESSION_TITLE_PROMPT),
         ConversationItem::user(format!(
             r#"<user_query>
@@ -114,31 +115,21 @@ pub(crate) fn build_session_title_request(user_message: &str, model: &str) -> Co
             clean_message
         )),
     ])
-    .with_model(model)
-    .with_tools(vec![ToolSpec {
-        name: "session_title".to_owned(),
-        description: Some(
-            "Generate the session_title which we use for the user_message".to_owned(),
-        ),
-        parameters: session_title_output_schema(),
-    }])
-    .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()))
+    .with_model(model);
+    request.json_output = Some(match backend {
+        sampling_types::ApiBackend::ChatCompletions => JsonOutputFormat::JsonObject,
+        sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages => {
+            JsonOutputFormat::JsonSchema(session_title_output_schema())
+        }
+    });
+    request
 }
 
-/// Validate the structured tool result and return `(normalized_title, raw_arguments)`.
-pub(crate) fn parse_session_title_response(
-    response: &ConversationResponse,
-) -> Result<(String, String), SessionTitleResponseError> {
-    let tool_call = response
-        .assistant()
-        .and_then(|assistant| {
-            assistant
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.name == "session_title")
-        })
-        .ok_or(SessionTitleResponseError::MissingToolCall)?;
-    let parsed = serde_json::from_str::<SessionTitle>(&tool_call.arguments)?;
+/// Validate the model's native structured output and return its normalized title.
+pub(crate) fn parse_session_title_output(
+    raw_output: &str,
+) -> Result<String, SessionTitleResponseError> {
+    let parsed = serde_json::from_str::<SessionTitle>(raw_output.trim())?;
     let normalized = parsed
         .session_title
         .split_whitespace()
@@ -150,15 +141,57 @@ pub(crate) fn parse_session_title_response(
     if normalized.chars().count() > 160 {
         return Err(SessionTitleResponseError::TitleTooLong);
     }
-    Ok((normalized, tool_call.arguments.to_string()))
+    Ok(normalized)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        TITLE_SOURCE_MAX_BYTES, strip_system_reminder_blocks, title_fallback_from_user_text,
-        title_source_text,
+        SESSION_TITLE_PROMPT, SessionTitleResponseError, TITLE_SOURCE_MAX_BYTES,
+        build_session_title_request, parse_session_title_output, strip_system_reminder_blocks,
+        title_fallback_from_user_text, title_source_text,
     };
+
+    #[test]
+    fn title_request_uses_native_structured_output_without_tools() {
+        for backend in [
+            sampling_types::ApiBackend::ChatCompletions,
+            sampling_types::ApiBackend::Responses,
+            sampling_types::ApiBackend::Messages,
+        ] {
+            let expects_schema = matches!(
+                backend,
+                sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages
+            );
+            let request = build_session_title_request("fix the auth bug", "test-model", backend);
+            assert!(request.tools.is_empty());
+            assert!(request.tool_choice.is_none());
+            if expects_schema {
+                assert!(matches!(
+                    request.json_output,
+                    Some(sampling_types::JsonOutputFormat::JsonSchema(_))
+                ));
+            } else {
+                assert!(matches!(
+                    request.json_output,
+                    Some(sampling_types::JsonOutputFormat::JsonObject)
+                ));
+            }
+            assert_eq!(request.items[0].text_content(), SESSION_TITLE_PROMPT);
+        }
+    }
+
+    #[test]
+    fn title_output_is_normalized_and_strictly_validated() {
+        assert_eq!(
+            parse_session_title_output(r#"{"session_title":"  Fix   auth  bug "}"#).unwrap(),
+            "Fix auth bug"
+        );
+        assert!(matches!(
+            parse_session_title_output(r#"{"session_title":"ok","extra":true}"#),
+            Err(SessionTitleResponseError::InvalidJson(_))
+        ));
+    }
 
     #[test]
     fn title_source_text_caps_oversized_input() {

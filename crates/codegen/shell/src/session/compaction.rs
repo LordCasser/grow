@@ -663,17 +663,7 @@ impl SessionActor {
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
-        let effective_tool_defs: Vec<sampling_types::ToolDefinition> =
-            self.prepare_tool_definitions().await.into_iter().collect();
-        let compaction_tool_tokens =
-            chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
-        let compaction_tools: Vec<sampling_types::ToolSpec> = effective_tool_defs
-            .into_iter()
-            .map(sampling_types::ToolSpec::from)
-            .collect();
         tracing::info!(
-            num_tools = compaction_tools.len(),
-            tool_tokens = compaction_tool_tokens,
             "Running compact with model '{}' (user model: '{}')",
             &sampling_config.model,
             &sampling_config.model
@@ -742,13 +732,10 @@ impl SessionActor {
             .wall_clock_budget_secs;
         let sampler = crate::session::helpers::summary_compaction::ShellCompactionSampler::new(
             user_context.clone(),
-            compaction_tools,
             sampling_client,
-            self.session_info.id.clone(),
             sampling_config.clone(),
             self.inference_idle_timeout.get(),
             wall_clock_budget_secs,
-            self.compaction.tool_choice,
             cancel.clone(),
             compaction_sideband.clone(),
             sideband_feedback.clone(),
@@ -857,8 +844,7 @@ impl SessionActor {
                             request_turns = match stage {
                                 InputStage::VerbatimFitted => {
                                     let budget = context_window
-                                        .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS)
-                                        .saturating_sub(compaction_tool_tokens);
+                                        .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS);
                                     let verbatim = chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
                                         summary_source.clone(),
                                         summary_strips_reasoning,
@@ -868,8 +854,7 @@ impl SessionActor {
                                     )
                                 }
                                 InputStage::Lossy => {
-                                    let lossy_budget = (context_window.saturating_mul(7) / 10)
-                                        .saturating_sub(compaction_tool_tokens);
+                                    let lossy_budget = context_window.saturating_mul(7) / 10;
                                     chat_state::compaction_utils::fit_conversation_to_budget(
                                         chat_state::compaction_utils::prepare_conversation_for_summarization(
                                             summary_source.clone(),
