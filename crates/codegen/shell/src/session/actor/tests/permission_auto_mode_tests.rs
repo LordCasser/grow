@@ -461,7 +461,7 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             install_real_permissions(&mut actor);
 
-            // SetAutoMode { enabled: true } body (acp_session.rs handler):
+            // SetAutoMode { enabled: true } body (session actor handler):
             actor.permissions.set_mode(crate::util::config::PermissionMode::Auto);
             assert!(actor.permissions.mode().is_auto());
             assert!(
@@ -519,7 +519,7 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
 }
 
 /// Spawn-time path: auto already on → wire installs side-query (same as
-/// post-`spawn_session_actor` call at acp_session.rs:6156-6159).
+/// post-`spawn_session_actor` call in the session actor).
 #[tokio::test(flavor = "current_thread")]
 async fn spawn_auto_mode_wires_classifier_when_enabled() {
     let local = tokio::task::LocalSet::new();

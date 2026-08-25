@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::super::acp_session::SessionActor;
+use super::SessionActor;
 
 impl SessionActor {
     pub(super) async fn finish_restored_deep_research_if_terminal(&self) {

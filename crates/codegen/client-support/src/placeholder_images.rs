@@ -2,7 +2,7 @@
 //! image bytes.
 //!
 //! Both the TUI ([`pager::prompt_images`]) and the server-side
-//! ingestion path ([`crate::session::acp_session`]) need to recover image
+//! ingestion path (the shell session actor) need to recover image
 //! bytes when a placeholder lacks an attached `PastedImage` /
 //! `ContentBlock::Image` — e.g. a paste from a previous session's
 //! prompt, a session reload, or a synthetic re-render. The two sides

@@ -81,7 +81,7 @@ impl SessionActor {
     /// Emit `grow/git_head_changed` after an edit/shell command that may have
     /// moved HEAD (e.g. `git checkout`), so clients update their status bar
     /// immediately rather than waiting for the debounced fs-watch refresh.
-    pub(super) async fn maybe_notify_git_branch(&self) {
+    pub(in crate::session::actor) async fn maybe_notify_git_branch(&self) {
         if !self.git_head_enabled {
             return;
         }
@@ -120,7 +120,7 @@ impl SessionActor {
     }
 
     /// Live subagents and sticky usage-not-applied. `None` if the query failed.
-    pub(super) async fn outstanding_reply_for_prompt(
+    pub(in crate::session::actor) async fn outstanding_reply_for_prompt(
         &self,
         prompt_id: &str,
     ) -> Option<tools::implementations::grow_build::task::types::SubagentOutstandingReply> {
@@ -146,13 +146,13 @@ impl SessionActor {
 
     /// Report-level incomplete (error-path attach, tests). Same OR as
     /// [`super::turn::UsageDrainOutcome::report_incomplete`].
-    pub(super) fn usage_incomplete_from_reply(
+    pub(in crate::session::actor) fn usage_incomplete_from_reply(
         reply: Option<&tools::implementations::grow_build::task::types::SubagentOutstandingReply>,
     ) -> bool {
         super::turn::UsageDrainOutcome::from_outstanding_reply(reply).report_incomplete()
     }
 
-    pub(super) fn clear_subagent_usage_not_applied(&self, prompt_id: &str) {
+    pub(in crate::session::actor) fn clear_subagent_usage_not_applied(&self, prompt_id: &str) {
         let Some(tx) = &self.tool_context.subagent_event_tx else {
             return;
         };
@@ -167,7 +167,11 @@ impl SessionActor {
         ));
     }
 
-    pub(super) async fn handle_completion(&self, prompt_id: String, result: PromptTurnResult) {
+    pub(in crate::session::actor) async fn handle_completion(
+        &self,
+        prompt_id: String,
+        result: PromptTurnResult,
+    ) {
         // Settle the exact foreground owner first. An internal Goal turn is
         // intentionally absent from `pending_inputs`, so FIFO membership can
         // never be used as the ownership test.
@@ -299,7 +303,7 @@ impl SessionActor {
     /// `TurnCompleted` shape. This cache is never consulted by recovery.
     ///
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`.
-    pub(super) async fn emit_turn_completed(
+    pub(in crate::session::actor) async fn emit_turn_completed(
         &self,
         prompt_id: String,
         identity: Option<(&crate::session::PromptOrigin, crate::session::TurnKind)>,
@@ -410,7 +414,7 @@ impl SessionActor {
     /// Only a Goal-owned internal turn may degrade the Goal lifecycle. The same
     /// provider outcome on an ordinary user turn belongs to that turn alone and
     /// must still let the idle arbiter resume background Goal work.
-    pub(super) fn post_turn_goal_degradation_plan(
+    pub(in crate::session::actor) fn post_turn_goal_degradation_plan(
         result: &PromptTurnResult,
         origin: Option<&crate::session::PromptOrigin>,
     ) -> (bool, bool, Option<String>) {
@@ -468,7 +472,10 @@ impl SessionActor {
         )
     }
 
-    pub(super) async fn apply_infra_pause_after_turn_err(&self, message: String) -> bool {
+    pub(in crate::session::actor) async fn apply_infra_pause_after_turn_err(
+        &self,
+        message: String,
+    ) -> bool {
         let slash_detail = match message.strip_prefix("Turn failed: ") {
             Some(rest) => rest.to_owned(),
             None => message.clone(),
@@ -510,7 +517,7 @@ impl SessionActor {
         }
     }
 
-    pub(super) fn classify_install_error(
+    pub(in crate::session::actor) fn classify_install_error(
         err: &agent::plugins::install_registry::InstallError,
     ) -> String {
         crate::plugin::classify_install_error(err)

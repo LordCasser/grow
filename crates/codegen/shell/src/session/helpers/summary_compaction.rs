@@ -34,10 +34,10 @@ use sampler::SamplerConfig as SamplingConfig;
 use sampling_types::{ConversationItem, ConversationRequest};
 
 use crate::sampling::SamplingClient;
+use crate::session::actor::sideband::{SidebandRun, SidebandRunError};
 use crate::session::helpers::session_compact::{
     CompactFailure, CompactOutput, build_compaction_request_surface, generate_session_compact,
 };
-use crate::session::sideband::{SidebandRun, SidebandRunError};
 
 /// Wraps `generate_session_compact` as the shared engine's
 /// [`CompactionSampler`] for grow-build's range-summary pass.

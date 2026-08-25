@@ -165,7 +165,7 @@ impl SkipReason {
 
 /// Side effects that the auto-restart task needs. Abstracted as a trait so
 /// unit tests can plug in a mock — the production binding lives next to
-/// the dispatcher wiring in `acp_session.rs::SessionRestartActions`.
+/// the dispatcher wiring in the actor's `SessionRestartActions` implementation.
 ///
 /// ## Threading contract
 ///
@@ -965,7 +965,7 @@ mod tests {
     /// simulate the "not stdio" case by leaving the server
     /// **unconfigured** — production `is_stdio_server_configured`
     /// already returns `false` for HTTP/HttpAuth entries (see
-    /// `acp_session.rs` impl). The dispatcher's TransportClosed event
+    /// actor implementation). The dispatcher's TransportClosed event
     /// reaches `maybe_schedule_restart`, fails the stdio gate, emits
     /// `mcp.auto_restart.skipped{reason="not_configured"}`, and does
     /// NOT spawn the task.

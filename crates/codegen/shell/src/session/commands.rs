@@ -1,7 +1,7 @@
 //! Session actor command enum and associated public types.
 //!
 //! `SessionCommand` defines the message protocol used to drive a session
-//! actor. It was extracted from `acp_session.rs` to keep the actor
+//! actor. It was extracted from the actor module to keep the actor
 //! implementation focused on behaviour.
 use super::acp_types::*;
 use crate::extensions::notification::SessionNotification;

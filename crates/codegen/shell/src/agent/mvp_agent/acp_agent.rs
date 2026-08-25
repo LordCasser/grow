@@ -384,7 +384,7 @@ impl acp::Agent for MvpAgent {
             session_sampling.reasoning_effort = Some(effort);
         }
         let (summary_client, summary_model) = self.build_session_title_client(&session_sampling)?;
-        let session_title_route = Some(crate::session::summary::SessionTitleRoute::new(
+        let session_title_route = Some(crate::session::actor::summary::SessionTitleRoute::new(
             summary_client,
             summary_model,
         ));
@@ -951,7 +951,7 @@ impl acp::Agent for MvpAgent {
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             let session_title_route = if summary.display_title().is_empty() {
                 let (client, model) = self.build_session_title_client(&load_session_sampling)?;
-                Some(crate::session::summary::SessionTitleRoute::new(
+                Some(crate::session::actor::summary::SessionTitleRoute::new(
                     client, model,
                 ))
             } else {

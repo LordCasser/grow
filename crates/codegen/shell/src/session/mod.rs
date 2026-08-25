@@ -1,8 +1,8 @@
 pub mod acp_types;
+pub(crate) mod actor;
 pub mod announcement_state;
 pub mod commands;
 pub mod compaction_config;
-pub(crate) mod context_recall;
 pub mod control;
 pub mod handle;
 pub mod listing;
@@ -11,11 +11,9 @@ pub(crate) mod notification_inbox;
 pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
-#[path = "acp_session_impl/sideband.rs"]
-pub(crate) mod sideband;
 pub(crate) mod subagent_capability;
-pub use self::acp_session::*;
 pub use self::acp_types::*;
+pub use self::actor::*;
 pub use self::commands::*;
 pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
@@ -212,7 +210,6 @@ pub struct ClientFsConfig {
 }
 pub mod acp_conversion;
 pub mod acp_mcp;
-pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
 pub(crate) mod event_tracker;
 pub(crate) mod event_types;
@@ -248,7 +245,6 @@ pub mod result;
 pub mod signals;
 pub(crate) mod slash_commands;
 pub mod storage;
-pub(crate) mod summary;
 #[cfg(feature = "test-support")]
 pub mod testkit;
 pub mod tool_index;

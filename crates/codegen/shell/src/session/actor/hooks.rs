@@ -479,7 +479,7 @@ mod tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let actor = crate::session::acp_session::support::create_test_actor(
+                let actor = crate::session::actor::tests::support::create_test_actor(
                     0,
                     256_000,
                     85,

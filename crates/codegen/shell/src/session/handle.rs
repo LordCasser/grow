@@ -1,7 +1,7 @@
 //! `SessionHandle` — the `Clone + Send` proxy for interacting with a session actor.
 //!
 //! Callers hold a `SessionHandle` and send `SessionCommand` messages via the
-//! internal channel. Extracted from `acp_session.rs` to keep the actor
+//! internal channel. Extracted from the actor module to keep the actor
 //! implementation focused on behaviour.
 use super::commands::SessionCommand;
 use super::persistence::PersistenceMsg;

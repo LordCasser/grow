@@ -7,7 +7,7 @@
 //! at each turn-end.
 //!
 //! Production wiring lives in
-//! `crate::session::acp_session::{maybe_fire_laziness_check, evaluate_todo_gate}`
+//! `crate::session::actor::{maybe_fire_laziness_check, evaluate_todo_gate}`
 //! — this module is a thin replay harness around the same `pub(crate)`
 //! helpers. New crate-internal so we get visibility for free without
 //! widening the production surface.
@@ -338,11 +338,11 @@ fn push_new(state: &mut TodoState, u: TodoUpdateArgs) {
 //
 //   * Layer-2 (`TodoGate`): outstanding_subagents + incomplete
 //     terminal/monitor tasks. See `collect_todo_gate_input` in
-//     `acp_session.rs`.
+//     the session actor.
 //   * Layer-3 (`LazinessDetector` runtime_state line): incomplete
 //     terminal/monitor tasks ONLY (no subagents). See
 //     `snapshot_backing_task_count_for_debug_log` and the explanatory
-//     comment at `acp_session.rs:10018-10025` ("the prompt-scoped
+//     actor implementation ("the prompt-scoped
 //     subagent count isn't available without plumbing the prompt_id
 //     through").
 //
@@ -443,7 +443,7 @@ pub fn count_outstanding_dispatches(items: &[ConversationItem]) -> BackingCounts
 /// for both the gate input AND the JSON-output snapshot. We still
 /// run the partition twice (here for the snapshot, and again inside
 /// `as_input` for the gate decision) because `TodoGateInput`'s fields
-/// are module-private to `acp_session.rs` and the task brief forbids
+/// are module-private to the session actor and the task brief forbids
 /// widening them — but the *logical* duplication is contained to
 /// `partition_todos`, which is unit-tested against the production
 /// heuristic.

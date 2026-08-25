@@ -1170,7 +1170,7 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
     server.set_response("OK");
     let client = create_test_client(&server.url(), ApiBackend::Responses);
 
-    // Simulate the routing logic from acp_session.rs
+    // Simulate the routing logic from the session actor
     match client.api_backend() {
         ApiBackend::Responses => {
             let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);
@@ -1209,7 +1209,7 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
     server.set_response("OK");
     let client = create_test_client(&server.url(), ApiBackend::ChatCompletions);
 
-    // Simulate the routing logic from acp_session.rs
+    // Simulate the routing logic from the session actor
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);

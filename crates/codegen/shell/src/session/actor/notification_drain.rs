@@ -807,7 +807,7 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
+                    crate::session::actor::tests::support::build_actor().await;
                 let source = chat_state::NotificationSource::TaskCompleted {
                     task_id: "conflicting-retry".into(),
                     task_kind: chat_state::NotificationTaskKind::Task,
@@ -856,7 +856,7 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
+                    crate::session::actor::tests::support::build_actor().await;
                 actor
                     .receive_notification(
                         chat_state::NotificationSource::TaskCompleted {
@@ -914,7 +914,7 @@ mod tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-                let mut actor = crate::session::acp_session::support::create_test_actor(
+                let mut actor = crate::session::actor::tests::support::create_test_actor(
                     0,
                     256_000,
                     85,
@@ -971,8 +971,8 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
-                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
                 actor
                     .receive_notification(
                         chat_state::NotificationSource::MonitorProgress {
@@ -1029,8 +1029,8 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
-                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
                 actor
                     .receive_notification(
                         chat_state::NotificationSource::TaskCompleted {
@@ -1060,7 +1060,7 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
+                    crate::session::actor::tests::support::build_actor().await;
                 actor.goal_turn_task_ids.lock().insert("goal-build".into());
                 actor
                     .receive_notification(
@@ -1102,7 +1102,7 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
+                    crate::session::actor::tests::support::build_actor().await;
                 actor
                     .receive_notification(
                         chat_state::NotificationSource::TaskStillRunning {
@@ -1135,7 +1135,7 @@ mod tests {
                     [sampling_types::ConversationItem::System(_)]
                 ));
 
-                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
                 assert!(actor.drain_active_notifications().await);
                 assert!(
                     actor
@@ -1164,8 +1164,8 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
-                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
                 let completion_id = actor
                     .receive_notification(
                         chat_state::NotificationSource::TaskCompleted {
@@ -1223,8 +1223,8 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
-                crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
                 for (epoch, body) in [
                     ("checkpoint-1", "stale checkpoint body"),
                     ("checkpoint-2", "latest checkpoint body"),

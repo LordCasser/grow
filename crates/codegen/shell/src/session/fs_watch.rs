@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 use workspace::file_system::{CodebaseIndexManager, FileIndex, WalkOptions};
 
-use crate::session::acp_session::SessionActor;
+use crate::session::actor::SessionActor;
 use crate::session::persistence::PersistenceMsg;
 use crate::session::{ClientFsConfig, ClientFsMode};
 

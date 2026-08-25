@@ -9,7 +9,7 @@
 
 - `StopReason` 新增 `ModelContextWindowExceeded` / `PauseTurn` 变体（sampling-types，`messages.rs` / `conversation.rs`）。
 - `request_task.rs` 中 `StopReason::Length` 映射为 `AttemptOutcome::Truncated { partial_response }`（不再丢弃部分输出）。
-- `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 shell `session/acp_session_tests/truncation_recovery_tests.rs`）。
+- `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 shell `session/actor/tests/truncation_recovery_tests.rs`）。
 - D8 `chat-state` 使用功能命名，并继承 workspace 版本 `1.0.0`。
 
 ## 1. Problem Statement
@@ -93,8 +93,8 @@ chat-state (chat state layer)
   └── package identity and version verified before feature work
 
 shell (session layer)
-  ├── session/acp_session_impl/sampler_turn.rs: continue loop (detect Truncated, persist, inject prompt, re-sample)
-  ├── session/acp_session_impl/turn_end.rs:     StopFailure only for unrecoverable truncation
+  ├── session/actor/turn/sampling.rs: continue loop (detect Truncated, persist, inject prompt, re-sample)
+  ├── session/actor/turn/settlement.rs:         StopFailure only for unrecoverable truncation
   ├── sampling/error.rs:                        ACP error mapping update
   └── session/helpers/session_compact.rs:       ModelContextWindowExceeded -> compact trigger
 ```

@@ -787,7 +787,7 @@ fn acking_persistence_channel() -> (
 
 #[cfg(test)]
 mod grow_event_id_stamping_tests {
-    use super::support::create_test_actor;
+    use super::super::tests::support::create_test_actor;
     use super::*;
     async fn persisted_grow_event_id(
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
@@ -926,7 +926,7 @@ mod grow_event_id_stamping_tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut prx) = super::acking_persistence_channel();
-                let (actor, mut event_rx) = super::support::create_test_actor_ex(
+                let (actor, mut event_rx) = super::super::tests::support::create_test_actor_ex(
                     0,
                     256_000,
                     85,
@@ -934,7 +934,8 @@ mod grow_event_id_stamping_tests {
                     persistence_tx,
                 )
                 .await;
-                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
                 actor
                     .send_update(
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
@@ -1108,7 +1109,8 @@ mod grow_event_id_stamping_tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
                 // Enter Plan first (Normal → Plan is not an interrupting switch).
                 let entered = actor
                     .request_behavior_change(acp::SessionModeId::new("plan"))
@@ -1161,9 +1163,11 @@ mod grow_event_id_stamping_tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
-                actor.state.lock().await.foreground =
-                    ForegroundState::RegularTurn(super::support::running_task_stub("active-turn"));
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::super::tests::support::running_task_stub("active-turn"),
+                );
                 let surface_before = actor.chat_state_handle.get_conversation().await;
 
                 let outcome = actor
@@ -1308,7 +1312,7 @@ mod grow_event_id_stamping_tests {
 /// switch. See the `handle_prompt` gate for the full contract.
 #[cfg(test)]
 mod synthetic_prompt_behavior_tests {
-    use super::support::create_test_actor;
+    use super::super::tests::support::create_test_actor;
     use super::*;
 
     /// A `subagent-completed-*` wake arriving while Plan is active must not
@@ -1325,7 +1329,8 @@ mod synthetic_prompt_behavior_tests {
                 let actor = std::sync::Arc::new(
                     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
                 );
-                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
                 // Enter Plan first (Normal → Plan is not an interrupting switch).
                 let entered = actor
                     .request_behavior_change(acp::SessionModeId::new("plan"))
@@ -1411,7 +1416,8 @@ mod synthetic_prompt_behavior_tests {
                 let actor = std::sync::Arc::new(
                     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
                 );
-                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
                 // Enter Plan, then park a user-initiated switch to default.
                 assert!(matches!(
                     actor

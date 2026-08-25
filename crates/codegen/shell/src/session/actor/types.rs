@@ -1,5 +1,5 @@
-//! Top-level enum definitions for `acp_session`; their `impl` blocks and
-//! helpers stay in `acp_session.rs`.
+//! Top-level enum definitions for the session actor; their `impl` blocks and
+//! helpers stay in the actor module.
 
 use super::*;
 

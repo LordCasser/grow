@@ -4134,7 +4134,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
 /// session resume, etc.) shrinks the context window below accumulated
 /// token usage, auto-compact must trigger.
 ///
-/// Note: `handle_model_metadata_update` in acp_session.rs now blocks
+/// Note: `handle_model_metadata_update` in the session actor now blocks
 /// response-header downgrades (only upgrades accepted), so this path
 /// is mainly reachable via model switches. The actor itself still
 /// accepts any value via `update_sampling_config` — the guard lives

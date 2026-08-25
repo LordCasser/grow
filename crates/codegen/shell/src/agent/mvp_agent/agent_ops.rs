@@ -231,7 +231,7 @@ impl MvpAgent {
     /// is unknown (depends on the model the user picks), so we fail-closed
     /// for runtime/tool-dependent gates (`/flush`, `/loop`, `/memory`,
     /// …) and let the session-scoped `available_commands_update` in
-    /// `acp_session.rs` fill in the real per-model gating as soon as a
+    /// session actor fills in the real per-model gating as soon as a
     /// session starts.
     ///
     /// otherwise it wouldn't appear in the slash menu until after the

@@ -3,9 +3,9 @@
 //!
 //! INVARIANT: This is the **only** place in the shell crate that calls
 //! [`agent::AgentBuilder::new`]. Both initial session spawn
-//! ([`crate::session::acp_session::spawn_session_actor`]) and zero-turn
+//! ([`crate::session::actor::spawn_session_actor`]) and zero-turn
 //! harness rebuild
-//! ([`crate::session::acp_session::SessionActor::handle_rebuild_agent_for_definition`])
+//! ([`crate::session::actor::SessionActor::handle_rebuild_agent_for_definition`])
 //! go through [`AgentRebuildSpec::build_agent`].
 //!
 //! ## Why this exists
@@ -340,7 +340,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         models_manager: crate::agent::models::ModelsManager::default(),
         memory_enabled: false,
         memory_backend: None,
-        context_recall_backend: crate::session::context_recall::context_recall_channel().0,
+        context_recall_backend: crate::session::actor::context_recall::context_recall_channel().0,
         web_fetch_config: WebFetchConfig::Disabled,
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,

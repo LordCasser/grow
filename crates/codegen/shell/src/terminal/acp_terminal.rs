@@ -10,7 +10,7 @@ pub struct AcpTerminalRunner {
 
 #[async_trait::async_trait]
 // Terminal release on cancel is now handled by kill_and_release_all_for_session()
-// in cancel_running_task() — see acp_session.rs.
+// in cancel_running_task() — see the session actor.
 impl AsyncTerminalRunner for AcpTerminalRunner {
     async fn run(&self, request: TerminalRunRequest) -> Result<TerminalRunResult, TerminalError> {
         let session_id = self.session_id.clone();

@@ -4,7 +4,7 @@
 //! auto-compact threshold checks, inline auto-compact with auto-continue,
 //! error-recovery compaction and preflight overflow detection. These methods form
 //! a second `impl SessionActor` block that
-//! lives alongside the primary one in `acp_session.rs`.
+//! lives alongside the primary actor module.
 use super::SessionActor;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
@@ -608,7 +608,7 @@ impl SessionActor {
                 .await
                 .filter(|name| !name.is_empty() && !name.contains("by_kind"))
         };
-        let target_source = crate::session::context_recall::strip_context_recall_derivatives(
+        let target_source = crate::session::actor::context_recall::strip_context_recall_derivatives(
             source_surface[range_plan.start_index..=range_plan.end_index].to_vec(),
             None,
             context_recall_tool_name.as_deref(),
@@ -677,7 +677,7 @@ impl SessionActor {
             self.begin_sideband(
                 chat_state::SidebandPurpose::CompactionSummary,
                 sideband_prompt,
-                crate::session::sideband::SidebandSource::Frozen(vec![
+                crate::session::actor::sideband::SidebandSource::Frozen(vec![
                     compaction_input_ref.clone(),
                 ]),
                 chat_state::SidebandBudgetPolicy {
@@ -1796,7 +1796,7 @@ impl SessionActor {
             if state.pending_manual_compact.is_some()
                 || matches!(
                     state.foreground,
-                    crate::session::acp_session::ForegroundState::Compaction
+                    crate::session::actor::ForegroundState::Compaction
                 )
             {
                 tracing::debug!("auto compact skipped: manual compaction has priority");

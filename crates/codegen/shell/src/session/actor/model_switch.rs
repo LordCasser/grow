@@ -346,7 +346,7 @@ mod tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let mut actor = super::super::support::create_test_actor(
+                let mut actor = super::super::tests::support::create_test_actor(
                     0,
                     256_000,
                     85,
@@ -454,7 +454,7 @@ mod tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let actor = super::super::support::create_test_actor(
+                let actor = super::super::tests::support::create_test_actor(
                     0,
                     256_000,
                     85,
@@ -489,7 +489,7 @@ mod tests {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let actor = super::super::support::create_test_actor(
+                let actor = super::super::tests::support::create_test_actor(
                     0,
                     256_000,
                     85,

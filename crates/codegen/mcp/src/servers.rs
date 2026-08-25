@@ -2991,7 +2991,7 @@ impl McpClient {
         // The snapshot reads through the SHARED `Arc<Mutex<...>>`
         // slot. If the per-server task wired [`Self::set_event_tx`]
         // BEFORE invoking `get_tool_registrations` (the pattern in
-        // `acp_session.rs`), this snapshot picks up the sender even
+        // the session actor), this snapshot picks up the sender even
         // for the very first handshake.
         let event_tx = self.event_tx_clone();
 

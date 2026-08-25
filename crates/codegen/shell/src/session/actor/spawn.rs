@@ -1,4 +1,4 @@
-//! Session bring-up concern for `acp_session`: `spawn_session_actor`, the
+//! Session bring-up concern for the actor: `spawn_session_actor`, the
 //! per-session OS thread (`SessionThread` / `spawn_session_on_thread`), and
 //! the MCP auto-restart wiring (`SessionRestartActions`).
 #![allow(clippy::items_after_test_module)]
@@ -770,7 +770,7 @@ pub(crate) async fn spawn_session_actor(
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
-    session_title_route: Option<crate::session::summary::SessionTitleRoute>,
+    session_title_route: Option<crate::session::actor::summary::SessionTitleRoute>,
     timeline_bootstrap: TimelineBootstrap,
     rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     fs_notify_config: Option<ClientFsConfig>,
@@ -1455,7 +1455,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let tool_metadata_snapshot = Arc::new(std::sync::Mutex::new(Default::default()));
     let (context_recall_backend, context_recall_receiver) =
-        crate::session::context_recall::context_recall_channel();
+        crate::session::actor::context_recall::context_recall_channel();
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
@@ -2467,7 +2467,7 @@ pub(crate) async fn spawn_session_actor(
                 prefix_session.build_prefix_background().await
             }));
     }
-    crate::session::context_recall::serve_context_recall(&session, context_recall_receiver);
+    crate::session::actor::context_recall::serve_context_recall(&session, context_recall_receiver);
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_runtime_availability().await;
@@ -2899,7 +2899,7 @@ pub(crate) async fn spawn_session_on_thread(
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
-    session_title_route: Option<crate::session::summary::SessionTitleRoute>,
+    session_title_route: Option<crate::session::actor::summary::SessionTitleRoute>,
     timeline_bootstrap: TimelineBootstrap,
     rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     fs_notify_config: Option<ClientFsConfig>,

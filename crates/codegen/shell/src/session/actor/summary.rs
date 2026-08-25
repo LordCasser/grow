@@ -56,8 +56,8 @@ impl SessionActor {
         user_text: String,
         input_ref: chat_state::TimelineRangeRef,
     ) {
+        use crate::session::actor::sideband::{sideband_finish, sideband_usage};
         use crate::session::helpers::session_title;
-        use crate::session::sideband::{sideband_finish, sideband_usage};
 
         let request = session_title::build_session_title_request(
             &user_text,

@@ -544,12 +544,12 @@ pub struct RemoteSettings {
     /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
     /// The gate ships disabled; set this to `Some(true)` (via the
     /// `grow_build_settings` remote settings key) to enable it. See
-    /// `session::acp_session::resolve_todo_gate_config`.
+    /// `session::actor::resolve_todo_gate_config`.
     #[serde(default)]
     pub todo_gate_enabled: Option<bool>,
     /// Hard cap on TodoGate fires per user prompt.
     /// Precedence: this field > built-in default (`DEFAULT_TODO_GATE_MAX_FIRES`).
-    /// No CLI override. See `session::acp_session::resolve_todo_gate_config`.
+    /// No CLI override. See `session::actor::resolve_todo_gate_config`.
     #[serde(default)]
     pub todo_gate_max_fires_per_prompt: Option<u32>,
     /// When `Some(true)`, enable goal mode remotely.

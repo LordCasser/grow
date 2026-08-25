@@ -11,7 +11,7 @@
 //! Pending interactions are **requests, not notifications** — they are never
 //! persisted. We broadcast `pending_interaction` / `interaction_resolved`
 //! **fire-and-forget** via the gateway (same idiom as
-//! [`crate::session::summary`]); the routing layer fans them to every
+//! [`crate::session::actor::summary`]); the routing layer fans them to every
 //! subscriber because they carry a `sessionId`.
 
 use std::collections::HashMap;

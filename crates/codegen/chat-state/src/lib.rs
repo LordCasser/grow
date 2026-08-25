@@ -1,7 +1,7 @@
 //! chat-state — Timeline-backed session context management for Grow agents.
 //!
 //! This crate extracts conversation state management from `shell`'s
-//! `acp_session.rs` into a standalone actor. It follows the same actor pattern
+//! the shell session implementation into a standalone actor. It follows the same actor pattern
 //! as `hunk-tracker`:
 //!
 //! ```text

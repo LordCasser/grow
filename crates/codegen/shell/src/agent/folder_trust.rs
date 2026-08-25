@@ -10,7 +10,7 @@
 //! server is spawned, and exposes a cheap [`project_scope_allowed`] check that
 //! the MCP/LSP/permission loaders consult.
 //!
-//! Resolution lives here (not in `acp_session`) so the session core stays free
+//! Resolution lives here (not in the session actor) so the session core stays free
 //! of feature logic; the loaders only call [`project_scope_allowed`].
 //!
 //! The DECISION side — the workspace scan, the pure [`decide`] precedence, the

@@ -1876,7 +1876,7 @@ impl SessionPersistence {
                     if result.is_ok()
                         && let chat_state::TimelineEventKind::SessionTitle(title) = &event.kind
                     {
-                        crate::session::summary::notify_client(
+                        crate::session::actor::summary::notify_client(
                             &self.gateway,
                             &self.info,
                             event.seq.get(),

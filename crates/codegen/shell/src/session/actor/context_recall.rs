@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tools::implementations::context_recall::{ContextRecallBackend, ContextRecallOutput};
 
 use crate::session::SessionActor;
-use crate::session::sideband::{SidebandSource, sideband_finish, sideband_usage};
+use crate::session::actor::sideband::{SidebandSource, sideband_finish, sideband_usage};
 
 const CONTEXT_RECALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ARCHIVE_ITEM_CHARS: usize = 12_000;

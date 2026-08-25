@@ -2,11 +2,16 @@
 //! tool-execution pipeline (`execute_tool_calls`, `prepare_tool_call`,
 //! tool-call start/success/error notifications, and sampling-event handling).
 //!
-//! `#[path]` child of `acp_session` (see the module comments there) so this
-//! `impl SessionActor` block retains access to the actor's private fields and
-//! the parent module's private helpers.
+//! Child module of the session actor so this `impl SessionActor` block retains
+//! access to the actor's private fields and the parent module's helpers.
 use super::*;
+mod dispatch;
 use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
+use dispatch::*;
+pub(in crate::session::actor) use dispatch::{
+    HTTP_STATUS_DETAILS_KEY, MAX_ARGS_IN_ERROR, build_tool_parse_error_message, lock_path_for_args,
+    resolve_session_shell, should_show_resolved_model,
+};
 use futures::StreamExt;
 use tracing::Instrument;
 /// Whether a tool name is an MCP `create_pull_request` (qualified
@@ -99,7 +104,9 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         _ => false,
     }
 }
-pub(super) async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageContent>) {
+pub(in crate::session::actor) async fn wait_for_pending_interjection(
+    buf: &InterjectionBuffer<acp::ImageContent>,
+) {
     buf.wait_nonempty().await;
 }
 use crate::tools::tool_context::BlockingWaitGuard;
@@ -3380,7 +3387,9 @@ impl SessionActor {
                 "Context recall was not inserted because the active context changed or no longer has safe headroom. Re-run context_recall if the evidence is still needed.",
             );
             let max_context_tokens =
-                crate::session::context_recall::context_recall_max_context_tokens(context_window);
+                crate::session::actor::context_recall::context_recall_max_context_tokens(
+                    context_window,
+                );
             let outcome = self
                 .chat_state_handle
                 .push_tool_result_conditionally(

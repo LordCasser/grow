@@ -16,7 +16,7 @@ pub(crate) use crate::session::event_types::{
 // `Event::LazinessClassifierFired` / `LazinessNudgeFired` and the
 // `reason` field on `Event::LazinessClassifierAborted`. The producer
 // wraps the category strings in `LazinessCategory::as_const_str()`
-// (acp_session.rs) for compile-time closure over the set, and the
+// (the session actor) for compile-time closure over the set, and the
 // abort reasons are emitted only via the `LAZINESS_ABORT_*` consts
 // below — no string literals at any producer site.
 //
@@ -180,7 +180,7 @@ impl LazinessCategory {
 // ── TodoGate discriminator vocabulary ─────────────────────────────────
 //
 // Source of truth for the `reason` field on `Event::TodoGateFired`.
-// Producer wraps these via `TodoGateReason::as_str()` (acp_session.rs).
+// Producer wraps these via `TodoGateReason::as_str()` (the session actor).
 
 /// The TodoGate fired because a content-only turn ended with one or more
 /// pending or unbacked in-progress todos.
@@ -374,7 +374,7 @@ mod tests {
         // separately so a desync between `as_const_str` and the
         // `pub const` set is caught.
         let from_enum: std::collections::BTreeSet<&'static str> =
-            crate::session::acp_session::LazinessAbortReason::all()
+            crate::session::actor::LazinessAbortReason::all()
                 .iter()
                 .map(|r| r.as_const_str())
                 .collect();

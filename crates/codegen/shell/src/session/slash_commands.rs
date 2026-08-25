@@ -381,7 +381,7 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
 ///
 /// Each field corresponds to a `BuiltinGate` variant. Construct via
 /// `CommandAvailability::all_enabled()` for tests, or build it from a
-/// live `SessionActor` (see the call site in `acp_session.rs`).
+/// live `SessionActor` (see the call site in the actor module).
 ///
 /// `Default` returns every gate disabled (fail-closed) so a forgotten
 /// initialization advertises only `BuiltinGate::AlwaysOn` commands.

@@ -65,9 +65,7 @@ async fn validate_tool_call_permit(
     if prepared.permit.actor_source != authority.actor_source {
         return Err(stale("actor source changed"));
     }
-    if prepared.permit.canonical_args_hash
-        != super::tool_calls::hash_canonical_json(&prepared.parsed_args)
-    {
+    if prepared.permit.canonical_args_hash != super::hash_canonical_json(&prepared.parsed_args) {
         return Err(stale("canonical arguments changed"));
     }
     let current_max = authority
@@ -142,7 +140,7 @@ mod permit_tests {
                 call_id: "call-1".to_owned(),
                 tool_name: "fixture".to_owned(),
                 dispatch_target_name: None,
-                canonical_args_hash: super::super::tool_calls::hash_canonical_json(&args),
+                canonical_args_hash: super::hash_canonical_json(&args),
                 cwd: PathBuf::from("/workspace"),
                 descriptor_max: tool_protocol::ToolAccess::All,
                 required_access: tool_protocol::ToolAccess::All,
@@ -275,12 +273,15 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
 ///
 /// `target_directory` is deliberately omitted — a directory listing isn't an
 /// edit and must not bucket into a file lock.
-pub(super) fn lock_path_for_args(args: &serde_json::Value) -> Option<&str> {
+pub(in crate::session::actor) fn lock_path_for_args(args: &serde_json::Value) -> Option<&str> {
     str_arg(args, &["file_path", "path", "target_file"])
 }
 
 /// Temporary gate: only expose resolved model ID to the user for these models.
-pub(super) fn should_show_resolved_model(requested: &str, resolved: &str) -> bool {
+pub(in crate::session::actor) fn should_show_resolved_model(
+    requested: &str,
+    resolved: &str,
+) -> bool {
     requested != resolved && super::acp_types::is_coding_model_slug(requested)
 }
 
@@ -289,7 +290,7 @@ pub(super) fn should_show_resolved_model(requested: &str, resolved: &str) -> boo
 /// Unix: basename of `$SHELL` (e.g. "zsh", "bash").
 /// Windows: name from the `detect_windows_shell` cascade
 /// (pwsh > powershell.exe > Git Bash > cmd.exe), since `$SHELL` is absent.
-pub(super) fn resolve_session_shell() -> String {
+pub(in crate::session::actor) fn resolve_session_shell() -> String {
     #[cfg(unix)]
     {
         std::env::var("SHELL")
@@ -311,12 +312,14 @@ pub(super) fn resolve_session_shell() -> String {
 /// Key in `ToolError::details` that carries the HTTP status code.
 /// Used by tool error producers and
 /// the `is_auth_tool_error` classifier to avoid accidental key mismatch.
-pub(crate) const HTTP_STATUS_DETAILS_KEY: &str = "status";
+pub(in crate::session::actor) const HTTP_STATUS_DETAILS_KEY: &str = "status";
 
 impl SessionActor {
     /// Extract bash command from prompt blocks if present in meta.
     /// Returns Some(command) if the prompt is a direct bash command, None otherwise.
-    pub(super) fn extract_bash_command(prompt_blocks: &[acp::ContentBlock]) -> Option<String> {
+    pub(in crate::session::actor) fn extract_bash_command(
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> Option<String> {
         use crate::extensions::prompt_meta::PromptBlockMeta;
         for block in prompt_blocks {
             if let acp::ContentBlock::Text(text) = block
@@ -331,7 +334,7 @@ impl SessionActor {
 
     /// Handle a direct bash command from bash mode.
     /// Runs the command with streaming output and sends updates to the TUI.
-    pub(super) async fn handle_direct_bash_command(
+    pub(in crate::session::actor) async fn handle_direct_bash_command(
         self: &Arc<Self>,
         _prompt_id: &str,
         command: String,
@@ -589,7 +592,7 @@ impl SessionActor {
 /// hint will reference text that was truncated from the message.  The model
 /// should still have the full arguments in its context window from the
 /// turn it generated them.
-pub(crate) const MAX_ARGS_IN_ERROR: usize = 2_000;
+pub(in crate::session::actor) const MAX_ARGS_IN_ERROR: usize = 2_000;
 
 /// Build the user-facing error message shown when tool arguments cannot be
 /// parsed.  The message is stored as a `tool_result` in the conversation
@@ -607,7 +610,7 @@ pub(crate) const MAX_ARGS_IN_ERROR: usize = 2_000;
 ///    is itself invalid JSON — e.g. a missing `"` before a key name.  This
 ///    lets the model fix a one-character typo rather than regenerating a
 ///    thousand-line file.
-pub(super) fn build_tool_parse_error_message(
+pub(in crate::session::actor) fn build_tool_parse_error_message(
     function_name: &str,
     err: &tool_runtime::ToolError,
     raw_arguments: &str,

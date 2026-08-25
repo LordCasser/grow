@@ -78,7 +78,7 @@ pub fn hook_spec_to_info(spec: &::hooks::config::HookSpec) -> HookInfo {
 }
 
 // Wire types for client-registered hooks (`grow/hooks/run`); the gate that uses
-// them lives in `session::acp_session::hooks`.
+// them lives in `session::actor::hooks`.
 
 /// A matcher group from the client's registration: `{ matcher, hookCallbackIds, timeout }`.
 ///

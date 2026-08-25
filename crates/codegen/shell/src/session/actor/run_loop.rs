@@ -77,7 +77,7 @@ mod idle_admission_tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
-                    crate::session::acp_session::support::build_actor().await;
+                    crate::session::actor::tests::support::build_actor().await;
                 actor
                     .goal_runtime_available
                     .store(true, std::sync::atomic::Ordering::Relaxed);

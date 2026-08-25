@@ -381,8 +381,9 @@ pub(crate) async fn generate_session_compact(
                     Ok(chunk) => {
                         if let Some(reported) = chunk.usage.as_ref() {
                             let normalized: sampling_types::TokenUsage = reported.clone().into();
-                            usage =
-                                crate::session::sideband::sideband_usage_from_tokens(&normalized);
+                            usage = crate::session::actor::sideband::sideband_usage_from_tokens(
+                                &normalized,
+                            );
                         }
                         if let Some(choice) = chunk.choices.first() {
                             let delta = &choice.delta;

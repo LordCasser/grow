@@ -34,7 +34,7 @@ pub enum AuthScheme {
 /// `SamplerConfig` is the single source of truth for sampler
 /// configuration. The shell builds it directly (see
 /// `agent::config::resolve_model_to_sampling_config` and
-/// `session::acp_session::SessionActor::reconstruct_full_config`) by
+/// `session::actor::SessionActor::reconstruct_full_config`) by
 /// composing chat-state's `sampling_types::SamplingConfig`
 /// with `Credentials` (api key, client version).
 ///

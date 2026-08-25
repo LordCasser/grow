@@ -158,7 +158,7 @@ pub(super) fn is_auth_tool_error(err: &tool_runtime::ToolError) -> bool {
         || lower.contains("invalid_token")
 }
 impl SessionActor {
-    pub(super) async fn current_model_image_input_key(
+    pub(in crate::session::actor) async fn current_model_image_input_key(
         &self,
     ) -> Option<sampling_types::ModelImageInputKey> {
         self.chat_state_handle
@@ -180,7 +180,7 @@ impl SessionActor {
             .is_some_and(|state| state.is_unsupported(key))
     }
 
-    pub(super) async fn record_unsupported_model_image_input(
+    pub(in crate::session::actor) async fn record_unsupported_model_image_input(
         &self,
         key: sampling_types::ModelImageInputKey,
     ) -> std::io::Result<bool> {
@@ -190,7 +190,9 @@ impl SessionActor {
             .await
     }
 
-    pub(super) async fn unsupported_current_model_for_images(&self) -> Option<String> {
+    pub(in crate::session::actor) async fn unsupported_current_model_for_images(
+        &self,
+    ) -> Option<String> {
         let key = self.current_model_image_input_key().await?;
         self.model_image_input_is_unsupported(&key)
             .await
@@ -564,7 +566,7 @@ impl SessionActor {
 
     /// Pre-sampling gate for runtimes already present in the negative cache.
     /// Unknown runtimes remain optimistic and receive the original images.
-    pub(super) async fn project_images_for_known_text_model(
+    pub(in crate::session::actor) async fn project_images_for_known_text_model(
         &self,
     ) -> Result<chat_state::ImageProjectionReport, acp::Error> {
         let Some(key) = self.current_model_image_input_key().await else {
@@ -608,7 +610,9 @@ impl SessionActor {
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         defs.iter().cloned().map(ToolSpec::from).collect()
     }
-    pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
+    pub(in crate::session::actor) async fn prepare_tool_definitions_inner(
+        &self,
+    ) -> Vec<ToolDefinition> {
         if self
             .subagent_capabilities
             .as_ref()
@@ -678,7 +682,7 @@ impl SessionActor {
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
         self.model_auth_state(model_id).0
     }
-    pub(super) fn model_auth_provider(
+    pub(in crate::session::actor) fn model_auth_provider(
         &self,
         model_id: &str,
     ) -> Option<crate::auth::AuthProviderRef> {
@@ -699,7 +703,7 @@ impl SessionActor {
         Option<crate::auth::AuthProviderRef>,
     ) {
         use crate::agent::auth_method::ModelByok;
-        use crate::session::acp_session::ModelAuthMemo;
+        use crate::session::actor::ModelAuthMemo;
         if let Some(memo) = self.model_auth_memo.borrow().as_ref()
             && memo.model_id == model_id
             && memo.facts.byok != ModelByok::Unknown
@@ -810,7 +814,7 @@ impl SessionActor {
     /// the actor's `SamplingConfig` and `Credentials`. Folds in the
     /// URL-derived headers (cli-chat-proxy auth, the staging auth header)
     /// so the sampler crate stays URL-agnostic.
-    pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
+    pub(in crate::session::actor) async fn reconstruct_full_config(&self) -> SamplingConfig {
         let cfg = self
             .chat_state_handle
             .get_sampling_config()
@@ -896,7 +900,7 @@ impl SessionActor {
     /// permission judgment. Only genuine user-origin task turns cross the
     /// trust boundary; assistant/tool/synthetic content cannot authorize a
     /// exact locked-call judgment. The source chat state is never mutated or compacted.
-    pub(super) async fn child_permission_judgment_items(
+    pub(in crate::session::actor) async fn child_permission_judgment_items(
         &self,
         judgment: &workspace::permission::PermissionJudgmentRequest,
         input: crate::config::SubagentClassifierInput,
@@ -1788,7 +1792,7 @@ impl SessionActor {
         tokio::pin!(collect);
         let collected = tokio::select! {
             biased;
-            _ = super::tool_calls::wait_for_pending_interjection(
+            _ = super::super::wait_for_pending_interjection(
                 &self.pending_interjections,
             ) => {
                 self.events

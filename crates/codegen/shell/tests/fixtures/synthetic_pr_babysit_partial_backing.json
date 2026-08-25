@@ -1,6 +1,6 @@
 {
   "name": "pr_babysit_partial_backing",
-  "description": "Three /pr-babysit todos are in_progress but only one polling subagent is alive — the gate's tightened heuristic (PR2 partition) must classify the two unbacked items and fire with the in-flight reason. Backed items are intentionally NOT listed in the reminder body (the gate already decided not to nudge on them); negative coverage lives in the inline turn_end_guard_tests in acp_session.rs.",
+  "description": "Three /pr-babysit todos are in_progress but only one polling subagent is alive — the gate's tightened heuristic (PR2 partition) must classify the two unbacked items and fire with the in-flight reason. Backed items are intentionally NOT listed in the reminder body (the gate already decided not to nudge on them); negative coverage lives in the inline turn_end_guard_tests in the session actor.",
   "turns": [
     {
       "turn_index": 0,

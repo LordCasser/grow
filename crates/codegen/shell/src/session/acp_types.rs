@@ -1,7 +1,7 @@
 //! Public wire types (DTOs) for the ACP session actor.
 //!
 //! These are the request/response structs exchanged between the agent layer
-//! and the session actor. They were extracted from `acp_session.rs` to keep
+//! and the session actor. They were extracted from the actor module to keep
 //! that file focused on behaviour while giving downstream crates a lightweight
 //! import path for data types.
 

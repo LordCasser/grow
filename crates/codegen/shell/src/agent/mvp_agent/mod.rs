@@ -114,7 +114,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub initial_client_mcp_servers: Vec<acp::McpServer>,
     pub mcp_meta_config_map: McpMetaConfigMap,
     pub persistence: PersistenceHandle,
-    pub session_title_route: Option<crate::session::summary::SessionTitleRoute>,
+    pub session_title_route: Option<crate::session::actor::summary::SessionTitleRoute>,
     pub timeline_bootstrap: crate::session::TimelineBootstrap,
     pub rewind_points_source: Option<workspace::session::file_state::PinnedRewindSource>,
     pub origin_client: Option<crate::http::OriginClientInfo>,

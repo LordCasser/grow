@@ -70,40 +70,32 @@ use workspace::file_system::CodebaseIndexManager;
 use workspace::permission::{AccessKind, ClientType, Decision, PermissionHandle};
 use workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "grow_session";
-#[path = "compaction.rs"]
 mod compaction;
-#[path = "acp_session_impl/types.rs"]
+pub(crate) mod context_recall;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
-#[path = "acp_session_impl/auth_retry.rs"]
 mod auth_retry;
 use auth_retry::{AuthRetryDecision, AuthRetrySchedule};
-#[path = "acp_session_impl/completion_delivery.rs"]
 mod completion_delivery;
-#[path = "acp_session_impl/goal.rs"]
 mod goal;
-#[path = "acp_session_impl/interjection.rs"]
 mod interjection;
-#[path = "acp_session_impl/tool_calls.rs"]
-mod tool_calls;
-#[path = "acp_session_impl/turn.rs"]
+mod tool;
+use tool::wait_for_pending_interjection;
+use tool::*;
+pub(in crate::session::actor) use tool::{
+    MAX_ARGS_IN_ERROR, build_tool_parse_error_message, lock_path_for_args,
+};
 mod turn;
-#[path = "acp_session_impl/workflow.rs"]
+use turn::*;
 mod workflow_run;
 pub(crate) use interjection::*;
-#[path = "acp_session_impl/laziness.rs"]
 mod laziness;
 pub(crate) use laziness::*;
-#[path = "acp_session_impl/hooks_plugins.rs"]
 mod hooks_plugins;
-#[path = "acp_session_impl/mcp.rs"]
 mod mcp;
-#[path = "acp_session_impl/model_switch.rs"]
 mod model_switch;
-#[path = "acp_session_impl/prompt_queue.rs"]
 mod prompt_queue;
-#[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
 use super::acp_types;
@@ -112,66 +104,42 @@ use super::diagnostics;
 use super::helpers;
 use super::memory_state;
 use super::timeline_persistence;
-#[path = "acp_session_impl/prompt_build.rs"]
 mod prompt_build;
 use prompt_build::*;
-#[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
 use session_mode::*;
-#[path = "acp_session_impl/sampler_turn.rs"]
-mod sampler_turn;
-use super::sideband::*;
-use sampler_turn::*;
-#[path = "acp_session_impl/tool_dispatch.rs"]
-mod tool_dispatch;
-use tool_dispatch::*;
-#[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;
-#[path = "acp_session_impl/tasks_cancel.rs"]
 mod tasks_cancel;
 use tasks_cancel::*;
-#[path = "acp_session_impl/reminders.rs"]
 mod reminders;
 use reminders::*;
 pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
-#[path = "acp_session_impl/laziness_classifier.rs"]
 mod laziness_classifier;
 pub(crate) use laziness_classifier::*;
-#[path = "acp_session_impl/notification_drain.rs"]
 mod notification_drain;
 use notification_drain::*;
-#[path = "acp_session_impl/extensions.rs"]
 mod extensions;
 use extensions::*;
-#[path = "acp_session_impl/memory_dream.rs"]
 mod memory_dream;
 use memory_dream::*;
-#[path = "acp_session_impl/goal_support.rs"]
 mod goal_support;
 pub(crate) use goal_support::*;
-#[path = "acp_session_impl/hook_dispatch.rs"]
 mod hook_dispatch;
 use hook_dispatch::*;
-#[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
-#[path = "acp_session_impl/recap.rs"]
 mod recap;
-#[path = "acp_session_impl/rewind.rs"]
 mod rewind;
-#[path = "acp_session_impl/run_loop.rs"]
 mod run_loop;
-#[path = "acp_session_impl/session_setup.rs"]
 mod session_setup;
-#[path = "acp_session_impl/turn_end.rs"]
-mod turn_end;
-#[path = "acp_session_impl/updates.rs"]
 mod updates;
 use run_loop::*;
-#[path = "acp_session_impl/spawn.rs"]
+pub(crate) mod sideband;
 mod spawn;
+pub(crate) mod summary;
 use super::acp_types::*;
+use sideband::*;
 pub use spawn::SessionThread;
 pub(crate) use spawn::*;
 /// Client-registered hook gates (the `grow/hooks/run` reverse request).
@@ -753,7 +721,7 @@ pub(crate) struct SessionActor {
     /// One-shot title inference capability. `None` means the session already
     /// has a title or is a child session that never generates one.
     pub(crate) session_title_route:
-        std::cell::RefCell<Option<crate::session::summary::SessionTitleRoute>>,
+        std::cell::RefCell<Option<crate::session::actor::summary::SessionTitleRoute>>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     /// Per-subagent exactly-once marker keyed by `subagent_id`; Goal usage is
@@ -959,67 +927,7 @@ impl SessionActor {
     }
 }
 #[cfg(test)]
-#[path = "acp_session_tests/client_hooks_tests.rs"]
-mod client_hooks_tests;
-/// ToolBridge must route file operations through the injected FileSystem,
-/// not direct disk I/O. When `.with_fs()` is dropped from the builder,
-/// tools fall back to LocalFs and ACP client-side enforcement stops working.
-#[cfg(test)]
-#[path = "acp_session_tests/fs_injection_regression_tests.rs"]
-mod fs_injection_regression_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/image_input_recovery_tests.rs"]
-mod image_input_recovery_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/permission_auto_mode_tests.rs"]
-mod permission_auto_mode_tests;
-/// Tests for [`conversation_has_project_instructions`], the idempotence
-/// helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
-///
-/// Coverage:
-/// - True when a tagged [`SyntheticReason::ProjectInstructions`] user item
-///   is present (the new post-Task-1 form).
-/// - False for an empty conversation and for a conversation with only a real
-///   user message.
-#[cfg(test)]
-#[path = "acp_session_tests/project_instructions_idempotence_tests.rs"]
-mod project_instructions_idempotence_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/prompt_mode_transition_tests.rs"]
-mod prompt_mode_transition_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/read_file_image_description_tests.rs"]
-mod read_file_image_description_tests;
-/// Regression coverage for the per-turn `record_token_usage` path.
-#[cfg(test)]
-#[path = "acp_session_tests/record_response_token_usage_tests.rs"]
-mod record_response_token_usage_tests;
-#[cfg(test)]
-#[cfg(test)]
-#[path = "acp_session_tests/reverse_request_session_id_tests.rs"]
-mod reverse_request_session_id_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/rewind_cross_compaction_tests.rs"]
-mod rewind_cross_compaction_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
-mod rewind_synthetic_turn_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/subagent_bash_permission_tests.rs"]
-mod subagent_bash_permission_tests;
-/// Pins the `SubagentFinished` usage-fold attribution gate.
-#[cfg(test)]
-#[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
-mod subagent_usage_fold_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/support.rs"]
-pub(crate) mod support;
-#[cfg(test)]
-#[path = "acp_session_tests/usage_categories_tests.rs"]
-mod usage_categories_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/workflow_launch_tests.rs"]
-mod workflow_launch_tests;
+mod tests;
 /// Drop guard that records aggregate turn metrics on the current tracing span
 struct TurnMetrics {
     turn_tool_count: u64,
@@ -1045,54 +953,3 @@ impl Drop for TurnMetrics {
         self.span.record("turn_model_calls", self.turn_model_calls);
     }
 }
-#[cfg(test)]
-#[cfg(test)]
-#[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
-mod build_tool_parse_error_message_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
-mod chat_history_integrity_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
-mod compaction_pre_prune_tests;
-#[cfg(test)]
-#[cfg(test)]
-#[path = "acp_session_tests/interjection_tests.rs"]
-mod interjection_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/laziness/laziness_debug_tests.rs"]
-mod laziness_debug_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/laziness/laziness_detector_tests.rs"]
-mod laziness_detector_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/laziness/laziness_integration_tests.rs"]
-mod laziness_integration_tests;
-#[cfg(test)]
-#[cfg(test)]
-#[path = "acp_session_tests/parallel_dispatch_tests.rs"]
-mod parallel_dispatch_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
-mod prompt_context_persistence_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/recap_display_only_tests.rs"]
-mod recap_display_only_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/reminder_policy_tests.rs"]
-mod reminder_policy_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/session_thread_tests.rs"]
-mod session_thread_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/stop_cancelled_tests.rs"]
-mod stop_cancelled_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/truncation_recovery_tests.rs"]
-mod truncation_recovery_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
-mod turn_end_guard_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn_pipeline_v2_tests.rs"]
-mod turn_pipeline_v2_tests;

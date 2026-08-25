@@ -1,7 +1,7 @@
 //! Shared plugin lifecycle operations (output-agnostic).
 //!
 //! Called by the CLI (`plugin_cmd.rs`). The in-session slash commands
-//! (`acp_session.rs`) currently inline similar logic and should migrate here.
+//! (the session actor) currently inline similar logic and should migrate here.
 //!
 //! Callers own output formatting and diagnostics.
 
@@ -522,7 +522,7 @@ fn looks_like_local_path(s: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
-/// Classify an install error for diagnostics. Strings match `acp_session.rs` exactly.
+/// Classify an install error for diagnostics. Strings match the session actor exactly.
 pub fn classify_install_error(err: &InstallError) -> String {
     match err {
         InstallError::AlreadyInstalled { .. } => "already_installed",
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn classify_error_strings_match_canonical() {
-        // Must match acp_session.rs::classify_install_error exactly — prevents diagnostics drift.
+        // Must match the actor's classify_install_error exactly — prevents diagnostics drift.
         assert_eq!(
             classify_install_error(&InstallError::AlreadyInstalled { key: "k".into() }),
             "already_installed"

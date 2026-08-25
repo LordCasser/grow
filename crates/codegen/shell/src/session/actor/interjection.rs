@@ -8,8 +8,8 @@ use super::*;
 // shell and tool loops share semantics. The shell keeps arrival (ACP ext
 // methods), persistence, and pager echo.
 //
-// Re-exported for `acp_session.rs` which does `pub(crate) use interjection::*;`
-// so retained code and co-located tests keep resolving by `acp_session::` path.
+// Re-exported by the actor module so retained code and co-located tests resolve
+// through the actor's private namespace.
 pub(crate) use tools::interjection::format_interjection;
 
 /// Requeue payload for an auto-promoted follow-up: the exact fields needed to

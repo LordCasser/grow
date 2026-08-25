@@ -1,7 +1,11 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+mod sampling;
+use sampling::*;
+mod settlement;
 use crate::session::behavior::BehaviorChangeOutcome;
+use settlement::*;
 
 pub(super) fn should_capture_implicit_goal_objective(
     origin: &crate::session::PromptOrigin,
