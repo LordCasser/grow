@@ -1,14 +1,15 @@
 //! Local-only Trajectory query server.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::{BufRead, Read, Seek};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::Html;
+use axum::middleware;
+use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,16 @@ const MAX_TRAJECTORY_ENTITIES: usize = 512;
 const MAX_TRAJECTORY_FILES: usize = 1_536;
 const MAX_TRAJECTORY_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TRAJECTORY_EVENTS: usize = 250_000;
+const DEFAULT_TRAJECTORY_PAGE_ROWS: usize = 240;
+const MAX_TRAJECTORY_PAGE_ROWS: usize = 1_000;
+const TRAJECTORY_OVERVIEW_BINS: usize = 180;
+const TRAJECTORY_SUMMARY_CHARS: usize = 320;
+const TRAJECTORY_WIRE_FIELD_CHARS: usize = 512;
+const TRAJECTORY_DETAIL_PREVIEW_CHARS: usize = 200_000;
+const TRAJECTORY_DETAIL_PREVIEW_NODES: usize = 4_000;
+const TRAJECTORY_DETAIL_PREVIEW_DEPTH: usize = 10;
+const TRAJECTORY_DETAIL_PREVIEW_ITEMS: usize = 80;
+const LEDGER_TAIL_CHECK_BYTES: u64 = 64 * 1024;
 
 #[derive(Default)]
 struct TrajectoryReadBudget {
@@ -93,32 +104,110 @@ struct AppState {
 struct SessionTrajectoryCache {
     session_dir: PathBuf,
     offset: u64,
-    prefix_hash: Option<[u8; 32]>,
+    prefix_hasher: Option<blake3::Hasher>,
+    tail_hash: Option<[u8; 32]>,
+    source_stamp: Option<LedgerStamp>,
     timeline: chat_state::Timeline,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
     workflows: BTreeMap<String, WorkflowJournalCache>,
     children: BTreeMap<String, SessionTrajectoryCache>,
+    materialized: Option<MaterializedTrajectory>,
+    last_query: Option<(TrajectoryQuery, TrajectoryResponse)>,
+    arrival_order: BTreeMap<String, u64>,
+    next_arrival: u64,
 }
 
 #[derive(Default)]
 struct SidebandCache {
     offset: u64,
-    prefix_hash: Option<[u8; 32]>,
-    events: Vec<chat_state::SidebandEvent>,
+    prefix_hasher: Option<blake3::Hasher>,
+    tail_hash: Option<[u8; 32]>,
+    source_stamp: Option<LedgerStamp>,
+    timeline: Option<chat_state::SidebandTimeline>,
 }
 
 #[derive(Default)]
 struct WorkflowJournalCache {
     offset: u64,
-    entries: Vec<workflow::JournalEntry>,
-    prefix_hash: Option<[u8; 32]>,
+    projection: workflow::Journal,
+    prefix_hasher: Option<blake3::Hasher>,
+    tail_hash: Option<[u8; 32]>,
+    source_stamp: Option<LedgerStamp>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LedgerStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    change_marker: [u64; 4],
+}
+
+impl LedgerStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            change_marker: ledger_change_marker(metadata),
+        }
+    }
+
+    fn same_file_as(self, other: Self) -> bool {
+        ledger_same_file(self.change_marker, other.change_marker)
+    }
+}
+
+#[cfg(unix)]
+fn ledger_same_file(left: [u64; 4], right: [u64; 4]) -> bool {
+    left[..2] == right[..2]
+}
+
+#[cfg(windows)]
+fn ledger_same_file(left: [u64; 4], right: [u64; 4]) -> bool {
+    left[0] == right[0] && left[3] == right[3]
+}
+
+#[cfg(not(any(unix, windows)))]
+fn ledger_same_file(_left: [u64; 4], _right: [u64; 4]) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn ledger_change_marker(metadata: &std::fs::Metadata) -> [u64; 4] {
+    use std::os::unix::fs::MetadataExt as _;
+    [
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime() as u64,
+        metadata.ctime_nsec() as u64,
+    ]
+}
+
+#[cfg(windows)]
+fn ledger_change_marker(metadata: &std::fs::Metadata) -> [u64; 4] {
+    use std::os::windows::fs::MetadataExt as _;
+    [
+        metadata.creation_time(),
+        metadata.last_access_time(),
+        metadata.last_write_time(),
+        metadata.file_attributes() as u64,
+    ]
+}
+
+#[cfg(not(any(unix, windows)))]
+fn ledger_change_marker(_metadata: &std::fs::Metadata) -> [u64; 4] {
+    [0; 4]
+}
+
+struct MaterializedTrajectory {
+    revision: [u8; 32],
+    rows: Vec<chat_state::TrajectoryRow>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 struct TrajectoryQuery {
-    after: Option<u64>,
-    before: Option<u64>,
+    after: Option<String>,
+    before: Option<String>,
     entry: Option<String>,
     layer: Option<String>,
     actor: Option<String>,
@@ -129,7 +218,136 @@ struct TrajectoryQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize)]
+struct TrajectoryEventQuery {
+    entry: String,
+    #[serde(default)]
+    full: bool,
+}
+
+#[derive(Debug)]
+struct TrajectoryEntryNotFound(String);
+
+impl std::fmt::Display for TrajectoryEntryNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Trajectory entry '{}' was not found", self.0)
+    }
+}
+
+impl std::error::Error for TrajectoryEntryNotFound {}
+
+/// Compact wire row for list and overview navigation.
+///
+/// Canonical payloads deliberately live behind the exact-event endpoint so a
+/// long session cannot make every polling response proportional to its stored
+/// JSON values.
+#[derive(Debug, Clone, Serialize)]
+struct TrajectoryRowSummary {
+    entry_id: String,
+    ordinal: usize,
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_entry_id: Option<String>,
+    nesting_path: Vec<u64>,
+    at_ms: i64,
+    layer: String,
+    actor: String,
+    class: String,
+    producer: String,
+    kind: String,
+    state: String,
+    visibility: chat_state::SurfaceVisibility,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    summary: String,
+}
+
+impl From<&chat_state::TrajectoryRow> for TrajectoryRowSummary {
+    fn from(row: &chat_state::TrajectoryRow) -> Self {
+        Self {
+            entry_id: row.entry_id.clone(),
+            ordinal: 0,
+            seq: row.seq,
+            parent_entry_id: row.parent_entry_id.clone(),
+            nesting_path: row.nesting_path.clone(),
+            at_ms: row.at_ms,
+            layer: trajectory_wire_text(&row.layer),
+            actor: trajectory_wire_text(&row.actor),
+            class: trajectory_wire_text(&row.class),
+            producer: trajectory_wire_text(&row.producer),
+            kind: trajectory_wire_text(&row.kind),
+            state: trajectory_wire_text(&row.state),
+            visibility: row.visibility,
+            turn_id: row.turn_id.as_deref().map(trajectory_wire_text),
+            step_index: row.step_index,
+            correlation_id: row.correlation_id.as_deref().map(trajectory_wire_text),
+            duration_ms: row.duration_ms,
+            summary: crate::util::truncate(&row.summary, TRAJECTORY_SUMMARY_CHARS).to_owned(),
+        }
+    }
+}
+
+fn trajectory_wire_text(value: &str) -> String {
+    crate::util::truncate(value, TRAJECTORY_WIRE_FIELD_CHARS).to_owned()
+}
+
+impl TrajectoryRowSummary {
+    fn into_row(self, details: serde_json::Value) -> chat_state::TrajectoryRow {
+        chat_state::TrajectoryRow {
+            entry_id: self.entry_id,
+            seq: self.seq,
+            parent_entry_id: self.parent_entry_id,
+            nesting_path: self.nesting_path,
+            at_ms: self.at_ms,
+            layer: self.layer,
+            actor: self.actor,
+            class: self.class,
+            producer: self.producer,
+            kind: self.kind,
+            state: self.state,
+            visibility: self.visibility,
+            turn_id: self.turn_id,
+            step_index: self.step_index,
+            correlation_id: self.correlation_id,
+            duration_ms: self.duration_ms,
+            summary: self.summary,
+            details,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TrajectoryOverviewBin {
+    first_entry_id: Option<String>,
+    last_entry_id: Option<String>,
+    start_ms: i64,
+    end_ms: i64,
+    input: usize,
+    model: usize,
+    tools: usize,
+    failures: usize,
+    turns: usize,
+    steps: usize,
+    max_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TrajectoryOverview {
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    input_count: usize,
+    model_count: usize,
+    tools_count: usize,
+    bins: Vec<TrajectoryOverviewBin>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrajectoryResponse {
     session_id: String,
@@ -138,14 +356,25 @@ struct TrajectoryResponse {
     current_surface_items: usize,
     active_turn: Option<String>,
     active_step: Option<u32>,
-    open_requests: Vec<String>,
-    open_tools: Vec<String>,
-    open_workflows: Vec<String>,
+    open_request_count: usize,
+    open_tool_count: usize,
+    open_workflow_count: usize,
     matching_count: usize,
-    first_seq: Option<u64>,
-    last_seq: Option<u64>,
+    first_cursor: Option<String>,
+    last_cursor: Option<String>,
     has_earlier: bool,
-    rows: Vec<chat_state::TrajectoryRow>,
+    has_later: bool,
+    overview: TrajectoryOverview,
+    rows: Vec<TrajectoryRowSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrajectoryEventResponse {
+    session_id: String,
+    schema_version: u8,
+    row: chat_state::TrajectoryRow,
+    details_truncated: bool,
 }
 
 /// Bind the local server, report the exact URL, then serve until interrupted.
@@ -213,12 +442,20 @@ fn trajectory_router(token: &str, state: AppState) -> Router {
         .route(&root, get(index))
         .route(&format!("{root}/"), get(index))
         .route(&format!("{root}/api/trajectory"), get(query_trajectory))
+        .route(
+            &format!("{root}/api/trajectory/event"),
+            get(query_trajectory_event),
+        )
         .with_state(state)
+        .layer(middleware::map_response(add_security_headers))
 }
 
-async fn index(
-    headers: HeaderMap,
-) -> Result<(HeaderMap, Html<&'static str>), (StatusCode, String)> {
+async fn add_security_headers(mut response: Response) -> Response {
+    response.headers_mut().extend(response_security_headers());
+    response
+}
+
+async fn index(headers: HeaderMap) -> Result<(HeaderMap, Html<&'static str>), HttpError> {
     require_local_host(&headers)?;
     Ok((response_security_headers(), Html(PAGE)))
 }
@@ -227,19 +464,40 @@ async fn query_trajectory(
     State(state): State<AppState>,
     Query(query): Query<TrajectoryQuery>,
     headers: HeaderMap,
-) -> Result<(HeaderMap, Json<TrajectoryResponse>), (StatusCode, String)> {
+) -> Result<(HeaderMap, Json<TrajectoryResponse>), HttpError> {
     require_local_host(&headers)?;
     if query.after.is_some() as u8 + query.before.is_some() as u8 + query.entry.is_some() as u8 > 1
     {
-        return Err((
+        return Err(http_error(
             StatusCode::BAD_REQUEST,
-            "after, before, and entry are mutually exclusive".into(),
+            "after, before, and entry are mutually exclusive",
         ));
     }
     let response = tokio::task::spawn_blocking(move || query_cached(&state, query))
         .await
         .map_err(internal_error)?
-        .map_err(internal_error)?;
+        .map_err(query_error_response)?;
+    Ok((response_security_headers(), Json(response)))
+}
+
+async fn query_trajectory_event(
+    State(state): State<AppState>,
+    Query(query): Query<TrajectoryEventQuery>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<TrajectoryEventResponse>), HttpError> {
+    require_local_host(&headers)?;
+    if query.entry.trim().is_empty() {
+        return Err(http_error(
+            StatusCode::BAD_REQUEST,
+            "entry must not be empty",
+        ));
+    }
+    let response = tokio::task::spawn_blocking(move || {
+        query_event_cached_with_mode(&state, &query.entry, query.full)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(query_error_response)?;
     Ok((response_security_headers(), Json(response)))
 }
 
@@ -252,6 +510,190 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .cache
         .lock()
         .map_err(|_| anyhow::anyhow!("Trajectory cache lock was poisoned"))?;
+    refresh_cached_tree(state, &mut cache)?;
+    ensure_materialized(state, &mut cache)?;
+    if let Some((cached_query, response)) = &cache.last_query
+        && cached_query == &query
+    {
+        return Ok(response.clone());
+    }
+    let all_rows = &cache
+        .materialized
+        .as_ref()
+        .expect("Trajectory materialization was initialized")
+        .rows;
+    let search = query
+        .search
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let layer = query.layer.as_deref().filter(|value| !value.is_empty());
+    let actor = query.actor.as_deref().filter(|value| !value.is_empty());
+    let class = query.class.as_deref().filter(|value| !value.is_empty());
+    let producer = query.producer.as_deref().filter(|value| !value.is_empty());
+    let visibility = query
+        .visibility
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_TRAJECTORY_PAGE_ROWS)
+        .clamp(1, MAX_TRAJECTORY_PAGE_ROWS);
+    let matches_query = |row: &chat_state::TrajectoryRow| {
+        layer.is_none_or(|value| dimension_matches(&row.layer, value))
+            && actor.is_none_or(|value| dimension_matches(&row.actor, value))
+            && class.is_none_or(|value| row.class == value)
+            && producer.is_none_or(|value| dimension_matches(&row.producer, value))
+            && visibility.is_none_or(|value| visibility_name(row.visibility) == value)
+            && search.as_ref().is_none_or(|needle| {
+                format!(
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+                    row.seq,
+                    row.entry_id,
+                    row.parent_entry_id.as_deref().unwrap_or_default(),
+                    serde_json::to_string(&row.nesting_path).unwrap_or_default(),
+                    row.layer,
+                    row.actor,
+                    row.class,
+                    row.producer,
+                    row.kind,
+                    row.state,
+                    row.summary,
+                    row.turn_id.as_deref().unwrap_or_default(),
+                    row.correlation_id.as_deref().unwrap_or_default(),
+                )
+                .to_lowercase()
+                .contains(needle)
+            })
+    };
+    let matching = all_rows
+        .iter()
+        .filter(|row| matches_query(row))
+        .collect::<Vec<_>>();
+    let overview = trajectory_overview(&matching);
+    let matching_count = matching.len();
+    let cursor_index = |entry_id: &str| {
+        matching
+            .iter()
+            .position(|row| row.entry_id == entry_id)
+            .ok_or_else(|| anyhow::Error::new(TrajectoryEntryNotFound(entry_id.to_owned())))
+    };
+    let (start, end) = if let Some(entry_id) = query.entry.as_deref() {
+        let center = cursor_index(entry_id)?;
+        let end = center
+            .saturating_add(limit / 2)
+            .saturating_add(1)
+            .min(matching_count);
+        (end.saturating_sub(limit), end)
+    } else if let Some(entry_id) = query.after.as_deref() {
+        let start = cursor_index(entry_id)?.saturating_add(1);
+        (start, (start + limit).min(matching_count))
+    } else if let Some(entry_id) = query.before.as_deref() {
+        let end = cursor_index(entry_id)?;
+        (end.saturating_sub(limit), end)
+    } else {
+        (matching_count.saturating_sub(limit), matching_count)
+    };
+    let first_cursor = matching.get(start).map(|row| row.entry_id.clone());
+    let last_cursor = end
+        .checked_sub(1)
+        .and_then(|index| matching.get(index))
+        .map(|row| row.entry_id.clone());
+    let rows = matching[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let mut summary = TrajectoryRowSummary::from(*row);
+            summary.ordinal = start.saturating_add(offset);
+            summary
+        })
+        .collect::<Vec<_>>();
+    let response = TrajectoryResponse {
+        session_id: state.session_id.clone(),
+        schema_version: chat_state::TRAJECTORY_SCHEMA_VERSION,
+        event_count: cache.event_count(),
+        current_surface_items: cache.timeline.surface_len(),
+        active_turn: cache.timeline.active_turn().map(|id| id.0.to_string()),
+        active_step: cache.timeline.active_step().map(|id| id.index),
+        open_request_count: cache.timeline.open_request_ids().count(),
+        open_tool_count: cache.timeline.open_tool_call_ids().count(),
+        open_workflow_count: cache.timeline.open_workflow_run_ids().count(),
+        matching_count,
+        first_cursor,
+        last_cursor,
+        has_earlier: start > 0,
+        has_later: end < matching_count,
+        overview,
+        rows,
+    };
+    cache.last_query = Some((query, response.clone()));
+    Ok(response)
+}
+
+fn ensure_materialized(state: &AppState, cache: &mut SessionTrajectoryCache) -> anyhow::Result<()> {
+    let revision = cache.revision();
+    if cache
+        .materialized
+        .as_ref()
+        .is_some_and(|materialized| materialized.revision == revision)
+    {
+        return Ok(());
+    }
+    let previous = cache.materialized.take();
+    let fresh = match collect_cached_rows(state, cache) {
+        Ok(rows) => rows,
+        Err(error) => {
+            cache.materialized = previous;
+            return Err(error);
+        }
+    };
+    let rows = if let Some(previous) = previous {
+        let mut fresh_by_id = fresh
+            .into_iter()
+            .map(|row| (row.entry_id.clone(), row))
+            .collect::<HashMap<_, _>>();
+        let mut rows = Vec::with_capacity(fresh_by_id.len());
+        for old in previous.rows {
+            if let Some(updated) = fresh_by_id.remove(&old.entry_id) {
+                rows.push(updated);
+            }
+        }
+        let mut additions = fresh_by_id.into_values().collect::<Vec<_>>();
+        sort_rows_chronologically(&mut additions);
+        let returning = additions
+            .iter()
+            .any(|row| cache.arrival_order.contains_key(&row.entry_id));
+        cache.assign_arrival_order(&additions);
+        rows.extend(additions);
+        if returning {
+            rows.sort_by_key(|row| {
+                cache
+                    .arrival_order
+                    .get(&row.entry_id)
+                    .copied()
+                    .unwrap_or(u64::MAX)
+            });
+        }
+        rows
+    } else {
+        let mut rows = fresh;
+        sort_rows_chronologically(&mut rows);
+        cache.assign_arrival_order(&rows);
+        rows
+    };
+    let live_entries = rows
+        .iter()
+        .map(|row| row.entry_id.as_str())
+        .collect::<HashSet<_>>();
+    cache
+        .arrival_order
+        .retain(|entry_id, _| live_entries.contains(entry_id.as_str()));
+    cache.materialized = Some(MaterializedTrajectory { revision, rows });
+    cache.last_query = None;
+    Ok(())
+}
+
+fn refresh_cached_tree(state: &AppState, cache: &mut SessionTrajectoryCache) -> anyhow::Result<()> {
     let mut visited = BTreeSet::from([state.session_id.clone()]);
     let mut budget = TrajectoryReadBudget::default();
     #[cfg(not(test))]
@@ -281,6 +723,13 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
             &mut budget,
         )?;
     }
+    Ok(())
+}
+
+fn collect_cached_rows(
+    state: &AppState,
+    cache: &SessionTrajectoryCache,
+) -> anyhow::Result<Vec<chat_state::TrajectoryRow>> {
     let mut all_rows = Vec::new();
     cache.collect_rows(
         &state.session_id,
@@ -289,131 +738,261 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         &[],
         &mut all_rows,
     )?;
-    all_rows.sort_by(|left, right| left.nesting_path.cmp(&right.nesting_path));
-    if let Some(collision) = all_rows
-        .windows(2)
-        .find(|pair| pair[0].nesting_path == pair[1].nesting_path)
+    let mut causal_paths = HashMap::new();
+    for row in &all_rows {
+        if let Some(existing) = causal_paths.insert(&row.nesting_path, &row.entry_id) {
+            anyhow::bail!(
+                "Trajectory entries '{}' and '{}' share causal path {:?}",
+                existing,
+                row.entry_id,
+                row.nesting_path
+            );
+        }
+    }
+    let mut entry_ids = HashSet::new();
+    if let Some(duplicate) = all_rows
+        .iter()
+        .find(|row| !entry_ids.insert(row.entry_id.as_str()))
     {
         anyhow::bail!(
-            "Trajectory entries '{}' and '{}' share causal path {:?}",
-            collision[0].entry_id,
-            collision[1].entry_id,
-            collision[0].nesting_path
+            "Trajectory entry id '{}' is not globally unique",
+            duplicate.entry_id
         );
     }
-    let focus_root = query
-        .entry
-        .as_deref()
-        .map(|entry_id| {
-            all_rows
-                .iter()
-                .find(|row| row.entry_id == entry_id)
-                .map(root_seq)
-                .ok_or_else(|| anyhow::anyhow!("Trajectory entry '{entry_id}' was not found"))
-        })
-        .transpose()?;
-    let search = query.search.as_deref().map(str::to_lowercase);
-    let layer = query.layer.as_deref().filter(|value| !value.is_empty());
-    let actor = query.actor.as_deref().filter(|value| !value.is_empty());
-    let class = query.class.as_deref().filter(|value| !value.is_empty());
-    let producer = query.producer.as_deref().filter(|value| !value.is_empty());
-    let visibility = query
-        .visibility
-        .as_deref()
-        .filter(|value| !value.is_empty());
-    let limit = query.limit.unwrap_or(2_000).clamp(1, 10_000);
-    let matches_query = |row: &chat_state::TrajectoryRow| {
-        query.after.is_none_or(|after| root_seq(row) > after)
-            && query.before.is_none_or(|before| root_seq(row) < before)
-            && layer.is_none_or(|value| dimension_matches(&row.layer, value))
-            && actor.is_none_or(|value| dimension_matches(&row.actor, value))
-            && class.is_none_or(|value| row.class == value)
-            && producer.is_none_or(|value| dimension_matches(&row.producer, value))
-            && visibility.is_none_or(|value| visibility_name(row.visibility) == value)
-            && search.as_ref().is_none_or(|needle| {
-                format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
-                    row.seq,
-                    row.entry_id,
-                    row.parent_entry_id.as_deref().unwrap_or_default(),
-                    serde_json::to_string(&row.nesting_path).unwrap_or_default(),
-                    row.layer,
-                    row.actor,
-                    row.class,
-                    row.producer,
-                    row.kind,
-                    row.state,
-                    row.summary,
-                    row.turn_id.as_deref().unwrap_or_default(),
-                    row.correlation_id.as_deref().unwrap_or_default(),
-                    row.details,
-                )
-                .to_lowercase()
-                .contains(needle)
-            })
-    };
-    let matching = all_rows
+    Ok(all_rows)
+}
+
+fn sort_rows_chronologically(rows: &mut [chat_state::TrajectoryRow]) {
+    rows.sort_by(|left, right| {
+        left.at_ms
+            .cmp(&right.at_ms)
+            .then_with(|| left.nesting_path.cmp(&right.nesting_path))
+    });
+}
+
+fn query_event_cached(state: &AppState, entry_id: &str) -> anyhow::Result<TrajectoryEventResponse> {
+    query_event_cached_with_mode(state, entry_id, false)
+}
+
+fn query_event_cached_with_mode(
+    state: &AppState,
+    entry_id: &str,
+    full: bool,
+) -> anyhow::Result<TrajectoryEventResponse> {
+    let mut cache = state
+        .cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Trajectory cache lock was poisoned"))?;
+    refresh_cached_tree(state, &mut cache)?;
+    ensure_materialized(state, &mut cache)?;
+    let materialized = cache
+        .materialized
+        .as_ref()
+        .expect("Trajectory materialization was initialized")
+        .rows
         .iter()
-        .filter(|row| focus_root.map_or_else(|| matches_query(row), |root| root_seq(row) == root))
-        .collect::<Vec<_>>();
-    let matching_count = matching.len();
-    let root_sequences = matching
-        .iter()
-        .map(|row| root_seq(row))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let root_count = root_sequences.len();
-    let (start, end) = if query.after.is_some() {
-        (0, root_count.min(limit))
-    } else {
-        (root_count.saturating_sub(limit), root_count)
-    };
-    let has_earlier = focus_root.map_or_else(
-        || query.after.is_none() && start > 0,
-        |root| all_rows.iter().any(|row| root_seq(row) < root),
-    );
-    let selected_roots = root_sequences[start..end]
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let rows = matching
-        .into_iter()
-        .filter(|row| selected_roots.contains(&root_seq(row)))
+        .find(|row| row.entry_id == entry_id)
         .cloned()
-        .collect::<Vec<_>>();
-    let first_seq = root_sequences.get(start).copied();
-    let last_seq = end
-        .checked_sub(1)
-        .and_then(|index| root_sequences.get(index).copied());
-    Ok(TrajectoryResponse {
+        .ok_or_else(|| anyhow::Error::new(TrajectoryEntryNotFound(entry_id.to_owned())))?;
+    let (mut row, details_truncated) = cache
+        .canonical_row(&state.session_id, &state.actor_ref, entry_id, !full)?
+        .ok_or_else(|| anyhow::anyhow!("Trajectory source row '{entry_id}' disappeared"))?;
+    row.entry_id = materialized.entry_id;
+    row.parent_entry_id = materialized.parent_entry_id;
+    row.nesting_path = materialized.nesting_path;
+    row.visibility = materialized.visibility;
+    Ok(TrajectoryEventResponse {
         session_id: state.session_id.clone(),
         schema_version: chat_state::TRAJECTORY_SCHEMA_VERSION,
-        event_count: cache.event_count(),
-        current_surface_items: cache.timeline.surface_len(),
-        active_turn: cache.timeline.active_turn().map(|id| id.0.to_string()),
-        active_step: cache.timeline.active_step().map(|id| id.index),
-        open_requests: cache
-            .timeline
-            .open_request_ids()
-            .map(str::to_owned)
-            .collect(),
-        open_tools: cache
-            .timeline
-            .open_tool_call_ids()
-            .map(str::to_owned)
-            .collect(),
-        open_workflows: cache
-            .timeline
-            .open_workflow_run_ids()
-            .map(str::to_owned)
-            .collect(),
-        matching_count,
-        first_seq,
-        last_seq,
-        has_earlier,
-        rows,
+        row,
+        details_truncated,
     })
+}
+
+fn trajectory_row_needs_wire_truncation(row: &chat_state::TrajectoryRow) -> bool {
+    wire_text_exceeds(&row.summary, TRAJECTORY_SUMMARY_CHARS)
+        || [
+            row.layer.as_str(),
+            row.actor.as_str(),
+            row.class.as_str(),
+            row.producer.as_str(),
+            row.kind.as_str(),
+            row.state.as_str(),
+        ]
+        .into_iter()
+        .any(|value| wire_text_exceeds(value, TRAJECTORY_WIRE_FIELD_CHARS))
+        || row
+            .turn_id
+            .as_deref()
+            .is_some_and(|value| wire_text_exceeds(value, TRAJECTORY_WIRE_FIELD_CHARS))
+        || row
+            .correlation_id
+            .as_deref()
+            .is_some_and(|value| wire_text_exceeds(value, TRAJECTORY_WIRE_FIELD_CHARS))
+}
+
+fn wire_text_exceeds(value: &str, limit: usize) -> bool {
+    value.chars().nth(limit).is_some()
+}
+
+fn trajectory_detail_preview(
+    value: &serde_json::Value,
+    nodes: &mut usize,
+    chars: &mut usize,
+    truncated: &mut bool,
+    depth: usize,
+) -> serde_json::Value {
+    if *nodes >= TRAJECTORY_DETAIL_PREVIEW_NODES || *chars >= TRAJECTORY_DETAIL_PREVIEW_CHARS {
+        *truncated = true;
+        return serde_json::Value::String("[preview budget exhausted]".into());
+    }
+    *nodes += 1;
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            value.clone()
+        }
+        serde_json::Value::String(value) => {
+            let remaining = TRAJECTORY_DETAIL_PREVIEW_CHARS.saturating_sub(*chars);
+            let limit = remaining.min(8_000);
+            let preview = crate::util::truncate(value, limit);
+            *chars = chars.saturating_add(preview.chars().count());
+            if preview.len() == value.len() {
+                serde_json::Value::String(preview.to_owned())
+            } else {
+                *truncated = true;
+                serde_json::Value::String(format!(
+                    "{preview}… [{} chars omitted]",
+                    value
+                        .chars()
+                        .count()
+                        .saturating_sub(preview.chars().count())
+                ))
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if depth >= TRAJECTORY_DETAIL_PREVIEW_DEPTH {
+                *truncated = true;
+                return serde_json::Value::String("[depth omitted]".into());
+            }
+            let mut output = values
+                .iter()
+                .take(TRAJECTORY_DETAIL_PREVIEW_ITEMS)
+                .map(|value| trajectory_detail_preview(value, nodes, chars, truncated, depth + 1))
+                .collect::<Vec<_>>();
+            if values.len() > output.len() {
+                *truncated = true;
+                output.push(serde_json::Value::String(format!(
+                    "[{} items omitted]",
+                    values.len() - output.len()
+                )));
+            }
+            serde_json::Value::Array(output)
+        }
+        serde_json::Value::Object(values) => {
+            if depth >= TRAJECTORY_DETAIL_PREVIEW_DEPTH {
+                *truncated = true;
+                return serde_json::Value::String("[depth omitted]".into());
+            }
+            let mut output = serde_json::Map::new();
+            for (index, (key, value)) in values
+                .iter()
+                .take(TRAJECTORY_DETAIL_PREVIEW_ITEMS)
+                .enumerate()
+            {
+                let remaining = TRAJECTORY_DETAIL_PREVIEW_CHARS.saturating_sub(*chars);
+                let key_preview = crate::util::truncate(key, remaining.min(1_024));
+                *chars = chars.saturating_add(key_preview.chars().count());
+                let preview_key = if key_preview.len() == key.len() {
+                    key_preview.to_owned()
+                } else {
+                    *truncated = true;
+                    format!("{key_preview}…#{index}")
+                };
+                output.insert(
+                    preview_key,
+                    trajectory_detail_preview(value, nodes, chars, truncated, depth + 1),
+                );
+            }
+            if values.len() > output.len() {
+                *truncated = true;
+                output.insert(
+                    "…".into(),
+                    serde_json::Value::String(format!(
+                        "[{} fields omitted]",
+                        values.len() - output.len()
+                    )),
+                );
+            }
+            serde_json::Value::Object(output)
+        }
+    }
+}
+
+fn trajectory_overview(rows: &[&chat_state::TrajectoryRow]) -> TrajectoryOverview {
+    if rows.is_empty() {
+        return TrajectoryOverview::default();
+    }
+    let bin_count = rows.len().min(TRAJECTORY_OVERVIEW_BINS);
+    let mut overview = TrajectoryOverview {
+        start_ms: rows.iter().map(|row| trajectory_start_ms(row)).min(),
+        end_ms: rows.iter().map(|row| row.at_ms).max(),
+        bins: (0..bin_count)
+            .map(|_| TrajectoryOverviewBin::default())
+            .collect(),
+        ..Default::default()
+    };
+    for (index, row) in rows.iter().enumerate() {
+        let bin_index = index.saturating_mul(bin_count) / rows.len();
+        let bin = &mut overview.bins[bin_index.min(bin_count - 1)];
+        let start_ms = trajectory_start_ms(row);
+        if bin.first_entry_id.is_none() {
+            bin.first_entry_id = Some(row.entry_id.clone());
+            bin.start_ms = start_ms;
+            bin.end_ms = row.at_ms;
+        } else {
+            bin.start_ms = bin.start_ms.min(start_ms);
+            bin.end_ms = bin.end_ms.max(row.at_ms);
+        }
+        bin.last_entry_id = Some(row.entry_id.clone());
+        bin.max_duration_ms = bin.max_duration_ms.max(row.duration_ms.unwrap_or_default());
+        bin.failures += usize::from(matches!(row.state.as_str(), "failed" | "cancelled"));
+        bin.turns += usize::from(row.kind == "turn.started");
+        bin.steps += usize::from(row.kind == "step.started");
+        match trajectory_lane(row) {
+            0 => {
+                overview.input_count += 1;
+                bin.input += 1;
+            }
+            1 => {
+                overview.model_count += 1;
+                bin.model += 1;
+            }
+            _ => {
+                overview.tools_count += 1;
+                bin.tools += 1;
+            }
+        }
+    }
+    overview
+}
+
+fn trajectory_start_ms(row: &chat_state::TrajectoryRow) -> i64 {
+    row.at_ms
+        .saturating_sub(i64::try_from(row.duration_ms.unwrap_or_default()).unwrap_or(i64::MAX))
+}
+
+fn trajectory_lane(row: &chat_state::TrajectoryRow) -> usize {
+    if row.layer.starts_with("tool") {
+        2
+    } else if row.layer == "assistant"
+        || row.producer.starts_with("model")
+        || row.kind.starts_with("request.")
+        || row.kind.starts_with("step.")
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn read_summary_from_directory(
@@ -436,12 +1015,6 @@ fn dimension_matches(actual: &str, filter: &str) -> bool {
             .is_some_and(|suffix| matches!(suffix.as_bytes().first(), Some(b'.' | b':')))
 }
 
-fn root_seq(row: &chat_state::TrajectoryRow) -> u64 {
-    *row.nesting_path
-        .first()
-        .expect("Trajectory rows always have a non-empty nesting path")
-}
-
 enum TrajectorySessionResolver<'a> {
     Storage(&'a super::storage::jsonl::JsonlStorageAdapter),
     #[cfg(test)]
@@ -452,7 +1025,13 @@ impl TrajectorySessionResolver<'_> {
     fn open(
         &self,
         session_id: &str,
-    ) -> anyhow::Result<Option<(PathBuf, super::storage::ContainedDirectory, super::persistence::Summary)>> {
+    ) -> anyhow::Result<
+        Option<(
+            PathBuf,
+            super::storage::ContainedDirectory,
+            super::persistence::Summary,
+        )>,
+    > {
         match self {
             Self::Storage(storage) => {
                 let Some(opened) = storage.open_session_by_id(session_id)? else {
@@ -483,7 +1062,10 @@ impl TrajectorySessionResolver<'_> {
 }
 
 #[cfg(test)]
-fn find_test_session_dir(sessions_root: &Path, session_id: &str) -> anyhow::Result<Option<PathBuf>> {
+fn find_test_session_dir(
+    sessions_root: &Path,
+    session_id: &str,
+) -> anyhow::Result<Option<PathBuf>> {
     if !sessions_root.is_dir() {
         return Ok(None);
     }
@@ -497,6 +1079,118 @@ fn find_test_session_dir(sessions_root: &Path, session_id: &str) -> anyhow::Resu
 }
 
 impl SessionTrajectoryCache {
+    fn assign_arrival_order(&mut self, rows: &[chat_state::TrajectoryRow]) {
+        for row in rows {
+            if self.arrival_order.contains_key(&row.entry_id) {
+                continue;
+            }
+            let order = self.next_arrival;
+            self.next_arrival = self.next_arrival.saturating_add(1);
+            self.arrival_order.insert(row.entry_id.clone(), order);
+        }
+    }
+
+    fn canonical_row(
+        &self,
+        timeline_id: &str,
+        actor_ref: &str,
+        entry_id: &str,
+        preview: bool,
+    ) -> anyhow::Result<Option<(chat_state::TrajectoryRow, bool)>> {
+        let Some((source_id, seq)) = trajectory_entry_parts(entry_id) else {
+            return Ok(None);
+        };
+        if source_id == timeline_id {
+            let Some(projected) = self.projector.rows().iter().find(|row| row.seq == seq) else {
+                return Ok(None);
+            };
+            let (mut row, truncated) = preview_trajectory_row(projected, preview);
+            row.entry_id = entry_id.to_owned();
+            let index = usize::try_from(seq)?;
+            let event = self
+                .timeline
+                .events()
+                .get(index)
+                .ok_or_else(|| anyhow::anyhow!("Trajectory projector outran Timeline"))?;
+            row.actor = match &event.kind {
+                chat_state::TimelineEventKind::Workflow(event) => {
+                    format!("workflow:{}", workflow_run_id(event))
+                }
+                _ => actor_ref.to_owned(),
+            };
+            return Ok(Some((row, truncated)));
+        }
+        if let Some(sideband) = self.sidebands.get(source_id)
+            && let Some(timeline) = &sideband.timeline
+            && let Some(event) = timeline.events().iter().find(|event| event.seq == seq)
+        {
+            let attempt_times = timeline
+                .events()
+                .iter()
+                .filter_map(|event| {
+                    matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
+                        .then_some((event.seq, event.at_ms))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut row = sideband_row(event, "", &[], &attempt_times);
+            row.details = serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null);
+            return Ok(Some(preview_trajectory_row(&row, preview)));
+        }
+        if let Some(journal) = self.workflows.get(source_id)
+            && let Some(entry) = journal.projection.entries().get(usize::try_from(seq)?)
+        {
+            let pending = matches!(
+                journal
+                    .projection
+                    .replay_operation(entry.seq, &entry.kind, &entry.req_hash)?,
+                Some(workflow::journal::OperationReplay::Pending { .. })
+            );
+            let mut row = workflow_row(entry, source_id, "", &[], pending);
+            row.details = serde_json::to_value(entry).unwrap_or(serde_json::Value::Null);
+            return Ok(Some(preview_trajectory_row(&row, preview)));
+        }
+        for (child_id, child) in &self.children {
+            if let Some(row) =
+                child.canonical_row(child_id, &format!("subagent:{child_id}"), entry_id, preview)?
+            {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+
+    fn revision(&self) -> [u8; 32] {
+        fn update(cache: &SessionTrajectoryCache, hasher: &mut blake3::Hasher) {
+            hasher.update(b"session\0");
+            hasher.update(&cache.offset.to_le_bytes());
+            hasher.update(&ledger_digest(cache.prefix_hasher.as_ref()));
+            for (id, sideband) in &cache.sidebands {
+                hasher.update(b"sideband\0");
+                hasher.update(&(id.len() as u64).to_le_bytes());
+                hasher.update(id.as_bytes());
+                hasher.update(&sideband.offset.to_le_bytes());
+                hasher.update(&ledger_digest(sideband.prefix_hasher.as_ref()));
+            }
+            for (id, workflow) in &cache.workflows {
+                hasher.update(b"workflow\0");
+                hasher.update(&(id.len() as u64).to_le_bytes());
+                hasher.update(id.as_bytes());
+                hasher.update(&workflow.offset.to_le_bytes());
+                hasher.update(&ledger_digest(workflow.prefix_hasher.as_ref()));
+            }
+            for (id, child) in &cache.children {
+                hasher.update(b"child\0");
+                hasher.update(&(id.len() as u64).to_le_bytes());
+                hasher.update(id.as_bytes());
+                update(child, hasher);
+            }
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        update(self, &mut hasher);
+        *hasher.finalize().as_bytes()
+    }
+
     #[cfg(test)]
     fn refresh_tree(
         &mut self,
@@ -674,40 +1368,108 @@ impl SessionTrajectoryCache {
             std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
             "Trajectory Timeline ledger",
         )?;
-        let file_len = file.metadata()?.len();
-        if file_len < self.offset
-            || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
-        {
-            let session_dir = std::mem::take(&mut self.session_dir);
-            *self = Self::default();
-            self.session_dir = session_dir;
-        }
-        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, &path)?;
-        if complete_len == 0 {
+        let opened_stamp = LedgerStamp::from_metadata(&file.metadata()?);
+        if self.source_stamp == Some(opened_stamp) {
             return Ok(());
         }
-        let mut timeline = self.timeline.clone();
-        let mut accepted = Vec::new();
-        for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
+        let replacing = self.source_stamp.is_some();
+        let rebuilding = ledger_requires_rebuild(
+            self.offset,
+            self.prefix_hasher.as_ref(),
+            self.tail_hash,
+            self.source_stamp,
+            opened_stamp,
+            &mut file,
+        )?;
+        let old_offset = self.offset;
+        let mut timeline = if rebuilding {
+            chat_state::Timeline::default()
+        } else {
+            std::mem::take(&mut self.timeline)
+        };
+        let mut projector = if rebuilding {
+            chat_state::TrajectoryProjector::default()
+        } else {
+            std::mem::take(&mut self.projector)
+        };
+        let mut offset = if rebuilding { 0 } else { self.offset };
+        let mut prefix_hasher = if rebuilding {
+            None
+        } else {
+            self.prefix_hasher.clone()
+        };
+        let mut observed_stamp = opened_stamp;
+        let ingestion = (|| -> anyhow::Result<()> {
+            loop {
+                let (bytes, complete_len) = read_ledger_batch(&mut file, offset, &path)?;
+                if complete_len == 0 {
+                    let current_stamp = LedgerStamp::from_metadata(&file.metadata()?);
+                    if current_stamp != observed_stamp {
+                        observed_stamp = current_stamp;
+                        continue;
+                    }
+                    if rebuilding && replacing && offset == 0 {
+                        anyhow::bail!("Trajectory replacement has no committed Timeline entry");
+                    }
+                    break;
+                }
+                for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if timeline.events().len() >= event_limit {
+                        anyhow::bail!("Trajectory exceeds the event limit");
+                    }
+                    let event = serde_json::from_slice::<chat_state::TimelineEvent>(line).map_err(
+                        |error| anyhow::anyhow!("{} at byte {offset}: {error}", path.display()),
+                    )?;
+                    timeline.accept(event.clone())?;
+                    projector.accept(&event);
+                }
+                prefix_hasher
+                    .get_or_insert_with(blake3::Hasher::new)
+                    .update(&bytes[..complete_len]);
+                offset = offset.saturating_add(complete_len as u64);
+                observed_stamp = LedgerStamp::from_metadata(&file.metadata()?);
             }
-            if timeline.events().len() >= event_limit {
-                anyhow::bail!("Trajectory exceeds the event limit");
+            Ok(())
+        })();
+        if let Err(error) = ingestion {
+            if !rebuilding {
+                let (restored_timeline, restored_projector) =
+                    replay_timeline_prefix(&mut file, old_offset, &path, event_limit)?;
+                self.timeline = restored_timeline;
+                self.projector = restored_projector;
             }
-            let event =
-                serde_json::from_slice::<chat_state::TimelineEvent>(line).map_err(|error| {
-                    anyhow::anyhow!("{} at byte {}: {error}", path.display(), self.offset)
-                })?;
-            timeline.accept(event.clone())?;
-            accepted.push(event);
+            return Err(error);
         }
-        for event in &accepted {
-            self.projector.accept(event);
+        let tail_hash = match hash_ledger_tail(offset, &mut file) {
+            Ok(hash) => hash,
+            Err(error) => {
+                if !rebuilding {
+                    let (restored_timeline, restored_projector) =
+                        replay_timeline_prefix(&mut file, old_offset, &path, event_limit)?;
+                    self.timeline = restored_timeline;
+                    self.projector = restored_projector;
+                }
+                return Err(error);
+            }
+        };
+        if rebuilding {
+            let session_dir = std::mem::take(&mut self.session_dir);
+            let arrival_order = std::mem::take(&mut self.arrival_order);
+            let next_arrival = self.next_arrival;
+            *self = Self::default();
+            self.session_dir = session_dir;
+            self.arrival_order = arrival_order;
+            self.next_arrival = next_arrival;
         }
         self.timeline = timeline;
-        self.offset += complete_len as u64;
-        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
+        self.projector = projector;
+        self.offset = offset;
+        self.prefix_hasher = prefix_hasher;
+        self.tail_hash = tail_hash;
+        self.source_stamp = Some(observed_stamp);
         Ok(())
     }
 
@@ -761,10 +1523,7 @@ impl SessionTrajectoryCache {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            budget.enter_entity(
-                &format!("sideband {sideband_id}"),
-                depth.saturating_add(1),
-            )?;
+            budget.enter_entity(&format!("sideband {sideband_id}"), depth.saturating_add(1))?;
             budget.admit_file(&ledger, "sideband Timeline ledger")?;
             match sideband.refresh_from_directory(&sideband_dir, budget.remaining_events()) {
                 Ok(()) => {}
@@ -777,8 +1536,8 @@ impl SessionTrajectoryCache {
                 }
                 Err(error) => return Err(error),
             }
-            if !sideband.events.is_empty() {
-                budget.admit_events(sideband.events.len())?;
+            if let Some(timeline) = &sideband.timeline {
+                budget.admit_events(timeline.events().len())?;
                 seen.insert(sideband_id.clone());
             }
         }
@@ -844,10 +1603,7 @@ impl SessionTrajectoryCache {
                 super::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES,
             ) {
                 Ok(bytes) => {
-                    budget.enter_entity(
-                        &format!("Workflow {run_id}"),
-                        depth.saturating_add(1),
-                    )?;
+                    budget.enter_entity(&format!("Workflow {run_id}"), depth.saturating_add(1))?;
                     let manifest_file = run_dir.open_regular(
                         std::ffi::OsStr::new("state.json"),
                         "Trajectory Workflow manifest",
@@ -888,7 +1644,7 @@ impl SessionTrajectoryCache {
                 Ok(journal_file) => {
                     budget.admit_file(&journal_file, "Workflow journal")?;
                     journal.refresh_from_directory(&run_dir, budget.remaining_events())?;
-                    budget.admit_events(journal.entries.len())?;
+                    budget.admit_events(journal.projection.len())?;
                     validate_workflow_journal_links(&self.timeline, run_id, journal)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -921,12 +1677,11 @@ impl SessionTrajectoryCache {
                         "sideband {sideband_id} has a Timeline but no parent sideband.spawn fact"
                     )
                 })?;
-            chat_state::SidebandTimeline::from_events(sideband.events.clone())?.validate_parent(
-                parent_timeline_id,
-                &self.timeline,
-                parent_seq,
-                spawn,
-            )?;
+            sideband
+                .timeline
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("sideband {sideband_id} has no Timeline"))?
+                .validate_parent(parent_timeline_id, &self.timeline, parent_seq, spawn)?;
         }
         Ok(())
     }
@@ -954,8 +1709,9 @@ impl SessionTrajectoryCache {
             })
             .collect::<BTreeMap<_, _>>();
         for projected in self.projector.rows() {
-            let mut row = projected.clone();
-            row.entry_id = format!("t:{timeline_id}/{}", row.seq);
+            let entry_id = format!("t:{timeline_id}/{}", projected.seq);
+            let mut row = TrajectoryRowSummary::from(projected).into_row(serde_json::Value::Null);
+            row.entry_id = entry_id;
             row.parent_entry_id = parent_entry_id.map(str::to_owned);
             row.nesting_path = path_prefix
                 .iter()
@@ -1043,8 +1799,20 @@ impl SessionTrajectoryCache {
         let Some(journal) = self.workflows.get(run_id) else {
             return Ok(());
         };
-        for entry in &journal.entries {
-            rows.push(workflow_row(entry, run_id, parent_entry_id, path_prefix));
+        for entry in journal.projection.entries() {
+            let pending = matches!(
+                journal
+                    .projection
+                    .replay_operation(entry.seq, &entry.kind, &entry.req_hash)?,
+                Some(workflow::journal::OperationReplay::Pending { .. })
+            );
+            rows.push(workflow_row(
+                entry,
+                run_id,
+                parent_entry_id,
+                path_prefix,
+                pending,
+            ));
         }
         Ok(())
     }
@@ -1068,7 +1836,7 @@ impl SessionTrajectoryCache {
                 _ => None,
             })?;
         let entry = self.workflows.get(run_id).and_then(|journal| {
-            journal.entries.iter().find(|entry| {
+            journal.projection.entries().iter().find(|entry| {
                 entry.kind == "spawn_agent"
                     && entry
                         .result
@@ -1103,15 +1871,18 @@ impl SessionTrajectoryCache {
         let Some(sideband) = self.sidebands.get(sideband_id) else {
             return Ok(());
         };
-        let attempt_times = sideband
-            .events
+        let Some(timeline) = &sideband.timeline else {
+            return Ok(());
+        };
+        let attempt_times = timeline
+            .events()
             .iter()
             .filter_map(|event| {
                 matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
                     .then_some((event.seq, event.at_ms))
             })
             .collect::<BTreeMap<_, _>>();
-        for event in &sideband.events {
+        for event in timeline.events() {
             rows.push(sideband_row(
                 event,
                 parent_entry_id,
@@ -1127,15 +1898,36 @@ impl SessionTrajectoryCache {
             + self
                 .workflows
                 .values()
-                .map(|workflow| workflow.entries.len())
+                .map(|workflow| workflow.projection.len())
                 .sum::<usize>()
             + self
                 .sidebands
                 .values()
-                .map(|sideband| sideband.events.len())
+                .filter_map(|sideband| sideband.timeline.as_ref())
+                .map(|timeline| timeline.events().len())
                 .sum::<usize>()
             + self.children.values().map(Self::event_count).sum::<usize>()
     }
+}
+
+fn trajectory_entry_parts(entry_id: &str) -> Option<(&str, u64)> {
+    let (source, seq) = entry_id.strip_prefix("t:")?.rsplit_once('/')?;
+    Some((source, seq.parse().ok()?))
+}
+
+fn preview_trajectory_row(
+    row: &chat_state::TrajectoryRow,
+    preview: bool,
+) -> (chat_state::TrajectoryRow, bool) {
+    if !preview {
+        return (row.clone(), false);
+    }
+    let mut nodes = 0;
+    let mut chars = 0;
+    let mut truncated = trajectory_row_needs_wire_truncation(row);
+    let details =
+        trajectory_detail_preview(&row.details, &mut nodes, &mut chars, &mut truncated, 0);
+    (TrajectoryRowSummary::from(row).into_row(details), truncated)
 }
 
 fn terminal_requires_child(terminal: &chat_state::SubagentTerminalEvent) -> bool {
@@ -1151,19 +1943,44 @@ fn workflow_run_id(event: &chat_state::WorkflowEvent) -> &str {
     }
 }
 
+fn workflow_result_preview(result: &serde_json::Value) -> String {
+    match result {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => crate::util::truncate(value, 220).to_owned(),
+        serde_json::Value::Array(values) => format!("array · {} items", values.len()),
+        serde_json::Value::Object(values) if values.is_empty() => "object · 0 fields".into(),
+        serde_json::Value::Object(values) => {
+            let mut keys = values
+                .keys()
+                .take(6)
+                .map(|key| crate::util::truncate(key, 28))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if values.len() > 6 {
+                keys.push_str(", …");
+            }
+            format!("object · {} fields · {keys}", values.len())
+        }
+    }
+}
+
 fn workflow_row(
     entry: &workflow::JournalEntry,
     run_id: &str,
     parent_entry_id: &str,
     path_prefix: &[u64],
+    pending: bool,
 ) -> chat_state::TrajectoryRow {
+    let entry_id = format!("t:{run_id}/{}", entry.seq);
     let failed = entry
         .result
         .get(workflow::journal::HOST_ERROR_KEY)
         .and_then(serde_json::Value::as_str);
-    let result = serde_json::to_string(&entry.result).unwrap_or_else(|_| "null".into());
+    let result_preview = workflow_result_preview(&entry.result);
     chat_state::TrajectoryRow {
-        entry_id: format!("t:{run_id}/{}", entry.seq),
+        entry_id,
         seq: entry.seq,
         parent_entry_id: Some(parent_entry_id.to_owned()),
         nesting_path: path_prefix.iter().copied().chain([0, entry.seq]).collect(),
@@ -1173,7 +1990,9 @@ fn workflow_row(
         class: "message".into(),
         producer: format!("workflow-host:{}", entry.kind),
         kind: format!("workflow.host_call.{}", entry.kind),
-        state: if failed.is_some() {
+        state: if pending {
+            "running".into()
+        } else if failed.is_some() {
             "failed".into()
         } else {
             "completed".into()
@@ -1183,11 +2002,15 @@ fn workflow_row(
         step_index: None,
         correlation_id: Some(entry.req_hash.clone()),
         duration_ms: None,
-        summary: failed.map_or_else(
-            || format!("{} · {}", entry.kind, crate::util::truncate(&result, 220)),
-            |error| format!("{} · {}", entry.kind, crate::util::truncate(error, 220)),
-        ),
-        details: serde_json::to_value(entry).unwrap_or(serde_json::Value::Null),
+        summary: if pending {
+            format!("{} · pending", entry.kind)
+        } else {
+            failed.map_or_else(
+                || format!("{} · {result_preview}", entry.kind),
+                |error| format!("{} · {}", entry.kind, crate::util::truncate(error, 220)),
+            )
+        },
+        details: serde_json::Value::Null,
     }
 }
 
@@ -1204,6 +2027,28 @@ fn validate_workflow_journal_entry(entry: &workflow::JournalEntry) -> anyhow::Re
         if result.agent_id.trim().is_empty() {
             anyhow::bail!("Workflow spawn_agent result has an empty agent id");
         }
+    }
+    Ok(())
+}
+
+fn project_workflow_entry(
+    projection: &mut workflow::Journal,
+    entry: workflow::JournalEntry,
+    event_limit: usize,
+) -> anyhow::Result<()> {
+    projection.project_physical_entry(entry.clone())?;
+    if projection.len() > event_limit {
+        anyhow::bail!("Trajectory exceeds the event limit");
+    }
+    if matches!(
+        projection.replay_operation(entry.seq, &entry.kind, &entry.req_hash)?,
+        Some(workflow::journal::OperationReplay::Completed(_))
+    ) {
+        let index = usize::try_from(entry.seq)?;
+        let logical = projection.entries().get(index).ok_or_else(|| {
+            anyhow::anyhow!("Workflow projection lost logical entry {}", entry.seq)
+        })?;
+        validate_workflow_journal_entry(logical)?;
     }
     Ok(())
 }
@@ -1226,8 +2071,14 @@ fn validate_workflow_journal_links(
         })
         .collect::<BTreeSet<_>>();
     let mut linked = BTreeSet::new();
-    for entry in &journal.entries {
+    for entry in journal.projection.entries() {
         if entry.kind != "spawn_agent"
+            || !matches!(
+                journal
+                    .projection
+                    .replay_operation(entry.seq, &entry.kind, &entry.req_hash)?,
+                Some(workflow::journal::OperationReplay::Completed(_))
+            )
             || entry
                 .result
                 .get(workflow::journal::HOST_ERROR_KEY)
@@ -1263,34 +2114,100 @@ impl SidebandCache {
             std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
             "Trajectory sideband ledger",
         )?;
-        let file_len = file.metadata()?.len();
-        if file_len < self.offset
-            || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
-        {
-            *self = Self::default();
-        }
-        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, &path)?;
-        if complete_len == 0 {
+        let opened_stamp = LedgerStamp::from_metadata(&file.metadata()?);
+        if self.source_stamp == Some(opened_stamp) {
             return Ok(());
         }
-        let mut events = self.events.clone();
-        for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
+        let replacing = self.source_stamp.is_some();
+        let rebuilding = ledger_requires_rebuild(
+            self.offset,
+            self.prefix_hasher.as_ref(),
+            self.tail_hash,
+            self.source_stamp,
+            opened_stamp,
+            &mut file,
+        )?;
+        let old_offset = self.offset;
+        let mut timeline = if rebuilding {
+            None
+        } else {
+            self.timeline.take()
+        };
+        let mut offset = if rebuilding { 0 } else { self.offset };
+        let mut prefix_hasher = if rebuilding {
+            None
+        } else {
+            self.prefix_hasher.clone()
+        };
+        let mut observed_stamp = opened_stamp;
+        let ingestion = (|| -> anyhow::Result<()> {
+            loop {
+                let (bytes, complete_len) = read_ledger_batch(&mut file, offset, &path)?;
+                if complete_len == 0 {
+                    let current_stamp = LedgerStamp::from_metadata(&file.metadata()?);
+                    if current_stamp != observed_stamp {
+                        observed_stamp = current_stamp;
+                        continue;
+                    }
+                    if rebuilding && replacing && offset == 0 {
+                        anyhow::bail!("Trajectory replacement has no committed sideband entry");
+                    }
+                    break;
+                }
+                for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if timeline
+                        .as_ref()
+                        .map_or(0, |timeline| timeline.events().len())
+                        >= event_limit
+                    {
+                        anyhow::bail!("Trajectory exceeds the event limit");
+                    }
+                    let event = serde_json::from_slice::<chat_state::SidebandEvent>(line).map_err(
+                        |error| anyhow::anyhow!("{} at byte {offset}: {error}", path.display()),
+                    )?;
+                    let current = match &mut timeline {
+                        Some(timeline) => timeline,
+                        None => timeline.insert(chat_state::SidebandTimeline::new(
+                            event.sideband_id.clone(),
+                        )?),
+                    };
+                    current.accept(event)?;
+                }
+                prefix_hasher
+                    .get_or_insert_with(blake3::Hasher::new)
+                    .update(&bytes[..complete_len]);
+                offset = offset.saturating_add(complete_len as u64);
+                observed_stamp = LedgerStamp::from_metadata(&file.metadata()?);
             }
-            if events.len() >= event_limit {
-                anyhow::bail!("Trajectory exceeds the event limit");
+            Ok(())
+        })();
+        if let Err(error) = ingestion {
+            if !rebuilding {
+                self.timeline = replay_sideband_prefix(&mut file, old_offset, &path, event_limit)?;
             }
-            let event =
-                serde_json::from_slice::<chat_state::SidebandEvent>(line).map_err(|error| {
-                    anyhow::anyhow!("{} at byte {}: {error}", path.display(), self.offset)
-                })?;
-            events.push(event);
+            return Err(error);
         }
-        chat_state::SidebandTimeline::from_events(events.clone())?;
-        self.events = events;
-        self.offset += complete_len as u64;
-        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
+        let tail_hash = match hash_ledger_tail(offset, &mut file) {
+            Ok(hash) => hash,
+            Err(error) => {
+                if !rebuilding {
+                    self.timeline =
+                        replay_sideband_prefix(&mut file, old_offset, &path, event_limit)?;
+                }
+                return Err(error);
+            }
+        };
+        if rebuilding {
+            *self = Self::default();
+        }
+        self.timeline = timeline;
+        self.offset = offset;
+        self.prefix_hasher = prefix_hasher;
+        self.tail_hash = tail_hash;
+        self.source_stamp = Some(observed_stamp);
         Ok(())
     }
 
@@ -1324,47 +2241,94 @@ impl WorkflowJournalCache {
         if !opened.is_file() || opened.len() > workflow::journal::MAX_JOURNAL_BYTES {
             anyhow::bail!("Workflow journal changed during open: {}", path.display());
         }
-        if opened.len() < self.offset || !self.prefix_matches(&mut file)? {
+        let opened_stamp = LedgerStamp::from_metadata(&opened);
+        if self.source_stamp == Some(opened_stamp) {
+            return Ok(());
+        }
+        let replacing = self.source_stamp.is_some();
+        let rebuilding = ledger_requires_rebuild(
+            self.offset,
+            self.prefix_hasher.as_ref(),
+            self.tail_hash,
+            self.source_stamp,
+            opened_stamp,
+            &mut file,
+        )?;
+        let old_offset = self.offset;
+        let mut projection = if rebuilding {
+            workflow::Journal::default()
+        } else {
+            std::mem::take(&mut self.projection)
+        };
+        let mut offset = if rebuilding { 0 } else { self.offset };
+        let mut prefix_hasher = if rebuilding {
+            None
+        } else {
+            self.prefix_hasher.clone()
+        };
+        let mut observed_stamp = opened_stamp;
+        let ingestion = (|| -> anyhow::Result<()> {
+            loop {
+                let (bytes, complete_len) = read_ledger_batch(&mut file, offset, &path)?;
+                if complete_len == 0 {
+                    let current = file.metadata()?;
+                    if !current.is_file() || current.len() > workflow::journal::MAX_JOURNAL_BYTES {
+                        anyhow::bail!("Workflow journal changed during read: {}", path.display());
+                    }
+                    let current_stamp = LedgerStamp::from_metadata(&current);
+                    if current_stamp != observed_stamp {
+                        observed_stamp = current_stamp;
+                        continue;
+                    }
+                    if rebuilding && replacing && offset == 0 {
+                        anyhow::bail!("Trajectory replacement has no committed Workflow entry");
+                    }
+                    break;
+                }
+                for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let entry = serde_json::from_slice::<workflow::JournalEntry>(line)?;
+                    project_workflow_entry(&mut projection, entry, event_limit)?;
+                }
+                prefix_hasher
+                    .get_or_insert_with(blake3::Hasher::new)
+                    .update(&bytes[..complete_len]);
+                offset = offset.saturating_add(complete_len as u64);
+                let current = file.metadata()?;
+                if !current.is_file() || current.len() > workflow::journal::MAX_JOURNAL_BYTES {
+                    anyhow::bail!("Workflow journal changed during read: {}", path.display());
+                }
+                observed_stamp = LedgerStamp::from_metadata(&current);
+            }
+            Ok(())
+        })();
+        if let Err(error) = ingestion {
+            if !rebuilding {
+                self.projection =
+                    replay_workflow_prefix(&mut file, old_offset, &path, event_limit)?;
+            }
+            return Err(error);
+        }
+        let tail_hash = match hash_ledger_tail(offset, &mut file) {
+            Ok(hash) => hash,
+            Err(error) => {
+                if !rebuilding {
+                    self.projection =
+                        replay_workflow_prefix(&mut file, old_offset, &path, event_limit)?;
+                }
+                return Err(error);
+            }
+        };
+        if rebuilding {
             *self = Self::default();
         }
-        file.seek(std::io::SeekFrom::Start(self.offset))?;
-        let mut bytes = Vec::new();
-        let remaining = workflow::journal::MAX_JOURNAL_BYTES.saturating_sub(self.offset);
-        (&mut file)
-            .take(remaining.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > remaining {
-            anyhow::bail!("Workflow journal exceeds the byte limit");
-        }
-        let complete_len = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
-        let mut entries = self.entries.clone();
-        for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            if entries.len() >= workflow::journal::MAX_JOURNAL_ENTRIES {
-                anyhow::bail!("Workflow journal exceeds the entry limit");
-            }
-            if entries.len() >= event_limit {
-                anyhow::bail!("Trajectory exceeds the event limit");
-            }
-            let entry = serde_json::from_slice::<workflow::JournalEntry>(line)?;
-            let expected = u64::try_from(entries.len())?;
-            if entry.seq != expected {
-                anyhow::bail!(
-                    "Workflow journal is not dense: expected {expected}, found {}",
-                    entry.seq
-                );
-            }
-            validate_workflow_journal_entry(&entry)?;
-            entries.push(entry);
-        }
-        self.entries = entries;
-        self.offset = self.offset.saturating_add(complete_len as u64);
-        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
+        self.projection = projection;
+        self.offset = offset;
+        self.prefix_hasher = prefix_hasher;
+        self.tail_hash = tail_hash;
+        self.source_stamp = Some(observed_stamp);
         Ok(())
     }
 
@@ -1381,10 +2345,6 @@ impl WorkflowJournalCache {
         )?;
         self.refresh_from_directory(&directory, MAX_TRAJECTORY_EVENTS)
     }
-
-    fn prefix_matches(&self, file: &mut std::fs::File) -> anyhow::Result<bool> {
-        ledger_prefix_matches(self.offset, self.prefix_hash, file)
-    }
 }
 
 fn sideband_row(
@@ -1393,6 +2353,7 @@ fn sideband_row(
     path_prefix: &[u64],
     attempt_times: &BTreeMap<u64, i64>,
 ) -> chat_state::TrajectoryRow {
+    let entry_id = format!("t:{}/{}", event.sideband_id, event.seq);
     let (kind, state, producer, summary, duration_ms) = match &event.kind {
         chat_state::SidebandEventKind::Request(request) => (
             "sideband.request",
@@ -1448,7 +2409,7 @@ fn sideband_row(
         ),
     };
     chat_state::TrajectoryRow {
-        entry_id: format!("t:{}/{}", event.sideband_id, event.seq),
+        entry_id,
         seq: event.seq,
         parent_entry_id: Some(parent_entry_id.to_owned()),
         nesting_path: path_prefix
@@ -1469,7 +2430,7 @@ fn sideband_row(
         correlation_id: Some(event.sideband_id.clone()),
         duration_ms,
         summary,
-        details: serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null),
+        details: serde_json::Value::Null,
     }
 }
 
@@ -1481,14 +2442,20 @@ fn visibility_name(value: chat_state::SurfaceVisibility) -> &'static str {
     }
 }
 
-fn require_local_host(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+type HttpError = (StatusCode, HeaderMap, String);
+
+fn http_error(status: StatusCode, message: impl Into<String>) -> HttpError {
+    (status, response_security_headers(), message.into())
+}
+
+fn require_local_host(headers: &HeaderMap) -> Result<(), HttpError> {
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| (StatusCode::FORBIDDEN, "missing Host header".into()))?;
+        .ok_or_else(|| http_error(StatusCode::FORBIDDEN, "missing Host header"))?;
     let authority = host
         .parse::<axum::http::uri::Authority>()
-        .map_err(|_| (StatusCode::FORBIDDEN, "invalid Host header".into()))?;
+        .map_err(|_| http_error(StatusCode::FORBIDDEN, "invalid Host header"))?;
     let authority_host = authority.host();
     let ip_host = authority_host
         .strip_prefix('[')
@@ -1499,12 +2466,24 @@ fn require_local_host(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     if local {
         Ok(())
     } else {
-        Err((StatusCode::FORBIDDEN, "non-loopback Host rejected".into()))
+        Err(http_error(
+            StatusCode::FORBIDDEN,
+            "non-loopback Host rejected",
+        ))
     }
 }
 
-fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+fn internal_error(error: impl std::fmt::Display) -> HttpError {
+    tracing::error!(error = %error, "Trajectory query failed");
+    http_error(StatusCode::INTERNAL_SERVER_ERROR, "Trajectory query failed")
+}
+
+fn query_error_response(error: anyhow::Error) -> HttpError {
+    if error.downcast_ref::<TrajectoryEntryNotFound>().is_some() {
+        http_error(StatusCode::NOT_FOUND, error.to_string())
+    } else {
+        internal_error(error)
+    }
 }
 
 fn response_security_headers() -> HeaderMap {
@@ -1529,6 +2508,135 @@ fn response_security_headers() -> HeaderMap {
         HeaderValue::from_static("DENY"),
     );
     headers
+}
+
+fn replay_timeline_prefix(
+    file: &mut std::fs::File,
+    offset: u64,
+    path: &Path,
+    event_limit: usize,
+) -> anyhow::Result<(chat_state::Timeline, chat_state::TrajectoryProjector)> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut reader = std::io::BufReader::new((&mut *file).take(offset));
+    let mut timeline = chat_state::Timeline::default();
+    let mut projector = chat_state::TrajectoryProjector::default();
+    let mut line = Vec::new();
+    let mut consumed = 0_u64;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(read as u64);
+        if line.last() != Some(&b'\n') {
+            anyhow::bail!("{} has an uncommitted cached prefix", path.display());
+        }
+        line.pop();
+        if line.is_empty() {
+            continue;
+        }
+        if timeline.events().len() >= event_limit {
+            anyhow::bail!("Trajectory exceeds the event limit");
+        }
+        let event = serde_json::from_slice::<chat_state::TimelineEvent>(&line)?;
+        timeline.accept(event.clone())?;
+        projector.accept(&event);
+    }
+    if consumed != offset {
+        anyhow::bail!(
+            "{} changed while restoring its cached prefix",
+            path.display()
+        );
+    }
+    Ok((timeline, projector))
+}
+
+fn replay_workflow_prefix(
+    file: &mut std::fs::File,
+    offset: u64,
+    path: &Path,
+    event_limit: usize,
+) -> anyhow::Result<workflow::Journal> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut reader = std::io::BufReader::new((&mut *file).take(offset));
+    let mut projection = workflow::Journal::default();
+    let mut line = Vec::new();
+    let mut consumed = 0_u64;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(read as u64);
+        if line.last() != Some(&b'\n') {
+            anyhow::bail!("{} has an uncommitted cached prefix", path.display());
+        }
+        line.pop();
+        if line.is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_slice::<workflow::JournalEntry>(&line)?;
+        project_workflow_entry(&mut projection, entry, event_limit)?;
+    }
+    if consumed != offset {
+        anyhow::bail!(
+            "{} changed while restoring its cached prefix",
+            path.display()
+        );
+    }
+    Ok(projection)
+}
+
+fn replay_sideband_prefix(
+    file: &mut std::fs::File,
+    offset: u64,
+    path: &Path,
+    event_limit: usize,
+) -> anyhow::Result<Option<chat_state::SidebandTimeline>> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut reader = std::io::BufReader::new((&mut *file).take(offset));
+    let mut timeline: Option<chat_state::SidebandTimeline> = None;
+    let mut line = Vec::new();
+    let mut consumed = 0_u64;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(read as u64);
+        if line.last() != Some(&b'\n') {
+            anyhow::bail!("{} has an uncommitted cached prefix", path.display());
+        }
+        line.pop();
+        if line.is_empty() {
+            continue;
+        }
+        if timeline
+            .as_ref()
+            .map_or(0, |timeline| timeline.events().len())
+            >= event_limit
+        {
+            anyhow::bail!("Trajectory exceeds the event limit");
+        }
+        let event = serde_json::from_slice::<chat_state::SidebandEvent>(&line)?;
+        let current = match &mut timeline {
+            Some(timeline) => timeline,
+            None => timeline.insert(chat_state::SidebandTimeline::new(
+                event.sideband_id.clone(),
+            )?),
+        };
+        current.accept(event)?;
+    }
+    if consumed != offset {
+        anyhow::bail!(
+            "{} changed while restoring its cached prefix",
+            path.display()
+        );
+    }
+    Ok(timeline)
 }
 
 fn read_ledger_batch(
@@ -1584,7 +2692,40 @@ fn read_ledger_batch(
     Ok((bytes, complete_len))
 }
 
-fn ledger_prefix_matches(
+fn ledger_digest(hasher: Option<&blake3::Hasher>) -> [u8; 32] {
+    hasher.map_or([0; 32], |hasher| *hasher.finalize().as_bytes())
+}
+
+fn ledger_requires_rebuild(
+    offset: u64,
+    prefix_hasher: Option<&blake3::Hasher>,
+    tail_hash: Option<[u8; 32]>,
+    previous_stamp: Option<LedgerStamp>,
+    opened_stamp: LedgerStamp,
+    file: &mut std::fs::File,
+) -> anyhow::Result<bool> {
+    let Some(previous_stamp) = previous_stamp else {
+        return Ok(true);
+    };
+    if !previous_stamp.same_file_as(opened_stamp) || opened_stamp.len < offset {
+        return Ok(true);
+    }
+    if offset == 0 {
+        return Ok(false);
+    }
+    if opened_stamp.len > offset {
+        // The authoritative writer only grows an existing ledger by append.
+        // Checking its last committed block protects the append boundary
+        // without making every live poll proportional to the full history.
+        return Ok(!ledger_tail_matches(offset, tail_hash, file)?);
+    }
+    let Some(expected) = prefix_hasher.map(|hasher| *hasher.finalize().as_bytes()) else {
+        return Ok(true);
+    };
+    Ok(!hash_ledger_prefix(offset, file)?.is_some_and(|actual| actual == expected))
+}
+
+fn ledger_tail_matches(
     offset: u64,
     expected: Option<[u8; 32]>,
     file: &mut std::fs::File,
@@ -1595,20 +2736,18 @@ fn ledger_prefix_matches(
     let Some(expected) = expected else {
         return Ok(false);
     };
-    Ok(hash_ledger_prefix(offset, file)?.is_some_and(|actual| actual == expected))
+    Ok(hash_ledger_tail(offset, file)?.is_some_and(|actual| actual == expected))
 }
 
-fn refresh_ledger_prefix_hash(
-    offset: u64,
-    hash: &mut Option<[u8; 32]>,
-    file: &mut std::fs::File,
-) -> anyhow::Result<()> {
-    *hash = if offset == 0 {
-        None
-    } else {
-        hash_ledger_prefix(offset, file)?
-    };
-    Ok(())
+fn hash_ledger_tail(offset: u64, file: &mut std::fs::File) -> anyhow::Result<Option<[u8; 32]>> {
+    if offset == 0 {
+        return Ok(None);
+    }
+    let length = offset.min(LEDGER_TAIL_CHECK_BYTES);
+    file.seek(std::io::SeekFrom::Start(offset - length))?;
+    let mut bytes = vec![0; usize::try_from(length)?];
+    file.read_exact(&mut bytes)?;
+    Ok(Some(*blake3::hash(&bytes).as_bytes()))
 }
 
 fn hash_ledger_prefix(offset: u64, file: &mut std::fs::File) -> anyhow::Result<Option<[u8; 32]>> {
@@ -1628,42 +2767,7 @@ fn hash_ledger_prefix(offset: u64, file: &mut std::fs::File) -> anyhow::Result<O
     Ok(Some(*hasher.finalize().as_bytes()))
 }
 
-const PAGE: &str = r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Grow Trajectory</title><style>
-:root{color-scheme:dark;--bg:#0b0d10;--panel:#12151a;--line:#272c35;--muted:#89919f;--text:#e7eaf0;--accent:#7dd3fc;--green:#86efac;--yellow:#fde68a;--red:#fca5a5}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px ui-monospace,SFMono-Regular,Menlo,monospace;height:100vh;overflow:hidden}
-header{height:58px;display:flex;align-items:center;gap:18px;padding:0 18px;border-bottom:1px solid var(--line);background:#0e1116}.brand{font-weight:800;letter-spacing:.08em}.session{color:var(--accent)}.stats{display:flex;gap:14px;color:var(--muted);margin-left:auto}.live{color:var(--green)}
-.controls{min-height:88px;display:flex;align-content:center;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 18px;border-bottom:1px solid var(--line);background:var(--panel)}input,select,button{height:34px;background:#0b0e13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:0 9px;font:inherit}input{width:min(340px,34vw)}button{cursor:pointer}button:hover{border-color:#4b5563}.follow.on{color:var(--green);border-color:#28623e}
-.overview{height:64px;display:grid;grid-template-columns:58px minmax(0,1fr);border-bottom:1px solid var(--line);background:#0e1116}.lane-labels{position:relative;border-right:1px solid var(--line);color:var(--muted);font-size:9px}.lane-labels span{position:absolute;right:5px}.lane-labels span:nth-child(1){top:8px}.lane-labels span:nth-child(2){top:27px}.lane-labels span:nth-child(3){top:46px}.track{position:relative;overflow:hidden}.track::before,.track::after{content:"";position:absolute;left:0;right:0;border-top:1px solid #191e26}.track::before{top:21px}.track::after{top:42px}.span{position:absolute;height:8px;top:calc(7px + var(--lane) * 20px);left:var(--left);width:max(2px,var(--width));min-width:2px;border:0;border-radius:2px;padding:0;background:var(--muted);opacity:.78;cursor:pointer}.span.input{background:var(--accent)}.span.model{background:#c4b5fd}.span.tools{background:var(--yellow)}.span.failed,.span.cancelled{background:var(--red)}.span.shadowed{opacity:.25}.span:hover,.span.selected{opacity:1;box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--accent)}.turn-mark{position:absolute;top:0;bottom:0;width:1px;background:#334155;pointer-events:none}
-main{height:calc(100vh - 210px);display:grid;grid-template-columns:minmax(0,1fr) 420px}.ledger{overflow:auto}.inspector{border-left:1px solid var(--line);background:#0e1116;overflow:auto;padding:16px}.inspector h3{margin:0 0 12px}.inspector pre{white-space:pre-wrap;word-break:break-word;color:#cbd5e1;line-height:1.5}.empty{color:var(--muted)}
-table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}thead{position:sticky;top:0;background:#151920;z-index:2}th{text-align:left;color:var(--muted);font-weight:500;padding:9px 8px;border-bottom:1px solid var(--line)}td{padding:8px;border-bottom:1px solid #1b2028;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}tr{cursor:pointer}tbody tr.event-row{height:34px}tbody tr.spacer{cursor:default}tbody tr.spacer td{padding:0;border:0}tbody tr:hover,tbody tr.selected{background:#151b24}.seq{width:108px;color:#657083}.time{width:92px}.class{width:92px}.layer{width:112px}.actor{width:154px}.kind{width:150px}.producer{width:116px}.state{width:88px}.turn{width:72px}.duration{width:82px;text-align:right}.summary{width:auto}.message .kind{color:var(--accent)}.audit .kind{color:var(--green)}.auxiliary .kind{color:#c4b5fd}.failed,.cancelled{color:var(--red)}.retrying{color:var(--yellow)}.shadowed{opacity:.48}.pill{padding:2px 6px;border:1px solid var(--line);border-radius:999px}
-@media(max-width:900px){main{grid-template-columns:1fr}.inspector{display:none}.stats{display:none}.turn{display:none}}
-</style></head><body>
-<header><span class="brand">GROW / TRAJECTORY</span><span class="session" id="session">loading…</span><div class="stats"><span id="counts"></span><span id="position"></span><span class="live" id="health">● live</span></div></header>
-<div class="controls"><input id="search" placeholder="Search coordinates, kind, id, payload…"><select id="layer"><option value="">all layers</option><option>system</option><option>user</option><option>assistant</option><option>tool</option><option>plugin</option><option>meta</option></select><select id="actor"><option value="">all actors</option><option>main</option><option>subagent</option><option>workflow</option><option>sideband</option></select><select id="class"><option value="">all classes</option><option>message</option><option>lifecycle</option><option>governance</option><option>audit</option><option>auxiliary</option></select><select id="producer"><option value="">all producers</option><option>core</option><option>model</option><option>tool</option><option>workflow-host</option><option>hook</option><option>plugin</option><option>skill</option><option>mcp</option><option>user</option></select><select id="visibility"><option value="">all surfaces</option><option value="current">current</option><option value="shadowed">shadowed</option><option value="log_only">log only</option></select><button id="older">load earlier</button><button class="follow on" id="follow">tail follow</button><button id="refresh">refresh</button></div>
-<div class="overview"><div class="lane-labels"><span>INPUT</span><span>MODEL</span><span>TOOLS</span></div><div class="track" id="track"></div></div>
-<main><div class="ledger" id="ledger"><table><thead><tr><th class="seq">seq</th><th class="time">time</th><th class="class">class</th><th class="layer">layer</th><th class="actor">actor</th><th class="kind">kind</th><th class="producer">producer</th><th class="state">state</th><th class="turn">turn/step</th><th class="duration">duration</th><th class="summary">summary</th></tr></thead><tbody id="rows"></tbody></table></div><aside class="inspector"><h3>Event inspector</h3><div class="empty" id="hint">Select an event to inspect its canonical payload and four-dimensional identity.</div><pre id="details"></pre></aside></main>
-<script>
-const $=id=>document.getElementById(id), rows=$('rows'), ledger=$('ledger'), track=$('track'),ROW_HEIGHT=34,OVERSCAN=20;function hashEntry(){if(!location.hash)return null;try{return decodeURIComponent(location.hash.slice(1))}catch{return null}}let follow=true,selected=hashEntry(),deepLinkPending=selected!=null,timer,latestData=null,olderRows=[],hasEarlier=false,displayRows=[],renderQueued=false;
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function time(ms){return new Date(ms).toLocaleTimeString([], {hour12:false})}function duration(ms){return ms==null?'—':ms<1000?ms+' ms':(ms/1000).toFixed(2)+' s'}
-function lane(r){if(r.layer.startsWith('tool'))return['tools',2];if(r.layer==='assistant'||r.producer.startsWith('model')||r.kind.startsWith('request.')||r.kind.startsWith('step.'))return['model',1];return['input',0]}
-function drawOverview(items){if(!items.length){track.innerHTML='';return}const starts=items.map(r=>r.at_ms-(r.duration_ms??0)),ends=items.map(r=>r.at_ms),min=Math.min(...starts),max=Math.max(...ends,min+1),domain=max-min;const marks=items.filter(r=>r.kind==='turn.started').map(r=>`<i class="turn-mark" style="left:${((r.at_ms-min)/domain)*100}%"></i>`).join('');const spans=items.map(r=>{const [laneKind,n]=lane(r),start=r.at_ms-(r.duration_ms??0),left=((start-min)/domain)*100,width=Math.max(.12,((Math.max(r.duration_ms??0,1))/domain)*100);return `<button class="span ${laneKind} ${esc(r.state)} ${esc(r.visibility)}" data-entry="${esc(r.entry_id)}" style="--lane:${n};--left:${left}%;--width:${width}%" title="${esc(r.entry_id)} ${esc(r.kind)} · ${esc(r.summary)}"></button>`}).join('');track.innerHTML=marks+spans;track.querySelectorAll('.span').forEach(span=>span.onclick=()=>focusEvent(span.dataset.entry))}
-function rowMarkup(r){const depth=Math.max(0,r.nesting_path.length-1),parent=r.parent_entry_id==null?'':` ← ${esc(r.parent_entry_id)}`;return `<tr data-entry="${esc(r.entry_id)}" class="event-row ${esc(r.class)} ${esc(r.state)} ${esc(r.visibility)}"><td class="seq" title="${esc(r.entry_id)}${parent}"><span style="padding-left:${depth*12}px">${depth?'↳ ':''}${r.nesting_path.join('·')}</span></td><td class="time">${time(r.at_ms)}</td><td class="class"><span class="pill">${esc(r.class)}</span></td><td class="layer">${esc(r.layer)}</td><td class="actor">${esc(r.actor)}</td><td class="kind">${esc(r.kind)}</td><td class="producer">${esc(r.producer)}</td><td class="state">${esc(r.state)}</td><td class="turn">${r.turn_id??'—'}/${r.step_index??'—'}</td><td class="duration">${duration(r.duration_ms)}</td><td class="summary" title="${esc(r.summary)}">${esc(r.summary)}</td></tr>`}
-function renderLedger(){renderQueued=false;const viewport=Math.max(1,ledger.clientHeight),start=Math.max(0,Math.floor(ledger.scrollTop/ROW_HEIGHT)-OVERSCAN),end=Math.min(displayRows.length,Math.ceil((ledger.scrollTop+viewport)/ROW_HEIGHT)+OVERSCAN),top=start*ROW_HEIGHT,bottom=(displayRows.length-end)*ROW_HEIGHT;rows.innerHTML=`<tr class="spacer"><td colspan="11" style="height:${top}px"></td></tr>`+displayRows.slice(start,end).map(rowMarkup).join('')+`<tr class="spacer"><td colspan="11" style="height:${bottom}px"></td></tr>`;rows.querySelectorAll('tr.event-row').forEach(tr=>tr.onclick=()=>inspect(tr.dataset.entry,tr));if(selected!=null)rows.querySelector(selector(selected))?.classList.add('selected')}
-function queueRender(){if(!renderQueued){renderQueued=true;requestAnimationFrame(renderLedger)}}
-function draw(data){$('session').textContent=data.sessionId;$('counts').textContent=`${data.eventCount} events · ${data.currentSurfaceItems} surface · ${data.matchingCount} matched`;$('position').textContent=data.activeTurn==null?(data.openWorkflows.length?`${data.openWorkflows.length} workflow active`:'idle'):`turn ${data.activeTurn} / step ${data.activeStep??'—'}`;$('older').disabled=!hasEarlier;displayRows=data.rows;window.__trajectory=displayRows;renderLedger();drawOverview(displayRows);if(follow){ledger.scrollTop=Math.max(0,displayRows.length*ROW_HEIGHT-ledger.clientHeight);renderLedger()}if(selected!=null){focusEvent(selected,deepLinkPending);deepLinkPending=false}}
-function selector(entry){return `[data-entry="${CSS.escape(entry)}"]`}function inspect(entry,tr){rows.querySelector('.selected')?.classList.remove('selected');track.querySelector('.selected')?.classList.remove('selected');tr?.classList.add('selected');track.querySelector(selector(entry))?.classList.add('selected');selected=entry;history.replaceState(null,'',`#${encodeURIComponent(entry)}`);const r=displayRows.find(x=>x.entry_id===entry);if(!r)return;$('hint').style.display='none';$('details').textContent=JSON.stringify(r,null,2)}
-function focusEvent(entry,scroll=true){const index=displayRows.findIndex(row=>row.entry_id===entry);if(index<0)return;follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused';if(scroll){ledger.scrollTop=Math.max(0,index*ROW_HEIGHT-ledger.clientHeight/2);renderLedger()}inspect(entry,rows.querySelector(selector(entry)))}
-function queryParams(){const p=new URLSearchParams({limit:'5000'});if(deepLinkPending&&selected)p.set('entry',selected);if($('search').value)p.set('search',$('search').value);for(const id of ['layer','actor','class','producer','visibility'])if($(id).value)p.set(id,$(id).value);return p}
-function rootSeq(r){return r.nesting_path[0]}function comparePath(a,b){for(let i=0;i<Math.min(a.length,b.length);i++)if(a[i]!==b[i])return a[i]-b[i];return a.length-b.length}function mergeRows(...groups){const byId=new Map;for(const group of groups)for(const row of group)byId.set(row.entry_id,row);return [...byId.values()].sort((a,b)=>comparePath(a.nesting_path,b.nesting_path))}
-async function fetchPage(params){const base=window.location.pathname.replace(/\/?$/,'/');const endpoint=new URL(base+'api/trajectory',window.location.origin);endpoint.search=params;const res=await fetch(endpoint);if(!res.ok)throw Error(await res.text());return await res.json()}
-async function load(){clearTimeout(timer);try{const focusing=deepLinkPending&&selected!=null,data=await fetchPage(queryParams());if(focusing)olderRows=mergeRows(data.rows,olderRows);latestData=data;if(!olderRows.length||focusing)hasEarlier=data.hasEarlier;data.rows=mergeRows(olderRows,data.rows);draw(data);$('health').textContent='● live';$('health').style.color='var(--green)'}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}timer=setTimeout(load,1000)}
-async function loadEarlier(){const visible=window.__trajectory??[];if(!visible.length||!hasEarlier)return;const oldHeight=ledger.scrollHeight,oldTop=ledger.scrollTop,p=queryParams();p.set('before',String(rootSeq(visible[0])));$('older').disabled=true;try{const page=await fetchPage(p);olderRows=mergeRows(page.rows,olderRows);hasEarlier=page.hasEarlier;if(latestData){latestData.rows=mergeRows(olderRows,latestData.rows);draw(latestData);ledger.scrollTop=oldTop+(ledger.scrollHeight-oldHeight)}}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}$('older').disabled=!hasEarlier}
-function resetWindow(){olderRows=[];hasEarlier=false;load()}
-$('older').onclick=loadEarlier;$('follow').onclick=()=>{follow=!follow;$('follow').classList.toggle('on',follow);$('follow').textContent=follow?'tail follow':'tail paused'};$('refresh').onclick=load;for(const id of ['layer','actor','class','producer','visibility'])$(id).onchange=resetWindow;let debounce;$('search').oninput=()=>{clearTimeout(debounce);debounce=setTimeout(resetWindow,180)};ledger.onscroll=()=>{queueRender();if(ledger.scrollHeight-ledger.scrollTop-ledger.clientHeight>80){follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused'}};window.onhashchange=()=>{const entry=hashEntry();if(entry){deepLinkPending=true;focusEvent(entry)}};load();
-</script></body></html>"#;
+const PAGE: &str = include_str!("trajectory.html");
 
 #[cfg(test)]
 mod tests {
@@ -1710,9 +2814,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let session_dir = temp.path().join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
+        let timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(
+                "inspect the event",
+            )])
+            .unwrap();
         write_timeline(
             &session_dir.join(super::super::storage::TIMELINE_FILE),
-            &chat_state::Timeline::default(),
+            &timeline,
         );
         let state = AppState {
             session_id: "canonical-session".into(),
@@ -1721,9 +2830,7 @@ mod tests {
             sessions_root: temp.path().join("sessions"),
             cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, trajectory_router("secret", state))
@@ -1749,6 +2856,78 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["sessionId"], "canonical-session");
+        assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+        assert!(body["rows"][0].get("details").is_none());
+        assert_eq!(body["overview"]["input_count"], 1);
+
+        let response = client
+            .get(format!(
+                "http://{address}/secret/api/trajectory/event?entry=t%3Acanonical-session%2F0"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body["row"].get("details").is_some());
+
+        let response = client
+            .get(format!(
+                "http://{address}/secret/api/trajectory/event?entry=t%3Amissing%2F0"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+
+        let response = client
+            .get(format!(
+                "http://{address}/secret/api/trajectory?after=a&before=b"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+
+        for path in [
+            "/secret/api/trajectory?limit=not-a-number",
+            "/secret/api/trajectory/event",
+            "/secret/missing",
+        ] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_client_error(), "path {path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        }
+
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(
+                    temp.path()
+                        .join("session")
+                        .join(super::super::storage::TIMELINE_FILE)
+                )
+                .unwrap(),
+            "{{not-json}}"
+        )
+        .unwrap();
+        let response = client
+            .get(format!("http://{address}/secret/api/trajectory"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.text().await.unwrap(), "Trajectory query failed");
 
         server.abort();
         let _ = server.await;
@@ -1759,6 +2938,22 @@ mod tests {
             .events()
             .iter()
             .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn write_timeline_with_start_time(path: &Path, timeline: &chat_state::Timeline, start_ms: i64) {
+        let body = timeline
+            .events()
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, mut event)| {
+                event.at_ms = start_ms.saturating_add(index as i64);
+                serde_json::to_string(&event).unwrap()
+            })
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
@@ -1879,7 +3074,9 @@ mod tests {
             chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("bravo")])
                 .unwrap();
         write_timeline(&path, &first);
-        let first_len = std::fs::metadata(&path).unwrap().len();
+        let first_metadata = std::fs::metadata(&path).unwrap();
+        let first_len = first_metadata.len();
+        let first_mtime = filetime::FileTime::from_last_modification_time(&first_metadata);
 
         let mut cache = SessionTrajectoryCache::default();
         cache.refresh(&path).unwrap();
@@ -1887,6 +3084,7 @@ mod tests {
 
         write_timeline(&path, &second);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), first_len);
+        filetime::set_file_mtime(&path, first_mtime).unwrap();
         cache.refresh(&path).unwrap();
         assert_eq!(cache.timeline.events().len(), 1);
         assert_eq!(cache.timeline.surface()[0].text_content(), "bravo");
@@ -1967,7 +3165,8 @@ mod tests {
         cache.refresh(&path).unwrap();
         write(&[event('b')]);
         cache.refresh(&path).unwrap();
-        let chat_state::SidebandEventKind::Request(request) = &cache.events[0].kind else {
+        let events = cache.timeline.as_ref().unwrap().events();
+        let chat_state::SidebandEventKind::Request(request) = &events[0].kind else {
             panic!("expected request");
         };
         assert!(request.prompt.starts_with('b'));
@@ -1985,8 +3184,9 @@ mod tests {
         };
         write(&[third, terminal]);
         cache.refresh(&path).unwrap();
-        assert_eq!(cache.events.len(), 2);
-        let chat_state::SidebandEventKind::Request(request) = &cache.events[0].kind else {
+        let events = cache.timeline.as_ref().unwrap().events();
+        assert_eq!(events.len(), 2);
+        let chat_state::SidebandEventKind::Request(request) = &events[0].kind else {
             panic!("expected request");
         };
         assert!(request.prompt.starts_with('c'));
@@ -2052,6 +3252,37 @@ mod tests {
     }
 
     #[test]
+    fn malformed_timeline_replacement_preserves_the_verified_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let first =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("first")])
+                .unwrap();
+        let replacement =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(
+                "replacement",
+            )])
+            .unwrap();
+        write_timeline(&path, &first);
+        let mut cache = SessionTrajectoryCache::default();
+        cache.refresh(&path).unwrap();
+        let committed_offset = cache.offset;
+
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{{not-json}}\n",
+                serde_json::to_string(&replacement.events()[0]).unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(cache.refresh(&path).is_err());
+        assert_eq!(cache.offset, committed_offset);
+        assert_eq!(cache.timeline.surface()[0].text_content(), "first");
+        assert_eq!(cache.projector.rows().len(), 1);
+    }
+
+    #[test]
     fn workflow_journal_cache_detects_same_length_tail_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.jsonl");
@@ -2070,14 +3301,23 @@ mod tests {
             .unwrap();
         };
         write(&entry("aa"));
+        let first_mtime =
+            filetime::FileTime::from_last_modification_time(&std::fs::metadata(&path).unwrap());
         let mut cache = WorkflowJournalCache::default();
         cache.refresh(&path).unwrap();
-        assert_eq!(cache.entries[0].result, serde_json::json!("aa"));
+        assert_eq!(
+            cache.projection.entries()[0].result,
+            serde_json::json!("aa")
+        );
 
         write(&entry("bb"));
+        filetime::set_file_mtime(&path, first_mtime).unwrap();
         cache.refresh(&path).unwrap();
-        assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.entries[0].result, serde_json::json!("bb"));
+        assert_eq!(cache.projection.len(), 1);
+        assert_eq!(
+            cache.projection.entries()[0].result,
+            serde_json::json!("bb")
+        );
     }
 
     #[test]
@@ -2105,15 +3345,23 @@ mod tests {
         write(&[entry(0, 'b')]);
         cache.refresh(&path).unwrap();
         assert_eq!(
-            cache.entries[0].result.as_str().unwrap().as_bytes()[0],
+            cache.projection.entries()[0]
+                .result
+                .as_str()
+                .unwrap()
+                .as_bytes()[0],
             b'b'
         );
 
         write(&[entry(0, 'c'), entry(1, 'd')]);
         cache.refresh(&path).unwrap();
-        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.projection.len(), 2);
         assert_eq!(
-            cache.entries[0].result.as_str().unwrap().as_bytes()[0],
+            cache.projection.entries()[0]
+                .result
+                .as_str()
+                .unwrap()
+                .as_bytes()[0],
             b'c'
         );
     }
@@ -2146,8 +3394,101 @@ mod tests {
         writeln!(file, "{{not-json}}").unwrap();
 
         assert!(cache.refresh(&path).is_err());
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.projection.len(), 1);
         assert_eq!(cache.offset, committed_offset);
+    }
+
+    #[test]
+    fn malformed_workflow_replacement_preserves_the_verified_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let entry = |result: &str| workflow::JournalEntry {
+            seq: 0,
+            kind: "log".into(),
+            req_hash: "request".into(),
+            result: serde_json::Value::String(result.into()),
+            at_ms: 1,
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry("first")).unwrap()),
+        )
+        .unwrap();
+        let mut cache = WorkflowJournalCache::default();
+        cache.refresh(&path).unwrap();
+        let committed_offset = cache.offset;
+
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{{not-json}}\n",
+                serde_json::to_string(&entry("replacement")).unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(cache.refresh(&path).is_err());
+        assert_eq!(cache.offset, committed_offset);
+        assert_eq!(
+            cache.projection.entries()[0].result,
+            serde_json::json!("first")
+        );
+    }
+
+    #[test]
+    fn workflow_journal_cache_folds_pending_and_completed_physical_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let pending = workflow::JournalEntry {
+            seq: 0,
+            kind: "spawn_agent".into(),
+            req_hash: "request".into(),
+            result: serde_json::json!({"__workflow_operation_pending": "operation"}),
+            at_ms: 1,
+        };
+        let completed = workflow::JournalEntry {
+            result: serde_json::json!({
+                "agent_id": "agent-1",
+                "success": true,
+                "output": "completed",
+                "cancelled": false,
+                "tokens_used": 1,
+                "duration_ms": 1
+            }),
+            at_ms: 2,
+            ..pending.clone()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&pending).unwrap(),
+                serde_json::to_string(&completed).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let mut cache = WorkflowJournalCache::default();
+        cache.refresh(&path).unwrap();
+
+        assert_eq!(cache.projection.len(), 1);
+        assert_eq!(cache.projection.entries()[0].result["agent_id"], "agent-1");
+    }
+
+    #[test]
+    fn workflow_result_preview_never_serializes_large_structured_values() {
+        let scalar =
+            workflow_result_preview(&serde_json::Value::String("payload".repeat(1_000_000)));
+        assert_eq!(scalar.chars().count(), 220);
+
+        let structured = workflow_result_preview(&serde_json::json!({
+            "large": "payload".repeat(1_000_000),
+            "status": "completed",
+        }));
+        assert!(structured.starts_with("object · 2 fields · "));
+        assert!(structured.contains("large"));
+        assert!(structured.contains("status"));
+        assert!(!structured.contains("payload"));
+        assert!(structured.len() < 128);
     }
 
     #[test]
@@ -2281,14 +3622,23 @@ mod tests {
         .unwrap();
         assert_eq!(response.event_count, 6);
         assert_eq!(response.rows.len(), 4);
-        assert_eq!(response.rows[1].entry_id, "t:wf_debug/0");
+        let first_host_call = response
+            .rows
+            .iter()
+            .find(|row| row.entry_id == "t:wf_debug/0")
+            .unwrap();
         assert_eq!(
-            response.rows[1].parent_entry_id.as_deref(),
+            first_host_call.parent_entry_id.as_deref(),
             Some("t:session/0")
         );
-        assert_eq!(response.rows[1].nesting_path, [0, 0, 0]);
-        assert_eq!(response.rows[1].actor, "workflow:wf_debug");
-        assert_eq!(response.rows[2].entry_id, "t:wf_debug/1");
+        assert_eq!(first_host_call.nesting_path, [0, 0, 0]);
+        assert_eq!(first_host_call.actor, "workflow:wf_debug");
+        assert!(
+            response
+                .rows
+                .iter()
+                .any(|row| row.entry_id == "t:wf_debug/1")
+        );
 
         let unfiltered = query_cached(&state, TrajectoryQuery::default()).unwrap();
         let child = unfiltered
@@ -2329,15 +3679,74 @@ mod tests {
         let response = query_cached(
             &state,
             TrajectoryQuery {
-                after: Some(0),
+                after: Some("t:session/0".into()),
                 limit: Some(1),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(response.matching_count, 2);
+        assert_eq!(response.matching_count, 3);
         assert_eq!(response.rows.len(), 1);
         assert_eq!(response.rows[0].seq, 1);
+        assert_eq!(response.rows[0].ordinal, 1);
+        assert!(response.has_earlier);
+        assert!(response.has_later);
+        let summary_wire = serde_json::to_value(&response.rows[0]).unwrap();
+        assert!(summary_wire.get("details").is_none());
+        let detail = query_event_cached(&state, "t:session/1").unwrap();
+        assert_ne!(detail.row.details, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn summary_window_does_not_transfer_large_canonical_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = "canonical-payload-marker".repeat(100_000);
+        let timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(
+                payload.clone(),
+            )])
+            .unwrap();
+        write_timeline(&dir.path().join("timeline.jsonl"), &timeline);
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+
+        let summary =
+            serde_json::to_vec(&query_cached(&state, TrajectoryQuery::default()).unwrap()).unwrap();
+        let detail = query_event_cached(&state, "t:session/0").unwrap();
+        let detail_wire = serde_json::to_vec(&detail).unwrap();
+        let full =
+            serde_json::to_vec(&query_event_cached_with_mode(&state, "t:session/0", true).unwrap())
+                .unwrap();
+        assert!(
+            summary.len() < 16 * 1024,
+            "summary was {} bytes",
+            summary.len()
+        );
+        assert!(detail.details_truncated);
+        assert!(detail_wire.len() < 256 * 1024);
+        assert!(full.len() > payload.len());
+    }
+
+    #[test]
+    fn bounded_preview_also_limits_large_outer_fields() {
+        let timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("hello")])
+                .unwrap();
+        let mut row = timeline.trajectory().rows.remove(0);
+        let large = "outer-field".repeat(100_000);
+        row.producer = large.clone();
+        row.correlation_id = Some(large.clone());
+        row.turn_id = Some(large);
+
+        let (preview, truncated) = preview_trajectory_row(&row, true);
+        let wire = serde_json::to_vec(&preview).unwrap();
+        assert!(truncated);
+        assert!(wire.len() < 16 * 1024, "preview was {} bytes", wire.len());
     }
 
     #[test]
@@ -2369,15 +3778,103 @@ mod tests {
         let response = query_cached(
             &state,
             TrajectoryQuery {
-                before: Some(2),
+                before: Some("t:session/2".into()),
                 limit: Some(1),
                 ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(response.rows[0].seq, 1);
+        assert_eq!(response.rows[0].ordinal, 1);
         assert!(response.has_earlier);
-        assert_eq!(response.first_seq, Some(1));
+        assert!(response.has_later);
+        assert_eq!(response.first_cursor.as_deref(), Some("t:session/1"));
+        assert_eq!(response.last_cursor.as_deref(), Some("t:session/1"));
+    }
+
+    #[test]
+    fn repeated_query_cache_invalidates_when_the_ledger_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let mut timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("first")])
+                .unwrap();
+        write_timeline(&path, &timeline);
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+
+        let first = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        let cached = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(first.event_count, 1);
+        assert_eq!(cached.event_count, 1);
+        assert!(state.cache.lock().unwrap().last_query.is_some());
+
+        timeline
+            .append(
+                sampling_types::ConversationItem::assistant("second"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        write_timeline(&path, &timeline);
+
+        let advanced = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(advanced.event_count, 2);
+        assert_eq!(advanced.rows.len(), 2);
+    }
+
+    #[test]
+    fn live_cursor_keeps_backdated_new_entries_at_the_observed_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let mut timeline = chat_state::Timeline::from_seed(vec![
+            sampling_types::ConversationItem::user("first"),
+            sampling_types::ConversationItem::assistant("second"),
+        ])
+        .unwrap();
+        write_timeline(&path, &timeline);
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let initial = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(initial.last_cursor.as_deref(), Some("t:session/1"));
+
+        let mut backdated = timeline
+            .append(
+                sampling_types::ConversationItem::assistant("arrived later"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        backdated.at_ms = timeline.events()[0].at_ms.saturating_sub(1);
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&backdated).unwrap()
+        )
+        .unwrap();
+
+        let response = query_cached(
+            &state,
+            TrajectoryQuery {
+                after: Some("t:session/1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].entry_id, "t:session/2");
     }
 
     #[test]
@@ -2395,8 +3892,8 @@ mod tests {
         let error = query_cached(
             &state,
             TrajectoryQuery {
-                after: Some(1),
-                before: Some(2),
+                after: Some("t:session/1".into()),
+                before: Some("t:session/2".into()),
                 ..Default::default()
             },
         )
@@ -2421,19 +3918,23 @@ mod tests {
     #[test]
     fn page_exposes_timeline_overview_and_four_dimension_filters() {
         assert!(PAGE.contains("id=\"track\""));
-        assert!(PAGE.contains(">INPUT</span>"));
-        assert!(PAGE.contains(">MODEL</span>"));
-        assert!(PAGE.contains(">TOOLS</span>"));
+        assert!(PAGE.contains("<b>INPUT</b>"));
+        assert!(PAGE.contains("<b>MODEL</b>"));
+        assert!(PAGE.contains("<b>TOOLS</b>"));
         assert!(PAGE.contains("id=\"layer\""));
         assert!(PAGE.contains("id=\"actor\""));
         assert!(PAGE.contains("id=\"class\""));
         assert!(PAGE.contains("id=\"producer\""));
-        assert!(PAGE.contains("<option>governance</option>"));
+        assert!(PAGE.contains("<option value=\"governance\">Governance</option>"));
         assert!(PAGE.contains("OVERSCAN=20"));
         assert!(PAGE.contains("parent_entry_id"));
         assert!(PAGE.contains("nesting_path"));
         assert!(PAGE.contains("history.replaceState"));
-        assert!(PAGE.contains("p.set('entry',selected)"));
+        assert!(PAGE.contains("api/trajectory/event"));
+        assert!(PAGE.contains("MAX_WINDOW_ROWS=1800"));
+        assert!(PAGE.contains("params.set('before',displayRows[0].entry_id)"));
+        assert!(PAGE.contains("boundary-label"));
+        assert!(PAGE.contains("active · step"));
     }
 
     #[test]
@@ -2612,8 +4113,8 @@ mod tests {
                 .enumerate()
                 .all(|(seq, row)| row.nesting_path == [1, seq as u64])
         );
-        assert_eq!(response.first_seq, Some(1));
-        assert_eq!(response.last_seq, Some(1));
+        assert_eq!(response.first_cursor, Some(format!("t:{sideband_id}/0")));
+        assert_eq!(response.last_cursor, Some(format!("t:{sideband_id}/3")));
         assert_eq!(response.rows[0].entry_id, format!("t:{sideband_id}/0"));
         assert_eq!(response.rows[0].kind, "sideband.request");
         assert_eq!(response.rows[3].kind, "sideband.end");
@@ -2671,7 +4172,11 @@ mod tests {
             chat_state::MessageCause::Assistant,
         )
         .unwrap();
-        write_timeline(&root_dir.join(super::super::storage::TIMELINE_FILE), &root);
+        write_timeline_with_start_time(
+            &root_dir.join(super::super::storage::TIMELINE_FILE),
+            &root,
+            1,
+        );
 
         let mut child = chat_state::Timeline::default();
         child
@@ -2702,12 +4207,17 @@ mod tests {
                 chat_state::MessageCause::Assistant,
             )
             .unwrap();
-        write_child_session(
+        let child_dir = write_child_session(
             &sessions_root,
             "/child",
             "child-session",
             "root-session",
             &child,
+        );
+        write_timeline_with_start_time(
+            &child_dir.join(super::super::storage::TIMELINE_FILE),
+            &child,
+            10,
         );
 
         let mut grandchild = chat_state::Timeline::default();
@@ -2724,12 +4234,17 @@ mod tests {
                 chat_state::MessageCause::Assistant,
             )
             .unwrap();
-        write_child_session(
+        let grandchild_dir = write_child_session(
             &sessions_root,
             "/grandchild",
             "grandchild-session",
             "child-session",
             &grandchild,
+        );
+        write_timeline_with_start_time(
+            &grandchild_dir.join(super::super::storage::TIMELINE_FILE),
+            &grandchild,
+            20,
         );
 
         let state = AppState {
@@ -2757,6 +4272,7 @@ mod tests {
             vec![
                 ("t:root-session/0", None, &[0][..], "main"),
                 ("t:root-session/1", None, &[1][..], "main"),
+                ("t:root-session/2", None, &[2][..], "main"),
                 (
                     "t:child-session/0",
                     Some("t:root-session/1"),
@@ -2776,6 +4292,12 @@ mod tests {
                     "subagent:child-session",
                 ),
                 (
+                    "t:child-session/3",
+                    Some("t:root-session/1"),
+                    &[1, 3][..],
+                    "subagent:child-session",
+                ),
+                (
                     "t:grandchild-session/0",
                     Some("t:child-session/2"),
                     &[1, 2, 0][..],
@@ -2787,13 +4309,6 @@ mod tests {
                     &[1, 2, 1][..],
                     "subagent:grandchild-session",
                 ),
-                (
-                    "t:child-session/3",
-                    Some("t:root-session/1"),
-                    &[1, 3][..],
-                    "subagent:child-session",
-                ),
-                ("t:root-session/2", None, &[2][..], "main"),
             ]
         );
         assert_eq!(response.event_count, 9);
@@ -2807,20 +4322,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filtered.rows.len(), 2);
-        assert_eq!(filtered.first_seq, Some(1));
-        assert_eq!(filtered.last_seq, Some(1));
+        assert_eq!(
+            filtered.first_cursor.as_deref(),
+            Some("t:grandchild-session/0")
+        );
+        assert_eq!(
+            filtered.last_cursor.as_deref(),
+            Some("t:grandchild-session/1")
+        );
 
         let focused = query_cached(
             &state,
             TrajectoryQuery {
                 entry: Some("t:grandchild-session/1".into()),
+                limit: Some(3),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(focused.rows.len(), 7);
-        assert_eq!(focused.first_seq, Some(1));
-        assert_eq!(focused.last_seq, Some(1));
+        assert_eq!(focused.rows.len(), 3);
+        assert!(focused.has_earlier);
+        assert!(!focused.has_later);
         assert!(
             focused
                 .rows

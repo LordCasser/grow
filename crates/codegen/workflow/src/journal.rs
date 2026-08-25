@@ -64,6 +64,7 @@ pub trait JournalStorage: Send + Sync {
     fn truncate(&self, len: u64) -> std::io::Result<()>;
 }
 
+#[derive(Clone)]
 pub struct Journal {
     entries: Vec<JournalEntry>,
     operation_ids: Vec<Option<String>>,
@@ -173,30 +174,7 @@ impl Journal {
                     error: error.to_string(),
                 }
             })?;
-            if entry.seq == entries.len() as u64 {
-                if entries.len() >= MAX_JOURNAL_ENTRIES {
-                    return Err(JournalError::UnsafeRestore {
-                        limit: MAX_JOURNAL_ENTRIES as u64,
-                        reason: "too many journal entries".into(),
-                    });
-                }
-                operation_ids.push(pending_operation_id(&entry.result));
-                entries.push(entry);
-            } else if let Some(index) = usize::try_from(entry.seq).ok()
-                && let Some(existing) = entries.get_mut(index)
-                && operation_ids.get(index).and_then(Option::as_ref).is_some()
-                && pending_operation_id(&entry.result).is_none()
-                && existing.kind == entry.kind
-                && existing.req_hash == entry.req_hash
-            {
-                *existing = entry;
-            } else {
-                return Err(JournalError::Sequence {
-                    index: entries.len(),
-                    expected: entries.len() as u64,
-                    actual: entry.seq,
-                });
-            }
+            fold_physical_entry(&mut entries, &mut operation_ids, entry)?;
             last_line_start = Some(line_start);
         }
         Ok(Self {
@@ -210,6 +188,21 @@ impl Journal {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Returns the folded logical journal entries without exposing mutable state.
+    pub fn entries(&self) -> &[JournalEntry] {
+        &self.entries
+    }
+
+    /// Projects one committed physical row into an in-memory journal view.
+    ///
+    /// This applies the same sequence and pending-operation replacement rules
+    /// as storage restore, but never appends, truncates, or otherwise touches
+    /// the configured storage. It is intended for read-only incremental
+    /// projectors such as Trajectory.
+    pub fn project_physical_entry(&mut self, entry: JournalEntry) -> Result<(), JournalError> {
+        fold_physical_entry(&mut self.entries, &mut self.operation_ids, entry)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -298,7 +291,11 @@ impl Journal {
         req_hash: String,
         operation_id: String,
     ) -> Result<(), JournalError> {
-        if self.entries.get(usize::try_from(seq).unwrap_or(usize::MAX)).is_some() {
+        if self
+            .entries
+            .get(usize::try_from(seq).unwrap_or(usize::MAX))
+            .is_some()
+        {
             return Err(JournalError::Divergence {
                 seq,
                 kind: kind.to_string(),
@@ -336,7 +333,11 @@ impl Journal {
         };
         if existing.kind != kind
             || existing.req_hash != req_hash
-            || self.operation_ids.get(index).and_then(Option::as_ref).is_none()
+            || self
+                .operation_ids
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_none()
             || pending_operation_id(&existing.result).is_none()
         {
             return Err(JournalError::Divergence {
@@ -434,6 +435,41 @@ impl Journal {
         self.last_line_start = None;
         Ok(true)
     }
+}
+
+fn fold_physical_entry(
+    entries: &mut Vec<JournalEntry>,
+    operation_ids: &mut Vec<Option<String>>,
+    entry: JournalEntry,
+) -> Result<(), JournalError> {
+    if entry.seq == entries.len() as u64 {
+        if entries.len() >= MAX_JOURNAL_ENTRIES {
+            return Err(JournalError::UnsafeRestore {
+                limit: MAX_JOURNAL_ENTRIES as u64,
+                reason: "too many journal entries".into(),
+            });
+        }
+        operation_ids.push(pending_operation_id(&entry.result));
+        entries.push(entry);
+        return Ok(());
+    }
+
+    if let Some(index) = usize::try_from(entry.seq).ok()
+        && let Some(existing) = entries.get_mut(index)
+        && operation_ids.get(index).and_then(Option::as_ref).is_some()
+        && pending_operation_id(&entry.result).is_none()
+        && existing.kind == entry.kind
+        && existing.req_hash == entry.req_hash
+    {
+        *existing = entry;
+        return Ok(());
+    }
+
+    Err(JournalError::Sequence {
+        index: entries.len(),
+        expected: entries.len() as u64,
+        actual: entry.seq,
+    })
 }
 
 fn pending_operation_id(value: &serde_json::Value) -> Option<String> {
@@ -639,9 +675,7 @@ mod tests {
 
         let mut recovered = Journal::load(path.clone()).unwrap();
         assert_eq!(
-            recovered
-                .replay_operation(0, "spawn_agent", &hash)
-                .unwrap(),
+            recovered.replay_operation(0, "spawn_agent", &hash).unwrap(),
             Some(OperationReplay::Pending {
                 operation_id: operation_id.clone(),
             })
@@ -658,14 +692,86 @@ mod tests {
 
         let completed = Journal::load(path.clone()).unwrap();
         assert_eq!(
-            completed
-                .replay_operation(0, "spawn_agent", &hash)
-                .unwrap(),
+            completed.replay_operation(0, "spawn_agent", &hash).unwrap(),
             Some(OperationReplay::Completed(serde_json::json!({
                 "agent_id": "018f0000-0000-7000-8000-000000000001"
             })))
         );
         assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn projector_folds_pending_row_into_completed_replacement() {
+        let operation_id = "018f0000-0000-7000-8000-000000000001";
+        let hash = request_hash("spawn_agent", &serde_json::json!({"prompt": "hi"}));
+        let mut journal = Journal::memory();
+        journal
+            .project_physical_entry(JournalEntry {
+                seq: 0,
+                kind: "spawn_agent".into(),
+                req_hash: hash.clone(),
+                result: serde_json::json!({ HOST_OPERATION_KEY: operation_id }),
+                at_ms: 1,
+            })
+            .unwrap();
+        journal
+            .project_physical_entry(JournalEntry {
+                seq: 0,
+                kind: "spawn_agent".into(),
+                req_hash: hash.clone(),
+                result: serde_json::json!({ "agent_id": operation_id }),
+                at_ms: 2,
+            })
+            .unwrap();
+
+        assert_eq!(journal.entries().len(), 1);
+        assert_eq!(
+            journal.replay_operation(0, "spawn_agent", &hash).unwrap(),
+            Some(OperationReplay::Completed(serde_json::json!({
+                "agent_id": operation_id
+            })))
+        );
+    }
+
+    #[test]
+    fn projector_rejects_another_physical_row_for_completed_seq() {
+        let mut journal = Journal::memory();
+        let entry = JournalEntry {
+            seq: 0,
+            kind: "log".into(),
+            req_hash: "hash".into(),
+            result: serde_json::json!("done"),
+            at_ms: 1,
+        };
+        journal.project_physical_entry(entry.clone()).unwrap();
+        assert!(matches!(
+            journal.project_physical_entry(entry),
+            Err(JournalError::Sequence {
+                expected: 1,
+                actual: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn projector_does_not_write_configured_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal =
+            Journal::with_storage(Arc::new(FileJournalStorage { path: path.clone() }));
+        journal
+            .project_physical_entry(JournalEntry {
+                seq: 0,
+                kind: "log".into(),
+                req_hash: "hash".into(),
+                result: serde_json::json!("done"),
+                at_ms: 1,
+            })
+            .unwrap();
+        assert!(!path.exists());
+        assert_eq!(journal.bytes, 0);
+        assert_eq!(journal.last_line_start, None);
     }
 
     #[test]
