@@ -486,12 +486,7 @@ pub fn peek_model_and_mode(
                     .plan_mode_pending
                     .unwrap_or(agent.session.plan_mode_active);
                 PeekModeBadge {
-                    agent: Some(
-                        agent
-                            .session_agent_name
-                            .clone()
-                            .unwrap_or_else(|| "grow".into()),
-                    ),
+                    agent: Some(agent.session.agent_name().unwrap_or("grow").to_owned()),
                     model: agent.session.models.current_model_name(),
                     permission_mode: agent.session.permission_mode(),
                     plan,
@@ -510,8 +505,8 @@ pub fn peek_model_and_mode(
                     .and_then(|c| c.session.models.current_model_name())
                     .or_else(|| parent_agent.session.models.current_model_name());
                 let agent = child
-                    .and_then(|c| c.session_agent_name.clone())
-                    .or_else(|| parent_agent.session_agent_name.clone())
+                    .and_then(|c| c.session.agent_name().map(str::to_owned))
+                    .or_else(|| parent_agent.session.agent_name().map(str::to_owned))
                     .or_else(|| Some("grow".into()));
                 let permission_mode = child
                     .map(|child| child.session.permission_mode())

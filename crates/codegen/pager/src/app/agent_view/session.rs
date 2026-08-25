@@ -182,7 +182,6 @@ impl AgentView {
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
             pending_stop_hooks: None,
             show_goal_detail: false,
-            self_interjection_ids: std::collections::HashSet::new(),
             current_branch: None,
             is_worktree: false,
             main_repo: None,
@@ -331,8 +330,6 @@ impl AgentView {
             timeline_rail: None,
             timeline_hover: None,
             timeline_hover_preview: None,
-            session_agent_name: None,
-            agent_switch_pending: None,
             subagent_views: HashMap::new(),
             active_subagent: None,
             is_subagent_view: false,
@@ -350,7 +347,6 @@ impl AgentView {
             pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
             deferred_send: None,
-            prompt_status_query_for: None,
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
             plugin_cta: PluginCtaState::default(),
@@ -394,7 +390,7 @@ impl AgentView {
     /// wall-max against a previous attempt's anchor in
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
-        self.prompt_status_query_for = None;
+        self.session.clear_prompt_status_query();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
         self.session.turn_started_at = None;
@@ -432,7 +428,7 @@ impl AgentView {
         // before the reload is in flight for a prompt that may not survive
         // the reload, and its in-flight guard would otherwise block
         // re-querying the prompt's authoritative status forever.
-        self.prompt_status_query_for = None;
+        self.session.clear_prompt_status_query();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
         self.optimistic_queue_ids.clear();
@@ -475,7 +471,7 @@ impl AgentView {
         // discarded worker runtime.
         self.reset_edit_hl_runtime();
         self.session.model_switch_pending = false;
-        self.agent_switch_pending = None;
+        self.session.complete_agent_switch();
         let fresh = self.scrollback.fresh_continuation();
         self.session_reload = Some(SessionReload {
             generation,
@@ -521,7 +517,7 @@ impl AgentView {
     /// it. Deliberately NOT used by server-initiated synthetic turns
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
-        self.prompt_status_query_for = None;
+        self.session.clear_prompt_status_query();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
         // A new turn invalidates the previous turn's finalized marker: a
@@ -1700,9 +1696,9 @@ mod status_window_tests {
         // enforce. `begin_session_reload` ends in `begin_replay_window`, so
         // this single site covers both entry points.
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.prompt_status_query_for = Some("pid-lost".into());
+        agent.session.begin_prompt_status_query("pid-lost");
         agent.begin_replay_window();
-        assert!(agent.prompt_status_query_for.is_none());
+        assert!(!agent.session.prompt_status_query_matches("pid-lost"));
     }
     #[test]
     fn begin_replay_window_closes_transcript_search() {

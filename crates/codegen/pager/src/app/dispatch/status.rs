@@ -306,7 +306,7 @@ pub(super) fn handle_session_info_complete(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
-    agent.session_agent_name = info.data.agent_name.clone();
+    agent.session.apply_agent_name(info.data.agent_name.clone());
     if let Some(modal) = agent.agents_modal.as_mut() {
         modal.active_agent = info.data.agent_name.clone();
     }

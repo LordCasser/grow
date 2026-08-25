@@ -803,8 +803,10 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
         }] if *agent_id == id && prompt_id == "pid-submitting"
     ));
     assert_eq!(
-        app.agents[&id].prompt_status_query_for.as_deref(),
-        Some("pid-submitting")
+        app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-submitting"),
+        true
     );
 }
 
@@ -840,8 +842,10 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
         }] if *agent_id == id && prompt_id == "pid-running"
     ));
     assert_eq!(
-        app.agents[&id].prompt_status_query_for.as_deref(),
-        Some("pid-running")
+        app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-running"),
+        true
     );
     assert!(
         app.agents[&id].session.state.is_turn_running(),
@@ -875,7 +879,11 @@ fn running_turn_with_recent_activity_skips_query() {
         poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
         "recent activity must suppress the running watchdog"
     );
-    assert!(app.agents[&id].prompt_status_query_for.is_none());
+    assert!(
+        !app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-running")
+    );
 }
 
 #[test]
@@ -929,7 +937,11 @@ fn running_turn_below_threshold_skips_query() {
         poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
         "a running window below the threshold must not query"
     );
-    assert!(app.agents[&id].prompt_status_query_for.is_none());
+    assert!(
+        !app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-running")
+    );
 }
 
 #[test]
@@ -943,7 +955,7 @@ fn running_turn_query_in_flight_skips_duplicate() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-inflight".into());
-        agent.prompt_status_query_for = Some("pid-inflight".into());
+        agent.session.begin_prompt_status_query("pid-inflight");
         agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
@@ -968,7 +980,7 @@ fn running_status_response_rearms_from_observation_time() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-running".into());
-        agent.prompt_status_query_for = Some("pid-running".into());
+        agent.session.begin_prompt_status_query("pid-running");
         agent.session.turn_started_at = Some(old_start);
     }
 
@@ -987,7 +999,7 @@ fn running_status_response_rearms_from_observation_time() {
         Some(old_start),
         "display anchor is stable"
     );
-    assert!(agent.prompt_status_query_for.is_none());
+    assert!(!agent.session.prompt_status_query_matches("pid-running"));
     assert!(
         agent
             .session
@@ -1020,7 +1032,7 @@ fn nonterminal_watchdog_answers_never_end_a_running_turn() {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.session.current_prompt_id = Some("pid-running".into());
-            agent.prompt_status_query_for = Some("pid-running".into());
+            agent.session.begin_prompt_status_query("pid-running");
             agent.session.turn_started_at = Some(old_start);
         }
 
@@ -1092,7 +1104,7 @@ fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
     assert!(agent.session.state.is_idle());
     assert!(agent.session.current_prompt_id.is_none());
     assert!(
-        agent.prompt_status_query_for.is_none(),
+        !agent.session.prompt_status_query_matches("pid-running"),
         "the in-flight guard must clear so a later prompt can be re-queried"
     );
     let markers = (0..agent.scrollback.len())
@@ -1120,7 +1132,7 @@ fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.current_prompt_id = Some("pid-queued".into());
-        agent.prompt_status_query_for = Some("pid-queued".into());
+        agent.session.begin_prompt_status_query("pid-queued");
         agent.session.turn_started_at = Some(old_start);
     }
 
@@ -1143,7 +1155,7 @@ fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
         agent.session.current_prompt_id.as_deref(),
         Some("pid-queued")
     );
-    assert!(agent.prompt_status_query_for.is_none());
+    assert!(!agent.session.prompt_status_query_matches("pid-queued"));
     assert_eq!(
         agent.session.turn_started_at,
         Some(old_start),
@@ -1179,7 +1191,7 @@ fn queued_prompt_status_resolves_submitting_state() {
             combined_scrollback_entries: vec![],
             chip_elements: vec![],
         });
-        agent.prompt_status_query_for = Some("pid-queued".into());
+        agent.session.begin_prompt_status_query("pid-queued");
         agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_WATCHDOG_DELAY
@@ -1210,7 +1222,7 @@ fn queued_prompt_status_resolves_submitting_state() {
         "the queued row (re-merged via queue/changed) represents the message"
     );
     assert!(agent.session.in_flight_prompt.is_none());
-    assert!(agent.prompt_status_query_for.is_none());
+    assert!(!agent.session.prompt_status_query_matches("pid-queued"));
     assert!(
         agent.session.turn_started_at.is_none(),
         "the submitting watchdog must NOT re-arm (mark_turn_finished cleared the window)"
@@ -1224,7 +1236,7 @@ fn terminal_prompt_status_uses_same_first_wins_finalizer() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.current_prompt_id = Some("pid-terminal".into());
-        agent.prompt_status_query_for = Some("pid-terminal".into());
+        agent.session.begin_prompt_status_query("pid-terminal");
         agent.session.turn_started_at = Some(std::time::Instant::now());
     }
 

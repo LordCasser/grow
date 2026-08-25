@@ -891,9 +891,7 @@ fn handle_session_notification_inner(
             actually_changed
         }
         GrowSessionUpdate::AgentChanged { agent_name } => {
-            let changed = agent.session_agent_name.as_deref() != Some(agent_name.as_str());
-            agent.session_agent_name = Some(agent_name);
-            changed
+            agent.session.apply_agent_name(Some(agent_name))
         }
         GrowSessionUpdate::MemoryFiles { files } => {
             let entries = crate::views::memory_modal::build_entries(files);

@@ -392,7 +392,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if agent.session.current_prompt_id.as_deref() != Some(prompt_id.as_str()) {
                 return vec![];
             }
-            agent.prompt_status_query_for = None;
+            agent.session.clear_prompt_status_query();
             match status {
                 Ok(PromptStatusWire::Running { turn_start_ms }) => {
                     let observed_at = std::time::Instant::now();
@@ -618,10 +618,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 // Local dispatch sets `agent_switch_pending`; clear it here.
                 // `AgentChanged` may have already written `session_agent_name`,
                 // so success feedback keys off pending intent, not name equality.
-                let local_switch = agent.agent_switch_pending.take().is_some();
+                let local_switch = agent.session.complete_agent_switch();
                 match result {
                     Ok(()) => {
-                        agent.session_agent_name = Some(agent_name.clone());
+                        agent.session.apply_agent_name(Some(agent_name.clone()));
                         if local_switch {
                             agent.scrollback.push_block(RenderBlock::system(format!(
                                 "Switched to {agent_name}"
@@ -918,7 +918,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_name,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.session_agent_name = agent_name.clone();
+                agent.session.apply_agent_name(agent_name.clone());
                 if let Some(modal) = agent.agents_modal.as_mut() {
                     modal.active_agent = agent_name;
                 }

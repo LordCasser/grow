@@ -684,7 +684,7 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     ));
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
     assert_eq!(
-        app.agents[&id].agent_switch_pending.as_deref(),
+        app.agents[&id].session.agent_switch_target(),
         Some("grow"),
         "dispatch must mark local switch intent for complete feedback"
     );
@@ -706,7 +706,7 @@ fn switch_agent_soft_allows_unknown_name_for_shell_ssot() {
             if *agent_id == id && agent_name == "software-engineering/software-architect"
     ));
     assert_eq!(
-        app.agents[&id].agent_switch_pending.as_deref(),
+        app.agents[&id].session.agent_switch_target(),
         Some("software-engineering/software-architect")
     );
 }

@@ -495,7 +495,7 @@ pub(super) fn dispatch_open_config_agents_modal(
     let cwd = agent.session.cwd.clone();
     let toggle = load_agent_toggle();
     let session_id = agent.session.session_id.clone();
-    let active_agent = agent.session_agent_name.clone();
+    let active_agent = agent.session.agent_name().map(str::to_owned);
     let mut modal = AgentsModalState::new(&cwd, &toggle, &bundle, active_agent);
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;

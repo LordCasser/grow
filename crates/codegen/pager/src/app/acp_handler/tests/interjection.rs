@@ -206,8 +206,8 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .self_interjection_ids
-            .insert("ij-1".to_string());
+            .session
+            .remember_self_interjection("ij-1");
 
         let affected = handle_ext_notification(
             &interjection_ext_with_id("sess-view", "my own", Some("ij-1")),
@@ -223,7 +223,7 @@
             "the echo must not push a duplicate block"
         );
         assert!(
-            !agent.self_interjection_ids.contains("ij-1"),
+            !agent.session.has_self_interjection("ij-1"),
             "the id must be forgotten after dedup"
         );
     }

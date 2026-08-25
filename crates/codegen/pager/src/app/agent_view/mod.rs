@@ -715,7 +715,6 @@ pub struct AgentView {
     /// removes the id. Other panes (which lack the id) render it. This is the
     /// queue's optimistic-echo + reconcile-by-id pattern, applied so the
     /// originator gets instant feedback AND viewers stay in sync.
-    pub self_interjection_ids: std::collections::HashSet<String>,
     pub current_branch: Option<String>,
     pub is_worktree: bool,
     pub main_repo: Option<String>,
@@ -1129,12 +1128,6 @@ pub struct AgentView {
     /// lands on a tick; borrowed during render so streaming redraws don't
     /// rescan/allocate the prompt every frame.
     pub(crate) timeline_hover_preview: Option<(usize, String)>,
-    /// Running agent definition for this session (`grow/session/info` `agentName`).
-    pub session_agent_name: Option<String>,
-    /// Local `/agent` switch in flight: target name set when dispatching
-    /// `Effect::SwitchAgent`, cleared on `SwitchAgentComplete`. Used so the
-    /// success scrollback is not suppressed when `AgentChanged` arrives first.
-    pub agent_switch_pending: Option<String>,
     /// Child subagent views. Keyed by child_session_id.
     /// Created eagerly on SubagentSpawned so updates are tracked from the start.
     pub subagent_views: HashMap<String, Box<AgentView>>,
@@ -1221,7 +1214,6 @@ pub struct AgentView {
     pub(crate) deferred_send: Option<AgentDeferredSend>,
     /// Prompt-id currently being reconciled by the submission watchdog. This
     /// prevents the lifecycle deadline from issuing duplicate status RPCs.
-    pub(crate) prompt_status_query_for: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes — the `session/prompt` RPC is in flight and no
     /// `grow/queue/changed` broadcast has confirmed the row yet. Inserted by

@@ -779,7 +779,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             // Mark local intent before the ACP round-trip so complete can
             // always emit feedback even if AgentChanged updates the name first.
             if let Some(agent) = app.agents.get_mut(&id) {
-                agent.agent_switch_pending = Some(agent_name.clone());
+                agent.session.begin_agent_switch(agent_name.clone());
             }
             vec![Effect::SwitchAgent {
                 agent_id: id,

@@ -450,7 +450,7 @@ pub(crate) fn poll_stalled_prompt_submissions(
             let prompt_id = agent.session.current_prompt_id.as_ref()?;
             // One status query in flight per prompt: the response handler
             // clears the marker, re-arming the watchdog for the next window.
-            if agent.prompt_status_query_for.as_deref() == Some(prompt_id.as_str()) {
+            if agent.session.prompt_status_query_matches(prompt_id) {
                 return None;
             }
             let stalled = if agent.session.state.is_turn_submitting() {
@@ -478,7 +478,7 @@ pub(crate) fn poll_stalled_prompt_submissions(
     let mut effects = Vec::new();
     for (agent_id, prompt_id, session_id) in stalled_submissions {
         if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.prompt_status_query_for = Some(prompt_id.clone());
+            agent.session.begin_prompt_status_query(prompt_id.clone());
         }
         effects.push(Effect::QueryPromptStatus {
             agent_id,
@@ -528,7 +528,7 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
         .values()
         .filter_map(|agent| {
             let prompt_id = agent.session.current_prompt_id.as_deref()?;
-            if agent.prompt_status_query_for.as_deref() == Some(prompt_id) {
+            if agent.session.prompt_status_query_matches(prompt_id) {
                 return None;
             }
             if agent.session.state.is_turn_submitting() {

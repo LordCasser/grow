@@ -725,7 +725,7 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     // Dedup our own optimistic echo: if we minted this id we already rendered
     // the block locally — drop the broadcast copy (and forget the id).
     if let Some(iid) = interjection_id
-        && agent.self_interjection_ids.remove(iid)
+        && agent.session.consume_self_interjection(iid)
     {
         return false;
     }

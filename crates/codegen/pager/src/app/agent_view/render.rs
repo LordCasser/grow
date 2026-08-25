@@ -2280,7 +2280,7 @@ impl AgentView {
             Some(eff) => format!("{model_id} ({eff})"),
             None => model_id,
         };
-        let agent_label = self.session_agent_name.as_deref().unwrap_or("grow");
+        let agent_label = self.session.agent_name().unwrap_or("grow");
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
                 agent_name: agent_label,

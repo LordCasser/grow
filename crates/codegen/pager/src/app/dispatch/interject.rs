@@ -51,7 +51,9 @@ pub(super) fn dispatch_interject(
     // record its id so the broadcast echo (`grow/session/interjection`) is
     // deduped instead of rendering a second copy on this pane.
     let interjection_id = uuid::Uuid::new_v4().to_string();
-    agent.self_interjection_ids.insert(interjection_id.clone());
+    agent
+        .session
+        .remember_self_interjection(interjection_id.clone());
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));

@@ -877,7 +877,7 @@ fn running_status_shims_only_while_submitting() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnSubmitting;
         agent.session.current_prompt_id = Some("pid-run".into());
-        agent.prompt_status_query_for = Some("pid-run".into());
+        agent.session.begin_prompt_status_query("pid-run");
         agent.apply_follow_ups("resp-1".into(), "pid-run", vec!["follow up".into()]);
     }
 
@@ -904,7 +904,7 @@ fn running_status_shims_only_while_submitting() {
     );
     assert!(agent.session.turn_start_ms.is_some());
     assert!(agent.session.turn_started_at.is_some());
-    assert!(agent.prompt_status_query_for.is_none());
+    assert!(!agent.session.prompt_status_query_matches("pid-run"));
 }
 
 /// W4: once the turn is already `TurnRunning`, a further `Running` status
@@ -920,7 +920,7 @@ fn running_status_skips_shim_when_turn_already_running() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-run".into());
-        agent.prompt_status_query_for = Some("pid-run".into());
+        agent.session.begin_prompt_status_query("pid-run");
         agent.apply_follow_ups("resp-1".into(), "pid-run", vec!["follow up".into()]);
     }
 
@@ -944,7 +944,7 @@ fn running_status_skips_shim_when_turn_already_running() {
     );
     assert!(agent.session.turn_start_ms.is_some());
     assert!(agent.session.turn_started_at.is_some());
-    assert!(agent.prompt_status_query_for.is_none());
+    assert!(!agent.session.prompt_status_query_matches("pid-run"));
 }
 
 #[test]
@@ -1013,10 +1013,10 @@ fn switch_agent_complete_updates_only_agent_name() {
     let model_id = acp::ModelId::new("configured-model");
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.models.current = Some(model_id.clone());
-    agent.session_agent_name = Some("builder".into());
+    agent.session.apply_agent_name(Some("builder".into()));
     // Local dispatch marks pending; AgentChanged may already have the new name.
-    agent.agent_switch_pending = Some("reviewer".into());
-    agent.session_agent_name = Some("reviewer".into());
+    agent.session.begin_agent_switch("reviewer");
+    agent.session.apply_agent_name(Some("reviewer".into()));
     let before = agent.scrollback.len();
 
     let effects = dispatch(
@@ -1029,11 +1029,8 @@ fn switch_agent_complete_updates_only_agent_name() {
     );
 
     assert!(effects.is_empty());
-    assert_eq!(
-        app.agents[&id].session_agent_name.as_deref(),
-        Some("reviewer")
-    );
-    assert!(app.agents[&id].agent_switch_pending.is_none());
+    assert_eq!(app.agents[&id].session.agent_name(), Some("reviewer"));
+    assert!(app.agents[&id].session.agent_switch_target().is_none());
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
     assert_eq!(app.agents[&id].scrollback.len(), before + 1);
     let scrollback = &app.agents[&id].scrollback;
@@ -1063,10 +1060,7 @@ fn switch_agent_complete_without_pending_skips_success_message() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(
-        app.agents[&id].session_agent_name.as_deref(),
-        Some("reviewer")
-    );
+    assert_eq!(app.agents[&id].session.agent_name(), Some("reviewer"));
     assert_eq!(
         app.agents[&id].scrollback.len(),
         before,

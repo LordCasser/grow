@@ -1358,7 +1358,7 @@ impl AgentView {
             "ask"
         };
         self.prompt.slash_controller.set_selection_context(
-            self.session_agent_name.clone(),
+            self.session.agent_name().map(str::to_owned),
             behavior,
             deep_research,
             goal,

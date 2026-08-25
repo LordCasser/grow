@@ -656,6 +656,20 @@ pub struct AgentSession {
     /// Whether this session currently has a question awaiting user input.
     /// The question view remains presentation state on `AgentView`.
     pub(crate) question_pending: bool,
+    /// IDs of interjections this client sent and already rendered locally.
+    /// The shell broadcasts each interjection to every attached pane; the
+    /// originating session consumes its own id here to suppress the echoed
+    /// copy while other panes still render it.
+    self_interjection_ids: HashSet<String>,
+    /// Running agent definition reported for this ACP session.
+    session_agent_name: Option<String>,
+    /// Local `/agent` switch target awaiting completion. The pending intent
+    /// survives an earlier `AgentChanged` notification so the eventual RPC
+    /// completion can still emit exactly one local success message.
+    agent_switch_pending: Option<String>,
+    /// Prompt currently being reconciled by the submission watchdog. This
+    /// bounds status requests to one in flight per prompt.
+    prompt_status_query_for: Option<String>,
     /// Prompt history for the current session, fetched from ACP
     /// (`grow/prompt_history` scoped via `session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
@@ -960,6 +974,10 @@ impl AgentSession {
             permission_mode,
             pending_permission_count: 0,
             question_pending: false,
+            self_interjection_ids: HashSet::new(),
+            session_agent_name: None,
+            agent_switch_pending: None,
+            prompt_status_query_for: None,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1026,6 +1044,54 @@ impl AgentSession {
 
     pub(crate) fn mark_created_via_new(&mut self) {
         self.created_via_new = true;
+    }
+
+    pub(crate) fn remember_self_interjection(&mut self, id: impl Into<String>) {
+        self.self_interjection_ids.insert(id.into());
+    }
+
+    pub(crate) fn consume_self_interjection(&mut self, id: &str) -> bool {
+        self.self_interjection_ids.remove(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_self_interjection(&self, id: &str) -> bool {
+        self.self_interjection_ids.contains(id)
+    }
+
+    pub(crate) fn agent_name(&self) -> Option<&str> {
+        self.session_agent_name.as_deref()
+    }
+
+    pub(crate) fn apply_agent_name(&mut self, name: Option<String>) -> bool {
+        let changed = self.session_agent_name != name;
+        self.session_agent_name = name;
+        changed
+    }
+
+    pub(crate) fn begin_agent_switch(&mut self, name: impl Into<String>) {
+        self.agent_switch_pending = Some(name.into());
+    }
+
+    pub(crate) fn complete_agent_switch(&mut self) -> bool {
+        self.agent_switch_pending.take().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_switch_target(&self) -> Option<&str> {
+        self.agent_switch_pending.as_deref()
+    }
+
+    pub(crate) fn prompt_status_query_matches(&self, prompt_id: &str) -> bool {
+        self.prompt_status_query_for.as_deref() == Some(prompt_id)
+    }
+
+    pub(crate) fn begin_prompt_status_query(&mut self, prompt_id: impl Into<String>) {
+        self.prompt_status_query_for = Some(prompt_id.into());
+    }
+
+    pub(crate) fn clear_prompt_status_query(&mut self) {
+        self.prompt_status_query_for = None;
     }
 
     /// Update context state with a full snapshot from live callers.
