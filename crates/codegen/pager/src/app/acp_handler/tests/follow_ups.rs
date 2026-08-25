@@ -299,7 +299,7 @@
         let id = AgentId(0);
         {
             let agent = app.agents.get_mut(&id).unwrap();
-            agent.attached_as_viewer = true;
+            agent.session.attached_as_viewer = true;
             agent.session.current_prompt_id = Some("p1".into());
             agent.apply_follow_ups("resp-1".into(), "p1", vec!["old".into()]);
         }

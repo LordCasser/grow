@@ -425,7 +425,7 @@ impl AgentView {
                                     (self.session.session_id.as_ref(), row)
                                     && let Some(server_id) = row.server_id
                                 {
-                                    self.shared_queue.retain(|e| e.id != server_id);
+                                    self.session.shared_queue.retain(|e| e.id != server_id);
                                     if self.visible_queue_is_empty() {
                                         self.hide_queue_pane();
                                     }

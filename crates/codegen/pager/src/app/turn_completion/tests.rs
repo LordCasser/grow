@@ -20,7 +20,7 @@ fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 /// A viewer in TurnRunning with an adopted prompt id, ready to be finalized.
 fn running_viewer(prompt_id: &str) -> AgentView {
     let mut agent = super::super::agent_view::test_agent_view(Some("s1"), PathBuf::from("/tmp"));
-    agent.attached_as_viewer = true;
+    agent.session.attached_as_viewer = true;
     agent.session.start_turn(&mut agent.scrollback);
     agent.session.current_prompt_id = Some(prompt_id.into());
     agent.turn_started_at = Some(Instant::now());
@@ -523,13 +523,13 @@ fn viewer_finalize_runs_full_teardown_once() {
         !agent.prompt.prompt_suggestion.has_suggestion(),
         "stale prompt suggestion wiped"
     );
-    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+    assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
 
     // The duplicate/stale terminal must not repeat any of the teardown.
     let duplicate =
         finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
     assert!(matches!(duplicate.apply, TerminalApply::Ignored));
-    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+    assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
     assert!(agent.permission_queue.is_empty());
     assert!(agent.plan_approval_view.is_none());
     assert!(!agent.bash_turn);
@@ -544,7 +544,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     let mut agent = running_viewer("p1");
     let _ =
         finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
-    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+    assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
 
     let mut meta = serde_json::Map::new();
     meta.insert("promptId".into(), serde_json::json!("p1"));
@@ -554,7 +554,11 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
         .meta(meta);
     merge_finalized_pr_meta(&mut agent, &Ok(pr));
 
-    let merged = agent.finalized_pr_meta.as_ref().expect("meta merged");
+    let merged = agent
+        .session
+        .finalized_pr_meta
+        .as_ref()
+        .expect("meta merged");
     assert_eq!(
         merged.usage.as_ref().map(|u| u.total_tokens),
         Some(42),
@@ -568,7 +572,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
 
     // A second late response fills only the missing fields (no clobber).
     merge_finalized_pr_meta(&mut agent, &Err("late boom".to_string()));
-    let merged = agent.finalized_pr_meta.as_ref().unwrap();
+    let merged = agent.session.finalized_pr_meta.as_ref().unwrap();
     assert_eq!(merged.error.as_deref(), Some("late boom"));
     assert_eq!(
         merged.usage.as_ref().map(|u| u.total_tokens),
@@ -596,7 +600,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     );
     assert!(
         matches!(
-            agent2.finalized_pr_meta.as_ref().unwrap().structured_output.as_ref(),
+            agent2.session.finalized_pr_meta.as_ref().unwrap().structured_output.as_ref(),
             Some(Err(e)) if e == "schema mismatch"
         ),
         "structuredOutputError maps to the Err form"

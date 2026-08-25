@@ -57,7 +57,7 @@
             &mut app,
         );
         assert!(a1, "first event must apply");
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(5));
 
         // Exact duplicate eventId → dropped (not affected), highwater unchanged.
         let a2 = handle(
@@ -65,7 +65,7 @@
             &mut app,
         );
         assert!(!a2, "a duplicate eventId must be dropped");
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(5));
 
         // Stale lower eventId → dropped.
         let a3 = handle(
@@ -73,7 +73,7 @@
             &mut app,
         );
         assert!(!a3, "a lower (already-passed) eventId must be dropped");
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(5));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(5));
 
         // New higher eventId → applies, highwater advances.
         let a4 = handle(
@@ -81,7 +81,7 @@
             &mut app,
         );
         assert!(a4, "a new (higher) eventId must apply");
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(9));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(9));
 
         // No eventId (older shell) → always applies; highwater untouched.
         let a5 = handle(
@@ -92,7 +92,7 @@
             a5,
             "an update without an eventId must still apply (back-compat)"
         );
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(9));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(9));
     }
 
     /// Regression: the per-process `eventId` counter resets each resume,
@@ -117,11 +117,11 @@
             );
         }
         assert_eq!(
-            app.agents[&id].last_applied_event_seq, None,
+            app.agents[&id].session.last_applied_event_seq, None,
             "replay must not seed the dedup highwater"
         );
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-resume-4"),
             "the reconnect cursor follows the last APPLIED event id, replay included"
         );
@@ -135,7 +135,7 @@
             ),
             "a live update after resume must render even with a reset-low eventId"
         );
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(1));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(1));
 
         assert!(
             !handle(
@@ -158,7 +158,7 @@
             agent
                 .scrollback
                 .push_block(RenderBlock::system("pre-outage content"));
-            agent.last_seen_event_id = Some("sess-rc-3".into());
+            agent.session.last_seen_event_id = Some("sess-rc-3".into());
             agent.begin_session_reload(1);
             assert!(agent.session.loading_replay);
             assert_eq!(
@@ -198,7 +198,7 @@
             "the reload placeholder is removed at finalize"
         );
         assert_eq!(
-            agent.last_seen_event_id.as_deref(),
+            agent.session.last_seen_event_id.as_deref(),
             Some("sess-rc-2"),
             "the cursor follows the replayed tail"
         );
@@ -222,9 +222,9 @@
             agent
                 .scrollback
                 .push_block(RenderBlock::system("pre-outage content"));
-            agent.last_seen_event_id = Some("sess-rc-3".into());
-            agent.last_applied_event_seq = Some(3);
-            agent.last_applied_grow_event_seq = Some(5);
+            agent.session.last_seen_event_id = Some("sess-rc-3".into());
+            agent.session.last_applied_event_seq = Some(3);
+            agent.session.last_applied_grow_event_seq = Some(5);
             agent.begin_session_reload(1);
         }
 
@@ -241,12 +241,12 @@
         );
         let _ = handle_ext_notification(&grow_model_switch_notif("sess-rc", "sess-rc-30"), &mut app);
         assert_eq!(
-            app.agents[&id].last_applied_event_seq,
+            app.agents[&id].session.last_applied_event_seq,
             Some(40),
             "the live ACP tail advanced its highwater in-window"
         );
         assert_eq!(
-            app.agents[&id].last_applied_grow_event_seq,
+            app.agents[&id].session.last_applied_grow_event_seq,
             Some(30),
             "the live Grow line advanced its highwater in-window"
         );
@@ -266,13 +266,13 @@
         );
         assert_eq!(agent.scrollback.len(), 1, "partial replay was discarded");
         assert_eq!(
-            agent.last_seen_event_id.as_deref(),
+            agent.session.last_seen_event_id.as_deref(),
             Some("sess-rc-3"),
             "the cursor reverts with the transcript so a later reload doesn't skip events"
         );
-        assert_eq!(agent.last_applied_event_seq, Some(3));
+        assert_eq!(agent.session.last_applied_event_seq, Some(3));
         assert_eq!(
-            agent.last_applied_grow_event_seq,
+            agent.session.last_applied_grow_event_seq,
             Some(5),
             "the Grow highwater reverts with the transcript — left at 30 it would \
              dedup-drop the next reload's re-delivery of the discarded blocks"
@@ -298,8 +298,8 @@
                 .push_block(RenderBlock::system("pre-outage content"));
             // A turn was in flight at disconnect: its entry is still running.
             agent.scrollback.set_last_running(true);
-            agent.last_seen_event_id = Some("sess-rc-3".into());
-            agent.last_applied_event_seq = Some(3);
+            agent.session.last_seen_event_id = Some("sess-rc-3".into());
+            agent.session.last_applied_event_seq = Some(3);
             agent.begin_session_reload(1);
         }
 
@@ -321,11 +321,11 @@
             "the live tail is appended below the kept transcript"
         );
         assert_eq!(
-            agent.last_seen_event_id.as_deref(),
+            agent.session.last_seen_event_id.as_deref(),
             Some("sess-rc-4"),
             "the cursor advances to the applied tail"
         );
-        assert_eq!(agent.last_applied_event_seq, Some(4));
+        assert_eq!(agent.session.last_applied_event_seq, Some(4));
         assert!(
             !agent.scrollback.needs_animation(),
             "running entries from the pre-outage turn are finished on merge"
@@ -342,7 +342,7 @@
         ));
         let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(agent.scrollback.len(), len_before + 1);
-        assert_eq!(agent.last_applied_event_seq, Some(5));
+        assert_eq!(agent.session.last_applied_event_seq, Some(5));
     }
 
     /// A reconnect superseding an unfinished reload window keeps exactly one
@@ -441,7 +441,7 @@
         let _ = handle(plan_update_msg("sess-plan", &[], None, false), &mut app);
 
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             None,
             "no eventId on the update — cursor untouched"
         );
@@ -451,10 +451,10 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-plan-6")
         );
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(6));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(6));
     }
 
     /// Todo-pane stash semantics across the three reload outcomes.
@@ -542,7 +542,7 @@
             &mut app
         ));
         assert_eq!(app.agents[&id].scrollback.len(), 1);
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(10));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(10));
 
         // Exact re-delivery: dropped, nothing re-applied, cursor unchanged.
         assert!(!handle_ext_notification(
@@ -555,7 +555,7 @@
             "a duplicate Grow event must not push a second block"
         );
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-xdup-10")
         );
 
@@ -565,7 +565,7 @@
             &mut app
         ));
         assert_eq!(app.agents[&id].scrollback.len(), 2);
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(11));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(11));
 
         // Lower-stale re-delivery (an already-applied lower id re-sent by
         // the cursor tail, e.g. goal mode) is dropped too — `<=`, not just
@@ -579,7 +579,7 @@
             2,
             "a stale lower-id Grow event must not push a block"
         );
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(11));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(11));
     }
 
     /// An unhandled Grow kind (the default `_` arm) leaves no trace, so it must
@@ -595,11 +595,11 @@
             &mut app
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id, None,
+            app.agents[&id].session.last_seen_event_id, None,
             "an unhandled Grow update must not advance the reconnect cursor"
         );
         assert_eq!(
-            app.agents[&id].last_applied_grow_event_seq, None,
+            app.agents[&id].session.last_applied_grow_event_seq, None,
             "an unhandled Grow update must not advance the dedup highwater"
         );
 
@@ -609,10 +609,10 @@
             &mut app
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-ig-8")
         );
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(8));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(8));
     }
 
     /// Split-highwater regression: a fresh direct-emitted Grow id must NOT
@@ -630,7 +630,7 @@
             &grow_model_switch_notif("sess-split", "sess-split-21"),
             &mut app
         ));
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(21));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(21));
 
         // The delayed ACP chunk stamped N arrives after — it must render.
         let len_before = app.agents[&id].scrollback.len();
@@ -652,12 +652,12 @@
             "the chunk's text must render — a shared highwater would have dropped it"
         );
         assert_eq!(
-            app.agents[&id].last_applied_event_seq,
+            app.agents[&id].session.last_applied_event_seq,
             Some(20),
             "the ACP highwater is seeded by the ACP stream only"
         );
         assert_eq!(
-            app.agents[&id].last_applied_grow_event_seq,
+            app.agents[&id].session.last_applied_grow_event_seq,
             Some(21),
             "…and the ACP apply must not clobber the Grow highwater either"
         );
@@ -703,7 +703,7 @@
         );
 
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-bg-6"),
             "the bg-stdout arm must advance the cursor"
         );
@@ -738,7 +738,7 @@
             "unexpected replay must not append to the transcript"
         );
         assert!(
-            agent.last_seen_event_id.is_none(),
+            agent.session.last_seen_event_id.is_none(),
             "a dropped replay must not advance the reconnect cursor"
         );
     }
@@ -755,7 +755,7 @@
             &mut app,
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-cur-5")
         );
 
@@ -765,7 +765,7 @@
             &mut app,
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-cur-5")
         );
 
@@ -781,7 +781,7 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-cur-5"),
             "a promptId-gated drop must not advance the cursor"
         );
@@ -819,7 +819,7 @@
         {
             let agent = app.agents.get_mut(&id).unwrap();
             assert!(agent.scrollback.is_empty(), "unexpected Grow replay dropped");
-            assert!(agent.last_seen_event_id.is_none());
+            assert!(agent.session.last_seen_event_id.is_none());
         }
 
         // Same update inside a reload window → applied and marks the window
@@ -837,7 +837,7 @@
         ));
         let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
-            agent.last_seen_event_id.as_deref(),
+            agent.session.last_seen_event_id.as_deref(),
             Some("sess-grow-7"),
             "applied Grow updates advance the reconnect cursor"
         );
@@ -938,7 +938,7 @@
             app.agents[&id].context_state.as_ref().map(|c| c.used),
             Some(500_000),
         );
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(20));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(20));
 
         // Stale historical replay delta: lower eventId (deduped), lower tokens.
         let _ = handle(
@@ -951,7 +951,7 @@
             "a deduped stale delta must not regress context_used to its lower value"
         );
         // Highwater unchanged by the deduped event.
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(20));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(20));
     }
 
     /// The reconnect adoption path (`finalize_reload_and_maybe_adopt`) must skip a
@@ -969,7 +969,7 @@
             &grow_turn_completed_notif("sess-1", "p-run", "end_turn", true),
             &mut app,
         );
-        assert!(app.agents[&id].replayed_terminal_prompts.contains("p-run"));
+        assert!(app.agents[&id].session.replayed_terminal_prompts.contains("p-run"));
 
         let finalized = app
             .agents
@@ -1005,11 +1005,11 @@
             &mut app
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id, None,
+            app.agents[&id].session.last_seen_event_id, None,
             "an ignored ModelChanged must not advance the reconnect cursor"
         );
         assert_eq!(
-            app.agents[&id].last_applied_grow_event_seq, None,
+            app.agents[&id].session.last_applied_grow_event_seq, None,
             "an ignored ModelChanged must not advance the dedup highwater"
         );
 
@@ -1019,11 +1019,11 @@
             &mut app
         ));
         assert_eq!(
-            app.agents[&id].last_seen_event_id.as_deref(),
+            app.agents[&id].session.last_seen_event_id.as_deref(),
             Some("sess-1-8"),
             "an applied ModelChanged advances the reconnect cursor"
         );
-        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(8));
+        assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(8));
     }
 
     #[test]
@@ -1051,6 +1051,6 @@
             Some(250_000),
             "a newer (higher eventId) delta must update context_used"
         );
-        assert_eq!(app.agents[&id].last_applied_event_seq, Some(8));
+        assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(8));
     }
 

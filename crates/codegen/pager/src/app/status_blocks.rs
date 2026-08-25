@@ -19,7 +19,7 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
 
     let mut rows: Vec<String> = Vec::new();
     let mut pos = 1usize;
-    for wire in &agent.shared_queue {
+    for wire in &agent.session.shared_queue {
         if running_id == Some(wire.id.as_str()) {
             continue;
         }

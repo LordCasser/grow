@@ -178,6 +178,7 @@ impl AgentView {
                     } = self.prompt_mode.clone()
                     {
                         let expected_version = self
+                            .session
                             .shared_queue
                             .iter()
                             .find(|e| e.id == server_id)
@@ -243,7 +244,8 @@ impl AgentView {
             row.as_ref()
                 .and_then(|r| r.server_id.clone())
                 .and_then(|server_id| {
-                    self.shared_queue
+                    self.session
+                        .shared_queue
                         .iter()
                         .find(|e| e.id == server_id)
                         .map(|w| {

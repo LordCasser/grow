@@ -472,6 +472,20 @@ impl AgentState {
         }
     }
 }
+/// Extra metadata a late `PromptResponse` contributes for an
+/// already-finalized turn (see [`AgentSession::finalized_pr_meta`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FinalizedPrMeta {
+    /// Typed token usage from the late response (`PromptResponse.usage`).
+    pub(crate) usage: Option<agent_client_protocol::Usage>,
+    /// `_meta.structuredOutput` / `_meta.structuredOutputError` from the late
+    /// response: `Ok(value)` when the model produced schema-validated output,
+    /// `Err(message)` when the shell reported a structured-output failure.
+    pub(crate) structured_output: Option<Result<serde_json::Value, String>>,
+    /// `Err` text when the late RPC resolved as an error (the durable rail's
+    /// `agent_result` may be coarser or absent).
+    pub(crate) error: Option<String>,
+}
 /// Per-agent business logic (ACP session, models, state).
 ///
 /// External code should use the facade methods (`handle_update`,
@@ -584,6 +598,94 @@ pub struct AgentSession {
     /// whose `meta.promptId` is set and doesn't match this id is silently
     /// dropped. `None` between turns.
     pub current_prompt_id: Option<String>,
+    /// Per-agent mirror of the server-authoritative shared prompt queue
+    /// (`AppView::shared_prompt_queues[sid]`), kept in sync by
+    /// `handle_queue_changed` and the immediate-send path. The queue pane
+    /// renders the union of this and the local `pending_prompts`; edit handlers
+    /// read it to route remove/reorder by origin. Empty unless a plain prompt
+    /// was queued server-side while a turn was running.
+    pub(crate) shared_queue: Vec<crate::app::prompt_queue::QueueEntryWire>,
+    /// True when this session was opened via `session/load` (session picker
+    /// resume, `/resume`, or a leader dashboard roster attach) rather than
+    /// created locally — i.e. this client is *viewing* a session it did not
+    /// start. While set, the ACP gate adopts the prompt id of incoming live
+    /// `session/update` deltas (the driver's turn) instead of dropping them,
+    /// so the viewer renders the in-flight (and subsequent) turns live. This
+    /// must NOT be applied to a locally-created driver, whose post-rewind
+    /// stale-chunk drop semantics rely on the strict prompt-id match. Cleared
+    /// in `maybe_drain_queue` the moment this client sends its own prompt
+    /// ("takes the wheel"), and re-derived per turn from
+    /// [`Self::self_originated_prompt_ids`] in the ACP gate / turn-start shim:
+    /// a client that has driven a turn can still go on to VIEW a turn another
+    /// client drives (e.g. a `/loop` cron, or a plain prompt typed in another
+    /// pane), so this flag is no longer a one-way latch.
+    pub(crate) attached_as_viewer: bool,
+    /// Prompt ids of turns THIS client originated (sent to the agent as the
+    /// turn driver). The ACP gate consults this to keep `attached_as_viewer`
+    /// per-turn accurate: a prompt id present here is this client's own turn
+    /// (drive it — and drop a stale post-rewind chunk on a mismatch), while one
+    /// that is absent is another client's (or a server-initiated) turn (adopt +
+    /// render it as a viewer). Without this, the flag latched false after the
+    /// first local prompt and the gate dropped every later turn a different
+    /// pane drove. Bounded FIFO — only recent ids matter (a stale chunk arrives
+    /// right after its turn ends).
+    pub(crate) self_originated_prompt_ids: VecDeque<String>,
+    /// Prompt ids rewound by this client, bounded to recent turns.
+    pub(crate) rewound_prompt_ids: VecDeque<String>,
+    /// Highwater of the largest `eventId` counter applied to this session's
+    /// scrollback (see `acp::meta::NotificationMeta::event_seq`). Incoming
+    /// `session/update`s with a counter `<=` this are duplicates (replay/live
+    /// overlap, a re-emit after the reconnect gate, or duplicate routing) and
+    /// are dropped so each event renders exactly once. `None` until the first
+    /// `eventId`-bearing update.
+    ///
+    /// ACP stream only — the Grow stream keeps its own highwater
+    /// ([`Self::last_applied_grow_event_seq`]) because the two streams are not
+    /// delivered in one id order: ACP lines ride the agent's FIFO event
+    /// pipeline while Grow lines are emitted direct-to-gateway, so a fresh Grow
+    /// id arriving ahead of queued lower-id ACP chunks must not make the chunks
+    /// look stale (silent live-text loss).
+    pub(crate) last_applied_event_seq: Option<u64>,
+    /// Grow-stream sibling of [`Self::last_applied_event_seq`] (see there for
+    /// why the highwaters are split). Same drop rule, replay-exempt.
+    pub(crate) last_applied_grow_event_seq: Option<u64>,
+    /// Raw `eventId` of the most recent update APPLIED to this root session —
+    /// replay or live, on both the ACP and Grow paths; dropped updates (dedup,
+    /// promptId gate, unexpected replay) don't move it. Sent as `_meta.cursor`
+    /// on a reconnect `session/load` so the agent replays only the post-cursor
+    /// tail. Why the full string: see
+    /// [`crate::acp::meta::NotificationMeta::event_id`].
+    pub(crate) last_seen_event_id: Option<String>,
+    /// Unexpected-replay drops since the last reload window opened. Gates the
+    /// drop log to one `warn!` per incident (a late replay is one line per
+    /// event — thousands for a large transcript).
+    pub(crate) unexpected_replay_drops: u32,
+    /// Prompt ids whose durable `TurnCompleted` terminal arrived during THIS
+    /// load's replay window (`loading_replay`). The running turn is not adopted
+    /// until replay finishes, so a terminal seen mid-replay can't be finalized
+    /// yet — it is recorded here and consulted by
+    /// `AgentView::should_adopt_running_prompt` so the post-replay adoption
+    /// skips a turn that already ended (otherwise the viewer re-strands on
+    /// "Waiting…"). Reset at the start of every load so it never leaks across
+    /// loads.
+    pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// Prompt id of the turn THIS client's terminal finalizer already
+    /// committed (the first-wins winner). A late `PromptResponse` whose pid
+    /// matches only merges its extra metadata ([`Self::finalized_pr_meta`]) —
+    /// it must not finish the turn, push a second marker, drain the queue,
+    /// or re-run the adoption handoff (all of that ran exactly once when the
+    /// finalizer won). Cleared at the next real turn start
+    /// (`AgentView::start_turn_boundary`) and at every replay-window entry, so
+    /// a stale pid can never merge into a newer turn.
+    pub(crate) finalized_prompt: Option<String>,
+    /// Extra metadata a late `PromptResponse` contributed for an
+    /// already-finalized turn ([`Self::finalized_prompt`] matched): the
+    /// durable rail's terminal cannot carry token usage, structured output,
+    /// or the RPC's own error text, so the late response merges them here.
+    /// There is no live consumer yet — this is the retention point that makes
+    /// the late-PR merge observable and keeps the data from being dropped by
+    /// the race.
+    pub(crate) finalized_pr_meta: Option<FinalizedPrMeta>,
     /// Whether this session was created via the `/new` slash command.
     /// Checked in the `SessionCreated` handler to decide whether to show
     /// the `/agents` discoverability tip. `false` for sessions created
@@ -663,6 +765,17 @@ impl AgentSession {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            shared_queue: Vec::new(),
+            attached_as_viewer: false,
+            self_originated_prompt_ids: VecDeque::new(),
+            rewound_prompt_ids: VecDeque::new(),
+            last_applied_event_seq: None,
+            last_applied_grow_event_seq: None,
+            last_seen_event_id: None,
+            unexpected_replay_drops: 0,
+            replayed_terminal_prompts: HashSet::new(),
+            finalized_prompt: None,
+            finalized_pr_meta: None,
             created_via_new: false,
         }
     }

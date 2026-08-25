@@ -164,13 +164,16 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // sessions that window is one actor drain hop (accepted).
                     let dedup_drop = !meta.is_replay
                         && meta.event_seq.is_some_and(|seq| {
-                            agent.last_applied_event_seq.is_some_and(|last| seq <= last)
+                            agent
+                                .session
+                                .last_applied_event_seq
+                                .is_some_and(|last| seq <= last)
                         });
                     if let Some(seq) = meta.event_seq
                         && !meta.is_replay
                         && !dedup_drop
                     {
-                        agent.last_applied_event_seq = Some(seq);
+                        agent.session.last_applied_event_seq = Some(seq);
                     }
 
                     if drop_unexpected_replay(
@@ -203,7 +206,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         && let Some(notif_pid) = meta.prompt_id.as_deref()
                         && agent.session.current_prompt_id.as_deref() != Some(notif_pid)
                     {
-                        agent.attached_as_viewer = !agent.is_self_originated_prompt(notif_pid);
+                        agent.session.attached_as_viewer =
+                            !agent.is_self_originated_prompt(notif_pid);
                     }
 
                     // Store context usage and turn timing on agent state.
@@ -238,7 +242,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         tracing::debug!(
                             session_id = notif.request.session_id.0.as_ref(),
                             event_seq = meta.event_seq,
-                            last_applied = agent.last_applied_event_seq,
+                            last_applied = agent.session.last_applied_event_seq,
                             is_replay = meta.is_replay,
                             "load-race: session/update DROPPED by dedup highwater (event_seq <= last_applied)"
                         );
@@ -306,13 +310,13 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     } else if !meta.is_replay
                         && let Some(notif_pid) = meta.prompt_id.as_ref()
                         && agent.session.current_prompt_id.as_ref() != Some(notif_pid)
-                        && !agent.attached_as_viewer
+                        && !agent.session.attached_as_viewer
                     {
                         tracing::debug!(
                             session_id = notif.request.session_id.0.as_ref(),
                             notif_prompt_id = meta.prompt_id.as_deref(),
                             current_prompt_id = agent.session.current_prompt_id.as_deref(),
-                            attached_as_viewer = agent.attached_as_viewer,
+                            attached_as_viewer = agent.session.attached_as_viewer,
                             loading_replay = agent.session.loading_replay,
                             "load-race: session/update DROPPED by promptId-mismatch gate on a non-viewer (stale/rewound-turn guard)"
                         );
@@ -346,7 +350,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // terminal provides the matching exit path.
                         if let Some(notif_pid) = meta.prompt_id.as_ref()
                             && agent.session.current_prompt_id.as_ref() != Some(notif_pid)
-                            && agent.attached_as_viewer
+                            && agent.session.attached_as_viewer
                         {
                             agent.session.current_prompt_id = Some(notif_pid.clone());
                             // A viewer adopting another client's new turn: drop
@@ -472,7 +476,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // dashboard's locally-tracked row) show every regular
                         // foreground turn as Working without inventing a second
                         // lifecycle for internal origins.
-                        if agent.attached_as_viewer
+                        if agent.session.attached_as_viewer
                             && !meta.is_replay
                             && !agent.session.loading_replay
                             && agent
@@ -480,7 +484,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 .current_prompt_id
                                 .as_deref()
                                 .is_some_and(|pid| {
-                                    !agent.replayed_terminal_prompts.contains(pid)
+                                    !agent.session.replayed_terminal_prompts.contains(pid)
                                         && !agent.is_rewound_prompt(pid)
                                 })
                             && !matches!(agent.session.state, AgentState::TurnRunning)

@@ -185,7 +185,7 @@
         // A viewer (attached_as_viewer) watching another client's session must
         // also render interjections broadcast for that session.
         let mut app = make_app_with_agent("sess-view");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+        app.agents.get_mut(&AgentId(0)).unwrap().session.attached_as_viewer = true;
         let affected =
             handle_ext_notification(&interjection_ext("sess-view", "viewer sees this"), &mut app);
         assert!(affected);

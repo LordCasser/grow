@@ -794,7 +794,7 @@ pub(super) fn dispatch_send_prompt_inner(
             event = "send_route_plain",
             immediate = immediate_server_send,
             is_turn_running = agent.session.state.is_turn_running(),
-            shared_queue_len = agent.shared_queue.len(),
+            shared_queue_len = agent.session.shared_queue.len(),
             pending_len = agent.session.pending_prompts.len(),
             current_prompt_id = agent.session.current_prompt_id.as_deref().unwrap_or(""),
             session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
@@ -970,7 +970,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         event = "send_route_bash",
         immediate = bash_immediate,
         is_turn_running = agent.session.state.is_turn_running(),
-        shared_queue_len = agent.shared_queue.len(),
+        shared_queue_len = agent.session.shared_queue.len(),
         pending_len = agent.session.pending_prompts.len(),
         current_prompt_id = agent.session.current_prompt_id.as_deref().unwrap_or(""),
         session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
@@ -1114,7 +1114,7 @@ pub(super) fn handle_prompt_response(
         // session is idle": once a NEWER turn owns the slot (even as a
         // server-unconfirmed submission), the late response is discarded
         // like any other stale terminal.
-        if agent.finalized_prompt.as_deref() == Some(response_pid)
+        if agent.session.finalized_prompt.as_deref() == Some(response_pid)
             && (agent.session.current_prompt_id.is_none()
                 || agent.session.current_prompt_id.as_deref() == Some(response_pid))
         {
@@ -1135,7 +1135,7 @@ pub(super) fn handle_prompt_response(
                     &sid,
                     response_pid,
                 );
-                agent.shared_queue.retain(|e| e.id != response_pid);
+                agent.session.shared_queue.retain(|e| e.id != response_pid);
                 agent.note_queue_echo_retired(response_pid);
             }
             // Resolved-without-running never adopts; explicit for the
@@ -1183,7 +1183,7 @@ pub(super) fn handle_prompt_response(
         event = "turn_end",
         prompt_id = prompt_id.as_deref().unwrap_or(""),
         was_cancelling,
-        shared_queue_len = agent.shared_queue.len(),
+        shared_queue_len = agent.session.shared_queue.len(),
         pending_len = agent.session.pending_prompts.len(),
         session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
         "turn ended; client returning to idle",
@@ -1265,7 +1265,7 @@ pub(super) fn handle_prompt_response(
         && let Some(agent) = app.agents.get_mut(&agent_id)
         && agent.prompt.text().is_empty()
         && agent.session.pending_prompts.is_empty()
-        && agent.shared_queue.is_empty()
+        && agent.session.shared_queue.is_empty()
         && agent.session.state.is_idle()
         && let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string())
     {

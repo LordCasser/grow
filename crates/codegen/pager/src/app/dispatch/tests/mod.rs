@@ -42,7 +42,7 @@ use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
 use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
-use crate::app::agent::{AgentId, AgentSession};
+use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{ActiveView, AppView, TrustState, WelcomeAnnouncementState};
 use crate::scrollback::block::RenderBlock;

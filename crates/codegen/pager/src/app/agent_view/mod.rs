@@ -644,21 +644,6 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
-/// Extra metadata a late `PromptResponse` contributed for an
-/// already-finalized turn (see [`AgentView::finalized_pr_meta`]).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FinalizedPrMeta {
-    /// Typed token usage from the late response (`PromptResponse.usage`).
-    pub(crate) usage: Option<agent_client_protocol::Usage>,
-    /// `_meta.structuredOutput` / `_meta.structuredOutputError` from the late
-    /// response: `Ok(value)` when the model produced schema-validated output,
-    /// `Err(message)` when the shell reported a structured-output failure.
-    pub(crate) structured_output: Option<Result<serde_json::Value, String>>,
-    /// `Err` text when the late RPC resolved as an error (the durable rail's
-    /// `agent_result` may be coarser or absent).
-    pub(crate) error: Option<String>,
-}
-
 pub(crate) type InlineMediaCompletions =
     std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>>;
 
@@ -673,95 +658,8 @@ pub struct AgentView {
     pub tasks: TasksPane,
     pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
-    /// Per-agent mirror of the server-authoritative shared prompt queue
-    /// (`AppView::shared_prompt_queues[sid]`), kept in sync by
-    /// `handle_queue_changed` and the immediate-send path. The queue
-    /// pane renders the union of this and the local `pending_prompts`; the
-    /// edit handlers read it to route remove/reorder by origin. Empty unless a
-    /// plain prompt was queued server-side while a turn was running.
-    pub shared_queue: Vec<crate::app::prompt_queue::QueueEntryWire>,
-    /// True when this session was opened via `session/load` (session picker
-    /// resume, `/resume`, or a leader dashboard roster attach) rather than
-    /// created locally — i.e. this client is *viewing* a session it did not
-    /// start. While set, the ACP gate adopts the prompt id of incoming live
-    /// `session/update` deltas (the driver's turn) instead of dropping them,
-    /// so the viewer renders the in-flight (and subsequent) turns live. This
-    /// must NOT be applied to a locally-created driver, whose post-rewind
-    /// stale-chunk drop semantics rely on the strict prompt-id match. Cleared
-    /// in `maybe_drain_queue` the moment this client sends its own prompt
-    /// ("takes the wheel"), and re-derived per turn from
-    /// [`Self::self_originated_prompt_ids`] in the ACP gate / turn-start shim:
-    /// a client that has driven a turn can still go on to VIEW a turn another
-    /// client drives (e.g. a `/loop` cron, or a plain prompt typed in another
-    /// pane), so this flag is no longer a one-way latch.
-    pub attached_as_viewer: bool,
-    /// Prompt ids of turns THIS client originated (sent to the agent as the
-    /// turn driver). The ACP gate consults this to keep `attached_as_viewer`
-    /// per-turn accurate: a prompt id present here is this client's own turn
-    /// (drive it — and drop a stale post-rewind chunk on a mismatch), while one
-    /// that is absent is another client's (or a server-initiated) turn (adopt +
-    /// render it as a viewer). Without this, the flag latched false after the
-    /// first local prompt and the gate dropped every later turn a different
-    /// pane drove. Bounded FIFO — only recent ids matter (a stale chunk arrives
-    /// right after its turn ends).
-    pub self_originated_prompt_ids: VecDeque<String>,
-    pub rewound_prompt_ids: VecDeque<String>,
-    /// Highwater of the largest `eventId` counter applied to this session's
-    /// scrollback (see `acp::meta::NotificationMeta::event_seq`). Incoming
-    /// `session/update`s with a counter `<=` this are duplicates (replay/live
-    /// overlap, a re-emit after the reconnect gate, or duplicate routing) and
-    /// are dropped so each event renders exactly once. `None` until the first
-    /// `eventId`-bearing update.
-    ///
-    /// ACP stream only — the Grow stream keeps its own highwater
-    /// ([`Self::last_applied_grow_event_seq`]) because the two streams are not
-    /// delivered in one id order: ACP lines ride the agent's FIFO event
-    /// pipeline while Grow lines are emitted direct-to-gateway, so a fresh Grow
-    /// id arriving ahead of queued lower-id ACP chunks must not make the
-    /// chunks look stale (silent live-text loss).
-    pub last_applied_event_seq: Option<u64>,
-    /// Grow-stream sibling of [`Self::last_applied_event_seq`] (see there for
-    /// why the highwaters are split). Same drop rule, replay-exempt.
-    pub last_applied_grow_event_seq: Option<u64>,
-    /// Raw `eventId` of the most recent update APPLIED to this root session —
-    /// replay or live, on both the ACP and Grow paths; dropped updates (dedup,
-    /// promptId gate, unexpected replay) don't move it. Sent as `_meta.cursor`
-    /// on a reconnect `session/load` so the agent replays only the post-cursor
-    /// tail. Why the full string: see
-    /// [`crate::acp::meta::NotificationMeta::event_id`].
-    pub last_seen_event_id: Option<String>,
     /// Open reconnect reload window, if any. See [`SessionReload`].
     pub(crate) session_reload: Option<SessionReload>,
-    /// Unexpected-replay drops since the last reload window opened. Gates the
-    /// drop log to one `warn!` per incident (a late replay is one line per
-    /// event — thousands for a large transcript).
-    pub(crate) unexpected_replay_drops: u32,
-    /// Prompt ids whose durable `TurnCompleted` terminal arrived during THIS
-    /// load's replay window (`loading_replay`). The running turn is not adopted
-    /// until replay finishes, so a terminal seen mid-replay can't be finalized
-    /// yet — it is recorded here and consulted by
-    /// [`Self::should_adopt_running_prompt`] so the post-replay adoption skips a
-    /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
-    /// Reset at the start of every load so it never leaks across loads.
-    pub(crate) replayed_terminal_prompts: HashSet<String>,
-    /// Prompt id of the turn THIS client's terminal finalizer already
-    /// committed (the first-wins winner). A late `PromptResponse` whose pid
-    /// matches only merges its extra metadata ([`Self::finalized_pr_meta`]) —
-    /// it must not finish the turn, push a second marker, drain the queue,
-    /// or re-run the adoption handoff (all of that ran exactly once when the
-    /// finalizer won). Cleared at the next real turn start
-    /// ([`start_turn_boundary`](crate::app::agent_view::session::AgentView::start_turn_boundary))
-    /// and at every replay-window entry, so a stale pid can never merge into
-    /// a newer turn.
-    pub(crate) finalized_prompt: Option<String>,
-    /// Extra metadata a late `PromptResponse` contributed for an
-    /// already-finalized turn ([`Self::finalized_prompt`] matched): the
-    /// durable rail's terminal cannot carry token usage, structured output,
-    /// or the RPC's own error text, so the late response merges them here.
-    /// There is no live consumer yet — this is the retention point that
-    /// makes the late-PR merge observable and keeps the data from being
-    /// dropped by the race.
-    pub(crate) finalized_pr_meta: Option<FinalizedPrMeta>,
     /// Wake prompt id whose failure marker already rendered — a re-delivered
     /// errored wake terminal must not stack a second "Turn failed" row (the
     /// output-epoch dedupe only covers chatty closes; failures bypass it).
@@ -1474,7 +1372,7 @@ pub struct AgentView {
     /// the OLDEST buffered entry (never the whole map).
     pub(crate) follow_up_pending_order: VecDeque<String>,
 }
-/// Cap on [`AgentView::self_originated_prompt_ids`]. Only recent ids matter (a
+/// Cap on [`AgentSession::self_originated_prompt_ids`]. Only recent ids matter (a
 /// stale post-rewind chunk arrives right after its turn ends), so a small
 /// bounded ring is plenty and keeps a long-lived session from growing the set
 /// without bound.
@@ -2271,7 +2169,7 @@ pub(crate) mod test_fixtures {
         };
         session.enqueue_prompt("local one".to_string());
         let mut agent = AgentView::new(session, ScrollbackState::new());
-        agent.shared_queue = vec![QueueEntryWire {
+        agent.session.shared_queue = vec![QueueEntryWire {
             id: "p1".into(),
             version: 2,
             owner: None,
@@ -2283,7 +2181,7 @@ pub(crate) mod test_fixtures {
         }];
         agent.queue.sync_from_merged(
             &agent.session.pending_prompts,
-            &agent.shared_queue,
+            &agent.session.shared_queue,
             agent.session.current_prompt_id.as_deref(),
         );
         agent.queue.overlay.visible = true;
@@ -2621,6 +2519,7 @@ pub(crate) mod test_fixtures {
         let mut completed = make_agent();
         completed.begin_session_reload(1);
         completed
+            .session
             .replayed_terminal_prompts
             .insert("turn-done".into());
         assert!(completed.finalize_reload_and_maybe_adopt(1, true, Some("turn-done".into())));
@@ -2998,11 +2897,13 @@ pub(crate) mod test_fixtures {
     pub fn running_agent_local_only() -> AgentView {
         let mut agent = make_running_agent();
         agent.active_pane = AgentPane::Queue;
-        agent.shared_queue.clear();
+        agent.session.shared_queue.clear();
         agent.session.current_prompt_id = None;
-        agent
-            .queue
-            .sync_from_merged(&agent.session.pending_prompts, &agent.shared_queue, None);
+        agent.queue.sync_from_merged(
+            &agent.session.pending_prompts,
+            &agent.session.shared_queue,
+            None,
+        );
         agent.queue.overlay.visible = true;
         agent.queue.overlay.focused = true;
         agent

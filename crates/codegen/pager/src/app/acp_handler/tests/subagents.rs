@@ -209,7 +209,7 @@
             assert!(root.subagent_views.contains_key(grandchild_sid));
             assert_eq!(root.scrollback.len(), before_restore + 1);
             assert_eq!(
-                root.subagent_views[child_sid].last_applied_grow_event_seq,
+                root.subagent_views[child_sid].session.last_applied_grow_event_seq,
                 Some(10),
                 "the persisted child eventId must seed the child-source highwater"
             );

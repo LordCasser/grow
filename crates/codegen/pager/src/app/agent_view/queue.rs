@@ -101,6 +101,7 @@ impl AgentView {
     pub(crate) fn visible_held_queue_len(&self) -> usize {
         let running = self.session.current_prompt_id.as_deref();
         let server = self
+            .session
             .shared_queue
             .iter()
             .filter(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
@@ -117,6 +118,7 @@ impl AgentView {
         let running = self.session.current_prompt_id.as_deref();
         // Merge order: server rows render (and send) first.
         if let Some(entry) = self
+            .session
             .shared_queue
             .iter()
             .find(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
@@ -133,7 +135,7 @@ impl AgentView {
     pub(crate) fn sync_queue_pane(&mut self) {
         self.queue.sync_from_merged(
             &self.session.pending_prompts,
-            &self.shared_queue,
+            &self.session.shared_queue,
             self.session.current_prompt_id.as_deref(),
         );
     }
@@ -212,7 +214,11 @@ impl AgentView {
             return None;
         }
         let server_id = row.server_id?;
-        let wire = self.shared_queue.iter().find(|e| e.id == server_id)?;
+        let wire = self
+            .session
+            .shared_queue
+            .iter()
+            .find(|e| e.id == server_id)?;
         Some(kind_from_wire(&wire.kind) == QueueEntryKind::Prompt)
     }
 
@@ -365,7 +371,7 @@ impl AgentView {
                         if let (Some(_sid), Some(row)) = (self.session.session_id.as_ref(), row)
                             && let Some(server_id) = row.server_id
                         {
-                            self.shared_queue.retain(|e| e.id != server_id);
+                            self.session.shared_queue.retain(|e| e.id != server_id);
                             if self.visible_queue_is_empty() {
                                 self.hide_queue_pane();
                             }
@@ -456,6 +462,7 @@ impl AgentView {
         let server_id = self.queue.row_ref(selection_id)?.server_id?;
         let running = self.session.current_prompt_id.as_deref();
         let all_ids: Vec<String> = self
+            .session
             .shared_queue
             .iter()
             .filter(|e| Some(e.id.as_str()) != running)
@@ -528,7 +535,7 @@ mod queue_steering_tests {
     #[test]
     fn server_bash_row_cannot_be_steered_or_advertised_as_sendable() {
         let mut agent = make_running_agent();
-        agent.shared_queue[0].kind = "bash".into();
+        agent.session.shared_queue[0].kind = "bash".into();
         agent.sync_queue_pane();
         let row = agent.queue.entry_ids()[0];
 
@@ -537,7 +544,7 @@ mod queue_steering_tests {
             agent.force_interject_queue_row(row),
             InputOutcome::Changed
         ));
-        assert_eq!(agent.shared_queue.len(), 1);
+        assert_eq!(agent.session.shared_queue.len(), 1);
         assert!(
             agent
                 .toast

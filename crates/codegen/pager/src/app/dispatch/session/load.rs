@@ -139,7 +139,7 @@ fn dispatch_load_session_ungated(
     );
     app.agents.insert(agent_id, agent);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
-    agent_mut.attached_as_viewer = true;
+    agent_mut.session.attached_as_viewer = true;
     agent_mut.begin_replay_window();
     agent_mut.loading_placeholder_id = Some(loading_placeholder_id);
     agent_mut.prompt.set_compact(app.appearance.prompt.compact);

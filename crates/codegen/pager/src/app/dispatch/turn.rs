@@ -359,7 +359,7 @@ pub(super) fn do_cancel_turn_with_pause(
     // non-empty composer holds a NEWER draft the rewind would clobber.
     // Trigger-agnostic on purpose: fall back to the standard cancel.
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
-    let rewinding = agent.shared_queue.is_empty()
+    let rewinding = agent.session.shared_queue.is_empty()
         && app.cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()

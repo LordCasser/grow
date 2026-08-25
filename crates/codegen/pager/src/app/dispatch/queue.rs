@@ -60,7 +60,8 @@ fn combine_queued_prompts_enabled() -> bool {
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
 pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
-    let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
+    let server_busy =
+        agent.session.state.is_turn_running() || !agent.session.shared_queue.is_empty();
     server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
@@ -86,7 +87,7 @@ pub(super) fn push_server_queue_echo(
         .cloned()
         .unwrap_or_default();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.shared_queue = snapshot;
+        agent.session.shared_queue = snapshot;
         // Track the unconfirmed echo so a queue-row send-now against it is
         // parked until the confirming broadcast (see
         // `AgentView::send_now_awaiting_confirm`).
@@ -232,6 +233,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     // `immediate_server_send_eligible`).
     let running = agent.session.current_prompt_id.as_deref();
     if agent
+        .session
         .shared_queue
         .iter()
         .any(|e| Some(e.id.as_str()) != running)
@@ -282,8 +284,8 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     // This client is now sending its own prompt — it "takes the wheel" and is
     // no longer a passive viewer. Clearing this restores strict prompt-id gate
     // semantics (so stale chunks from a later rewind/cancel of THIS turn are
-    // dropped, not adopted). See `AgentView::attached_as_viewer`.
-    agent.attached_as_viewer = false;
+    // dropped, not adopted). See `AgentSession::attached_as_viewer`.
+    agent.session.attached_as_viewer = false;
 
     ulog::info(
         "prompt.drain",
@@ -304,7 +306,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         event = "local_drain",
         kind = queued.kind.as_label(),
         remaining = agent.session.pending_prompts.len(),
-        shared_queue_len = agent.shared_queue.len(),
+        shared_queue_len = agent.session.shared_queue.len(),
         session = session_id.0.as_ref(),
         text = %queued.text.chars().take(48).collect::<String>(),
         "draining prompt LOCALLY as a new running turn",
@@ -616,13 +618,13 @@ pub(crate) fn apply_turn_start_shim(
         kind,
         adopted_from_other_client,
         prev_current_prompt_id = agent.session.current_prompt_id.as_deref().unwrap_or(""),
-        shared_queue_len = agent.shared_queue.len(),
+        shared_queue_len = agent.session.shared_queue.len(),
         text = %text.as_deref().unwrap_or("").chars().take(48).collect::<String>(),
         "adopting server-driven running turn (turn-start shim)",
     );
     agent.start_turn_boundary(Some(&prompt_id));
     agent.session.current_prompt_id = Some(prompt_id.clone());
-    agent.attached_as_viewer = adopted_from_other_client;
+    agent.session.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but KEEP the
     // seen ring, so a buffer-replayed `grow/follow_ups` for an older response
     // stays rejected (no stale revival). This is correct for BOTH passive-viewer

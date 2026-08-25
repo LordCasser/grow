@@ -1340,6 +1340,7 @@ impl AgentView {
         let running = self.session.current_prompt_id.as_deref();
         let queue_len = self.session.queue_len()
             + self
+                .session
                 .shared_queue
                 .iter()
                 .filter(|e| Some(e.id.as_str()) != running)

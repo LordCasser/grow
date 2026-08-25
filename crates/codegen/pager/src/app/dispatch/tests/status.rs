@@ -26,7 +26,7 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
         // server's queue (mirrored from the last broadcast) still has work.
         agent.session.state = AgentState::Idle;
         agent.session.current_prompt_id = None;
-        agent.shared_queue = snapshot;
+        agent.session.shared_queue = snapshot;
         assert!(agent.session.pending_prompts.is_empty());
     }
 

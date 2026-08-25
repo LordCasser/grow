@@ -7,7 +7,8 @@
 //! the turn, pushes the marker, and runs the full turn-end teardown exactly
 //! once. The losing rail contributes only its extra metadata — a late
 //! `PromptResponse` merges usage / structured output / error details into
-//! [`AgentView::finalized_pr_meta`] instead of re-finishing or re-marking.
+//! [`crate::app::agent::AgentSession::finalized_pr_meta`] instead of
+//! re-finishing or re-marking.
 //!
 //! The durable rail may only finalize a *terminal* turn state
 //! (`TurnRunning`/`TurnCancelling`). While a turn is still `TurnSubmitting`
@@ -22,8 +23,8 @@ use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::blocks::SessionEvent;
 use agent_client_protocol as acp;
 
-use super::agent::AgentId;
-use super::agent_view::{AgentView, FinalizedPrMeta};
+use super::agent::{AgentId, FinalizedPrMeta};
+use super::agent_view::AgentView;
 use super::app_view::AppView;
 use super::dispatch::drain_root_permission_queue;
 
@@ -271,7 +272,7 @@ pub(super) fn finalize_prompt_terminal(
     // pid-less finalize (legacy shell, no tracked pid) records nothing —
     // there is no id a late response could be matched against.
     if let Some(pid) = &ending_prompt_id {
-        agent.finalized_prompt = Some(pid.clone());
+        agent.session.finalized_prompt = Some(pid.clone());
     }
 
     TerminalOutcome {
@@ -344,7 +345,7 @@ fn terminal_notification(
 
 /// Merge a late `PromptResponse`'s metadata into the record for the turn the
 /// durable rail already finalized. Called only when
-/// [`AgentView::finalized_prompt`] matches the response's pid: the response
+/// [`crate::app::agent::AgentSession::finalized_prompt`] matches the response's pid: the response
 /// is the same turn's RPC terminal, so only its extra data is applied — no
 /// finish, no marker, no drain, no adoption handoff (all ran once at the
 /// first-wins finalize).
@@ -379,6 +380,7 @@ pub(super) fn merge_finalized_pr_meta(
     // Fill missing fields only, so a second late response cannot clobber
     // data the first one already contributed.
     let slot = agent
+        .session
         .finalized_pr_meta
         .get_or_insert_with(FinalizedPrMeta::default);
     if slot.usage.is_none() {

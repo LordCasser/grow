@@ -87,7 +87,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             .cloned()
             .unwrap_or_default();
         if let Some(agent) = app.agents.get_mut(&aid) {
-            agent.shared_queue = snapshot;
+            agent.session.shared_queue = snapshot;
             // Cleanup hook: if the user is editing a server-origin row and
             // that row is no longer in the broadcast (started draining,
             // removed by another client, etc.), exit editing mode so the
@@ -98,7 +98,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 super::super::agent_view::PromptMode::EditingQueued {
                     server_id: Some(sid),
                     ..
-                } if !agent.shared_queue.iter().any(|e| &e.id == sid) => Some(sid.clone()),
+                } if !agent.session.shared_queue.iter().any(|e| &e.id == sid) => Some(sid.clone()),
                 _ => None,
             };
             if let Some(sid) = stranded_server_id {

@@ -115,7 +115,7 @@ pub(super) fn drop_unexpected_replay(
         agent.mark_reload_replay_seen();
         return false;
     }
-    if agent.unexpected_replay_drops == 0 {
+    if agent.session.unexpected_replay_drops == 0 {
         tracing::warn!(
             session_id,
             source,
@@ -130,7 +130,7 @@ pub(super) fn drop_unexpected_replay(
             "Dropping unexpected replay update"
         );
     }
-    agent.unexpected_replay_drops = agent.unexpected_replay_drops.saturating_add(1);
+    agent.session.unexpected_replay_drops = agent.session.unexpected_replay_drops.saturating_add(1);
     true
 }
 /// Advance the reconnect cursor to an APPLIED update's eventId. Called from
@@ -138,7 +138,7 @@ pub(super) fn drop_unexpected_replay(
 /// promptId gate, unexpected replay) deliberately don't move it.
 pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut NotificationMeta) {
     if let Some(id) = meta.event_id.take() {
-        agent.last_seen_event_id = Some(id);
+        agent.session.last_seen_event_id = Some(id);
     }
 }
 /// Handle `grow/session_notification` and replay-path `grow/session/update`.
@@ -241,7 +241,7 @@ fn handle_session_notification_inner(
             agent
                 .subagent_views
                 .get(session_notif.session_id.0.as_ref())
-                .and_then(|parent_view| parent_view.last_applied_grow_event_seq)
+                .and_then(|parent_view| parent_view.session.last_applied_grow_event_seq)
                 .is_some_and(|last| seq <= last)
         })
     {
@@ -271,6 +271,7 @@ fn handle_session_notification_inner(
         && !meta.is_replay
         && meta.event_seq.is_some_and(|seq| {
             agent
+                .session
                 .last_applied_grow_event_seq
                 .is_some_and(|last| seq <= last)
         })
@@ -278,7 +279,7 @@ fn handle_session_notification_inner(
         tracing::debug!(
             session_id = session_notif.session_id.0.as_ref(),
             event_seq = meta.event_seq,
-            last_applied = agent.last_applied_grow_event_seq,
+            last_applied = agent.session.last_applied_grow_event_seq,
             "grow/session update DROPPED by dedup highwater (event_seq <= last_applied)"
         );
         return false;
@@ -355,7 +356,7 @@ fn handle_session_notification_inner(
         } => {
             if agent.session.loading_replay {
                 agent.scrollback.seal_subagent_permission_group();
-                agent.replayed_terminal_prompts.insert(prompt_id);
+                agent.session.replayed_terminal_prompts.insert(prompt_id);
                 false
             } else {
                 let cancel_trigger = session_notif
@@ -1048,10 +1049,10 @@ fn handle_session_notification_inner(
                 .get_mut(session_notif.session_id.0.as_ref())
             {
                 if let Some(seq) = meta.event_seq {
-                    parent_view.last_applied_grow_event_seq = Some(seq);
+                    parent_view.session.last_applied_grow_event_seq = Some(seq);
                 }
                 if let Some(id) = meta.event_id {
-                    parent_view.last_seen_event_id = Some(id);
+                    parent_view.session.last_seen_event_id = Some(id);
                 }
             }
         } else {
@@ -1059,10 +1060,10 @@ fn handle_session_notification_inner(
                 && !meta.is_replay
                 && !is_workflow_update
             {
-                agent.last_applied_grow_event_seq = Some(seq);
+                agent.session.last_applied_grow_event_seq = Some(seq);
             }
             if let Some(id) = meta.event_id {
-                agent.last_seen_event_id = Some(id);
+                agent.session.last_seen_event_id = Some(id);
             }
         }
     }

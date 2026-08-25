@@ -138,7 +138,7 @@ fn plan_reconnect_load(
     let mut meta = serde_json::json!({
         "permissionMode": shell::util::config::permission_mode_canonical_str(mode),
     });
-    if let Some(ref cursor) = agent.last_seen_event_id {
+    if let Some(ref cursor) = agent.session.last_seen_event_id {
         meta["cursor"] = serde_json::Value::String(cursor.clone());
     }
     Some(ReconnectLoadPlan {
@@ -3197,7 +3197,7 @@ mod tests {
             plan.meta.get("cursor").is_none(),
             "no cursor key before any event was applied"
         );
-        agent.last_seen_event_id = Some("sess-1-42".into());
+        agent.session.last_seen_event_id = Some("sess-1-42".into());
         agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         let plan = plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).unwrap();
         assert_eq!(

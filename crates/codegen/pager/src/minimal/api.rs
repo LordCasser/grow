@@ -199,7 +199,7 @@ pub fn set_agent_active_pane(agent: &mut AgentView, pane: crate::app::agent_view
 }
 
 pub fn agent_shared_queue_len(agent: &AgentView) -> usize {
-    agent.shared_queue.len()
+    agent.session.shared_queue.len()
 }
 
 pub fn agent_btw_state(agent: &AgentView) -> Option<&crate::views::btw_overlay::BtwOverlayState> {

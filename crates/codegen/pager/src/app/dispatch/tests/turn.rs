@@ -273,7 +273,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.shared_queue = vec![
+        agent.session.shared_queue = vec![
             QueueEntryWire {
                 id: "q1".into(),
                 version: 3,
@@ -308,7 +308,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
     );
     // The local mirror is left intact; the agent's rebroadcast drives the
     // queue, so the pager must not predict the post-cancel order.
-    let q = &app.agents[&id].shared_queue;
+    let q = &app.agents[&id].session.shared_queue;
     assert_eq!(
         q.len(),
         2,

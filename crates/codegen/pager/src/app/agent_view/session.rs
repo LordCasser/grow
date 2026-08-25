@@ -91,9 +91,9 @@ impl AgentView {
     pub(crate) fn bind_session_id(&mut self, session_id: agent_client_protocol::SessionId) {
         if self.session.session_id.as_ref() != Some(&session_id) {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
-            self.last_seen_event_id = None;
-            self.last_applied_event_seq = None;
-            self.last_applied_grow_event_seq = None;
+            self.session.last_seen_event_id = None;
+            self.session.last_applied_event_seq = None;
+            self.session.last_applied_grow_event_seq = None;
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
@@ -112,30 +112,42 @@ impl AgentView {
         if self.is_self_originated_prompt(prompt_id) {
             return;
         }
-        self.self_originated_prompt_ids
+        self.session
+            .self_originated_prompt_ids
             .push_back(prompt_id.to_string());
-        while self.self_originated_prompt_ids.len() > SELF_ORIGINATED_PROMPT_CAP {
-            self.self_originated_prompt_ids.pop_front();
+        while self.session.self_originated_prompt_ids.len() > SELF_ORIGINATED_PROMPT_CAP {
+            self.session.self_originated_prompt_ids.pop_front();
         }
     }
     /// Whether `prompt_id` is a turn THIS client originated (vs. one another
     /// client drives, or a server-initiated turn).
     pub fn is_self_originated_prompt(&self, prompt_id: &str) -> bool {
-        self.self_originated_prompt_ids
+        self.session
+            .self_originated_prompt_ids
             .iter()
             .any(|p| p == prompt_id)
     }
     pub(crate) fn note_rewound_prompt(&mut self, prompt_id: &str) {
-        if self.rewound_prompt_ids.iter().any(|p| p == prompt_id) {
+        if self
+            .session
+            .rewound_prompt_ids
+            .iter()
+            .any(|p| p == prompt_id)
+        {
             return;
         }
-        self.rewound_prompt_ids.push_back(prompt_id.to_string());
-        while self.rewound_prompt_ids.len() > REWOUND_PROMPT_ID_CAP {
-            self.rewound_prompt_ids.pop_front();
+        self.session
+            .rewound_prompt_ids
+            .push_back(prompt_id.to_string());
+        while self.session.rewound_prompt_ids.len() > REWOUND_PROMPT_ID_CAP {
+            self.session.rewound_prompt_ids.pop_front();
         }
     }
     pub(crate) fn is_rewound_prompt(&self, prompt_id: &str) -> bool {
-        self.rewound_prompt_ids.iter().any(|p| p == prompt_id)
+        self.session
+            .rewound_prompt_ids
+            .iter()
+            .any(|p| p == prompt_id)
     }
     /// Create a new agent view with default UI state.
     ///
@@ -152,18 +164,7 @@ impl AgentView {
             tasks: TasksPane::new(),
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
-            shared_queue: Vec::new(),
-            attached_as_viewer: false,
-            self_originated_prompt_ids: VecDeque::new(),
-            rewound_prompt_ids: VecDeque::new(),
-            last_applied_event_seq: None,
-            last_applied_grow_event_seq: None,
-            last_seen_event_id: None,
             session_reload: None,
-            unexpected_replay_drops: 0,
-            replayed_terminal_prompts: HashSet::new(),
-            finalized_prompt: None,
-            finalized_pr_meta: None,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -444,13 +445,13 @@ impl AgentView {
         self.reset_mermaid_runtime();
         self.scrollback_search = None;
         self.session.loading_replay = true;
-        self.replayed_terminal_prompts.clear();
-        self.unexpected_replay_drops = 0;
+        self.session.replayed_terminal_prompts.clear();
+        self.session.unexpected_replay_drops = 0;
         self.pending_stop_hooks = None;
         // A reconnect restarts live state: the pre-window finalized marker
         // must not merge a late PromptResponse into the reloaded turn.
-        self.finalized_prompt = None;
-        self.finalized_pr_meta = None;
+        self.session.finalized_prompt = None;
+        self.session.finalized_pr_meta = None;
         // Re-arm the prompt-status watchdog (same invariant as
         // `start_turn_boundary` / `mark_turn_finished`): a status RPC issued
         // before the reload is in flight for a prompt that may not survive
@@ -514,9 +515,9 @@ impl AgentView {
             private_workflow_runs: std::mem::take(&mut self.private_workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
-            last_seen_event_id: self.last_seen_event_id.clone(),
-            last_applied_event_seq: self.last_applied_event_seq,
-            last_applied_grow_event_seq: self.last_applied_grow_event_seq,
+            last_seen_event_id: self.session.last_seen_event_id.clone(),
+            last_applied_event_seq: self.session.last_applied_event_seq,
+            last_applied_grow_event_seq: self.session.last_applied_grow_event_seq,
             saw_replay: false,
             saw_todo_update: false,
         });
@@ -551,8 +552,8 @@ impl AgentView {
         // A new turn invalidates the previous turn's finalized marker: a
         // late PromptResponse for the OLD pid must be discarded (not merged)
         // once a newer turn owns the slot.
-        self.finalized_prompt = None;
-        self.finalized_pr_meta = None;
+        self.session.finalized_prompt = None;
+        self.session.finalized_pr_meta = None;
         let _ = starting_prompt_id;
         self.session.start_turn(&mut self.scrollback);
     }
@@ -608,11 +609,12 @@ impl AgentView {
     }
     /// Whether a running turn reported on load is still live for this view.
     /// A turn whose durable `TurnCompleted` already arrived in this load's replay
-    /// (recorded in [`Self::replayed_terminal_prompts`]) has ended; adopting it
+    /// (recorded in `self.session.replayed_terminal_prompts`) has ended; adopting it
     /// would re-strand the viewer on "Waiting…".
     ///
     pub(crate) fn should_adopt_running_prompt(&self, prompt_id: &str) -> bool {
-        !self.replayed_terminal_prompts.contains(prompt_id) && !self.is_rewound_prompt(prompt_id)
+        !self.session.replayed_terminal_prompts.contains(prompt_id)
+            && !self.is_rewound_prompt(prompt_id)
     }
 
     /// Finalize a reconnect-reload window and, iff the running prompt is
@@ -725,9 +727,9 @@ impl AgentView {
             self.private_workflow_runs = reload.private_workflow_runs;
             self.workflow_run_revisions = reload.workflow_run_revisions;
             self.cleared_workflow_runs = reload.cleared_workflow_runs;
-            self.last_seen_event_id = reload.last_seen_event_id;
-            self.last_applied_event_seq = reload.last_applied_event_seq;
-            self.last_applied_grow_event_seq = reload.last_applied_grow_event_seq;
+            self.session.last_seen_event_id = reload.last_seen_event_id;
+            self.session.last_applied_event_seq = reload.last_applied_event_seq;
+            self.session.last_applied_grow_event_seq = reload.last_applied_grow_event_seq;
             dropped_heavy = true;
         }
         self.session.loading_replay = false;
