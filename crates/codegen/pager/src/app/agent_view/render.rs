@@ -1301,7 +1301,7 @@ impl AgentView {
             }
             status.push("plan", Line::from(Span::styled("plan", plan_style)));
         }
-        if let Some(ref goal) = self.goal_state {
+        if let Some(ref goal) = self.session.goal_state {
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
@@ -1315,7 +1315,7 @@ impl AgentView {
                     &theme,
                     self.hit_goal_status.hovered,
                     frame_stamp,
-                    self.context_state.as_ref().map(|c| c.used),
+                    self.session.context_state.as_ref().map(|c| c.used),
                     active_subagent_tokens,
                 ),
             );
@@ -1327,9 +1327,10 @@ impl AgentView {
         {
             status.push("mcp", mcp_line);
         }
-        let ctx_used = self.context_state.as_ref().map(|c| c.used);
+        let ctx_used = self.session.context_state.as_ref().map(|c| c.used);
         let model_window = self.session.models.get_context_window();
         let ctx_total = self
+            .session
             .context_state
             .as_ref()
             .and_then(|c| (c.total > 0).then_some(c.total))
@@ -2068,7 +2069,7 @@ impl AgentView {
                             watching_hovered: self.hit_watching_cue.hovered,
                         }),
                         has_running_execute,
-                        total_tokens: self.context_state.as_ref().map(|c| c.used),
+                        total_tokens: self.session.context_state.as_ref().map(|c| c.used),
                         mcp_init_progress: self.mcp_init_progress.as_ref(),
                         is_bash_turn: self.bash_turn,
                         is_pending_user_input,
@@ -4117,7 +4118,7 @@ impl AgentView {
             prompt_post_flush = Some(clear.into());
         }
         if self.show_goal_detail
-            && let Some(ref goal) = self.goal_state
+            && let Some(ref goal) = self.session.goal_state
         {
             if let Some(output) = crate::views::goal_detail::render_goal_detail(
                 buf,

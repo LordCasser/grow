@@ -513,7 +513,7 @@
         // also be reset — see the comment in handle_child_session_notification.
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
-            child_view.context_state.as_ref().map(|c| c.used),
+            child_view.session.context_state.as_ref().map(|c| c.used),
             Some(25000)
         );
     }
@@ -528,7 +528,7 @@
             .subagent_sessions
             .insert(child_sid.into(), make_subagent_info(child_sid));
         let mut child_view = make_agent(Some(child_sid));
-        child_view.context_state = Some(shell::session::ContextInfo::from_notification(
+        child_view.session.context_state = Some(shell::session::ContextInfo::from_notification(
             90_000, 131_072,
         ));
         agent
@@ -545,7 +545,7 @@
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
-            child_view.context_state.as_ref().map(|c| c.used),
+            child_view.session.context_state.as_ref().map(|c| c.used),
             Some(90_000)
         );
     }

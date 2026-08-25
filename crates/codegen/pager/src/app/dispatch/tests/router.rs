@@ -929,7 +929,7 @@ fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.session_id = Some("sess-1".into());
         agent.session.behavior_mode = tools::types::BehaviorId::Goal;
-        agent.goal_state = None;
+        agent.session.goal_state = None;
         agent.prompt.sync_acp_commands(
             &agent.session.available_commands,
             agent.session.available_tools.as_ref(),

@@ -4,7 +4,7 @@
     #[test]
     fn handle_updates_total_tokens_used_for_active_agent() {
         let mut app = make_app_with_agent("sess-1");
-        assert!(app.agents.get(&AgentId(0)).unwrap().context_state.is_none());
+        assert!(app.agents.get(&AgentId(0)).unwrap().session.context_state.is_none());
 
         let _ = handle(make_token_notification_message("sess-1", 12_345), &mut app);
 
@@ -12,6 +12,7 @@
             app.agents
                 .get(&AgentId(0))
                 .unwrap()
+                .session
                 .context_state
                 .as_ref()
                 .map(|c| c.used),
@@ -33,6 +34,7 @@
             app.agents
                 .get(&AgentId(0))
                 .unwrap()
+                .session
                 .context_state
                 .as_ref()
                 .map(|c| c.used),
@@ -935,7 +937,7 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].context_state.as_ref().map(|c| c.used),
+            app.agents[&id].session.context_state.as_ref().map(|c| c.used),
             Some(500_000),
         );
         assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(20));
@@ -946,7 +948,7 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].context_state.as_ref().map(|c| c.used),
+            app.agents[&id].session.context_state.as_ref().map(|c| c.used),
             Some(500_000),
             "a deduped stale delta must not regress context_used to its lower value"
         );
@@ -1038,7 +1040,7 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].context_state.as_ref().map(|c| c.used),
+            app.agents[&id].session.context_state.as_ref().map(|c| c.used),
             Some(100_000),
         );
 
@@ -1047,10 +1049,9 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].context_state.as_ref().map(|c| c.used),
+            app.agents[&id].session.context_state.as_ref().map(|c| c.used),
             Some(250_000),
             "a newer (higher eventId) delta must update context_used"
         );
         assert_eq!(app.agents[&id].session.last_applied_event_seq, Some(8));
     }
-

@@ -74,7 +74,7 @@ impl AgentView {
                             self.workflows_view.reset();
                             self.set_goal_detail_visible(false);
                         }
-                    } else if self.goal_state.is_some() {
+                    } else if self.session.goal_state.is_some() {
                         self.toggle_goal_detail();
                     }
                     return InputOutcome::Changed;

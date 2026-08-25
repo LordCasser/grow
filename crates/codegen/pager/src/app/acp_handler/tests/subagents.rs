@@ -1070,7 +1070,7 @@
 
         let agent_a = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
-            agent_a.context_state.as_ref().map(|c| c.used),
+            agent_a.session.context_state.as_ref().map(|c| c.used),
             Some(25_000),
             "AutoCompactCompleted must reset A's context_used even when B is active"
         );

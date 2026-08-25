@@ -592,7 +592,7 @@ fn top_level_row(
         pinned,
         is_active,
         badges,
-        context_pct: agent.context_state.as_ref().map(|c| c.usage_pct),
+        context_pct: agent.session.context_state.as_ref().map(|c| c.usage_pct),
         indent: 0,
         parent_label: None,
         is_more_placeholder: false,

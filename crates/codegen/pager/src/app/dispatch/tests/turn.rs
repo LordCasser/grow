@@ -437,7 +437,7 @@ fn goal_active_cancel_opens_panel_ignoring_pref() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.goal_state = Some(GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(GoalDisplayState::test_stub());
         agent.session.state = AgentState::TurnRunning;
         agent.cancel_subagents_preference = Some(true); // must be ignored
     }
@@ -464,7 +464,7 @@ fn goal_panel_choice_count_follows_subagents() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.goal_state = Some(GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(GoalDisplayState::test_stub());
         agent.session.state = AgentState::TurnRunning;
     }
     let _ = dispatch(Action::CancelTurn, &mut app);
@@ -583,7 +583,7 @@ fn goal_active_without_turn_pause_routes_command_plane() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.goal_state = Some(GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(GoalDisplayState::test_stub());
         // Idle: no turn running.
     }
     let _ = dispatch(Action::CancelTurn, &mut app);
@@ -627,7 +627,7 @@ fn goal_retry_replays_last_interrupt_without_pause() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
     }
     // First gesture: StopTurnOnly (stashes the intent).
     let _ = dispatch(

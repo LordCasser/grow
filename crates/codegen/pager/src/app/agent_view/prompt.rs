@@ -1163,8 +1163,8 @@ mod configuration_shortcut_tests {
     #[test]
     fn goal_edit_tab_fills_the_current_objective() {
         let mut agent = super::test_fixtures::make_agent();
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        agent.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
+        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
         let commands = vec![agent_client_protocol::AvailableCommand::new(
             "goal".to_string(),
             "Manage the current goal".to_string(),

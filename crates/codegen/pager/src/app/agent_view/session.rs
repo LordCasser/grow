@@ -176,8 +176,6 @@ impl AgentView {
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
-            context_state: None,
-            goal_state: None,
             goal_detail_renderer: crate::views::goal_detail::GoalDetailRenderer::default(),
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -187,7 +185,6 @@ impl AgentView {
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
             pending_stop_hooks: None,
-            last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
             turn_start_ms_prompt: None,
@@ -939,31 +936,13 @@ impl AgentView {
     /// Update context state with a full snapshot from live callers.
     ///
     pub fn apply_full_context_info(&mut self, next: shell::session::ContextInfo) {
-        self.context_state = Some(next);
+        self.session.apply_full_context_info(next);
     }
     /// Update context state from a streaming notification carrying only
     /// `used` and `total` fields.
     ///
     pub fn apply_context_used(&mut self, used: u64, total: u64) {
-        let total = if total > 0 {
-            total
-        } else {
-            self.context_state.as_ref().map(|s| s.total).unwrap_or(0)
-        };
-        match self.context_state.as_mut() {
-            Some(snap) => {
-                snap.used = used;
-                if total > 0 {
-                    snap.total = total;
-                }
-                snap.usage_pct = token_estimation::usage_percentage_u8(used, snap.total);
-                snap.free_tokens = token_estimation::free_tokens(snap.total, used);
-            }
-            None => {
-                self.context_state =
-                    Some(shell::session::ContextInfo::from_notification(used, total));
-            }
-        }
+        self.session.apply_context_used(used, total);
     }
     /// Record a key event to the input flight recorder.
     ///

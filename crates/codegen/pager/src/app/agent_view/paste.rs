@@ -1502,10 +1502,10 @@ pub(super) mod paste_key_tests {
         assert_refused(&mut agent, &mut counts, "agents modal");
         agent.agents_modal = None;
         agent.show_goal_detail = true;
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         assert_refused(&mut agent, &mut counts, "goal detail overlay");
         agent.show_goal_detail = false;
-        agent.goal_state = None;
+        agent.session.goal_state = None;
         agent.prompt.suggestions.dropdown.open = true;
         assert_refused(&mut agent, &mut counts, "prompt dropdown");
         agent.prompt.suggestions.dropdown.open = false;

@@ -964,15 +964,15 @@ fn handle_session_notification_inner(
             status_message,
         } => {
             if status == "cleared" {
-                if let Some(g) = agent.goal_state.take() {
-                    agent.last_cleared_goal_id = Some(g.goal_id);
+                if let Some(g) = agent.session.goal_state.take() {
+                    agent.session.last_cleared_goal_id = Some(g.goal_id);
                     agent
                         .scrollback
                         .push_block(RenderBlock::session_event(SessionEvent::GoalCleared));
                 }
                 agent.set_goal_detail_visible(false);
                 true
-            } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
+            } else if agent.session.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false
             } else {
                 let Some(new_status) = GoalDisplayStatus::parse(&status) else {
@@ -980,6 +980,7 @@ fn handle_session_notification_inner(
                     return false;
                 };
                 let elapsed_floor_ms = agent
+                    .session
                     .goal_state
                     .as_ref()
                     .filter(|g| g.goal_id == goal_id)
@@ -987,7 +988,7 @@ fn handle_session_notification_inner(
                     .unwrap_or(0)
                     .max(elapsed_ms);
                 if let Some(event) = goal_transition_event(
-                    agent.goal_state.as_ref(),
+                    agent.session.goal_state.as_ref(),
                     &goal_id,
                     &objective,
                     new_status,
@@ -997,7 +998,7 @@ fn handle_session_notification_inner(
                         .scrollback
                         .push_block(RenderBlock::session_event(event));
                 }
-                agent.goal_state = Some(GoalDisplayState {
+                agent.session.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
                     status: new_status,

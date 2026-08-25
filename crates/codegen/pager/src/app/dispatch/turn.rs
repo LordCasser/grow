@@ -103,6 +103,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         // turn" (gap / verifying / planning: pause only) — never pretends to
         // cancel a turn that is not running.
         if agent
+            .session
             .goal_state
             .as_ref()
             .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))

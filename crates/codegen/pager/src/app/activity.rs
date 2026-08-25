@@ -72,6 +72,7 @@ impl AgentActivityProjection {
                     .iter()
                     .any(|run| run.is_active()),
             goal_active: agent
+                .session
                 .goal_state
                 .as_ref()
                 .is_some_and(|goal| goal.status == crate::app::agent::GoalDisplayStatus::Active),
@@ -109,7 +110,7 @@ mod tests {
     #[test]
     fn active_goal_projects_work_while_foreground_is_idle() {
         let mut agent = test_agent_view(Some("goal-session"), "/tmp".into());
-        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         let projection = AgentActivityProjection::from_agent(&agent);
         assert!(projection.goal_active);
         assert!(projection.working());

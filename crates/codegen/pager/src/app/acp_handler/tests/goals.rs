@@ -31,7 +31,7 @@ fn send_goal_update(app: &mut AppView, status: &str, objective: &str) -> bool {
 fn goal_update_maps_only_the_long_term_goal_projection() {
     let mut app = make_app_with_agent("sess-A");
     assert!(send_goal_update(&mut app, "active", "ship it"));
-    let goal = app.agents[&AgentId(0)].goal_state.as_ref().unwrap();
+    let goal = app.agents[&AgentId(0)].session.goal_state.as_ref().unwrap();
     assert_eq!(goal.goal_id, "g1");
     assert_eq!(goal.objective, "ship it");
     assert_eq!(goal.status, GoalDisplayStatus::Active);
@@ -66,7 +66,7 @@ fn retired_blackboard_wire_state_is_rejected() {
         }),
         &mut app,
     ));
-    assert!(app.agents[&AgentId(0)].goal_state.is_none());
+    assert!(app.agents[&AgentId(0)].session.goal_state.is_none());
 }
 
 #[test]
@@ -113,5 +113,5 @@ fn lifecycle_transitions_append_deduplicated_goal_events() {
         last_session_event(&app.agents[&AgentId(0)].scrollback),
         Some(SessionEvent::GoalCleared)
     ));
-    assert!(app.agents[&AgentId(0)].goal_state.is_none());
+    assert!(app.agents[&AgentId(0)].session.goal_state.is_none());
 }

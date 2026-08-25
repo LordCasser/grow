@@ -4187,7 +4187,7 @@ pub(crate) mod tests {
         idle_agent_with_content(&mut app, id);
         let mut goal = crate::app::agent::GoalDisplayState::test_stub();
         goal.status = crate::app::agent::GoalDisplayStatus::Active;
-        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+        app.agents.get_mut(&id).unwrap().session.goal_state = Some(goal);
         assert_eq!(
             app.visible_frame_interval(TEST_FRAME_INTERVAL),
             Some(TEST_FRAME_INTERVAL),
@@ -4198,6 +4198,7 @@ pub(crate) mod tests {
         app.agents
             .get_mut(&id)
             .unwrap()
+            .session
             .goal_state
             .as_mut()
             .unwrap()
@@ -4301,7 +4302,7 @@ pub(crate) mod tests {
         agent.session.state = AgentState::Idle;
         let mut goal = crate::app::agent::GoalDisplayState::test_stub();
         goal.status = crate::app::agent::GoalDisplayStatus::Active;
-        agent.goal_state = Some(goal);
+        agent.session.goal_state = Some(goal);
         app.notification_service = crate::notifications::NotificationService::new(
             crate::notifications::NotificationConfig {
                 progress_bar: true,
@@ -4326,6 +4327,7 @@ pub(crate) mod tests {
         app.agents
             .get_mut(&id)
             .unwrap()
+            .session
             .goal_state
             .as_mut()
             .unwrap()

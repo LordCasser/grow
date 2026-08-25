@@ -694,11 +694,6 @@ pub struct AgentView {
     pub(crate) modal_buttons: Vec<ModalButtonHit>,
     /// Currently hovered modal button key (for highlight).
     pub(crate) modal_hovered_key: Option<char>,
-    /// Cached server-reported context state.
-    pub context_state: Option<shell::session::ContextInfo>,
-    /// Current long-lived Goal state. Set by `GoalUpdated` session
-    /// notifications, cleared when a new session starts.
-    pub goal_state: Option<super::agent::GoalDisplayState>,
     /// View-only scroll state for the Goal detail overlay.
     pub(crate) goal_detail_renderer: crate::views::goal_detail::GoalDetailRenderer,
     pub workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
@@ -717,15 +712,9 @@ pub struct AgentView {
     /// that pushes it). Consumed or flushed by `push_turn_terminal_marker`;
     /// dropped on every replay-window entry.
     pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
-    /// Goal id of the most recently cleared goal, captured from the dropped
-    /// state (the `cleared` event itself carries an empty id). Drops a late
-    /// in-flight `GoalUpdated` that would otherwise resurrect the cleared
-    /// chip/modal. Single slot: goal ids are unique, so only the latest clear
-    /// can race a stale update.
-    pub last_cleared_goal_id: Option<String>,
     /// Whether the expanded goal detail overlay is visible.
     /// Toggled by `Action::ToggleGoalDetail`. Only shown when
-    /// `goal_state` is `Some`.
+    /// `session.goal_state` is `Some`.
     pub show_goal_detail: bool,
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.

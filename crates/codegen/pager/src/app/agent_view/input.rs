@@ -43,7 +43,7 @@ impl AgentView {
     /// Open or close the Goal overlay as one UI state transition. Navigation
     /// belongs to the overlay lifetime, so reopening starts at the top.
     pub(crate) fn set_goal_detail_visible(&mut self, visible: bool) {
-        let visible = visible && self.goal_state.is_some();
+        let visible = visible && self.session.goal_state.is_some();
         if self.show_goal_detail != visible {
             self.goal_detail_renderer.reset_navigation();
         }
@@ -604,7 +604,7 @@ impl AgentView {
         if let Some(outcome) = self.handle_workflows_overlay_input(ev) {
             return outcome;
         }
-        if self.show_goal_detail && self.goal_state.is_some() {
+        if self.show_goal_detail && self.session.goal_state.is_some() {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
             {
@@ -1269,14 +1269,16 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('g')
             && key.modifiers.is_empty()
-            && (self.goal_state.is_some() || !self.workflow_runs.is_empty())
+            && (self.session.goal_state.is_some() || !self.workflow_runs.is_empty())
         {
             let has_active_workflow = self.workflow_runs.iter().any(|run| !run.is_terminal());
-            return InputOutcome::Action(if self.goal_state.is_some() && !has_active_workflow {
-                Action::ToggleGoalDetail
-            } else {
-                Action::ToggleWorkflows
-            });
+            return InputOutcome::Action(
+                if self.session.goal_state.is_some() && !has_active_workflow {
+                    Action::ToggleGoalDetail
+                } else {
+                    Action::ToggleWorkflows
+                },
+            );
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1356,7 +1358,8 @@ impl AgentView {
             behavior,
             deep_research,
             goal,
-            self.goal_state
+            self.session
+                .goal_state
                 .as_ref()
                 .filter(|goal| goal.status != crate::app::agent::GoalDisplayStatus::Complete)
                 .map(|goal| goal.objective.clone()),
@@ -2140,7 +2143,7 @@ mod btw_focus_tests {
         assert!(block.block_viewer.is_none(), "block viewer handled Esc");
         assert_minimal_btw_active(&block, "block viewer");
         let mut goal = minimal_btw_agent();
-        goal.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        goal.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         goal.show_goal_detail = true;
         goal.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert!(!goal.show_goal_detail, "goal detail handled Esc");

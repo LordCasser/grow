@@ -222,11 +222,12 @@ pub fn clear_agent_btw_geometry(agent: &mut AgentView) {
 }
 
 pub fn agent_context_used(agent: &AgentView) -> Option<u64> {
-    agent.context_state.as_ref().map(|state| state.used)
+    agent.session.context_state.as_ref().map(|state| state.used)
 }
 
 pub fn agent_context_total(agent: &AgentView) -> Option<u64> {
     agent
+        .session
         .context_state
         .as_ref()
         .and_then(|state| (state.total > 0).then_some(state.total))
@@ -585,7 +586,7 @@ pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
     v.active_subagent.is_none()
         && v.image_viewer.is_none()
         && v.gboom.is_none()
-        && !(v.show_goal_detail && v.goal_state.is_some())
+        && !(v.show_goal_detail && v.session.goal_state.is_some())
         && v.line_viewer.is_none()
         && v.extensions_modal.is_none()
         && v.agents_modal.is_none()

@@ -498,6 +498,17 @@ pub struct AgentSession {
     pub models: ModelState,
     pub state: AgentState,
     pub cwd: PathBuf,
+    /// Cached server-reported context state.
+    pub(crate) context_state: Option<shell::session::ContextInfo>,
+    /// Current long-lived Goal state. Set by `GoalUpdated` session
+    /// notifications, cleared when a new session starts.
+    pub(crate) goal_state: Option<GoalDisplayState>,
+    /// Goal id of the most recently cleared goal, captured from the dropped
+    /// state (the `cleared` event itself carries an empty id). Drops a late
+    /// in-flight `GoalUpdated` that would otherwise resurrect the cleared
+    /// chip/modal. Single slot: goal ids are unique, so only the latest clear
+    /// can race a stale update.
+    pub(crate) last_cleared_goal_id: Option<String>,
     /// Whether this session is running inside a git worktree.
     pub is_worktree: bool,
     /// `AgentId` of the parent session if this session was created via
@@ -761,6 +772,9 @@ impl AgentSession {
             models,
             state: AgentState::Idle,
             cwd,
+            context_state: None,
+            goal_state: None,
+            last_cleared_goal_id: None,
             is_worktree: false,
             forked_from: None,
             pending_prompts: VecDeque::new(),
@@ -821,6 +835,35 @@ impl AgentSession {
 
     pub(crate) fn mark_created_via_new(&mut self) {
         self.created_via_new = true;
+    }
+
+    /// Update context state with a full snapshot from live callers.
+    pub(crate) fn apply_full_context_info(&mut self, next: shell::session::ContextInfo) {
+        self.context_state = Some(next);
+    }
+
+    /// Update context state from a streaming notification carrying only
+    /// `used` and `total` fields.
+    pub(crate) fn apply_context_used(&mut self, used: u64, total: u64) {
+        let total = if total > 0 {
+            total
+        } else {
+            self.context_state.as_ref().map(|s| s.total).unwrap_or(0)
+        };
+        match self.context_state.as_mut() {
+            Some(snap) => {
+                snap.used = used;
+                if total > 0 {
+                    snap.total = total;
+                }
+                snap.usage_pct = token_estimation::usage_percentage_u8(used, snap.total);
+                snap.free_tokens = token_estimation::free_tokens(snap.total, used);
+            }
+            None => {
+                self.context_state =
+                    Some(shell::session::ContextInfo::from_notification(used, total));
+            }
+        }
     }
 
     pub fn permission_mode(&self) -> shell::util::config::PermissionMode {
