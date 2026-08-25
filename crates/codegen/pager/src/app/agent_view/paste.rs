@@ -14,25 +14,13 @@ use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 #[cfg(test)]
 use crossterm::event::{Event, KeyEvent};
 impl AgentView {
-    /// Insert a plain-text (caption) clipboard paste into the prompt, matching
-    /// the bracketed arm's whitespace policy + slash/suggestion refresh. The
-    /// image/file-url portion of a paste is handled by the deferred probe.
-    fn insert_prompt_plain_text(
-        &mut self,
-        clipboard_text: Option<&str>,
-    ) -> (InputOutcome, crate::app::actions::ClipboardTextInsertion) {
-        self.insert_prompt_text(clipboard_text, false)
-    }
-    pub(super) fn insert_bracketed_prompt_text(
-        &mut self,
-        text: &str,
-    ) -> (InputOutcome, crate::app::actions::ClipboardTextInsertion) {
-        self.insert_prompt_text(Some(text), true)
-    }
-    fn insert_prompt_text(
+    /// Insert clipboard text into the prompt using the same whitespace,
+    /// slash-command, and suggestion-refresh policy as interactive paste.
+    pub(super) fn insert_prompt_text(
         &mut self,
         clipboard_text: Option<&str>,
         activate_bash: bool,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> (InputOutcome, crate::app::actions::ClipboardTextInsertion) {
         use crate::app::actions::ClipboardTextInsertion;
         let Some(text) = clipboard_text else {
@@ -58,10 +46,10 @@ impl AgentView {
             PromptEvent::Edited => {
                 self.prompt.refresh_slash(&self.session.models);
                 if let Some(eff) = self.notify_suggestion_text_changed() {
-                    self.pending_effects.push(eff);
+                    effects.push(eff);
                 }
                 if let Some(eff) = self.notify_plugin_cta_text_changed() {
-                    self.pending_effects.push(eff);
+                    effects.push(eff);
                 }
                 (InputOutcome::Changed, ClipboardTextInsertion::Inserted)
             }
@@ -90,23 +78,23 @@ impl AgentView {
         &mut self,
         source: crate::app::actions::ClipboardPasteSource,
         change_count: Option<u64>,
+        effects: &mut Vec<super::actions::Effect>,
     ) {
         let images_dir = crate::prompt_images::session_images_dir(
             self.session.session_id.as_ref(),
             &self.session.cwd,
         );
         self.paste_probe_in_flight += 1;
-        self.pending_effects
-            .push(crate::app::actions::Effect::ProbeClipboardAttachment {
-                ctx: crate::app::actions::ClipboardPasteContext {
-                    target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
-                        agent_id: self.session.id,
-                        images_dir,
-                    },
-                    source,
+        effects.push(crate::app::actions::Effect::ProbeClipboardAttachment {
+            ctx: crate::app::actions::ClipboardPasteContext {
+                target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
+                    agent_id: self.session.id,
+                    images_dir,
                 },
-                change_count,
-            });
+                source,
+            },
+            change_count,
+        });
     }
     /// Ctrl/Cmd+V paste: a file path in the text resolves synchronously and
     /// wins; else the clipboard raster/file-url probe defers off the event loop
@@ -115,13 +103,14 @@ impl AgentView {
     pub(super) fn handle_paste_key_deferred(
         &mut self,
         clipboard_text: crate::app::actions::ClipboardTextRead,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         let tip_showing = self.ephemeral_tip.current_key()
             == Some(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
         self.ephemeral_tip
             .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
         if let Some(text) = clipboard_text.as_deref()
-            && let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text)
+            && let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text, effects)
         {
             return outcome;
         }
@@ -134,10 +123,12 @@ impl AgentView {
                     tip_showing,
                 },
                 change_count,
+                effects,
             );
             return InputOutcome::Changed;
         }
-        self.insert_prompt_plain_text(clipboard_text.as_deref()).0
+        self.insert_prompt_text(clipboard_text.as_deref(), false, effects)
+            .0
     }
     /// Attach the result of a deferred clipboard attachment probe
     /// ([`Effect::ProbeClipboardAttachment`]). The heavy read/decode/persist
@@ -147,6 +138,7 @@ impl AgentView {
         ctx: crate::app::actions::ClipboardPasteContext,
         image: crate::app::actions::ProbedAttachment,
         file_urls: Option<String>,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> crate::app::actions::ClipboardPasteCompletion {
         use crate::app::actions::{
             ClipboardPasteCompletion, ClipboardPasteFailure, ProbedAttachment,
@@ -171,9 +163,9 @@ impl AgentView {
                     ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
                 } else {
                     if let Some(preparation) = preparation {
-                        self.pending_effects.push(
-                            crate::app::actions::Effect::PreparePromptImagePreview { preparation },
-                        );
+                        effects.push(crate::app::actions::Effect::PreparePromptImagePreview {
+                            preparation,
+                        });
                     }
                     if ctx.source.tip_showing() {
                         diagnostics::session_ctx::log_event(diagnostics::events::ContextualTip {
@@ -197,7 +189,7 @@ impl AgentView {
         };
         let file = if attachment == ClipboardPasteCompletion::FullMiss {
             file_urls.as_deref().and_then(|urls| {
-                self.try_handle_dropped_paths_paste(urls)
+                self.try_handle_dropped_paths_paste(urls, effects)
                     .map(|(_, completion)| completion)
             })
         } else {
@@ -207,7 +199,7 @@ impl AgentView {
             ctx.source
                 .text_to_insert_on_miss()
                 .filter(|text| !text.trim().is_empty())
-                .map(|text| self.insert_prompt_plain_text(Some(text)).1)
+                .map(|text| self.insert_prompt_text(Some(text), false, effects).1)
         } else {
             None
         };
@@ -259,12 +251,16 @@ impl AgentView {
         }
     }
     /// Consume wrap host-image magic paste (`Some` = handled, never as text).
-    pub(super) fn try_handle_wrap_host_image_paste(&mut self, text: &str) -> Option<InputOutcome> {
+    pub(super) fn try_handle_wrap_host_image_paste(
+        &mut self,
+        text: &str,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> Option<InputOutcome> {
         let wrap = crate::wrap_clipboard_image::try_decode_wrap_host_image_paste(text)?;
         Some(match wrap {
             crate::wrap_clipboard_image::WrapImagePaste::Image(data) => {
                 let pasted = crate::prompt_images::from_clipboard_data(&data);
-                let _ = self.handle_image_paste_from_data(pasted);
+                let _ = self.handle_image_paste_from_data(pasted, effects);
                 self.prompt.refresh_slash(&self.session.models);
                 InputOutcome::Changed
             }
@@ -281,8 +277,12 @@ impl AgentView {
     /// plan-approval, and question-view paste arms — all of which share
     /// the same prompt widget as the main Prompt pane and need identical
     /// classifier semantics.
-    pub(super) fn route_popup_paste(&mut self, text: &str) -> InputOutcome {
-        if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+    pub(super) fn route_popup_paste(
+        &mut self,
+        text: &str,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> InputOutcome {
+        if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text, effects) {
             return outcome;
         }
         let _ = self.prompt.handle_paste(text);
@@ -318,6 +318,7 @@ impl AgentView {
     pub(super) fn try_handle_dropped_paths_paste(
         &mut self,
         text: &str,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> Option<(InputOutcome, crate::app::actions::ClipboardPasteCompletion)> {
         if crate::terminal::terminal_context().is_ssh {
             return None;
@@ -353,7 +354,7 @@ impl AgentView {
                         self.prompt.textarea.begin_undo_group();
                         group_open = true;
                     }
-                    if self.handle_image_paste_from_data(img) {
+                    if self.handle_image_paste_from_data(img, effects) {
                         inserted_image = true;
                     }
                 }
@@ -376,10 +377,10 @@ impl AgentView {
             self.prompt.refresh_slash(&self.session.models);
         }
         if inserted_non_image && let Some(eff) = self.notify_suggestion_text_changed() {
-            self.pending_effects.push(eff);
+            effects.push(eff);
         }
         if inserted_non_image && let Some(eff) = self.notify_plugin_cta_text_changed() {
-            self.pending_effects.push(eff);
+            effects.push(eff);
         }
         let completion = if inserted_image || inserted_non_image {
             crate::app::actions::ClipboardPasteCompletion::Handled
@@ -408,6 +409,7 @@ impl AgentView {
     fn handle_image_paste_from_data(
         &mut self,
         mut pasted: crate::prompt_images::PastedImage,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> bool {
         if self.reject_shared_queue_image_attachment(&pasted) {
             return false;
@@ -427,8 +429,7 @@ impl AgentView {
             return false;
         }
         if let Some(preparation) = preparation {
-            self.pending_effects
-                .push(crate::app::actions::Effect::PreparePromptImagePreview { preparation });
+            effects.push(crate::app::actions::Effect::PreparePromptImagePreview { preparation });
         }
         true
     }
@@ -471,42 +472,48 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn wrap_host_image_none_paste_not_inserted_as_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let registry = ActionRegistry::defaults();
         let outcome = agent.handle_input(
             &Event::Paste(crate::wrap_clipboard_image::MAGIC_NONE.to_string()),
             &registry,
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert!(agent.prompt.text().is_empty());
     }
     #[test]
     fn wrap_host_image_malformed_paste_not_inserted_as_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let registry = ActionRegistry::defaults();
         let outcome = agent.handle_input(
             &Event::Paste("GROW_WRAP_IMG\nimage/png\n!!!".to_string()),
             &registry,
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert!(agent.prompt.text().is_empty());
     }
     #[test]
     fn paste_key_text_inserts_into_prompt() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let outcome = paste_cmd_v(&mut agent, Some("hello world"));
+        agent.force_active_pane(ActivePane::Prompt);
+        let outcome = paste_cmd_v(&mut agent, Some("hello world"), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "hello world");
     }
     #[test]
     fn paste_key_multiline_text_creates_element() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let text = "line1\nline2\nline3\nline4";
-        let outcome = paste_cmd_v(&mut agent, Some(text));
+        let outcome = paste_cmd_v(&mut agent, Some(text), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), text);
         assert_eq!(agent.prompt.textarea().elements().len(), 1);
@@ -514,40 +521,45 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_image_preferred_over_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        paste_cmd_v_image(&mut agent, Some("text content"));
+        agent.force_active_pane(ActivePane::Prompt);
+        paste_cmd_v_image(&mut agent, Some("text content"), &mut effects);
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #1]"));
         assert!(!agent.prompt.text().contains("text content"));
     }
     #[test]
     fn paste_key_image_when_no_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        paste_cmd_v_image(&mut agent, None);
+        agent.force_active_pane(ActivePane::Prompt);
+        paste_cmd_v_image(&mut agent, None, &mut effects);
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #1]"));
     }
     #[test]
     fn paste_key_image_when_text_is_empty_string() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        paste_cmd_v_image(&mut agent, Some(""));
+        agent.force_active_pane(ActivePane::Prompt);
+        paste_cmd_v_image(&mut agent, Some(""), &mut effects);
         assert_eq!(agent.prompt.images.len(), 1);
     }
     #[test]
     fn paste_key_image_when_text_is_whitespace() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        paste_cmd_v_image(&mut agent, Some("   \n  "));
+        agent.force_active_pane(ActivePane::Prompt);
+        paste_cmd_v_image(&mut agent, Some("   \n  "), &mut effects);
         assert_eq!(agent.prompt.images.len(), 1);
     }
     #[test]
     fn paste_key_empty_clipboard_consumes_key() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let outcome = paste_cmd_v(&mut agent, None);
+        agent.force_active_pane(ActivePane::Prompt);
+        let outcome = paste_cmd_v(&mut agent, None, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.text().is_empty());
         assert!(agent.prompt.images.is_empty());
@@ -558,28 +570,31 @@ pub(super) mod paste_key_tests {
     /// whitespace caption (a no-image miss with blank text inserts nothing).
     #[test]
     fn paste_key_whitespace_only_text_with_no_image_or_urls_is_noop() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let _ = paste_cmd_v(&mut agent, Some("   "));
+        agent.force_active_pane(ActivePane::Prompt);
+        let _ = paste_cmd_v(&mut agent, Some("   "), &mut effects);
         assert!(agent.prompt.text().is_empty());
-        let _ = paste_cmd_v(&mut agent, Some("\t\n  \t"));
+        let _ = paste_cmd_v(&mut agent, Some("\t\n  \t"), &mut effects);
         assert!(agent.prompt.text().is_empty());
     }
     #[test]
     fn paste_key_appends_to_existing_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         agent.prompt.textarea.insert_str("existing ");
-        let outcome = paste_cmd_v(&mut agent, Some("pasted"));
+        let outcome = paste_cmd_v(&mut agent, Some("pasted"), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "existing pasted");
     }
     #[test]
     fn paste_key_image_with_existing_text_in_prompt() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         agent.prompt.textarea.insert_str("describe: ");
-        paste_cmd_v_image(&mut agent, None);
+        paste_cmd_v_image(&mut agent, None, &mut effects);
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("describe: "));
         assert!(agent.prompt.text().contains("[Image #1]"));
@@ -588,24 +603,27 @@ pub(super) mod paste_key_tests {
     /// empty → deferred probe, whitespace caption dropped on the miss).
     #[test]
     fn paste_key_single_newline_text_is_noop() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let _ = paste_cmd_v(&mut agent, Some("\n"));
+        agent.force_active_pane(ActivePane::Prompt);
+        let _ = paste_cmd_v(&mut agent, Some("\n"), &mut effects);
         assert!(agent.prompt.text().is_empty());
     }
     #[test]
     fn paste_key_cr_normalized_to_lf() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let outcome = paste_cmd_v(&mut agent, Some("a\rb\rc"));
+        agent.force_active_pane(ActivePane::Prompt);
+        let outcome = paste_cmd_v(&mut agent, Some("a\rb\rc"), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "a\nb\nc");
     }
     #[test]
     fn paste_key_tabs_expanded_to_spaces() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let outcome = paste_cmd_v(&mut agent, Some("if true:\n\tpass"));
+        agent.force_active_pane(ActivePane::Prompt);
+        let outcome = paste_cmd_v(&mut agent, Some("if true:\n\tpass"), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(!agent.prompt.text().contains('\t'));
         assert_eq!(agent.prompt.text(), "if true:\n    pass");
@@ -614,49 +632,55 @@ pub(super) mod paste_key_tests {
     /// (trimmed-empty → deferred probe, blank caption dropped on the miss).
     #[test]
     fn paste_key_empty_string_text_no_image_is_noop() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let _ = paste_cmd_v(&mut agent, Some(""));
+        agent.force_active_pane(ActivePane::Prompt);
+        let _ = paste_cmd_v(&mut agent, Some(""), &mut effects);
         assert!(agent.prompt.text().is_empty());
     }
     #[test]
     fn paste_key_image_path_detected_as_image() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let png_path = dir.path().join("test.png");
         let png = make_test_png(10, 10);
         std::fs::write(&png_path, &png).unwrap();
         let path_str = png_path.to_string_lossy().to_string();
-        let outcome = paste_cmd_v(&mut agent, Some(&path_str));
+        let outcome = paste_cmd_v(&mut agent, Some(&path_str), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #"));
         assert!(agent.prompt.images[0].preview.is_pending());
-        assert!(agent.pending_effects.iter().any(|effect| matches!(
+        assert!(effects.iter().any(|effect| matches!(
             effect,
             crate::app::actions::Effect::PreparePromptImagePreview { .. }
         )));
     }
     #[test]
     fn paste_key_tiny_image_path_cannot_insert_or_send_immediately() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tiny.png");
         std::fs::write(&path, make_test_png(1, 1)).unwrap();
-        let outcome = paste_cmd_v(&mut agent, Some(&path.display().to_string()));
+        let outcome = paste_cmd_v(&mut agent, Some(&path.display().to_string()), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.images.is_empty());
         assert!(!agent.prompt.text().contains("[Image #"));
-        assert!(!agent.pending_effects.iter().any(|effect| matches!(
+        assert!(!effects.iter().any(|effect| matches!(
             effect,
             crate::app::actions::Effect::PreparePromptImagePreview { .. }
         )));
-        let enter = agent.handle_prompt_key_for_test(&KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
+        let enter = agent.handle_prompt_key_for_test(
+            &KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &mut effects,
+        );
         assert!(!matches!(
             enter,
             InputOutcome::Action(crate::app::actions::Action::SendPrompt(_))
@@ -664,22 +688,24 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_non_image_path_pasted_as_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
-        let outcome = paste_cmd_v(&mut agent, Some("/tmp/not-an-image.txt"));
+        agent.force_active_pane(ActivePane::Prompt);
+        let outcome = paste_cmd_v(&mut agent, Some("/tmp/not-an-image.txt"), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.images.is_empty());
         assert_eq!(agent.prompt.text(), "/tmp/not-an-image.txt");
     }
     #[test]
     fn paste_key_non_image_file_url_with_clipboard_icon_uses_path_not_icon() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join("notes.txt");
         std::fs::write(&txt, b"hello").unwrap();
         let url = format!("file://{}", txt.display());
-        let outcome = paste_cmd_v(&mut agent, Some(&url));
+        let outcome = paste_cmd_v(&mut agent, Some(&url), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
             agent.prompt.images.is_empty(),
@@ -708,8 +734,9 @@ pub(super) mod paste_key_tests {
     /// off-thread, so the completion sees no image.
     #[test]
     fn paste_key_file_urls_probe_recovers_when_text_is_none() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join("only_furl.txt");
         std::fs::write(&txt, b"hi").unwrap();
@@ -719,6 +746,7 @@ pub(super) mod paste_key_tests {
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             Some(url),
+            &mut effects,
         );
         assert_eq!(
             completion,
@@ -748,8 +776,9 @@ pub(super) mod paste_key_tests {
     /// deferred file-url recovery must still route the path on completion.
     #[test]
     fn paste_key_file_urls_probe_recovers_when_text_is_empty_string() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join("empty_text_furl.txt");
         std::fs::write(&txt, b"hi").unwrap();
@@ -759,6 +788,7 @@ pub(super) mod paste_key_tests {
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             Some(url),
+            &mut effects,
         );
         assert!(
             agent.prompt.images.is_empty(),
@@ -778,8 +808,9 @@ pub(super) mod paste_key_tests {
     /// text (the Finder file-icon raster is suppressed by the off-thread probe).
     #[test]
     fn paste_key_file_urls_probe_handles_multi_file_payload() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("snap.png");
         let txt = dir.path().join("notes.txt");
@@ -791,6 +822,7 @@ pub(super) mod paste_key_tests {
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             Some(furl_payload),
+            &mut effects,
         );
         assert_eq!(
             agent.prompt.images.len(),
@@ -815,13 +847,14 @@ pub(super) mod paste_key_tests {
     /// off-thread file-url recovery never runs and can't insert a rival path).
     #[test]
     fn paste_key_file_urls_probe_not_double_inserted_when_text_classifies() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("notes.txt");
         std::fs::write(&primary, b"primary").unwrap();
         let primary_url = format!("file://{}", primary.display());
-        let outcome = paste_cmd_v(&mut agent, Some(&primary_url));
+        let outcome = paste_cmd_v(&mut agent, Some(&primary_url), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
             agent.prompt.images.is_empty(),
@@ -829,7 +862,7 @@ pub(super) mod paste_key_tests {
             agent.prompt.images.len(),
         );
         assert!(
-            deferred_probe_target(&agent).is_none(),
+            deferred_probe_target(&agent, &effects).is_none(),
             "a classifying text paste must not also defer a probe"
         );
         let canon_primary = dunce::canonicalize(&primary).unwrap();
@@ -842,8 +875,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_non_image_file_url_percent_encoded_space_round_trips() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("My Documents");
         std::fs::create_dir_all(&sub).unwrap();
@@ -851,7 +885,7 @@ pub(super) mod paste_key_tests {
         std::fs::write(&txt, b"x").unwrap();
         let encoded = txt.display().to_string().replace(' ', "%20");
         let url = format!("file://{}", encoded);
-        let outcome = paste_cmd_v(&mut agent, Some(&url));
+        let outcome = paste_cmd_v(&mut agent, Some(&url), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.images.is_empty());
         assert!(
@@ -875,8 +909,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_multi_file_drop_image_plus_non_image_handles_both() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("snap.png");
         let txt = dir.path().join("notes.txt");
@@ -884,7 +919,7 @@ pub(super) mod paste_key_tests {
         std::fs::write(&png, &png_bytes).unwrap();
         std::fs::write(&txt, b"hi").unwrap();
         let pasted = format!("file://{}\nfile://{}", png.display(), txt.display());
-        let outcome = paste_cmd_v(&mut agent, Some(&pasted));
+        let outcome = paste_cmd_v(&mut agent, Some(&pasted), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #1]"));
@@ -911,14 +946,15 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_image_path_with_trailing_newline_still_attaches() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("trail.png");
         let png_bytes = make_test_png(8, 8);
         std::fs::write(&png, &png_bytes).unwrap();
         let pasted = format!("file://{}\n", png.display());
-        let outcome = paste_cmd_v(&mut agent, Some(&pasted));
+        let outcome = paste_cmd_v(&mut agent, Some(&pasted), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(
@@ -941,13 +977,14 @@ pub(super) mod paste_key_tests {
     #[test]
     fn event_paste_non_image_file_url_inserts_decoded_path_not_chip() {
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join("event_paste.txt");
         std::fs::write(&txt, b"hello").unwrap();
         let url = format!("file://{}", txt.display());
         let registry = ActionRegistry::defaults();
-        let outcome = agent.handle_input(&Event::Paste(url), &registry);
+        let mut effects = Vec::new();
+        let outcome = agent.handle_input(&Event::Paste(url), &registry, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Changed),
             "Event::Paste path must claim the drop with `Changed`; got {outcome:?}"
@@ -978,8 +1015,9 @@ pub(super) mod paste_key_tests {
     /// `try_handle_dropped_paths_paste`.
     #[test]
     fn paste_key_cap_reached_does_not_block_non_image_insert() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let cap = crate::views::prompt_widget::PromptWidget::IMAGE_CAP;
         for _ in 0..(cap - 1) {
             agent.prompt.insert_image(test_image_paste()).unwrap();
@@ -1003,7 +1041,7 @@ pub(super) mod paste_key_tests {
             c.display(),
             txt.display(),
         );
-        let outcome = paste_cmd_v(&mut agent, Some(&pasted));
+        let outcome = paste_cmd_v(&mut agent, Some(&pasted), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.images.len(), cap);
         let canon_txt = dunce::canonicalize(&txt).unwrap();
@@ -1034,14 +1072,15 @@ pub(super) mod paste_key_tests {
         setup: impl FnOnce(&mut AgentView),
     ) {
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         setup(&mut agent);
         let dir = tempfile::tempdir().unwrap();
         let txt = dir.path().join(format!("{arm_name}_paste.txt"));
         std::fs::write(&txt, b"hello").unwrap();
         let url = format!("file://{}", txt.display());
         let registry = ActionRegistry::defaults();
-        let outcome = agent.handle_input(&Event::Paste(url), &registry);
+        let mut effects = Vec::new();
+        let outcome = agent.handle_input(&Event::Paste(url), &registry, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Changed),
             "[{arm_name}] outcome must be Changed; got {outcome:?}"
@@ -1107,9 +1146,11 @@ pub(super) mod paste_key_tests {
         agent.prompt.set_text("hidden prompt");
         agent.plan_approval_view = Some(make_plan_approval_view_state());
         agent.line_viewer = None;
+        let mut effects = Vec::new();
         let outcome = agent.handle_input(
             &Event::Paste("ignored".to_owned()),
             &ActionRegistry::defaults(),
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert_eq!(agent.prompt.text(), "hidden prompt");
@@ -1269,12 +1310,14 @@ pub(super) mod paste_key_tests {
     /// the end-to-end happy path the whole feature exists for.
     #[test]
     fn main_prompt_substantial_wipe_routes_show_undo_tip() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent.prompt.set_contextual_hints(true, true);
         for _ in 0..25 {
-            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event());
+            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event(), &mut effects);
         }
-        let outcome = agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event());
+        let outcome =
+            agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event(), &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::ShowUndoTip)),
             "substantial main-prompt wipe must route show, got {outcome:?}"
@@ -1285,18 +1328,19 @@ pub(super) mod paste_key_tests {
     /// `accepted` diagnostics; the emit itself has no in-process capture sink).
     #[test]
     fn ctrl_z_accepts_and_retires_undo_tip() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent.prompt.set_contextual_hints(true, true);
         for _ in 0..25 {
-            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event());
+            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event(), &mut effects);
         }
-        let _ = agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event());
+        let _ = agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event(), &mut effects);
         assert!(agent.prompt.text().is_empty(), "ctrl+c wiped the draft");
         let _ = agent.ephemeral_tip.show(
             crate::tips::clear_detector::undo_tip(),
             &mut std::collections::HashMap::new(),
         );
-        let _ = agent.handle_prompt_key_for_test(&key!('z', CONTROL).to_key_event());
+        let _ = agent.handle_prompt_key_for_test(&key!('z', CONTROL).to_key_event(), &mut effects);
         assert!(
             !agent.prompt.text().is_empty(),
             "ctrl+z restored the wiped draft"
@@ -1311,17 +1355,18 @@ pub(super) mod paste_key_tests {
     /// is misattributed to it).
     #[test]
     fn ctrl_z_leaves_a_non_undo_tip_untouched() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent.prompt.set_contextual_hints(true, true);
         for _ in 0..25 {
-            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event());
+            let _ = agent.handle_prompt_key_for_test(&key!('x').to_key_event(), &mut effects);
         }
-        let _ = agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event());
+        let _ = agent.handle_prompt_key_for_test(&key!('c', CONTROL).to_key_event(), &mut effects);
         let _ = agent.ephemeral_tip.show(
             crate::tips::clipboard_focus::clipboard_image_tip(),
             &mut std::collections::HashMap::new(),
         );
-        let _ = agent.handle_prompt_key_for_test(&key!('z', CONTROL).to_key_event());
+        let _ = agent.handle_prompt_key_for_test(&key!('z', CONTROL).to_key_event(), &mut effects);
         assert_eq!(
             agent.ephemeral_tip.current_key(),
             Some(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY),
@@ -1380,14 +1425,15 @@ pub(super) mod paste_key_tests {
     /// A paste retires the clipboard-image hint that advertised it.
     #[test]
     fn paste_clears_clipboard_image_tip() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let _ = agent.ephemeral_tip.show(
             crate::tips::clipboard_focus::clipboard_image_tip(),
             &mut std::collections::HashMap::new(),
         );
         assert!(agent.ephemeral_tip.is_active());
-        let _ = paste_cmd_v(&mut agent, Some("hello"));
+        let _ = paste_cmd_v(&mut agent, Some("hello"), &mut effects);
         assert!(
             !agent.ephemeral_tip.is_active(),
             "paste must clear the clipboard-image tip"
@@ -1400,8 +1446,9 @@ pub(super) mod paste_key_tests {
     /// `tips::ephemeral` and the mapping in the diagnostics crate.
     #[test]
     fn image_paste_accepts_clipboard_tip_and_attaches() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let _ = agent.ephemeral_tip.show(
             crate::tips::clipboard_focus::clipboard_image_tip(),
             &mut std::collections::HashMap::new(),
@@ -1410,7 +1457,7 @@ pub(super) mod paste_key_tests {
             agent.ephemeral_tip.current_key(),
             Some(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY)
         );
-        paste_cmd_v_image(&mut agent, None);
+        paste_cmd_v_image(&mut agent, None, &mut effects);
         assert_eq!(agent.prompt.images.len(), 1, "image attached");
         assert!(
             !agent.ephemeral_tip.is_active(),
@@ -1424,14 +1471,19 @@ pub(super) mod paste_key_tests {
     #[test]
     fn bracketed_paste_clears_clipboard_image_tip() {
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let _ = agent.ephemeral_tip.show(
             crate::tips::clipboard_focus::clipboard_image_tip(),
             &mut std::collections::HashMap::new(),
         );
         assert!(agent.ephemeral_tip.is_active());
         let registry = ActionRegistry::defaults();
-        let _ = agent.handle_input(&Event::Paste("a\nb\nc\nd\ne".to_string()), &registry);
+        let mut effects = Vec::new();
+        let _ = agent.handle_input(
+            &Event::Paste("a\nb\nc\nd\ne".to_string()),
+            &registry,
+            &mut effects,
+        );
         assert!(
             !agent.ephemeral_tip.is_active(),
             "bracketed paste must clear the clipboard-image tip"
@@ -2098,12 +2150,16 @@ pub(super) mod paste_key_tests {
     /// Target of the enqueued deferred-probe effect, if any.
     fn deferred_probe_target(
         agent: &AgentView,
+        effects: &[crate::app::actions::Effect],
     ) -> Option<crate::app::actions::ClipboardPasteTarget> {
-        deferred_probe_ctx(agent).map(|ctx| ctx.target)
+        deferred_probe_ctx(agent, effects).map(|ctx| ctx.target)
     }
     /// The `ClipboardPasteContext` of the enqueued deferred-probe effect, if any.
-    fn deferred_probe_ctx(agent: &AgentView) -> Option<crate::app::actions::ClipboardPasteContext> {
-        agent.pending_effects.iter().find_map(|e| match e {
+    fn deferred_probe_ctx(
+        _agent: &AgentView,
+        effects: &[crate::app::actions::Effect],
+    ) -> Option<crate::app::actions::ClipboardPasteContext> {
+        effects.iter().find_map(|e| match e {
             crate::app::actions::Effect::ProbeClipboardAttachment { ctx, .. } => Some(ctx.clone()),
             _ => None,
         })
@@ -2111,14 +2167,18 @@ pub(super) mod paste_key_tests {
     /// Drive a real Cmd+V through the shipped entry point with the given pbpaste
     /// text and an available, raster-free snapshot (the native snapshot gate skips
     /// the deferred image probe), so a text or file-path paste resolves synchronously.
-    fn paste_cmd_v(agent: &mut AgentView, clipboard_text: Option<&str>) -> InputOutcome {
+    fn paste_cmd_v(
+        agent: &mut AgentView,
+        clipboard_text: Option<&str>,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> InputOutcome {
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: clipboard_text.map(str::to_owned),
             snapshot_supported: Some(true),
             snapshot: Some((Some(1), false)),
             ..Default::default()
         });
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key(), effects);
         crate::clipboard::clear_clipboard_probe_hook();
         outcome
     }
@@ -2144,34 +2204,40 @@ pub(super) mod paste_key_tests {
     /// Drive a real Cmd+V that finds a raster (defers), then complete the probe
     /// with a decoded image — the full shipped image-paste path through the
     /// deferred entry point.
-    fn paste_cmd_v_image(agent: &mut AgentView, clipboard_text: Option<&str>) {
+    fn paste_cmd_v_image(
+        agent: &mut AgentView,
+        clipboard_text: Option<&str>,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: clipboard_text.map(str::to_owned),
             ..crate::clipboard::ClipboardProbeHook::with_raster(None)
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
-        let ctx = deferred_probe_ctx(agent).expect("an image paste must defer a probe");
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), effects);
+        let ctx = deferred_probe_ctx(agent, effects).expect("an image paste must defer a probe");
         crate::clipboard::clear_clipboard_probe_hook();
         let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
         agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::Image(pasted),
             None,
+            effects,
         );
     }
     #[test]
     fn agent_paste_snapshot_no_raster_stays_synchronous() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: Some("hello world".to_string()),
             snapshot_supported: Some(true),
             snapshot: Some((Some(1), false)),
             ..Default::default()
         });
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
         let calls = crate::clipboard::clipboard_probe_call_count();
-        let deferred = deferred_probe_target(&agent).is_some();
+        let deferred = deferred_probe_target(&agent, &effects).is_some();
         crate::clipboard::clear_clipboard_probe_hook();
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(calls, 0, "snapshot with no raster must skip the probe");
@@ -2184,17 +2250,18 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_paste_snapshot_has_image_defers_probe() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: Some("caption".to_string()),
             snapshot_supported: Some(true),
             snapshot: Some((Some(1), true)),
             ..Default::default()
         });
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
         let calls = crate::clipboard::clipboard_probe_call_count();
-        let ctx = deferred_probe_ctx(&agent);
+        let ctx = deferred_probe_ctx(&agent, &effects);
         crate::clipboard::clear_clipboard_probe_hook();
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(calls, 0, "probe must NOT run inline on the event loop");
@@ -2214,16 +2281,17 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_cmd_v_probe_ctx_not_bracketed() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: Some("caption".to_string()),
             snapshot_supported: Some(true),
             snapshot: Some((Some(1), true)),
             ..Default::default()
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
-        let ctx = deferred_probe_ctx(&agent);
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
+        let ctx = deferred_probe_ctx(&agent, &effects);
         crate::clipboard::clear_clipboard_probe_hook();
         let ctx = ctx.expect("a Cmd+V with a raster must defer a probe");
         assert!(
@@ -2236,14 +2304,15 @@ pub(super) mod paste_key_tests {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn agent_bracketed_paste_stamps_ctx_bracketed() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let registry = ActionRegistry::defaults();
         crate::clipboard::set_clipboard_probe_hook(
             crate::clipboard::ClipboardProbeHook::with_raster(None),
         );
-        let _ = agent.handle_input(&Event::Paste("中".to_owned()), &registry);
-        let ctx = deferred_probe_ctx(&agent);
+        let _ = agent.handle_input(&Event::Paste("中".to_owned()), &registry, &mut effects);
+        let ctx = deferred_probe_ctx(&agent, &effects);
         crate::clipboard::clear_clipboard_probe_hook();
         let ctx = ctx.expect("a short bracketed paste with a raster must defer a probe");
         assert!(
@@ -2259,16 +2328,17 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_empty_paste_key_defers_probe() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             snapshot_supported: Some(true),
             snapshot: Some((Some(1), false)),
             ..Default::default()
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
         let calls = crate::clipboard::clipboard_probe_call_count();
-        let target = deferred_probe_target(&agent);
+        let target = deferred_probe_target(&agent, &effects);
         crate::clipboard::clear_clipboard_probe_hook();
         assert_eq!(calls, 0, "probe must NOT run inline on the event loop");
         assert!(matches!(
@@ -2279,28 +2349,31 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn failed_clipboard_text_read_is_carried_into_deferred_context() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text_read_failed: true,
             ..crate::clipboard::ClipboardProbeHook::snapshot_unavailable()
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
-        let ctx =
-            deferred_probe_ctx(&agent).expect("failed text read must still probe attachments");
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
+        let ctx = deferred_probe_ctx(&agent, &effects)
+            .expect("failed text read must still probe attachments");
         crate::clipboard::clear_clipboard_probe_hook();
         assert!(ctx.source.text_read_failed());
     }
     #[test]
     fn agent_completion_attaches_image_to_prompt() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
         let ctx = agent_completion_ctx(&agent, Some("caption"));
         let completion = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::Image(pasted),
             None,
+            &mut effects,
         );
         assert_eq!(
             completion,
@@ -2322,20 +2395,22 @@ pub(super) mod paste_key_tests {
     /// raster attaches ONLY the image (caption suppressed) — never image + caption.
     #[test]
     fn agent_cmd_v_image_wins_no_double_insert() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
             text: Some("caption text".to_string()),
             ..crate::clipboard::ClipboardProbeHook::with_raster(None)
         });
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
-        let ctx = deferred_probe_ctx(&agent).expect("probe deferred");
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
+        let ctx = deferred_probe_ctx(&agent, &effects).expect("probe deferred");
         crate::clipboard::clear_clipboard_probe_hook();
         let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
         agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::Image(pasted),
             None,
+            &mut effects,
         );
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #1]"));
@@ -2348,13 +2423,15 @@ pub(super) mod paste_key_tests {
     /// No-image miss on an image-wins Cmd+V inserts the carried caption instead.
     #[test]
     fn agent_cmd_v_caption_inserted_on_no_image_miss() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let ctx = agent_completion_ctx(&agent, Some("caption text"));
         let completion = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             None,
+            &mut effects,
         );
         assert_eq!(
             completion,
@@ -2383,9 +2460,11 @@ pub(super) mod paste_key_tests {
             ),
         ] {
             let mut agent = make_agent();
-            agent.set_active_pane(ActivePane::Prompt, true);
+            let mut effects = Vec::new();
+            agent.force_active_pane(ActivePane::Prompt);
             let ctx = agent_completion_ctx(&agent, Some("caption text"));
-            let completion = agent.complete_clipboard_attachment_paste(ctx, probe, None);
+            let completion =
+                agent.complete_clipboard_attachment_paste(ctx, probe, None, &mut effects);
             assert_eq!(completion, expected);
             assert_eq!(agent.prompt.text(), "caption text");
         }
@@ -2395,7 +2474,7 @@ pub(super) mod paste_key_tests {
         let mut agent = make_agent();
         agent.prompt.set_text("same text");
         agent.prompt.textarea.set_selection(0, "same text".len());
-        let (_, completion) = agent.insert_prompt_plain_text(Some("same text"));
+        let (_, completion) = agent.insert_prompt_text(Some("same text"), false, &mut Vec::new());
         assert_eq!(
             completion,
             crate::app::actions::ClipboardTextInsertion::Inserted
@@ -2409,15 +2488,20 @@ pub(super) mod paste_key_tests {
         };
         for text in ["", " \n\t"] {
             let mut agent = make_agent();
-            let (_, synchronous) = agent.insert_bracketed_prompt_text(text);
+            let mut effects = Vec::new();
+            let (_, synchronous) = agent.insert_prompt_text(Some(text), true, &mut Vec::new());
             assert_eq!(synchronous, ClipboardTextInsertion::Empty);
             let mut ctx = agent_completion_ctx(&agent, Some(text));
             ctx.source = crate::app::actions::ClipboardPasteSource::BracketedInserted {
                 text: text.to_owned(),
                 insertion: synchronous,
             };
-            let completion =
-                agent.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, None);
+            let completion = agent.complete_clipboard_attachment_paste(
+                ctx,
+                ProbedAttachment::NoRaster,
+                None,
+                &mut effects,
+            );
             assert_eq!(
                 completion,
                 ClipboardPasteCompletion::FullMiss,
@@ -2442,19 +2526,23 @@ pub(super) mod paste_key_tests {
             ),
         ] {
             let mut agent = make_agent();
-            let (_, synchronous) = agent.insert_bracketed_prompt_text("inserted");
+            let mut effects = Vec::new();
+            let (_, synchronous) =
+                agent.insert_prompt_text(Some("inserted"), true, &mut Vec::new());
             assert_eq!(synchronous, ClipboardTextInsertion::Inserted);
             let mut ctx = agent_completion_ctx(&agent, Some("inserted"));
             ctx.source = crate::app::actions::ClipboardPasteSource::BracketedInserted {
                 text: "inserted".to_owned(),
                 insertion: synchronous,
             };
-            let completion = agent.complete_clipboard_attachment_paste(ctx, probe, None);
+            let completion =
+                agent.complete_clipboard_attachment_paste(ctx, probe, None, &mut effects);
             assert_eq!(completion, expected);
         }
     }
     #[test]
     fn failed_clipboard_text_read_cannot_become_full_miss() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let mut ctx = agent_completion_ctx(&agent, None);
         ctx.source = crate::app::actions::ClipboardPasteSource::ClipboardKey {
@@ -2465,6 +2553,7 @@ pub(super) mod paste_key_tests {
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             None,
+            &mut effects,
         );
         assert_eq!(
             completion,
@@ -2475,13 +2564,15 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_completion_inserts_unreadable_file_url_as_path_text() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let ctx = agent_completion_ctx(&agent, None);
         let completion = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
             Some("file:///definitely/missing/grow-primary-paste.png".to_owned()),
+            &mut effects,
         );
         assert_eq!(
             completion,
@@ -2495,25 +2586,29 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_completion_distinguishes_dropped_and_failed_probes() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let ctx = agent_completion_ctx(&agent, None);
         let dropped = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::ProbeDropped,
             None,
+            &mut effects,
         );
         let ctx = agent_completion_ctx(&agent, None);
         let failed = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::ProbeFailed,
             None,
+            &mut effects,
         );
         let ctx = agent_completion_ctx(&agent, None);
         let persist_failed = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::PersistFailed("disk full".to_owned()),
             None,
+            &mut effects,
         );
         assert_eq!(
             dropped,
@@ -2537,8 +2632,9 @@ pub(super) mod paste_key_tests {
     /// when the deferred probe attaches an image.
     #[test]
     fn agent_cmd_v_tip_accept_emitted_on_deferred_image() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         let _ = agent.ephemeral_tip.show(
             crate::tips::clipboard_focus::clipboard_image_tip(),
             &mut std::collections::HashMap::new(),
@@ -2546,8 +2642,8 @@ pub(super) mod paste_key_tests {
         crate::clipboard::set_clipboard_probe_hook(
             crate::clipboard::ClipboardProbeHook::with_raster(None),
         );
-        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key());
-        let ctx = deferred_probe_ctx(&agent).expect("probe deferred");
+        let _ = agent.handle_prompt_key_for_test(&ctrl_v_key(), &mut effects);
+        let ctx = deferred_probe_ctx(&agent, &effects).expect("probe deferred");
         crate::clipboard::clear_clipboard_probe_hook();
         assert!(
             ctx.source.tip_showing(),
@@ -2558,6 +2654,7 @@ pub(super) mod paste_key_tests {
             ctx,
             crate::app::actions::ProbedAttachment::Image(pasted),
             None,
+            &mut effects,
         );
         assert_eq!(agent.prompt.images.len(), 1);
     }

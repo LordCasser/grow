@@ -725,34 +725,37 @@ mod plan_chip_tests {
         crate::appearance::cache::set_simple_mode(true);
         let mut agent = make_agent();
         agent.vim_mode = true;
-        agent.set_active_pane(ActivePane::Prompt, true);
-        agent.set_input_mode(InputMode::Vim);
+        agent.force_active_pane(ActivePane::Prompt);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        agent.set_input_mode(InputMode::Vim, &mut effects);
         assert_eq!(agent.active_pane, ActivePane::Scrollback);
         assert!(!agent.is_simple_mode());
         let registry = ActionRegistry::defaults();
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&j, &registry);
+        let outcome = agent.handle_scrollback_key(&j, &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Action(Action::SelectNext)));
     }
     #[test]
     fn set_input_mode_vim_nonempty_prompt_keeps_pane() {
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         agent.prompt.set_text("draft");
-        agent.set_input_mode(InputMode::Vim);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        agent.set_input_mode(InputMode::Vim, &mut effects);
         assert_eq!(agent.active_pane, ActivePane::Prompt);
     }
     #[test]
     fn set_input_mode_simple_from_scrollback_leaves_pane_unchanged() {
         let mut agent = make_agent();
         agent.vim_mode = true;
-        agent.set_active_pane(ActivePane::Scrollback, true);
-        agent.set_input_mode(InputMode::Simple);
+        agent.force_active_pane(ActivePane::Scrollback);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        agent.set_input_mode(InputMode::Simple, &mut effects);
         assert_eq!(agent.active_pane, ActivePane::Scrollback);
         assert!(agent.is_simple_mode());
         let registry = ActionRegistry::defaults();
         let x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&x, &registry);
+        let outcome = agent.handle_scrollback_key(&x, &registry, &mut effects);
         assert_eq!(agent.active_pane, ActivePane::Scrollback);
         assert!(matches!(outcome, InputOutcome::Unchanged));
     }
@@ -770,9 +773,10 @@ mod plan_chip_tests {
     #[test]
     fn set_input_mode_reconciles_pane_orthogonal_to_active_modal_field() {
         let mut agent = make_agent();
-        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.force_active_pane(ActivePane::Prompt);
         agent.active_modal = None;
-        agent.set_input_mode(InputMode::Vim);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        agent.set_input_mode(InputMode::Vim, &mut effects);
         assert_eq!(agent.active_pane, ActivePane::Scrollback);
         assert!(agent.active_modal.is_none());
     }
@@ -781,10 +785,11 @@ mod plan_chip_tests {
         crate::appearance::cache::set_vim_mode(false);
         let mut agent = make_agent();
         agent.vim_mode = false;
-        agent.set_active_pane(ActivePane::Scrollback, true);
+        agent.force_active_pane(ActivePane::Scrollback);
         let registry = ActionRegistry::defaults();
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&j, &registry);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        let outcome = agent.handle_scrollback_key(&j, &registry, &mut effects);
         assert!(
             matches!(
                 outcome,
@@ -798,10 +803,11 @@ mod plan_chip_tests {
         crate::appearance::cache::set_vim_mode(true);
         let mut agent = make_agent();
         agent.vim_mode = true;
-        agent.set_active_pane(ActivePane::Scrollback, true);
+        agent.force_active_pane(ActivePane::Scrollback);
         let registry = ActionRegistry::defaults();
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&j, &registry);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        let outcome = agent.handle_scrollback_key(&j, &registry, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::SelectNext)),
             "vim-on: bare 'j' in scrollback must dispatch SelectNext; got {outcome:?}"
@@ -811,18 +817,19 @@ mod plan_chip_tests {
     fn scrollback_arrow_down_works_in_both_modes() {
         let registry = ActionRegistry::defaults();
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut a_off = make_agent();
         a_off.vim_mode = false;
-        a_off.set_active_pane(ActivePane::Scrollback, true);
+        a_off.force_active_pane(ActivePane::Scrollback);
         assert!(matches!(
-            a_off.handle_scrollback_key(&down, &registry),
+            a_off.handle_scrollback_key(&down, &registry, &mut effects),
             InputOutcome::Action(Action::SelectNext)
         ));
         let mut a_on = make_agent();
         a_on.vim_mode = true;
-        a_on.set_active_pane(ActivePane::Scrollback, true);
+        a_on.force_active_pane(ActivePane::Scrollback);
         assert!(matches!(
-            a_on.handle_scrollback_key(&down, &registry),
+            a_on.handle_scrollback_key(&down, &registry, &mut effects),
             InputOutcome::Action(Action::SelectNext)
         ));
     }

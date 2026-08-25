@@ -315,24 +315,27 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             new_text,
         } => queue::dispatch_queue_interject_shared(app, id, expected_version, new_text),
         Action::FocusPrompt => {
+            let mut effects = Vec::new();
             with_active_agent(app, |agent| {
-                agent.set_active_pane(ActivePane::Prompt, false);
+                agent.set_active_pane(ActivePane::Prompt, &mut effects);
             });
-            vec![]
+            effects
         }
         Action::FocusScrollback => {
+            let mut effects = Vec::new();
             with_active_agent(app, |agent| {
-                agent.set_active_pane(ActivePane::Scrollback, false);
+                agent.set_active_pane(ActivePane::Scrollback, &mut effects);
             });
-            vec![]
+            effects
         }
         Action::ClearPrompt => dispatch_clear_prompt(app),
         Action::OpenHistorySearch => dispatch_open_history_search(app),
         Action::OpenScrollbackSearch(query) => {
+            let mut effects = Vec::new();
             with_active_agent(app, |agent| {
-                agent.open_scrollback_search(query.as_deref());
+                agent.open_scrollback_search(query.as_deref(), &mut effects);
             });
-            vec![]
+            effects
         }
         Action::SelectNext => {
             navigate_clearing_selection(app, |s| s.select_next());

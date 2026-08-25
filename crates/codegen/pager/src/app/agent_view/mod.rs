@@ -68,6 +68,7 @@ use crate::actions::ActionId;
 use crate::key;
 use crate::render::SafeBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 /// Hit areas for inline media buttons, rebuilt each frame.
 ///
 /// All hit areas are cleared at the start of inline media rendering and
@@ -1149,9 +1150,6 @@ pub struct AgentView {
     /// summary projection on load/resume.
     /// Precedence in the dashboard title is below `display_name`, above first-prompt text.
     pub generated_session_title: Option<String>,
-    /// Effects queued by input handlers that cannot return `InputOutcome::Action`.
-    /// Drained by `AppView.handle_input` after each event.
-    pub(crate) pending_effects: Vec<super::actions::Effect>,
     /// In-flight deferred clipboard attachment probes for this prompt. A send
     /// while `> 0` is stashed (see `deferred_send`) so a
     /// paste-then-immediate-send never builds content blocks before the image

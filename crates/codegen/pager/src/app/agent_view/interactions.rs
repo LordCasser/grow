@@ -1728,6 +1728,7 @@ mod permission_mouse_tests {
         assert_eq!(agent.permission_item_at(10, 35), Some(2));
     }
     fn click_at(agent: &mut AgentView, registry: &ActionRegistry, row: u16) -> InputOutcome {
+        let mut effects = Vec::new();
         agent.handle_input(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -1736,6 +1737,7 @@ mod permission_mouse_tests {
                 modifiers: crossterm::event::KeyModifiers::empty(),
             }),
             registry,
+            &mut effects,
         )
     }
     fn click_row(agent: &mut AgentView, registry: &ActionRegistry, idx: u16) -> InputOutcome {

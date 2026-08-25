@@ -1546,6 +1546,7 @@ fn set_plan_mode_on_from_off_emits_set_session_mode() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -1590,7 +1591,12 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
             .dashboard
             .as_mut()
             .unwrap()
-            .handle_input(&ctrl_x, &app.registry);
+            .handle_input_with_paste_provenance(
+                &ctrl_x,
+                &app.registry,
+                PasteProvenance::Terminal,
+                &mut input_effects,
+            );
         match outcome {
             crate::app::app_view::InputOutcome::Action(
                 crate::app::actions::Action::DashboardStop,
@@ -1651,6 +1657,7 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
@@ -1666,7 +1673,12 @@ fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
         .dashboard
         .as_mut()
         .unwrap()
-        .handle_input(&ctrl_x, &app.registry);
+        .handle_input_with_paste_provenance(
+            &ctrl_x,
+            &app.registry,
+            PasteProvenance::Terminal,
+            &mut input_effects,
+        );
     match outcome1 {
         crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
             let _ = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
@@ -1681,7 +1693,12 @@ fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
         .dashboard
         .as_mut()
         .unwrap()
-        .handle_input(&ctrl_x, &app.registry);
+        .handle_input_with_paste_provenance(
+            &ctrl_x,
+            &app.registry,
+            PasteProvenance::Terminal,
+            &mut input_effects,
+        );
     match outcome2 {
         crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
             let effects = dispatch(crate::app::actions::Action::DashboardStop, &mut app);

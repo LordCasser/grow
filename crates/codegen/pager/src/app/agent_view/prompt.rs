@@ -73,9 +73,13 @@ impl AgentView {
     /// **non–VS Code** pinned registry so host `TERM_PROGRAM` cannot change
     /// InterjectPrompt / OpenExtensions chords under test.
     #[cfg(test)]
-    pub(crate) fn handle_prompt_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
+    pub(crate) fn handle_prompt_key_for_test(
+        &mut self,
+        key: &KeyEvent,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> InputOutcome {
         let registry = ActionRegistry::non_vscode_for_test();
-        self.handle_prompt_key(key, &registry, false)
+        self.handle_prompt_key(key, &registry, false, effects)
     }
 
     /// Like [`Self::handle_prompt_key_for_test`] with an explicit registry
@@ -85,8 +89,9 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
+        effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
-        self.handle_prompt_key(key, registry, false)
+        self.handle_prompt_key(key, registry, false, effects)
     }
 
     // `pub(super)`: also called by `AppView::minimal_key_intercept` to route
@@ -98,6 +103,7 @@ impl AgentView {
         key: &KeyEvent,
         registry: &ActionRegistry,
         prompt_paging: bool,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         // Dismiss transient toasts on any keypress so error messages don't
         // linger while the user is already typing. Sticky status banners
@@ -308,14 +314,14 @@ impl AgentView {
                         return InputOutcome::Changed;
                     }
                     KeyCode::Tab => {
-                        if self.accept_completion_dropdown_item() {
+                        if self.accept_completion_dropdown_item(effects) {
                             return InputOutcome::Changed;
                         }
                         // Empty items (race): close and fall through.
                         self.prompt.completion_dropdown_close();
                     }
                     KeyCode::Enter if key.modifiers.is_empty() => {
-                        if self.accept_completion_dropdown_item() {
+                        if self.accept_completion_dropdown_item(effects) {
                             return InputOutcome::Changed;
                         }
                         // Empty items (race): close and fall through to send.
@@ -351,8 +357,8 @@ impl AgentView {
                     .suggestions
                     .tab_decision(self.prompt.text(), self.prompt.cursor())
                 {
-                    TabAction::Nothing => self.request_shell_tab_completion(true),
-                    action => self.execute_tab_action(action),
+                    TabAction::Nothing => self.request_shell_tab_completion(true, effects),
+                    action => self.execute_tab_action(action, effects),
                 }
                 return InputOutcome::Changed;
             }
@@ -420,7 +426,7 @@ impl AgentView {
 
         // 0. Editing-mode intercepts (see `queue_edit.rs`). `None` falls
         //    through to the widget (Shift-Enter / Alt-Enter newline, typing).
-        if let Some(outcome) = self.handle_editing_queued_key(key) {
+        if let Some(outcome) = self.handle_editing_queued_key(key, effects) {
             return outcome;
         }
 
@@ -565,7 +571,7 @@ impl AgentView {
                         if matches!(self.prompt_mode, PromptMode::Normal)
                             && self.prompt.text().trim().is_empty()
                             && self.session.state.is_turn_running()
-                            && let Some(outcome) = self.try_send_now_queued_from_prompt()
+                            && let Some(outcome) = self.try_send_now_queued_from_prompt(effects)
                         {
                             return outcome;
                         }
@@ -598,7 +604,7 @@ impl AgentView {
                     if matches!(self.prompt_mode, PromptMode::Normal)
                         && self.prompt.text().trim().is_empty()
                         && self.session.state.is_turn_running()
-                        && let Some(outcome) = self.try_send_now_queued_from_prompt()
+                        && let Some(outcome) = self.try_send_now_queued_from_prompt(effects)
                     {
                         return outcome;
                     }
@@ -608,7 +614,7 @@ impl AgentView {
                 }
                 ActionId::InterjectPrompt => {
                     // Editing-queued intercept lives in `queue_edit.rs`.
-                    if let Some(outcome) = self.interject_editing_queued_intercept() {
+                    if let Some(outcome) = self.interject_editing_queued_intercept(effects) {
                         return outcome;
                     }
                     // Mid-turn steering:
@@ -635,7 +641,9 @@ impl AgentView {
                         self.prompt.set_text("");
                         return InputOutcome::Action(Action::SteerPrompt { text, images });
                     }
-                    if turn_running && let Some(outcome) = self.try_send_now_queued_from_prompt() {
+                    if turn_running
+                        && let Some(outcome) = self.try_send_now_queued_from_prompt(effects)
+                    {
                         return outcome;
                     }
                     return InputOutcome::Changed;
@@ -660,7 +668,7 @@ impl AgentView {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
             );
-            return self.handle_paste_key_deferred(clipboard_text);
+            return self.handle_paste_key_deferred(clipboard_text, effects);
         }
 
         // 2d. Promote agent-screen actions past the textarea.
@@ -734,10 +742,10 @@ impl AgentView {
                     }
                     self.prompt.refresh_slash(&self.session.models);
                     if let Some(eff) = self.notify_suggestion_text_changed() {
-                        self.pending_effects.push(eff);
+                        effects.push(eff);
                     }
                     if let Some(eff) = self.notify_plugin_cta_text_changed() {
-                        self.pending_effects.push(eff);
+                        effects.push(eff);
                     }
                     if let Some(action) = self.take_prompt_tip_signal() {
                         return InputOutcome::Action(action);
@@ -1068,31 +1076,34 @@ mod configuration_shortcut_tests {
     /// Guards the full routed path, not just registry resolution.
     #[test]
     fn ctrl_r_is_not_a_configuration_shortcut() {
+        let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
         let shortcut = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
-        let outcome = agent.handle_prompt_key_for_test(&shortcut);
+        let outcome = agent.handle_prompt_key_for_test(&shortcut, &mut effects);
         assert!(!matches!(outcome, InputOutcome::Action(_)));
     }
 
     /// Redo must preserve a multiline draft when there is nothing to redo.
     #[test]
     fn multiline_ctrl_r_preserves_non_empty_draft() {
+        let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
         agent.multiline_mode = true;
         agent.prompt.set_text("draft text");
         let shortcut = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
-        let outcome = agent.handle_prompt_key_for_test(&shortcut);
+        let outcome = agent.handle_prompt_key_for_test(&shortcut, &mut effects);
         assert!(!matches!(outcome, InputOutcome::Action(_)));
         assert_eq!(agent.prompt.text(), "draft text");
     }
 
     #[test]
     fn shift_tab_encodings_do_not_change_configuration_or_edit_the_draft() {
+        let mut effects = Vec::new();
         for shortcut in crate::input::key::shift_tab_keys() {
             let mut agent = super::test_fixtures::make_agent();
             agent.prompt.set_text("draft text");
             let key = KeyEvent::new(shortcut.code, shortcut.modifiers);
-            let outcome = agent.handle_prompt_key_for_test(&key);
+            let outcome = agent.handle_prompt_key_for_test(&key, &mut effects);
             let _ = outcome;
             assert_eq!(agent.prompt.text(), "draft text");
         }
@@ -1100,6 +1111,7 @@ mod configuration_shortcut_tests {
 
     #[test]
     fn plain_tab_follows_focus_scrollback_registration() {
+        let mut effects = Vec::new();
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         for mode in [
             crate::app::ScreenMode::Fullscreen,
@@ -1107,7 +1119,8 @@ mod configuration_shortcut_tests {
         ] {
             let mut agent = super::test_fixtures::make_agent();
             let registry = ActionRegistry::defaults_for(mode);
-            let outcome = agent.handle_prompt_key_with_registry_for_test(&tab, &registry);
+            let outcome =
+                agent.handle_prompt_key_with_registry_for_test(&tab, &registry, &mut effects);
             assert!(
                 matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
                 "{mode:?} plain Tab must focus scrollback, got {outcome:?}",
@@ -1116,21 +1129,25 @@ mod configuration_shortcut_tests {
 
         let mut minimal = super::test_fixtures::make_agent();
         let registry = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal);
-        let outcome = minimal.handle_prompt_key_with_registry_for_test(&tab, &registry);
+        let outcome =
+            minimal.handle_prompt_key_with_registry_for_test(&tab, &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert_eq!(minimal.active_pane, AgentPane::Prompt);
     }
 
     #[test]
     fn exact_optional_arg_slash_enter_sends_without_accepting_completion() {
+        let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
         agent.multiline_mode = true;
         agent.prompt.set_text("/doctor");
         agent.prompt.refresh_slash(&agent.session.models);
         assert!(agent.prompt.slash_open());
 
-        let outcome =
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let outcome = agent.handle_prompt_key_for_test(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut effects,
+        );
         assert!(
             matches!(
                 outcome,
@@ -1143,6 +1160,7 @@ mod configuration_shortcut_tests {
 
     #[test]
     fn minimal_slash_dropdown_still_consumes_tab() {
+        let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
         agent.prompt.set_text("/");
         agent.prompt.refresh_slash(&agent.session.models);
@@ -1155,6 +1173,7 @@ mod configuration_shortcut_tests {
         let outcome = agent.handle_prompt_key_with_registry_for_test(
             &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             &registry,
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.active_pane, super::AgentPane::Prompt);
@@ -1162,6 +1181,7 @@ mod configuration_shortcut_tests {
 
     #[test]
     fn goal_edit_tab_fills_the_current_objective() {
+        let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
         agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         agent.session.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
@@ -1178,8 +1198,10 @@ mod configuration_shortcut_tests {
         agent.prompt.refresh_slash(&agent.session.models);
         assert!(agent.prompt.slash_open());
 
-        let outcome =
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let outcome = agent.handle_prompt_key_for_test(
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut effects,
+        );
 
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "/goal edit 修复登录流程");
@@ -1201,12 +1223,13 @@ mod prompt_page_scroll_tests {
 
     fn prompt_focused_agent() -> AgentView {
         let mut agent = super::test_fixtures::make_agent();
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
         agent
     }
 
     #[test]
     fn modified_page_keys_do_not_page_conversation() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::non_vscode_for_test();
 
         for modifiers in [
@@ -1216,8 +1239,11 @@ mod prompt_page_scroll_tests {
         ] {
             for code in [KeyCode::PageUp, KeyCode::PageDown] {
                 let mut agent = prompt_focused_agent();
-                let outcome =
-                    agent.handle_input_with_prompt_paging(&key(code, modifiers), &registry);
+                let outcome = agent.handle_input_with_prompt_paging(
+                    &key(code, modifiers),
+                    &registry,
+                    &mut effects,
+                );
                 assert!(
                     !matches!(
                         outcome,
@@ -1231,6 +1257,7 @@ mod prompt_page_scroll_tests {
 
     #[test]
     fn active_prompt_dropdowns_own_page_keys() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::non_vscode_for_test();
         let mut slash = prompt_focused_agent();
         slash.prompt.set_text("/");
@@ -1247,11 +1274,15 @@ mod prompt_page_scroll_tests {
         let outcome = slash.handle_input_with_prompt_paging(
             &key(KeyCode::PageDown, KeyModifiers::NONE),
             &registry,
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(slash.prompt.slash_snapshot().selected > 0);
-        let outcome = slash
-            .handle_input_with_prompt_paging(&key(KeyCode::PageUp, KeyModifiers::NONE), &registry);
+        let outcome = slash.handle_input_with_prompt_paging(
+            &key(KeyCode::PageUp, KeyModifiers::NONE),
+            &registry,
+            &mut effects,
+        );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(slash.prompt.slash_snapshot().selected, 0);
 
@@ -1276,11 +1307,15 @@ mod prompt_page_scroll_tests {
         let outcome = completion.handle_input_with_prompt_paging(
             &key(KeyCode::PageDown, KeyModifiers::NONE),
             &registry,
+            &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(completion.prompt.suggestions.dropdown.selected > 0);
-        let outcome = completion
-            .handle_input_with_prompt_paging(&key(KeyCode::PageUp, KeyModifiers::NONE), &registry);
+        let outcome = completion.handle_input_with_prompt_paging(
+            &key(KeyCode::PageUp, KeyModifiers::NONE),
+            &registry,
+            &mut effects,
+        );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(completion.prompt.suggestions.dropdown.selected, 0);
     }
@@ -1397,7 +1432,8 @@ mod history_browse_panel_tests {
 
     /// Open the browse panel (Up) and wait for the matcher.
     fn open_browse(agent: &mut AgentView, expect: usize) {
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        let mut effects = Vec::new();
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         poll_results(agent, expect);
     }
 
@@ -1405,8 +1441,9 @@ mod history_browse_panel_tests {
     /// selected AND already filled into the composer.
     #[test]
     fn up_opens_browse_panel_and_populates_newest() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry", "say apple"]);
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.history_search.is_active());
         assert!(agent.prompt.history_search.is_browse());
@@ -1417,15 +1454,16 @@ mod history_browse_panel_tests {
     /// composer; Up at the oldest stays put.
     #[test]
     fn selection_moves_live_populate_the_composer() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry", "say apple"]);
         open_browse(&mut agent, 2);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "say apple");
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "say apple", "no wrap at the oldest");
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert_eq!(agent.prompt.text(), "say cherry");
         assert!(agent.prompt.history_search.is_active());
     }
@@ -1434,10 +1472,11 @@ mod history_browse_panel_tests {
     /// the panel and restores the empty composer.
     #[test]
     fn down_immediately_after_open_closes_the_panel() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry", "say apple"]);
         open_browse(&mut agent, 2);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
@@ -1445,8 +1484,9 @@ mod history_browse_panel_tests {
 
     #[test]
     fn down_never_opens_the_panel() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry"]);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
     }
@@ -1455,10 +1495,11 @@ mod history_browse_panel_tests {
     /// the populated text as a normal edit.
     #[test]
     fn typing_detaches_and_edits_the_populated_text() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry"]);
         open_browse(&mut agent, 1);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Char('!')));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Char('!')), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "say cherry!");
     }
@@ -1467,21 +1508,22 @@ mod history_browse_panel_tests {
     /// composer returns to Normal on other entries and on close.
     #[test]
     fn bash_entries_populate_bash_mode_and_back() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["! ls -la", "say apple"]);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "ls -la");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Bash);
         poll_results(&mut agent, 2);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "say apple");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert_eq!(agent.prompt.text(), "ls -la");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Bash);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "", "past newest → empty composer");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
@@ -1491,11 +1533,12 @@ mod history_browse_panel_tests {
     /// even off a bash entry that flipped the input mode.
     #[test]
     fn esc_restores_empty_normal_composer() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["! ls -la"]);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Bash);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Esc));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Esc), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
@@ -1504,26 +1547,32 @@ mod history_browse_panel_tests {
     /// Ctrl+R belongs to prompt redo, never history search.
     #[test]
     fn ctrl_r_does_not_open_history() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry"]);
-        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        agent.handle_prompt_key_for_test(
+            &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut effects,
+        );
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
     }
 
     #[test]
     fn up_with_a_draft_does_not_open() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry"]);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')));
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')), &mut effects);
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "d");
     }
 
     #[test]
     fn bash_mode_up_does_not_open() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["say cherry"]);
         agent.prompt_input_mode = PromptInputMode::Bash;
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
     }
@@ -1531,8 +1580,9 @@ mod history_browse_panel_tests {
     /// Up with no history consumes the key without opening an empty panel.
     #[test]
     fn up_with_empty_history_is_a_quiet_no_op() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&[]);
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
@@ -1543,9 +1593,10 @@ mod history_browse_panel_tests {
     /// — same suppression the populate path applies.
     #[test]
     fn accepted_at_token_does_not_rearm_file_dropdown() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["run a subagent for @crates/codegen"]);
         open_browse(&mut agent, 1);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Enter));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Enter), &mut effects);
         assert!(!agent.prompt.history_search.is_active(), "accept closes");
         assert_eq!(agent.prompt.text(), "run a subagent for @crates/codegen");
         assert!(
@@ -1560,8 +1611,9 @@ mod history_browse_panel_tests {
     /// Up/Down keep browsing and Down at the newest still closes.
     #[test]
     fn populated_at_token_does_not_steal_arrows() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_history(&["run a subagent for @crates/codegen", "older"]);
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "run a subagent for @crates/codegen");
         assert!(
             !agent.prompt.file_search_visible(),
@@ -1569,11 +1621,11 @@ mod history_browse_panel_tests {
         );
         poll_results(&mut agent, 2);
 
-        agent.handle_prompt_key_for_test(&key(KeyCode::Up));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Up), &mut effects);
         assert_eq!(agent.prompt.text(), "older", "Up must keep browsing");
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert_eq!(agent.prompt.text(), "run a subagent for @crates/codegen");
-        agent.handle_prompt_key_for_test(&key(KeyCode::Down));
+        agent.handle_prompt_key_for_test(&key(KeyCode::Down), &mut effects);
         assert!(
             !agent.prompt.history_search.is_active(),
             "Down at the newest must still close the panel"
@@ -1659,10 +1711,11 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn tab_accepts_suggestion_into_prompt() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
         assert!(agent.prompt.prompt_suggestion_visible());
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "run the tests");
         assert!(!agent.prompt.prompt_suggestion_visible());
@@ -1670,22 +1723,24 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn tab_accepts_remainder_after_matching_prefix_typed() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
         agent.prompt.textarea.insert_str("run ");
         assert_eq!(agent.prompt.prompt_suggestion_ghost(), Some("the tests"));
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "run the tests");
     }
 
     #[test]
     fn tab_falls_through_to_focus_scrollback_without_suggestion() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_prompt_suggestions(true);
         let mut agent = super::test_fixtures::make_agent();
         agent.refresh_prompt_suggestion_gate();
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab), &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
             "Tab keeps its focus-cycling behavior when no ghost is visible: {outcome:?}"
@@ -1694,10 +1749,11 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn right_arrow_accepts_suggestion() {
+        let mut effects = Vec::new();
         // Right at end-of-text is otherwise a no-op, so it doubles as
         // accept whenever the ghost is visible — in any mode.
         let mut agent = suggestion_agent("commit this");
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Right));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Right), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "commit this");
         assert!(!agent.prompt.prompt_suggestion_visible());
@@ -1705,17 +1761,19 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn right_arrow_accepts_remainder_after_matching_prefix() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
         agent.prompt.textarea.insert_str("run ");
         assert_eq!(agent.prompt.prompt_suggestion_ghost(), Some("the tests"));
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Right));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Right), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "run the tests");
     }
 
     #[test]
     fn right_arrow_mid_text_stays_cursor_movement() {
+        let mut effects = Vec::new();
         // Cursor away from end-of-text hides the ghost, so Right falls
         // through to the widget as plain cursor movement.
         let mut agent = suggestion_agent("run the tests");
@@ -1723,7 +1781,7 @@ mod prompt_suggestion_key_tests {
         agent.prompt.textarea.set_cursor(1);
         assert_eq!(agent.prompt.prompt_suggestion_ghost(), None);
 
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Right));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Right), &mut effects);
         assert_eq!(agent.prompt.text(), "run ", "no acceptance mid-text");
         assert_eq!(agent.prompt.cursor(), 2, "Right moved the cursor");
         assert!(agent.prompt.prompt_suggestion.has_suggestion());
@@ -1731,17 +1789,19 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn left_arrow_never_accepts() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("commit this");
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Left));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Left), &mut effects);
         assert_eq!(agent.prompt.text(), "", "Left must not accept");
         assert!(agent.prompt.prompt_suggestion.has_suggestion());
     }
 
     #[test]
     fn esc_dismisses_suggestion_on_empty_prompt() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Esc));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Esc), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(!agent.prompt.prompt_suggestion_visible());
         assert!(!agent.prompt.prompt_suggestion.has_suggestion());
@@ -1749,13 +1809,14 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn running_turn_gates_ghost_off() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
         agent.session.start_turn(&mut agent.scrollback);
         agent.refresh_prompt_suggestion_gate();
         assert!(!agent.prompt.prompt_suggestion_visible());
 
         // Tab while running falls through instead of accepting.
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab), &mut effects);
         assert!(
             !matches!(outcome, InputOutcome::Changed if agent.prompt.text() == "run the tests")
         );
@@ -1772,13 +1833,14 @@ mod prompt_suggestion_key_tests {
 
     #[test]
     fn typing_matching_prefix_shrinks_ghost() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char('r')));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char('r')), &mut effects);
         assert_eq!(agent.prompt.text(), "r");
         assert_eq!(agent.prompt.prompt_suggestion_ghost(), Some("un the tests"));
 
         // Divergent char hides it; suggestion stays loaded for backspace.
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char('x')));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char('x')), &mut effects);
         assert_eq!(agent.prompt.prompt_suggestion_ghost(), None);
         assert!(agent.prompt.prompt_suggestion.has_suggestion());
     }
@@ -1790,6 +1852,7 @@ mod prompt_suggestion_key_tests {
     /// without an impression.
     #[test]
     fn shown_latches_at_first_visibility_after_divergent_draft_clears() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_prompt_suggestions(true);
         let mut agent = super::test_fixtures::make_agent();
         // Divergent draft typed while the suggestion fetch was in flight.
@@ -1812,14 +1875,14 @@ mod prompt_suggestion_key_tests {
 
         // Backspace empties the draft. The intercept ran before the edit
         // (ghost still hidden then), so this event doesn't latch either.
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Backspace));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Backspace), &mut effects);
         assert_eq!(agent.prompt.text(), "");
         assert!(agent.prompt.prompt_suggestion_visible());
         assert!(!agent.prompt.prompt_suggestion.shown_logged());
 
         // The next key event sees the visible ghost and latches `shown`
         // first; the same event's Tab intercept then accepts.
-        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Tab), &mut effects);
         assert!(agent.prompt.prompt_suggestion.shown_logged());
         assert_eq!(agent.prompt.text(), "run the tests");
     }
@@ -1828,10 +1891,11 @@ mod prompt_suggestion_key_tests {
     /// key event), so `dismissed` never outruns `shown` either.
     #[test]
     fn shown_latches_before_dismiss_on_same_key_event() {
+        let mut effects = Vec::new();
         let mut agent = suggestion_agent("run the tests");
         assert!(!agent.prompt.prompt_suggestion.shown_logged());
 
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Esc));
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Esc), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
             agent.prompt.prompt_suggestion.shown_logged(),

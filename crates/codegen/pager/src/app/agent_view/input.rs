@@ -369,22 +369,29 @@ impl AgentView {
     /// 1. Pane-specific (prompt widget or scrollback navigation)
     /// 2. Agent-level (cancel, always-approve -- checked if pane didn't consume)
     /// 3. Return Unchanged (bubbles to app_view for global actions)
-    pub fn handle_input(&mut self, ev: &Event, registry: &ActionRegistry) -> InputOutcome {
-        self.handle_input_inner(ev, registry, false)
+    pub fn handle_input(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> InputOutcome {
+        self.handle_input_inner(ev, registry, false, effects)
     }
     /// Enable prompt-focused conversation paging on a normal full-TUI agent surface.
     pub(in crate::app) fn handle_input_with_prompt_paging(
         &mut self,
         ev: &Event,
         registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
-        self.handle_input_inner(ev, registry, true)
+        self.handle_input_inner(ev, registry, true, effects)
     }
     /// Route minimal-only `/btw` ownership before the unchanged shared router.
     pub(in crate::app) fn handle_minimal_input(
         &mut self,
         ev: &Event,
         registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         match self.handle_minimal_btw_input(ev) {
             crate::minimal_api::MinimalBtwInput::Handled(outcome) => *outcome,
@@ -401,14 +408,16 @@ impl AgentView {
                     ) {
                     InputOutcome::Changed
                 } else {
-                    self.handle_input(ev, registry)
+                    self.handle_input(ev, registry, effects)
                 };
                 if let Some(suspended) = suspended {
                     crate::minimal_api::restore_minimal_btw(self, suspended);
                 }
                 outcome
             }
-            crate::minimal_api::MinimalBtwInput::Delegate => self.handle_input(ev, registry),
+            crate::minimal_api::MinimalBtwInput::Delegate => {
+                self.handle_input(ev, registry, effects)
+            }
         }
     }
     /// Handle only minimal `/btw` dismissal and keyboard scrolling.
@@ -468,6 +477,7 @@ impl AgentView {
         ev: &Event,
         registry: &ActionRegistry,
         prompt_paging: bool,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         self.sync_command_selection_context();
         if self.scrollback_drag_latched() {
@@ -524,7 +534,7 @@ impl AgentView {
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
                 child_view.mark_as_subagent_view();
-                return child_view.handle_input_inner(ev, registry, prompt_paging);
+                return child_view.handle_input_inner(ev, registry, prompt_paging, effects);
             }
             return InputOutcome::Unchanged;
         }
@@ -537,7 +547,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if let Event::Paste(text) = ev
-            && let Some(outcome) = self.try_handle_wrap_host_image_paste(text)
+            && let Some(outcome) = self.try_handle_wrap_host_image_paste(text, effects)
         {
             return outcome;
         }
@@ -751,7 +761,7 @@ impl AgentView {
                         self.handle_plan_feedback_key(key)
                     }
                 }
-                Event::Paste(text) => self.route_popup_paste(text),
+                Event::Paste(text) => self.route_popup_paste(text, effects),
                 Event::Mouse(mouse) => {
                     let in_prompt = self
                         .pane_areas
@@ -822,9 +832,9 @@ impl AgentView {
                     if registry.lookup(key, When::Always) == Some(ActionId::Quit) {
                         return InputOutcome::Unchanged;
                     }
-                    self.handle_modal_key(key)
+                    self.handle_modal_key(key, effects)
                 }
-                Event::Mouse(mouse) => self.handle_modal_mouse(mouse),
+                Event::Mouse(mouse) => self.handle_modal_mouse(mouse, effects),
                 Event::Paste(text) => self.handle_modal_paste(text),
                 _ => InputOutcome::Changed,
             };
@@ -896,7 +906,7 @@ impl AgentView {
                         p.focus == crate::views::permission_view::PermissionFocus::FollowupInput
                     });
                     if in_followup {
-                        self.route_popup_paste(text)
+                        self.route_popup_paste(text, effects)
                     } else {
                         InputOutcome::Changed
                     }
@@ -921,7 +931,7 @@ impl AgentView {
                         .as_ref()
                         .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
                     {
-                        self.route_popup_paste(text)
+                        self.route_popup_paste(text, effects)
                     } else {
                         InputOutcome::Unchanged
                     }
@@ -1058,7 +1068,7 @@ impl AgentView {
                         .map(|qv| qv.focus == crate::views::question_view::QuestionFocus::InputMode)
                         .unwrap_or(false);
                     if in_input {
-                        self.route_popup_paste(text)
+                        self.route_popup_paste(text, effects)
                     } else {
                         InputOutcome::Changed
                     }
@@ -1115,12 +1125,12 @@ impl AgentView {
         }
         let outcome = match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => match self.active_pane {
-                AgentPane::Prompt => self.handle_prompt_key(key, registry, prompt_paging),
-                AgentPane::Scrollback => self.handle_scrollback_key(key, registry),
-                AgentPane::Todo => self.handle_todo_key(key, registry),
-                AgentPane::Queue => self.handle_queue_key(key, registry),
-                AgentPane::Tasks => self.handle_bg_tasks_key(key, registry),
-                AgentPane::Catalog => self.handle_catalog_key(key, registry),
+                AgentPane::Prompt => self.handle_prompt_key(key, registry, prompt_paging, effects),
+                AgentPane::Scrollback => self.handle_scrollback_key(key, registry, effects),
+                AgentPane::Todo => self.handle_todo_key(key, registry, effects),
+                AgentPane::Queue => self.handle_queue_key(key, registry, effects),
+                AgentPane::Tasks => self.handle_bg_tasks_key(key, registry, effects),
+                AgentPane::Catalog => self.handle_catalog_key(key, registry, effects),
             },
             Event::Paste(text) => {
                 if self.active_pane == AgentPane::Scrollback
@@ -1132,7 +1142,7 @@ impl AgentView {
                     self.ephemeral_tip
                         .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
                     self.btw_focused = false;
-                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text, effects) {
                         return outcome;
                     }
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1142,7 +1152,7 @@ impl AgentView {
                         None
                     };
                     let (outcome, synchronous_text_insertion) =
-                        self.insert_bracketed_prompt_text(text);
+                        self.insert_prompt_text(Some(text), true, effects);
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if let Some(change_count) = attachment_change_count {
                         self.enqueue_clipboard_attachment_probe(
@@ -1151,6 +1161,7 @@ impl AgentView {
                                 insertion: synchronous_text_insertion,
                             },
                             change_count,
+                            effects,
                         );
                     }
                     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1171,7 +1182,7 @@ impl AgentView {
                     }
                 }
             }
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => self.handle_mouse(mouse, effects),
             _ => InputOutcome::Unchanged,
         };
         if !matches!(outcome, InputOutcome::Unchanged) {
@@ -1184,9 +1195,9 @@ impl AgentView {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
             if self.todo.overlay.focused {
-                self.set_active_pane(AgentPane::Todo, false);
+                self.set_active_pane(AgentPane::Todo, effects);
             } else if self.active_pane == AgentPane::Todo {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return InputOutcome::Changed;
         }
@@ -1197,9 +1208,9 @@ impl AgentView {
             self.tasks.overlay.toggle();
             self.tasks.on_state_change();
             if self.tasks.overlay.focused {
-                self.set_active_pane(AgentPane::Tasks, false);
+                self.set_active_pane(AgentPane::Tasks, effects);
             } else if self.active_pane == AgentPane::Tasks {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return InputOutcome::Changed;
         }
@@ -1226,7 +1237,7 @@ impl AgentView {
             && registry.matches_id(ActionId::ToggleQueue, key)
             && (self.queue.is_visible() || !self.visible_queue_is_empty())
         {
-            self.toggle_queue_pane();
+            self.toggle_queue_pane(effects);
             return InputOutcome::Changed;
         }
         if let Event::Key(key) = ev
@@ -1246,7 +1257,9 @@ impl AgentView {
                 CtaPhase::Matched { .. } | CtaPhase::Error { .. }
             )
         {
-            self.connect_matched_plugin();
+            if let Some(effect) = self.connect_matched_plugin() {
+                effects.push(effect);
+            }
             return InputOutcome::Changed;
         }
         if let Event::Key(key) = ev
@@ -1470,28 +1483,42 @@ impl AgentView {
         });
         InputOutcome::Changed
     }
-    /// Returns `true` if the switch happened immediately, `false` if blocked.
-    pub(crate) fn set_active_pane(&mut self, target: AgentPane, force: bool) -> bool {
+    /// Force a pane change without consulting the queued-edit focus lock.
+    ///
+    /// This is reserved for state restoration and protocol-driven transitions
+    /// where the caller already owns the queue-edit lifecycle decision.
+    pub(crate) fn force_active_pane(&mut self, target: AgentPane) {
         if target != AgentPane::Scrollback {
             self.scrollback_search = None;
         }
-        if force {
-            if target != AgentPane::Todo {
-                self.todo.overlay.focused = false;
-            }
-            if target != AgentPane::Tasks {
-                self.tasks.overlay.focused = false;
-            }
-            if target != AgentPane::Catalog {
-                self.catalog.overlay.focused = false;
-            }
-            if target != AgentPane::Queue {
-                self.queue.overlay.focused = false;
-            }
-            self.active_pane = target;
-            return true;
+        if target != AgentPane::Todo {
+            self.todo.overlay.focused = false;
         }
-        if let Some(switched) = self.editing_lock_on_pane_switch(target) {
+        if target != AgentPane::Tasks {
+            self.tasks.overlay.focused = false;
+        }
+        if target != AgentPane::Catalog {
+            self.catalog.overlay.focused = false;
+        }
+        if target != AgentPane::Queue {
+            self.queue.overlay.focused = false;
+        }
+        self.active_pane = target;
+    }
+
+    /// Request a user-driven pane change and collect any queue-edit lifecycle
+    /// effect produced by leaving a clean server-backed edit.
+    ///
+    /// Returns `true` if the switch happened immediately, `false` if blocked.
+    pub(crate) fn set_active_pane(
+        &mut self,
+        target: AgentPane,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> bool {
+        if target != AgentPane::Scrollback {
+            self.scrollback_search = None;
+        }
+        if let Some(switched) = self.editing_lock_on_pane_switch(target, effects) {
             return switched;
         }
         if target != AgentPane::Todo {
@@ -1509,13 +1536,17 @@ impl AgentView {
         self.active_pane = target;
         true
     }
-    pub(crate) fn set_input_mode(&mut self, mode: InputMode) {
+    pub(crate) fn set_input_mode(
+        &mut self,
+        mode: InputMode,
+        effects: &mut Vec<super::actions::Effect>,
+    ) {
         self.input_mode = mode;
         if mode == InputMode::Vim
             && self.prompt.text().trim().is_empty()
             && self.active_pane == AgentPane::Prompt
         {
-            let _switched = self.set_active_pane(AgentPane::Scrollback, false);
+            let _switched = self.set_active_pane(AgentPane::Scrollback, effects);
         }
     }
     /// Propagate a vim-mode change to this view AND every nested
@@ -1576,15 +1607,16 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn ctrl_b_is_consumed_when_ineligible_and_demotes_when_eligible() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         for pane in [AgentPane::Prompt, AgentPane::Scrollback] {
             let mut agent = make_agent();
-            agent.set_active_pane(pane, true);
+            agent.force_active_pane(pane);
             agent.prompt.set_text("draft");
             let cursor = agent.prompt.text().len();
             agent.prompt.set_cursor(cursor);
             assert!(matches!(
-                agent.handle_input(&ctrl('b'), &registry),
+                agent.handle_input(&ctrl('b'), &registry, &mut effects),
                 InputOutcome::Changed
             ));
             assert_eq!(agent.active_pane, pane);
@@ -1592,7 +1624,7 @@ mod background_and_tasks_shortcut_tests {
             assert_eq!(agent.prompt.cursor(), cursor);
             assert!(!agent.tasks.overlay.focused);
             add_running_execute(&mut agent);
-            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry, &mut effects));
             assert_eq!(agent.active_pane, pane);
             assert_eq!(agent.prompt.text(), "draft");
             assert_eq!(agent.prompt.cursor(), cursor);
@@ -1600,10 +1632,11 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn ctrl_b_preempts_history_browse_and_search_without_mutating_them() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         for browse in [true, false] {
             let mut agent = make_agent();
-            agent.set_active_pane(AgentPane::Prompt, true);
+            agent.force_active_pane(AgentPane::Prompt);
             let history = [HistoryEntry {
                 text: "earlier prompt".into(),
             }];
@@ -1618,7 +1651,7 @@ mod background_and_tasks_shortcut_tests {
             let cursor = agent.prompt.cursor();
             let selected = agent.prompt.history_search.selected;
             add_running_execute(&mut agent);
-            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry, &mut effects));
             assert!(agent.prompt.history_search.is_active());
             assert_eq!(agent.prompt.history_search.is_browse(), browse);
             assert_eq!(agent.prompt.history_search.selected, selected);
@@ -1628,16 +1661,17 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn ctrl_b_preempts_file_search_without_mutating_it() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
         seed_file_search(&mut agent);
         assert!(agent.prompt.file_search_visible());
         let context = agent.prompt.file_search.context().cloned();
         let selected = agent.prompt.file_search.selected();
         let cursor = agent.prompt.cursor();
         add_running_execute(&mut agent);
-        assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+        assert_demotes(agent.handle_input(&ctrl('b'), &registry, &mut effects));
         assert_eq!(agent.prompt.file_search.context(), context.as_ref());
         assert_eq!(agent.prompt.file_search.selected(), selected);
         assert_eq!(agent.prompt.text(), "@src");
@@ -1645,6 +1679,7 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn ctrl_b_preempts_tasks_search_and_filter_without_mutating_them() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         for (open_key, expected_mode) in [('/', InputBarMode::Search), ('f', InputBarMode::Filter)]
         {
@@ -1652,7 +1687,7 @@ mod background_and_tasks_shortcut_tests {
             add_running_bg_task(&mut agent);
             agent.tasks.overlay.visible = true;
             agent.tasks.overlay.focused = true;
-            agent.set_active_pane(AgentPane::Tasks, true);
+            agent.force_active_pane(AgentPane::Tasks);
             assert!(
                 agent
                     .tasks
@@ -1666,7 +1701,7 @@ mod background_and_tasks_shortcut_tests {
                 );
             }
             add_running_execute(&mut agent);
-            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry, &mut effects));
             assert_eq!(agent.active_pane, AgentPane::Tasks);
             assert!(agent.tasks.overlay.visible);
             assert!(agent.tasks.overlay.focused);
@@ -1676,6 +1711,7 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let child_sid = "child-sid".to_string();
         let mut parent = make_agent();
@@ -1696,14 +1732,14 @@ mod background_and_tasks_shortcut_tests {
                 .running_execute_tool_call_id()
                 .is_some()
         );
-        child.set_active_pane(AgentPane::Scrollback, true);
+        child.force_active_pane(AgentPane::Scrollback);
         parent
             .subagent_views
             .insert(child_sid.clone(), Box::new(child));
         assert!(!parent.subagent_views[&child_sid].is_subagent_view);
         parent.open_subagent_fullscreen(child_sid.clone());
         assert!(parent.subagent_views[&child_sid].is_subagent_view);
-        let outcome = parent.handle_input(&ctrl('b'), &registry);
+        let outcome = parent.handle_input(&ctrl('b'), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(!matches!(
             outcome,
@@ -1736,21 +1772,22 @@ mod background_and_tasks_shortcut_tests {
     }
     #[test]
     fn ctrl_g_toggles_tasks_and_never_demotes() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("draft");
         let draft_len = agent.prompt.text().len();
         agent.prompt.set_cursor(draft_len);
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
         add_running_execute(&mut agent);
-        let first = agent.handle_input(&ctrl('g'), &registry);
+        let first = agent.handle_input(&ctrl('g'), &registry, &mut effects);
         assert!(matches!(first, InputOutcome::Changed));
         assert_eq!(agent.active_pane, AgentPane::Tasks);
         assert!(agent.tasks.overlay.visible);
         assert!(agent.tasks.overlay.focused);
         assert_eq!(agent.prompt.text(), "draft");
         assert_eq!(agent.prompt.cursor(), draft_len);
-        let second = agent.handle_input(&ctrl('g'), &registry);
+        let second = agent.handle_input(&ctrl('g'), &registry, &mut effects);
         assert!(matches!(
             second,
             InputOutcome::Action(Action::FocusScrollback)
@@ -1799,6 +1836,7 @@ mod leader_key_tests {
 
     #[test]
     fn ctrl_x_m_opens_configured_model_picker() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         let id = acp::ModelId::new("configured-model");
@@ -1809,11 +1847,11 @@ mod leader_key_tests {
         agent.session.models.current = Some(id);
 
         assert!(matches!(
-            agent.handle_input(&ctrl_x(), &registry),
+            agent.handle_input(&ctrl_x(), &registry, &mut effects),
             InputOutcome::Changed
         ));
         assert!(matches!(
-            agent.handle_input(&bare('m'), &registry),
+            agent.handle_input(&bare('m'), &registry, &mut effects),
             InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                 if command == "model"
         ));
@@ -1821,12 +1859,13 @@ mod leader_key_tests {
 
     #[test]
     fn ctrl_x_a_opens_agent_picker() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
 
-        let _ = agent.handle_input(&ctrl_x(), &registry);
+        let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
         assert!(matches!(
-            agent.handle_input(&bare('a'), &registry),
+            agent.handle_input(&bare('a'), &registry, &mut effects),
             InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                 if command == "agent"
         ));
@@ -1834,6 +1873,7 @@ mod leader_key_tests {
 
     #[test]
     fn ctrl_x_b_opens_behavior_picker() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.slash_controller.set_workflows_available(true);
@@ -1852,9 +1892,9 @@ mod leader_key_tests {
                 ),
             ]);
 
-        let _ = agent.handle_input(&ctrl_x(), &registry);
+        let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
         assert!(matches!(
-            agent.handle_input(&bare('b'), &registry),
+            agent.handle_input(&bare('b'), &registry, &mut effects),
             InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                 if command == "behavior"
         ));
@@ -1862,12 +1902,13 @@ mod leader_key_tests {
 
     #[test]
     fn ctrl_x_e_and_p_open_their_shared_selectors() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         for (key, expected) in [('e', "effort"), ('p', "permission")] {
             let mut agent = make_agent();
-            let _ = agent.handle_input(&ctrl_x(), &registry);
+            let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
             assert!(matches!(
-                agent.handle_input(&bare(key), &registry),
+                agent.handle_input(&bare(key), &registry, &mut effects),
                 InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                     if command == expected
             ));
@@ -1876,12 +1917,13 @@ mod leader_key_tests {
 
     #[test]
     fn leader_continuations_are_case_insensitive() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        let _ = agent.handle_input(&ctrl_x(), &registry);
+        let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
         let upper = Event::Key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
         assert!(matches!(
-            agent.handle_input(&upper, &registry),
+            agent.handle_input(&upper, &registry, &mut effects),
             InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                 if command == "permission"
         ));
@@ -1889,6 +1931,7 @@ mod leader_key_tests {
 
     #[test]
     fn behavior_switch_warning_does_not_capture_enter() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.show_behavior_switch_warning("Select Plan again to confirm", 8_000);
@@ -1897,6 +1940,7 @@ mod leader_key_tests {
         let outcome = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             &registry,
+            &mut effects,
         );
         assert!(matches!(
             outcome,
@@ -1906,12 +1950,13 @@ mod leader_key_tests {
 
     #[test]
     fn unknown_leader_continuation_is_consumed() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("draft");
 
-        let _ = agent.handle_input(&ctrl_x(), &registry);
-        let outcome = agent.handle_input(&bare('z'), &registry);
+        let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
+        let outcome = agent.handle_input(&bare('z'), &registry, &mut effects);
 
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.prompt.text(), "draft");
@@ -1937,7 +1982,7 @@ mod btw_focus_tests {
     /// (keyboard scrollability reads from it). 80x14 → 76-col body, 12 rows.
     fn prompt_focused_agent() -> AgentView {
         let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
         agent.last_btw_area = Rect::new(0, 0, 80, 14);
         agent
     }
@@ -1984,43 +2029,49 @@ mod btw_focus_tests {
     }
     #[test]
     fn focused_panel_scrolls_with_arrows() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Down), &reg),
+            agent.handle_input(&key(KeyCode::Down), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(done_scroll_offset(&agent), 1);
-        agent.handle_input(&key(KeyCode::Down), &reg);
+        agent.handle_input(&key(KeyCode::Down), &reg, &mut effects);
         assert_eq!(done_scroll_offset(&agent), 2);
-        agent.handle_input(&key(KeyCode::Up), &reg);
+        agent.handle_input(&key(KeyCode::Up), &reg, &mut effects);
         assert_eq!(done_scroll_offset(&agent), 1);
         assert!(agent.btw_focused);
     }
     #[test]
     fn focused_panel_owns_page_keys_before_prompt_paging() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
-        let outcome = agent.handle_input_with_prompt_paging(&key(KeyCode::PageDown), &reg);
+        let outcome =
+            agent.handle_input_with_prompt_paging(&key(KeyCode::PageDown), &reg, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         let after_down = done_scroll_offset(&agent);
         assert!(after_down > 0);
-        let outcome = agent.handle_input_with_prompt_paging(&key(KeyCode::PageUp), &reg);
+        let outcome =
+            agent.handle_input_with_prompt_paging(&key(KeyCode::PageUp), &reg, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(done_scroll_offset(&agent) < after_down);
         assert!(agent.btw_focused);
     }
     #[test]
     fn visible_unfocused_panel_allows_prompt_paging() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = false;
-        let outcome = agent.handle_input_with_prompt_paging(&key(KeyCode::PageDown), &reg);
+        let outcome =
+            agent.handle_input_with_prompt_paging(&key(KeyCode::PageDown), &reg, &mut effects);
         assert!(
             matches!(
                 &outcome,
@@ -2032,11 +2083,12 @@ mod btw_focus_tests {
     }
     #[test]
     fn typing_returns_focus_to_prompt() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
-        agent.handle_input(&key(KeyCode::Char('h')), &reg);
+        agent.handle_input(&key(KeyCode::Char('h')), &reg, &mut effects);
         assert!(
             !agent.btw_focused,
             "typing should return focus to the prompt"
@@ -2046,13 +2098,14 @@ mod btw_focus_tests {
     }
     #[test]
     fn arrows_move_prompt_cursor_when_prompt_focused() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.prompt.set_text("line one\nline two");
         agent.prompt.set_cursor(0);
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = false;
-        let out = agent.handle_input(&key(KeyCode::Down), &reg);
+        let out = agent.handle_input(&key(KeyCode::Down), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(
             agent.prompt.cursor() > 0,
@@ -2066,13 +2119,14 @@ mod btw_focus_tests {
     }
     #[test]
     fn nonscrollable_answer_never_captures_arrows() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.prompt.set_text("hello");
         agent.prompt.set_cursor(0);
         agent.btw_state = Some(BtwOverlayState::done("q".into(), "short".into()));
         agent.btw_focused = true;
-        agent.handle_input(&key(KeyCode::Down), &reg);
+        agent.handle_input(&key(KeyCode::Down), &reg, &mut effects);
         assert!(
             !agent.btw_focused,
             "a non-scrollable panel hands the arrows back to the prompt"
@@ -2081,12 +2135,13 @@ mod btw_focus_tests {
     }
     #[test]
     fn scrollback_pane_does_not_capture_arrows() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
-        agent.set_active_pane(AgentPane::Scrollback, true);
+        agent.force_active_pane(AgentPane::Scrollback);
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
-        agent.handle_input(&key(KeyCode::Down), &reg);
+        agent.handle_input(&key(KeyCode::Down), &reg, &mut effects);
         assert_eq!(
             done_scroll_offset(&agent),
             0,
@@ -2095,22 +2150,24 @@ mod btw_focus_tests {
     }
     #[test]
     fn esc_dismisses_panel_and_clears_focus() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
-        agent.handle_input(&key(KeyCode::Esc), &reg);
+        agent.handle_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(agent.btw_state.is_none(), "Esc dismisses the /btw panel");
         assert!(!agent.btw_focused, "dismissing the panel clears its focus");
     }
     #[test]
     fn minimal_permission_owns_esc_over_hidden_btw() {
+        let mut effects = Vec::new();
         let mut agent = minimal_btw_agent();
         let reg = ActionRegistry::defaults();
         agent
             .permission_queue
             .push_back(super::paste_key_tests::make_followup_permission_state());
-        agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        agent.handle_minimal_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert_minimal_btw_active(&agent, "permission");
         assert_eq!(
             agent.permission_queue.len(),
@@ -2128,6 +2185,7 @@ mod btw_focus_tests {
     }
     #[test]
     fn minimal_modal_and_viewers_own_esc_over_hidden_btw() {
+        let mut effects = Vec::new();
         let reg = ActionRegistry::defaults();
         let mut agents = minimal_btw_agent();
         agents.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
@@ -2136,20 +2194,20 @@ mod btw_focus_tests {
             &crate::app::bundle::BundleState::default(),
             None,
         ));
-        agents.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        agents.handle_minimal_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(agents.agents_modal.is_none(), "agents modal handled Esc");
         assert_minimal_btw_active(&agents, "agents modal");
         let mut block = minimal_btw_agent();
         block.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
             "t", "content",
         ));
-        block.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        block.handle_minimal_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(block.block_viewer.is_none(), "block viewer handled Esc");
         assert_minimal_btw_active(&block, "block viewer");
         let mut goal = minimal_btw_agent();
         goal.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         goal.show_goal_detail = true;
-        goal.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        goal.handle_minimal_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(!goal.show_goal_detail, "goal detail handled Esc");
         assert_minimal_btw_active(&goal, "goal detail");
     }
@@ -2174,24 +2232,26 @@ mod btw_focus_tests {
     }
     #[test]
     fn fullscreen_keeps_btw_first_esc_precedence() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent
             .permission_queue
             .push_back(super::paste_key_tests::make_followup_permission_state());
-        agent.handle_input(&key(KeyCode::Esc), &reg);
+        agent.handle_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(agent.btw_state.is_none());
         assert!(!agent.permission_queue.is_empty());
     }
     #[test]
     fn minimal_does_not_scroll_unpainted_btw_geometry() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
         agent.last_btw_area = Rect::default();
-        agent.handle_minimal_input(&key(KeyCode::Down), &reg);
+        agent.handle_minimal_input(&key(KeyCode::Down), &reg, &mut effects);
         assert_eq!(done_scroll_offset(&agent), 0);
     }
     /// A hidden `/jump` picker shadowed by the `/btw` panel must not let one Esc
@@ -2199,6 +2259,7 @@ mod btw_focus_tests {
     /// the panel survives, and only a second Esc dismisses it.
     #[test]
     fn esc_over_shadowed_jump_picker_spares_btw_panel() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
@@ -2211,7 +2272,7 @@ mod btw_focus_tests {
                 follow_mode: false,
             },
         });
-        agent.handle_input(&key(KeyCode::Esc), &reg);
+        agent.handle_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(
             agent.jump_state.is_none(),
             "first Esc drops the shadowed picker"
@@ -2220,7 +2281,7 @@ mod btw_focus_tests {
             agent.btw_state.is_some(),
             "the /btw panel survives the picker-dismissing Esc"
         );
-        agent.handle_input(&key(KeyCode::Esc), &reg);
+        agent.handle_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(
             agent.btw_state.is_none(),
             "a second Esc dismisses the /btw panel"
@@ -2228,30 +2289,32 @@ mod btw_focus_tests {
     }
     #[test]
     fn clicking_panel_refocuses_it() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = false;
-        agent.set_active_pane(AgentPane::Scrollback, true);
+        agent.force_active_pane(AgentPane::Scrollback);
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 5,
             row: 5,
             modifiers: KeyModifiers::NONE,
         };
-        agent.handle_mouse(&click);
+        agent.handle_mouse(&click, &mut effects);
         assert!(agent.btw_focused, "clicking the panel refocuses it");
         assert_eq!(agent.active_pane, AgentPane::Prompt);
-        agent.handle_input(&key(KeyCode::Down), &reg);
+        agent.handle_input(&key(KeyCode::Down), &reg, &mut effects);
         assert_eq!(done_scroll_offset(&agent), 1);
     }
     #[test]
     fn pasting_into_prompt_returns_focus() {
+        let mut effects = Vec::new();
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent.btw_focused = true;
-        agent.handle_input(&Event::Paste("a".repeat(5000)), &reg);
+        agent.handle_input(&Event::Paste("a".repeat(5000)), &reg, &mut effects);
         assert!(!agent.btw_focused, "pasting into the prompt returns focus");
     }
 }
@@ -2528,7 +2591,7 @@ mod jump_backout_key_tests {
     #[test]
     fn jump_picker_defeats_empty_focused_prompt() {
         let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
         assert!(
             agent.is_empty_focused_prompt(),
             "baseline: empty prompt focused"
@@ -2543,13 +2606,14 @@ mod jump_backout_key_tests {
     /// hatch as a running turn.
     #[test]
     fn jump_picker_ctrl_c_cancels_compact() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent.session.state = AgentState::CommandRunning {
             command: AgentCommand::Compact,
             started_at: std::time::Instant::now(),
         };
         open_jump(&mut agent);
-        let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+        let outcome = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults(), &mut effects);
         assert!(
             agent.jump_state.is_none(),
             "Ctrl+C during /compact must dismiss the jump picker"
@@ -2570,6 +2634,7 @@ mod rich_textarea_paste_routing_tests {
     use ratatui_textarea::{TextArea, TextAreaState};
     #[test]
     fn inline_edit_receives_raw_multiline_paste_without_touching_prompt() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent.prompt.set_text("hidden prompt");
         let mut textarea = TextArea::new();
@@ -2587,6 +2652,7 @@ mod rich_textarea_paste_routing_tests {
         let _ = agent.handle_input(
             &Event::Paste("中\nline".to_owned()),
             &ActionRegistry::defaults(),
+            &mut effects,
         );
         assert_eq!(
             agent.inline_edit.as_ref().map(|edit| edit.textarea.text()),

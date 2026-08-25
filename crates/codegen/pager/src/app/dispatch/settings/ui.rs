@@ -865,7 +865,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     rollback_value: &crate::settings::SettingValue,
 ) -> Vec<Effect> {
     use crate::settings::SettingValue;
-    let companion_effects: Vec<Effect> = Vec::new();
+    let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
@@ -874,7 +874,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             set_combine_queued_prompts_inner(app, *b)
         }
-        ("simple_mode", SettingValue::Bool(b)) => set_simple_mode_inner(app, *b),
+        ("simple_mode", SettingValue::Bool(b)) => {
+            companion_effects.extend(set_simple_mode_inner(app, *b));
+        }
         ("contextual_hints.undo", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.undo = v, *b)
         }

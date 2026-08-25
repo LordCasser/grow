@@ -310,6 +310,6 @@ pub(super) fn restore_permission_stashes(agent: &mut AgentView) {
         agent.prompt.restore(stashed);
     }
     if let Some(pane) = agent.permission_stashed_pane.take() {
-        agent.set_active_pane(pane, true);
+        agent.force_active_pane(pane);
     }
 }

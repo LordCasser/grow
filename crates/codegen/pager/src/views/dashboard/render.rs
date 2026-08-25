@@ -5937,15 +5937,20 @@ mod tests {
             assert!(line.contains("e\u{301}"), "combining tail split: {line:?}");
             assert!(line.contains("👩🏽\u{200d}💻"), "ZWJ tail split: {line:?}",);
             let end_cursor = rename_cursor_pos(&state, &rows).expect("end cursor");
+            let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
 
-            let _ = state.handle_input(
+            let _ = state.handle_input_with_paste_provenance(
                 &Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
                 &registry,
+                crate::app::app_view::PasteProvenance::Terminal,
+                &mut effects,
             );
             for _ in 0..20 {
-                let _ = state.handle_input(
+                let _ = state.handle_input_with_paste_provenance(
                     &Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
                     &registry,
+                    crate::app::app_view::PasteProvenance::Terminal,
+                    &mut effects,
                 );
             }
             let mut middle_buffer = Buffer::empty(area);

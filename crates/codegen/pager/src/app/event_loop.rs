@@ -2650,13 +2650,18 @@ async fn drain_and_process(
                 // Restore Prompt on refocus: needs-input overlay always, else idle non-vim.
                 match app.active_view {
                     ActiveView::Agent(id) => {
+                        let mut pane_effects = Vec::new();
                         if let Some(agent) = app.agents.get_mut(&id)
                             && agent.should_restore_prompt_on_focus_gained()
                         {
-                            agent.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+                            agent.set_active_pane(
+                                crate::views::agent::ActivePane::Prompt,
+                                &mut pane_effects,
+                            );
                             needs_draw = true;
                             had_non_resize_change = true;
                         }
+                        app.pending_effects.extend(pane_effects);
 
                         // Automatic "where was I" recap: the user just returned
                         // after being away long enough. Only when the session is

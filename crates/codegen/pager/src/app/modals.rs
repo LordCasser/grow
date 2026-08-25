@@ -249,7 +249,11 @@ impl AgentView {
     ///
     /// Matches the pressed character against the modal's options and resolves
     /// the result. All non-matching keys are consumed (blocked).
-    pub(super) fn handle_modal_key(&mut self, key: &KeyEvent) -> InputOutcome {
+    pub(super) fn handle_modal_key(
+        &mut self,
+        key: &KeyEvent,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> InputOutcome {
         use crate::views::modal::ActiveModal;
         use crate::views::modal_window::{self as mw, ModalWindowOutcome};
 
@@ -646,7 +650,7 @@ impl AgentView {
             ActiveModal::EditConfirm {
                 modal: confirm,
                 pending_target,
-            } => self.handle_edit_confirm_choice(confirm, pending_target, ch),
+            } => self.handle_edit_confirm_choice(confirm, pending_target, ch, effects),
             ActiveModal::CommandPalette { .. }
             | ActiveModal::ArgPicker { .. }
             | ActiveModal::SessionPicker { .. }
@@ -1463,6 +1467,7 @@ impl AgentView {
     pub(super) fn handle_modal_mouse(
         &mut self,
         mouse: &crossterm::event::MouseEvent,
+        effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
         use crate::views::modal::ActiveModal;
         use crate::views::modal_window::{self as mw, ModalWindowOutcome};
@@ -1742,7 +1747,7 @@ impl AgentView {
                 for btn in &self.modal_buttons {
                     if btn.rect.contains((mouse.column, mouse.row).into()) {
                         let key = KeyEvent::new(KeyCode::Char(btn.key), KeyModifiers::NONE);
-                        return self.handle_modal_key(&key);
+                        return self.handle_modal_key(&key, effects);
                     }
                 }
                 InputOutcome::Changed
@@ -2812,6 +2817,7 @@ mod command_palette_vim_input_tests {
 
     #[test]
     fn minimal_edit_prompt_palette_selection_preserves_draft() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         agent
             .prompt
@@ -2828,7 +2834,10 @@ mod command_palette_vim_input_tests {
             },
             window: crate::views::modal_window::ModalWindowState::new(),
         });
-        let out = agent.handle_modal_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let out = agent.handle_modal_key(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut effects,
+        );
         assert!(matches!(
             out,
             InputOutcome::Action(crate::app::actions::Action::EditPromptExternal)
@@ -2843,6 +2852,7 @@ mod command_palette_vim_input_tests {
     /// `vim_normal_first: load_vim_mode()` wiring are exercised end to end.
     #[test]
     fn vim_command_palette_input_then_esc_to_nav_then_i_reenters() {
+        let mut effects = Vec::new();
         // CI defaults vim off and this dev machine's config sets it on, so pin.
         crate::appearance::cache::set_vim_mode(true);
         let mut agent = make_agent();
@@ -2850,25 +2860,25 @@ mod command_palette_vim_input_tests {
 
         // Opens in INPUT mode: a letter types/filters immediately.
         assert!(palette_state(&agent).search_active, "opens in input mode");
-        agent.handle_modal_key(&key('a'));
+        agent.handle_modal_key(&key('a'), &mut effects);
         let st = palette_state(&agent);
         assert_eq!(st.query(), "a", "input mode: a letter filters");
         assert!(st.search_active);
 
         // First Esc clears the query via the modal chrome but stays in input.
-        agent.handle_modal_key(&esc());
+        agent.handle_modal_key(&esc(), &mut effects);
         let st = palette_state(&agent);
         assert!(st.query().is_empty(), "Esc clears the query");
         assert!(st.search_active, "still input after the first Esc");
 
         // Second Esc (empty query) drops to NAV via the picker's vim Esc.
-        agent.handle_modal_key(&esc());
+        agent.handle_modal_key(&esc(), &mut effects);
         let st = palette_state(&agent);
         assert!(!st.search_active, "second Esc drops to nav");
         assert!(st.query().is_empty());
 
         // NAV: a bare printable key must NOT type.
-        let out = agent.handle_modal_key(&key('b'));
+        let out = agent.handle_modal_key(&key('b'), &mut effects);
         let st = palette_state(&agent);
         assert!(st.query().is_empty(), "nav: a bare letter does not filter");
         assert!(!st.search_active);
@@ -2878,10 +2888,10 @@ mod command_palette_vim_input_tests {
         );
 
         // `i` re-enters INPUT without typing; a letter then filters again.
-        agent.handle_modal_key(&key('i'));
+        agent.handle_modal_key(&key('i'), &mut effects);
         assert!(palette_state(&agent).search_active, "i re-enters search");
         assert!(palette_state(&agent).query().is_empty(), "i does not type");
-        agent.handle_modal_key(&key('c'));
+        agent.handle_modal_key(&key('c'), &mut effects);
         assert_eq!(palette_state(&agent).query(), "c", "typing filters again");
         // Reset the global vim pin so it can't leak to later tests (libtest reuses threads).
         crate::appearance::cache::set_vim_mode(false);
@@ -2890,17 +2900,18 @@ mod command_palette_vim_input_tests {
     /// `/` is the other vim search-entry key: from NAV it re-enters INPUT.
     #[test]
     fn vim_command_palette_slash_reenters_search_from_nav() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_vim_mode(true);
         let mut agent = make_agent();
         open_command_palette(&mut agent);
 
         // Drop to nav: type, then two Escs (clear query, then nav).
-        agent.handle_modal_key(&key('a'));
-        agent.handle_modal_key(&esc());
-        agent.handle_modal_key(&esc());
+        agent.handle_modal_key(&key('a'), &mut effects);
+        agent.handle_modal_key(&esc(), &mut effects);
+        agent.handle_modal_key(&esc(), &mut effects);
         assert!(!palette_state(&agent).search_active, "in nav mode");
 
-        agent.handle_modal_key(&key('/'));
+        agent.handle_modal_key(&key('/'), &mut effects);
         assert!(palette_state(&agent).search_active, "/ re-enters search");
         assert!(palette_state(&agent).query().is_empty(), "/ does not type");
         // Reset the global vim pin so it can't leak to later tests (libtest reuses threads).
@@ -2911,24 +2922,25 @@ mod command_palette_vim_input_tests {
     /// so a letter keeps filtering even after Esc clears the query.
     #[test]
     fn non_vim_command_palette_stays_type_to_filter() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_vim_mode(false);
         let mut agent = make_agent();
         open_command_palette(&mut agent);
 
-        agent.handle_modal_key(&key('a'));
+        agent.handle_modal_key(&key('a'), &mut effects);
         let st = palette_state(&agent);
         assert_eq!(st.query(), "a", "a letter filters");
         assert!(st.search_active);
 
         // Esc clears the query (chrome) but never drops to a nav mode.
-        agent.handle_modal_key(&esc());
+        agent.handle_modal_key(&esc(), &mut effects);
         assert!(
             palette_state(&agent).query().is_empty(),
             "Esc clears the query"
         );
 
         // A bare letter still types — no vim nav-mode suppression.
-        agent.handle_modal_key(&key('b'));
+        agent.handle_modal_key(&key('b'), &mut effects);
         let st = palette_state(&agent);
         assert_eq!(st.query(), "b", "still type-to-filter (no nav mode)");
         assert!(st.search_active);
@@ -2936,6 +2948,7 @@ mod command_palette_vim_input_tests {
 
     #[test]
     fn command_palette_bracketed_paste_targets_only_active_query() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_vim_mode(false);
         let mut agent = make_agent();
         agent.prompt.set_text("hidden prompt");
@@ -2947,8 +2960,10 @@ mod command_palette_vim_input_tests {
         let _ = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             &registry,
+            &mut effects,
         );
-        let outcome = agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry);
+        let outcome =
+            agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(palette_state(&agent).query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
@@ -2958,7 +2973,8 @@ mod command_palette_vim_input_tests {
             state.search_active = false;
         }
         crate::appearance::cache::set_vim_mode(true);
-        let outcome = agent.handle_input(&Event::Paste("ignored".to_owned()), &registry);
+        let outcome =
+            agent.handle_input(&Event::Paste("ignored".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert!(palette_state(&agent).query().is_empty());
         assert_eq!(agent.prompt.text(), "hidden prompt");
@@ -3064,6 +3080,7 @@ mod arg_picker_profile_tests {
 
     #[test]
     fn arg_picker_type_to_filter_survives_arrow_keys_even_with_vim() {
+        let mut effects = Vec::new();
         crate::appearance::cache::set_vim_mode(true);
         let mut agent = make_agent();
         let id = acp::ModelId::new("grow-a");
@@ -3080,8 +3097,14 @@ mod arg_picker_profile_tests {
         agent.open_command_picker("model", "");
 
         // Down would exit search under palette vim semantics; ArgPicker must keep filtering.
-        agent.handle_modal_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        agent.handle_modal_key(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        agent.handle_modal_key(
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut effects,
+        );
+        agent.handle_modal_key(
+            &KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            &mut effects,
+        );
 
         let Some(ActiveModal::ArgPicker { items, state, .. }) = agent.active_modal.as_ref() else {
             panic!("expected ArgPicker");
@@ -3094,6 +3117,7 @@ mod arg_picker_profile_tests {
 
     #[test]
     fn arg_picker_select_emits_slash_with_catalog_id() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let id = acp::ModelId::new("provider/model-a");
         agent.session.models.available.insert(
@@ -3108,7 +3132,10 @@ mod arg_picker_profile_tests {
         };
         assert_eq!(items[0].display, "provider/model-a (current)");
 
-        let out = agent.handle_modal_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let out = agent.handle_modal_key(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut effects,
+        );
         match out {
             InputOutcome::Action(crate::app::actions::Action::SendSlashCommandPreservingDraft(
                 ref cmd,
@@ -3141,6 +3168,7 @@ mod settings_memory_paste_routing_tests {
 
     #[test]
     fn settings_and_memory_paste_only_into_focused_filters() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("hidden prompt");
@@ -3155,8 +3183,9 @@ mod settings_memory_paste_routing_tests {
         agent.active_modal = Some(ActiveModal::Settings {
             state: Box::new(settings),
         });
-        let _ = agent.handle_input(&left(), &registry);
-        let outcome = agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry);
+        let _ = agent.handle_input(&left(), &registry, &mut effects);
+        let outcome =
+            agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         let Some(ActiveModal::Settings { state }) = agent.active_modal.as_ref() else {
             panic!("settings modal remains open");
@@ -3169,9 +3198,10 @@ mod settings_memory_paste_routing_tests {
         agent.active_modal = Some(ActiveModal::MemoryBrowser {
             state: Box::new(memory),
         });
-        let _ = agent.handle_input(&Event::Paste("ab".to_owned()), &registry);
-        let _ = agent.handle_input(&left(), &registry);
-        let outcome = agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry);
+        let _ = agent.handle_input(&Event::Paste("ab".to_owned()), &registry, &mut effects);
+        let _ = agent.handle_input(&left(), &registry, &mut effects);
+        let outcome =
+            agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         let Some(ActiveModal::MemoryBrowser { state }) = agent.active_modal.as_ref() else {
             panic!("memory modal remains open");
@@ -3213,8 +3243,9 @@ mod usage_modal_input_tests {
 
     #[test]
     fn esc_closes_the_modal() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::Usage);
-        let outcome = agent.handle_modal_key(&key(KeyCode::Esc));
+        let outcome = agent.handle_modal_key(&key(KeyCode::Esc), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
             agent.active_modal.is_none(),
@@ -3224,16 +3255,18 @@ mod usage_modal_input_tests {
 
     #[test]
     fn tab_and_backtab_switch_tabs() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::Usage);
-        let _ = agent.handle_modal_key(&key(KeyCode::Tab));
+        let _ = agent.handle_modal_key(&key(KeyCode::Tab), &mut effects);
         assert_eq!(state_of(&agent).active_tab, UsageModalTab::Context);
         assert_eq!(state_of(&agent).window.active_tab, 1);
-        let _ = agent.handle_modal_key(&key(KeyCode::BackTab));
+        let _ = agent.handle_modal_key(&key(KeyCode::BackTab), &mut effects);
         assert_eq!(state_of(&agent).active_tab, UsageModalTab::Usage);
     }
 
     #[test]
     fn enter_copies_selected_session_info_row() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::SessionInfo);
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
             state.session_info = UsageTabData::Loaded(vec![SessionInfoRow {
@@ -3241,7 +3274,7 @@ mod usage_modal_input_tests {
                 value: "sess-9".into(),
             }]);
         }
-        let outcome = agent.handle_modal_key(&key(KeyCode::Enter));
+        let outcome = agent.handle_modal_key(&key(KeyCode::Enter), &mut effects);
         assert!(
             matches!(
                 outcome,
@@ -3253,6 +3286,7 @@ mod usage_modal_input_tests {
 
     #[test]
     fn mouse_click_on_row_copies_after_render_records_hits() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::SessionInfo);
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
             state.session_info = UsageTabData::Loaded(vec![SessionInfoRow {
@@ -3276,7 +3310,7 @@ mod usage_modal_input_tests {
             row: 8,
             modifiers: KeyModifiers::NONE,
         };
-        let outcome = agent.handle_modal_mouse(&click);
+        let outcome = agent.handle_modal_mouse(&click, &mut effects);
         assert!(
             matches!(
                 outcome,
@@ -3288,6 +3322,7 @@ mod usage_modal_input_tests {
 
     #[test]
     fn click_outside_popup_closes_the_modal() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::Usage);
         // Give the chrome a popup area so click-outside detection works.
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
@@ -3304,7 +3339,7 @@ mod usage_modal_input_tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         };
-        let outcome = agent.handle_modal_mouse(&click);
+        let outcome = agent.handle_modal_mouse(&click, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
             agent.active_modal.is_none(),
@@ -3314,6 +3349,7 @@ mod usage_modal_input_tests {
 
     #[test]
     fn mouse_click_on_tab_switches_tab() {
+        let mut effects = Vec::new();
         let mut agent = open_modal(UsageModalTab::Usage);
         // The chrome records tab rects during render; seed one for tab 1.
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
@@ -3339,7 +3375,7 @@ mod usage_modal_input_tests {
             row: 6,
             modifiers: KeyModifiers::NONE,
         };
-        let outcome = agent.handle_modal_mouse(&click);
+        let outcome = agent.handle_modal_mouse(&click, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(state_of(&agent).active_tab, UsageModalTab::Context);
     }

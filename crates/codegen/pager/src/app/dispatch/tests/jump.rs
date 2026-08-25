@@ -138,6 +138,7 @@ fn scroll_drops_hidden_jump_picker_behind_input_overlay() {
 
 #[test]
 fn key_drops_hidden_jump_picker_behind_input_overlay() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     // The key-path mirror: with an input overlay pending (and, as here, the
     // scrollback pane focused so the pane-gated cancel-turn panel is skipped),
     // a key must drop the hidden picker instead of the picker handling it.
@@ -156,7 +157,11 @@ fn key_drops_hidden_jump_picker_behind_input_overlay() {
         });
     let reg = crate::actions::ActionRegistry::defaults();
     let ev = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    let _ = app.agents.get_mut(&id).unwrap().handle_input(&ev, &reg);
+    let _ = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_input(&ev, &reg, &mut input_effects);
 
     assert!(
         app.agents[&id].jump_state.is_none(),
@@ -166,6 +171,7 @@ fn key_drops_hidden_jump_picker_behind_input_overlay() {
 
 #[test]
 fn ctrl_c_stays_cancellable_with_jump_open() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crate::app::agent::AgentState;
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -180,7 +186,11 @@ fn ctrl_c_stays_cancellable_with_jump_open() {
 
     let reg = crate::actions::ActionRegistry::defaults();
     let ev = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    let outcome = app.agents.get_mut(&id).unwrap().handle_input(&ev, &reg);
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_input(&ev, &reg, &mut input_effects);
 
     assert!(
         app.agents[&id].jump_state.is_none(),

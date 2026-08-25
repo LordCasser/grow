@@ -81,6 +81,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
     // Mirror the reconciled shared queue into the owning agent so the queue
     // pane can render the union of local + server rows without needing
     // `AppView` access during draw / input handling.
+    let mut lifecycle_effects = Vec::new();
     if let Some(aid) = agent_id {
         let snapshot = app
             .shared_prompt_queue(&session_id)
@@ -106,9 +107,12 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                     server_id = %sid,
                     "exiting EditingQueued: row is no longer in the shared queue"
                 );
-                agent.cancel_editing_queued_for_lost_row();
+                if let Some(effect) = agent.cancel_editing_queued_for_lost_row() {
+                    lifecycle_effects.push(effect);
+                }
             }
         }
+        app.pending_effects.extend(lifecycle_effects);
         // Resolve a queue-row send-now that was parked while its row was
         // still an optimistic echo: the broadcast just confirmed the row, so
         // fire the interject with the authoritative version (racing it

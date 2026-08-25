@@ -558,8 +558,9 @@ pub(super) fn dispatch_rewind_success(
     agent_id: crate::app::agent::AgentId,
     response: crate::views::rewind::RewindResponse,
 ) -> Vec<Effect> {
+    let mut effects = Vec::new();
     let Some(agent) = app.agents.get_mut(&agent_id) else {
-        return vec![];
+        return effects;
     };
 
     // Inline-edit resubmit text; taken unconditionally so a failed rewind
@@ -650,7 +651,7 @@ pub(super) fn dispatch_rewind_success(
     }
 
     if !is_files_only {
-        agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, false);
+        agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, &mut effects);
     }
 
     agent.rewind_points = None;
@@ -664,10 +665,11 @@ pub(super) fn dispatch_rewind_success(
             // the composer draft, `literal=true` sends slash-lookalike text
             // as a prompt (the transcript is already truncated — running it
             // as a command would swallow the resubmit).
-            return super::prompt::dispatch_send_prompt_inner(
+            effects.extend(super::prompt::dispatch_send_prompt_inner(
                 app, text, /* consume_input */ false, /* literal */ true,
                 /* is_follow_up */ false,
-            );
+            ));
+            return effects;
         }
         // View switched mid-rewind: fall back to prefilling that composer,
         // appending so an existing draft isn't clobbered.
@@ -680,7 +682,7 @@ pub(super) fn dispatch_rewind_success(
         }
     }
 
-    vec![]
+    effects
 }
 
 // TaskResult handlers.

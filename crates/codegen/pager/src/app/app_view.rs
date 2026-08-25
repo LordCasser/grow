@@ -1662,14 +1662,19 @@ impl AppView {
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
                 let outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {
+                        let mut child_effects = Vec::new();
                         let transcript_before = agent.active_subagent.clone();
                         let workflows_before = agent.show_workflows;
                         let outcome = if self.screen_mode.is_minimal() {
-                            agent.handle_minimal_input(ev, &self.registry)
+                            agent.handle_minimal_input(ev, &self.registry, &mut child_effects)
                         } else if prompt_paging {
-                            agent.handle_input_with_prompt_paging(ev, &self.registry)
+                            agent.handle_input_with_prompt_paging(
+                                ev,
+                                &self.registry,
+                                &mut child_effects,
+                            )
                         } else {
-                            agent.handle_input(ev, &self.registry)
+                            agent.handle_input(ev, &self.registry, &mut child_effects)
                         };
                         let transcript_opened =
                             transcript_before.is_none() && agent.active_subagent.is_some();
@@ -1677,11 +1682,11 @@ impl AppView {
                         if let Event::Key(key) = ev {
                             agent.record_input(key, &outcome);
                         }
-                        self.pending_effects.append(&mut agent.pending_effects);
                         if transcript_opened || workflows_opened {
                             self.scroll_state.cancel_stream();
                             self.last_scroll_pos = None;
                         }
+                        self.pending_effects.append(&mut child_effects);
                         outcome
                     }
                     None => InputOutcome::Unchanged,
@@ -1783,20 +1788,22 @@ impl AppView {
                     }
                     match self.agents.get_mut(&agent_id) {
                         Some(agent) => {
+                            let mut child_effects = Vec::new();
                             let transcript_before = agent.active_subagent.clone();
                             let workflows_before = agent.show_workflows;
-                            let outcome = agent.handle_input(ev, &self.registry);
+                            let outcome =
+                                agent.handle_input(ev, &self.registry, &mut child_effects);
                             let transcript_opened =
                                 transcript_before.is_none() && agent.active_subagent.is_some();
                             let workflows_opened = !workflows_before && agent.show_workflows;
                             if let Event::Key(key) = ev {
                                 agent.record_input(key, &outcome);
                             }
-                            self.pending_effects.append(&mut agent.pending_effects);
                             if transcript_opened || workflows_opened {
                                 self.scroll_state.cancel_stream();
                                 self.last_scroll_pos = None;
                             }
+                            self.pending_effects.append(&mut child_effects);
                             if matches!(outcome, InputOutcome::Action(Action::ExitSession)) {
                                 if let Some(d) = self.dashboard.as_mut() {
                                     d.close_popup();
@@ -1811,12 +1818,14 @@ impl AppView {
                         None => InputOutcome::Unchanged,
                     }
                 } else if let Some(ref mut dashboard) = self.dashboard {
+                    let mut child_effects = Vec::new();
                     let outcome = dashboard.handle_input_with_paste_provenance(
                         ev,
                         &self.registry,
                         paste_provenance,
+                        &mut child_effects,
                     );
-                    self.pending_effects.append(&mut dashboard.pending_effects);
+                    self.pending_effects.append(&mut child_effects);
                     outcome
                 } else {
                     InputOutcome::Unchanged
@@ -2618,7 +2627,10 @@ impl AppView {
             if let ActiveView::Agent(id) = &self.active_view {
                 let id = *id;
                 if let Some(agent) = self.agents.get_mut(&id) {
-                    return Some(agent.handle_prompt_key(key, &self.registry, false));
+                    let mut effects = Vec::new();
+                    let outcome = agent.handle_prompt_key(key, &self.registry, false, &mut effects);
+                    self.pending_effects.extend(effects);
+                    return Some(outcome);
                 }
             }
             return None;
@@ -5566,11 +5578,13 @@ pub(crate) mod tests {
             .unwrap()
             .prompt
             .set_screen_mode(ScreenMode::Minimal);
+        let mut input_effects = Vec::new();
         minimal
             .agents
             .get_mut(&id)
             .unwrap()
-            .set_input_mode(crate::views::agent::InputMode::Vim);
+            .set_input_mode(crate::views::agent::InputMode::Vim, &mut input_effects);
+        debug_assert!(input_effects.is_empty());
         assert_eq!(
             minimal.agents[&id].active_pane,
             crate::views::agent::ActivePane::Scrollback,
@@ -5797,7 +5811,7 @@ pub(crate) mod tests {
         let ActiveView::Agent(id) = app.active_view else {
             panic!("test app must start on an agent");
         };
-        app.agents.get_mut(&id).unwrap().set_active_pane(pane, true);
+        app.agents.get_mut(&id).unwrap().force_active_pane(pane);
         let out = app.handle_input(&event);
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(app.agents[&id].active_pane, pane);
@@ -6012,7 +6026,7 @@ pub(crate) mod tests {
         };
         {
             let agent = app.agents.get_mut(&id).unwrap();
-            agent.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+            agent.force_active_pane(crate::app::agent_view::AgentPane::Prompt);
             agent.prompt.set_text("draft text");
             agent.prompt.textarea.set_selection(1, 5);
         }
@@ -6056,7 +6070,7 @@ pub(crate) mod tests {
             app.agents
                 .get_mut(&id)
                 .unwrap()
-                .set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+                .force_active_pane(crate::app::agent_view::AgentPane::Prompt);
             (app, id)
         }
         #[derive(Clone, Copy)]
@@ -6128,7 +6142,7 @@ pub(crate) mod tests {
         };
         let child_sid = "page-target-child";
         let mut child = idle_child_view(&app, 1, child_sid);
-        child.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+        child.force_active_pane(crate::app::agent_view::AgentPane::Prompt);
         make_pageable(&mut child);
         {
             let parent = app.agents.get_mut(&id).unwrap();
@@ -6965,13 +6979,18 @@ pub(crate) mod tests {
     fn assert_scrollback_double_esc_opens_rewind(vim: bool) {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        let mut input_effects = Vec::new();
         let agent = app.agents.get_mut(&id).unwrap();
         agent.vim_mode = vim;
-        agent.set_input_mode(if vim {
-            crate::views::agent::InputMode::Vim
-        } else {
-            crate::views::agent::InputMode::Simple
-        });
+        agent.set_input_mode(
+            if vim {
+                crate::views::agent::InputMode::Vim
+            } else {
+                crate::views::agent::InputMode::Simple
+            },
+            &mut input_effects,
+        );
+        debug_assert!(input_effects.is_empty());
         agent.active_pane = crate::views::agent::ActivePane::Scrollback;
         agent
             .scrollback

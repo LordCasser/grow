@@ -2496,6 +2496,7 @@ mod editor_paste_routing_tests {
 
     #[test]
     fn extensions_paste_only_into_active_form() {
+        let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("hidden prompt");
@@ -2513,6 +2514,7 @@ mod editor_paste_routing_tests {
         let _ = agent.handle_input(
             &Event::Paste("https://example.test\r\n".to_owned()),
             &registry,
+            &mut effects,
         );
         assert_eq!(
             agent

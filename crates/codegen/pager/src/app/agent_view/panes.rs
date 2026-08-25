@@ -16,8 +16,9 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
-        if let Some(outcome) = self.handle_scrollback_search_key(key) {
+        if let Some(outcome) = self.handle_scrollback_search_key(key, effects) {
             return outcome;
         }
         let viewer_has_input = self
@@ -30,12 +31,12 @@ impl AgentView {
                 || (allow_i_alt && matches!(key.code, KeyCode::Char('i'))))
         {
             if self.question_view.is_some() {
-                self.set_active_pane(AgentPane::Prompt, false);
+                self.set_active_pane(AgentPane::Prompt, effects);
                 return InputOutcome::Changed;
             }
             if key.code == KeyCode::Tab
                 && self.tasks.overlay.visible
-                && self.set_active_pane(AgentPane::Tasks, false)
+                && self.set_active_pane(AgentPane::Tasks, effects)
             {
                 self.tasks.overlay.focused = true;
                 return InputOutcome::Changed;
@@ -108,7 +109,7 @@ impl AgentView {
             if self.scrollback.is_empty() {
                 return InputOutcome::ActionThenForward(Action::FocusPrompt);
             }
-            self.open_scrollback_search(None);
+            self.open_scrollback_search(None, effects);
             return InputOutcome::Changed;
         }
         if let Some(outcome) =
@@ -139,8 +140,12 @@ impl AgentView {
     /// `initial_query` (the `/find <word>` argument) is fed through the same
     /// keystroke path so a pre-filled search behaves identically to typing the
     /// word into the bar: a composing regex query with immediate highlights.
-    pub(crate) fn open_scrollback_search(&mut self, initial_query: Option<&str>) {
-        if self.set_active_pane(AgentPane::Scrollback, false) {
+    pub(crate) fn open_scrollback_search(
+        &mut self,
+        initial_query: Option<&str>,
+        effects: &mut Vec<super::actions::Effect>,
+    ) {
+        if self.set_active_pane(AgentPane::Scrollback, effects) {
             self.scrollback_search = Some(ScrollbackSearchState::open());
             if let Some(query) = initial_query {
                 self.set_scrollback_search_query(query);
@@ -175,7 +180,11 @@ impl AgentView {
     /// Returns `None` when search isn't open (or, while browsing, for keys that
     /// should fall through to normal scrollback handling). While composing the
     /// query the bar is modal and swallows other keys.
-    fn handle_scrollback_search_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+    fn handle_scrollback_search_key(
+        &mut self,
+        key: &KeyEvent,
+        _effects: &mut Vec<super::actions::Effect>,
+    ) -> Option<InputOutcome> {
         let composing = self.scrollback_search.as_ref()?.is_composing();
         let non_text = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
         if key.code == KeyCode::Esc {
@@ -274,6 +283,7 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         _registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         if key!('t', CONTROL).matches(key) {
@@ -295,7 +305,7 @@ impl AgentView {
         if let Some(action) = action {
             self.todo.on_state_change();
             if !self.todo.overlay.visible || !self.todo.overlay.focused {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return overlay_action_to_outcome(action);
         }
@@ -310,6 +320,7 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         use crate::views::tasks_pane::TaskEntry;
@@ -355,7 +366,7 @@ impl AgentView {
                                 &task.stdout,
                                 is_running,
                             ));
-                        self.set_active_pane(AgentPane::Scrollback, true);
+                        self.force_active_pane(AgentPane::Scrollback);
                         return InputOutcome::Changed;
                     }
                 }
@@ -440,7 +451,7 @@ impl AgentView {
         if let Some(action) = action {
             self.tasks.on_state_change();
             if !self.tasks.overlay.visible || !self.tasks.overlay.focused {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return overlay_action_to_outcome(action);
         }
@@ -455,6 +466,7 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         _registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         let has_input = self.catalog.list_state.input_mode().is_some();
@@ -468,7 +480,7 @@ impl AgentView {
         if let Some(action) = action {
             self.catalog.on_state_change();
             if !self.catalog.overlay.visible || !self.catalog.overlay.focused {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return overlay_action_to_outcome(action);
         }
@@ -805,17 +817,20 @@ mod paste_routing_tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     #[test]
     fn scrollback_search_paste_stays_scoped_and_browse_is_inert() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Scrollback, true);
+        agent.force_active_pane(AgentPane::Scrollback);
         agent.prompt.set_text("hidden prompt");
         agent.scrollback_search = Some(ScrollbackSearchState::open());
         let registry = ActionRegistry::defaults();
-        let _ = agent.handle_input(&Event::Paste("ab".to_owned()), &registry);
+        let _ = agent.handle_input(&Event::Paste("ab".to_owned()), &registry, &mut effects);
         let _ = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             &registry,
+            &mut effects,
         );
-        let outcome = agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry);
+        let outcome =
+            agent.handle_input(&Event::Paste("中\r\n".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(
             agent
@@ -826,7 +841,8 @@ mod paste_routing_tests {
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
         agent.scrollback_search.as_mut().unwrap().accept();
-        let outcome = agent.handle_input(&Event::Paste("ignored".to_owned()), &registry);
+        let outcome =
+            agent.handle_input(&Event::Paste("ignored".to_owned()), &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert_eq!(
             agent
@@ -837,7 +853,11 @@ mod paste_routing_tests {
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
         agent.scrollback_search = None;
-        let outcome = agent.handle_input(&Event::Paste("still ignored".to_owned()), &registry);
+        let outcome = agent.handle_input(
+            &Event::Paste("still ignored".to_owned()),
+            &registry,
+            &mut effects,
+        );
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert_eq!(agent.prompt.text(), "hidden prompt");
     }

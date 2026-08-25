@@ -342,7 +342,6 @@ impl AgentView {
             pending_recap_entry: None,
             display_name: None,
             generated_session_title: None,
-            pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
             deferred_send: None,
             plugin_cta: PluginCtaState::default(),
@@ -360,7 +359,13 @@ impl AgentView {
         } else {
             InputMode::Vim
         };
-        view.set_input_mode(mode);
+        // Construction cannot be leaving a queued edit, so initialize the
+        // mode and its default pane without invoking the interactive
+        // queue-edit lifecycle.
+        view.input_mode = mode;
+        if mode == InputMode::Vim && view.prompt.text().trim().is_empty() {
+            view.force_active_pane(ActivePane::Scrollback);
+        }
         view
     }
     /// Establish read-only child identity before a view is stored or opened.

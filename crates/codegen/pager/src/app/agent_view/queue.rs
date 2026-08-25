@@ -15,6 +15,7 @@ impl AgentView {
     pub(in crate::app) fn remove_local_queue_row(
         &mut self,
         id: u64,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> Option<crate::app::agent::QueuedPrompt> {
         let pos = self
             .session
@@ -28,12 +29,13 @@ impl AgentView {
             self.prompt_mode,
             PromptMode::EditingQueued { id: editing_id, server_id: None, .. } if editing_id == id
         ) {
-            self.exit_editing_mode();
+            let release_effect = self.exit_editing_mode();
+            debug_assert!(release_effect.is_none());
         }
         self.queue.select_after_delete(id);
         let prompt = self.session.pending_prompts.remove(pos);
         if self.visible_queue_is_empty() {
-            self.hide_queue_pane();
+            self.hide_queue_pane(effects);
         }
         prompt
     }
@@ -44,7 +46,10 @@ impl AgentView {
     /// order — the next item that would drain). Bare Enter and the send-now
     /// chord share this path; queue-pane selection / mouse "Send now" keep
     /// intentional selection. Returns `None` when there is nothing to send.
-    pub(super) fn try_send_now_queued_from_prompt(&mut self) -> Option<InputOutcome> {
+    pub(super) fn try_send_now_queued_from_prompt(
+        &mut self,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> Option<InputOutcome> {
         if !self.session.state.is_turn_running() {
             return None;
         }
@@ -54,7 +59,7 @@ impl AgentView {
         }
         let ids = self.queue.entry_ids();
         let id = *ids.first()?;
-        let outcome = self.force_interject_queue_row(id);
+        let outcome = self.force_interject_queue_row(id, effects);
         // Acting on the prompt-path send-now while its tip is up is the user
         // accepting the hint — mirrors the undo / image-input funnels so the
         // send_now `shown → accepted` conversion is measurable.
@@ -225,7 +230,11 @@ impl AgentView {
     }
 
     /// Atomically steer one merged-queue row into the active turn.
-    pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
+    pub(in crate::app) fn force_interject_queue_row(
+        &mut self,
+        id: u64,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> InputOutcome {
         if !self.session.state.is_turn_running() {
             self.show_toast("No turn running — prompt will send when ready");
             return InputOutcome::Changed;
@@ -269,7 +278,7 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        if let Some(prompt) = self.remove_local_queue_row(id) {
+        if let Some(prompt) = self.remove_local_queue_row(id, effects) {
             return InputOutcome::Action(Action::SteerPrompt {
                 text: prompt.text,
                 images: prompt.images,
@@ -279,13 +288,13 @@ impl AgentView {
     }
 
     /// Toggle queue pane visibility (shared by Ctrl-; shortcut and badge click).
-    pub(in crate::app) fn toggle_queue_pane(&mut self) {
+    pub(in crate::app) fn toggle_queue_pane(&mut self, effects: &mut Vec<super::actions::Effect>) {
         self.queue.overlay.toggle();
         self.queue.on_state_change();
         if self.queue.overlay.focused {
-            self.set_active_pane(AgentPane::Queue, false);
+            self.set_active_pane(AgentPane::Queue, effects);
         } else if self.active_pane == AgentPane::Queue {
-            self.set_active_pane(AgentPane::Scrollback, false);
+            self.set_active_pane(AgentPane::Scrollback, effects);
         }
     }
 
@@ -296,6 +305,7 @@ impl AgentView {
         &mut self,
         key: &KeyEvent,
         registry: &ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         use crate::views::queue_pane::{QueueEvent, QueueRowOrigin};
@@ -310,7 +320,7 @@ impl AgentView {
                 self.queue.reset_auto_show_edge();
             }
             if !self.queue.overlay.visible || !self.queue.overlay.focused {
-                self.set_active_pane(AgentPane::Scrollback, false);
+                self.set_active_pane(AgentPane::Scrollback, effects);
             }
             return overlay_action_to_outcome(action);
         }
@@ -333,7 +343,7 @@ impl AgentView {
                         {
                             self.session.shared_queue.retain(|e| e.id != server_id);
                             if self.visible_queue_is_empty() {
-                                self.hide_queue_pane();
+                                self.hide_queue_pane(effects);
                             }
                             return InputOutcome::Action(Action::QueueRemoveShared {
                                 id: server_id,
@@ -343,11 +353,11 @@ impl AgentView {
                         return InputOutcome::Changed;
                     }
                     // No drain kick (cf. mouse [cancel]): queue focus is unreachable mid-edit.
-                    self.remove_local_queue_row(id);
+                    self.remove_local_queue_row(id, effects);
                 }
                 QueueEvent::EditSelected { id } => {
                     // Entry into editing mode lives in `queue_edit.rs`.
-                    self.enter_queue_edit(id, is_server, row);
+                    self.enter_queue_edit(id, is_server, row, effects);
                 }
                 QueueEvent::SwapUp { id } => {
                     if is_server {
@@ -372,7 +382,7 @@ impl AgentView {
                     self.session.swap_prompt_down(id);
                 }
                 QueueEvent::ForceInterject { id } => {
-                    return self.force_interject_queue_row(id);
+                    return self.force_interject_queue_row(id, effects);
                 }
             }
             return InputOutcome::Changed;
@@ -406,13 +416,13 @@ impl AgentView {
     /// Hide the queue pane. Only steals focus when the queue pane was active —
     /// prompt-path send-now of the last local row must not yank the user out
     /// of the composer into scrollback.
-    pub(in crate::app) fn hide_queue_pane(&mut self) {
+    pub(in crate::app) fn hide_queue_pane(&mut self, effects: &mut Vec<super::actions::Effect>) {
         self.queue.overlay.visible = false;
         self.queue.overlay.focused = false;
         // External hide skips sync auto-hide; reset so next enqueue can auto-show.
         self.queue.reset_auto_show_edge();
         if self.active_pane == AgentPane::Queue {
-            self.set_active_pane(AgentPane::Scrollback, false);
+            self.set_active_pane(AgentPane::Scrollback, effects);
         }
     }
 
@@ -463,7 +473,7 @@ impl AgentView {
 
 #[cfg(test)]
 mod queue_steering_tests {
-    use super::test_fixtures::{make_running_agent, running_agent_local_only};
+    use super::test_fixtures::{make_agent, make_running_agent, running_agent_local_only};
     use super::*;
 
     #[test]
@@ -472,7 +482,8 @@ mod queue_steering_tests {
         let running_id = agent.session.current_prompt_id.clone();
         agent.sync_queue_pane();
         let row = agent.queue.entry_ids()[0];
-        let outcome = agent.force_interject_queue_row(row);
+        let mut effects = Vec::new();
+        let outcome = agent.force_interject_queue_row(row, &mut effects);
         assert!(matches!(
             outcome,
             InputOutcome::Action(Action::SteerPrompt { .. })
@@ -504,8 +515,9 @@ mod queue_steering_tests {
         let row = agent.queue.entry_ids()[0];
 
         assert!(!agent.held_queue_top_sendable());
+        let mut effects = Vec::new();
         assert!(matches!(
-            agent.force_interject_queue_row(row),
+            agent.force_interject_queue_row(row, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(agent.session.shared_queue.len(), 1);
@@ -515,6 +527,30 @@ mod queue_steering_tests {
                 .as_ref()
                 .is_some_and(|(message, _)| message.contains("Can't send this now"))
         );
+    }
+
+    #[test]
+    fn clean_server_edit_pane_switch_releases_hold_through_caller_effects() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new("s1"));
+        agent.prompt_mode = PromptMode::EditingQueued {
+            id: 7,
+            original: "queued".into(),
+            server_id: Some("q1".into()),
+            kind: crate::app::agent::QueueEntryKind::Prompt,
+        };
+        agent.prompt.set_text("queued");
+        agent.force_active_pane(AgentPane::Prompt);
+
+        let mut effects = Vec::new();
+        assert!(agent.set_active_pane(AgentPane::Scrollback, &mut effects));
+
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::app::actions::Effect::QueueReleaseEdit { session_id, id }]
+                if session_id == &agent_client_protocol::SessionId::new("s1") && id == "q1"
+        ));
     }
 }
 

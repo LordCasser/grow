@@ -343,7 +343,11 @@ mod link_click_tests {
     /// Drive a real `Down`→`Drag` through `handle_input` on a selectable
     /// scrollback line so `drag_selection` is genuinely promoted, then leave the
     /// button held with no `Up` — the latched state the recovery guard targets.
-    fn latch_real_scrollback_drag(agent: &mut AgentView, reg: &ActionRegistry) {
+    fn latch_real_scrollback_drag(
+        agent: &mut AgentView,
+        reg: &ActionRegistry,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
         setup_scrollback_area(agent, Rect::new(0, 0, 80, 24));
         let mut model = ResolvedSelectionModel::default();
         model.push_line(crate::scrollback::text_selection::ResolvedSelectableLine {
@@ -357,8 +361,8 @@ mod link_click_tests {
             joiner_to_previous: None,
         });
         agent.update_scrollback_selection_state(model, Default::default());
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 5)), reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), reg, effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 5)), reg, effects);
         assert!(
             agent.drag_selection.is_some(),
             "setup: Down→Drag on a selectable line must promote drag_selection"
@@ -369,10 +373,12 @@ mod link_click_tests {
     fn esc_unsticks_latched_drag() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
-        latch_real_scrollback_drag(&mut agent, &reg);
+        let mut effects = Vec::new();
+        latch_real_scrollback_drag(&mut agent, &reg, &mut effects);
         let _ = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             &reg,
+            &mut effects,
         );
         assert!(!agent.left_mouse_down);
         assert!(agent.drag_selection.is_none());
@@ -380,15 +386,16 @@ mod link_click_tests {
         assert!(agent.pending_block_drag.is_none());
         assert!(agent.block_drag_selection.is_none());
         assert!(!agent.scrollbar_dragging);
-        let _ = agent.handle_input(&Event::Mouse(mouse_moved(30, 5)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_moved(30, 5)), &reg, &mut effects);
         assert!(agent.drag_selection.is_none());
     }
     #[test]
     fn fresh_mouse_down_clears_prior_latch() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
-        latch_real_scrollback_drag(&mut agent, &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 10)), &reg);
+        let mut effects = Vec::new();
+        latch_real_scrollback_drag(&mut agent, &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 10)), &reg, &mut effects);
         assert!(
             agent.drag_selection.is_none(),
             "the stale promoted selection must not survive into the fresh press"
@@ -398,20 +405,23 @@ mod link_click_tests {
     fn live_drag_events_not_interrupted() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
-        latch_real_scrollback_drag(&mut agent, &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(20, 5)), &reg);
+        let mut effects = Vec::new();
+        latch_real_scrollback_drag(&mut agent, &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(20, 5)), &reg, &mut effects);
         assert!(agent.drag_selection.is_some());
-        let _ = agent.handle_input(&Event::Mouse(mouse_moved(25, 5)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_moved(25, 5)), &reg, &mut effects);
         assert!(agent.drag_selection.is_some());
     }
     #[test]
     fn non_esc_key_clears_latch() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
-        latch_real_scrollback_drag(&mut agent, &reg);
+        let mut effects = Vec::new();
+        latch_real_scrollback_drag(&mut agent, &reg, &mut effects);
         let _ = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
             &reg,
+            &mut effects,
         );
         assert!(!agent.left_mouse_down);
         assert!(agent.drag_selection.is_none());
@@ -426,21 +436,22 @@ mod link_click_tests {
     fn click_on_announcement_hide_button_dispatches_hide_action() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         agent
             .hit_announcement_hide
             .set(Some(Rect::new(70, 1, 6, 1)));
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 1)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 1)), &reg, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "[hide] click must dispatch AnnouncementsHide"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 2)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 2)), &reg, &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::AnnouncementsHide)
         ));
         agent.hit_announcement_hide.set(None);
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 1)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(72, 1)), &reg, &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::AnnouncementsHide)
@@ -453,19 +464,20 @@ mod link_click_tests {
     fn click_on_announcement_cta_button_dispatches_open_action() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         agent.hit_announcement_cta.set(Some(Rect::new(0, 1, 15, 1)));
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "[label] click must dispatch AnnouncementsOpenCta"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 2)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 2)), &reg, &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::AnnouncementsOpenCta)
         ));
         agent.hit_announcement_cta.set(None);
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg, &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::AnnouncementsOpenCta)
@@ -493,6 +505,7 @@ mod link_click_tests {
         let bundle = crate::app::bundle::BundleState::default();
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
+        let mut link_spans = Vec::<ratatui_inline::LinkSpan>::new();
         agent.draw(
             area,
             &mut buf,
@@ -508,7 +521,7 @@ mod link_click_tests {
             },
             &bundle,
             false,
-            &mut Vec::new(),
+            &mut link_spans,
             crate::app::agent_view::AppRenderParams::default(),
         );
         buf
@@ -521,6 +534,7 @@ mod link_click_tests {
     fn open_prompt_dropdown_suppresses_announcement_hide_click_target() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         let critical = [announcements::Announcement {
             severity: Some("critical".into()),
@@ -533,7 +547,11 @@ mod link_click_tests {
             .hit_announcement_hide
             .rect
             .expect("critical banner must arm the [hide] rect");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "sanity: visible [hide] must dispatch"
@@ -549,7 +567,11 @@ mod link_click_tests {
             agent.hit_announcement_hide.rect.is_none(),
             "open dropdown must suppress the [hide] rect"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "click where [hide] used to be must not hide-and-persist under a dropdown"
@@ -562,6 +584,7 @@ mod link_click_tests {
     fn open_prompt_dropdown_suppresses_announcement_cta_click_target() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         let promo = [announcements::Announcement {
             id: Some("promo-1".into()),
@@ -583,7 +606,11 @@ mod link_click_tests {
             agent.hit_announcement_hide.rect.is_some(),
             "promo row must arm the [hide] rect too"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "sanity: visible [label] must dispatch"
@@ -599,7 +626,11 @@ mod link_click_tests {
             agent.hit_announcement_cta.rect.is_none(),
             "open dropdown must suppress the [label] rect"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "click where [label] used to be must not open a URL under a dropdown"
@@ -612,6 +643,7 @@ mod link_click_tests {
     fn open_prompt_dropdown_suppresses_stop_button_click_target() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         agent.session.state = AgentState::TurnRunning;
         draw_banner_frame(&mut agent, &reg, &[], 0);
@@ -619,7 +651,11 @@ mod link_click_tests {
             .hit_cancel_button
             .rect
             .expect("running turn must arm the stop rect");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
             "sanity: visible stop must dispatch CancelTurn"
@@ -635,7 +671,11 @@ mod link_click_tests {
             agent.hit_cancel_button.rect.is_none(),
             "open dropdown must suppress the stop rect"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
             "click where stop used to be must not cancel the turn under a dropdown"
@@ -648,28 +688,29 @@ mod link_click_tests {
     fn watching_cue_click_opens_tasks_pane_with_one_time_shortcut_toast() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         super::test_fixtures::add_running_bg_task(&mut agent);
         draw_banner_frame(&mut agent, &reg, &[], 0);
         let rect = agent.hit_watching_cue.rect.expect("cue rect must be armed");
         let click = Event::Mouse(mouse_down(rect.x + 1, rect.y));
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input(&click, &reg, &mut effects);
         assert!(agent.tasks.overlay.focused);
         assert!(agent.toast.is_none(), "focus-only click must not toast");
         agent.tasks.overlay.hide();
         agent.tasks.on_state_change();
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input(&click, &reg, &mut effects);
         assert!(agent.tasks.overlay.visible && agent.tasks.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Tasks);
         let toast = agent.toast.clone().map(|(msg, _)| msg);
         assert_eq!(toast.as_deref(), Some("Tip: Ctrl+G toggles the tasks pane"));
         agent.toast = None;
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input(&click, &reg, &mut effects);
         assert!(!agent.tasks.overlay.visible);
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input(&click, &reg, &mut effects);
         assert!(agent.tasks.overlay.visible);
         assert!(agent.toast.is_none(), "toast fires only once per session");
     }
@@ -682,6 +723,7 @@ mod link_click_tests {
         use agent_client_protocol as acp;
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         agent.session.state = AgentState::TurnRunning;
         agent.session.handle_update(
@@ -700,7 +742,11 @@ mod link_click_tests {
             .hit_bg_button
             .rect
             .expect("running execute must arm the bg rect");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
             "sanity: visible bg button must dispatch DemoteToBackground"
@@ -716,7 +762,11 @@ mod link_click_tests {
             agent.hit_bg_button.rect.is_none(),
             "open dropdown must suppress the bg rect"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
             "click where the bg button used to be must not demote under a dropdown"
@@ -747,6 +797,7 @@ mod link_click_tests {
     fn open_prompt_dropdown_suppresses_header_promo_cta_click_target() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         agent.last_terminal_size = (120, 30);
         let promo = [announcements::Announcement {
             id: Some("promo-pin".into()),
@@ -765,7 +816,11 @@ mod link_click_tests {
             .hit_promo_cta
             .rect
             .expect("promo must arm the header CTA rect");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "sanity: visible header CTA must dispatch"
@@ -781,7 +836,11 @@ mod link_click_tests {
             agent.hit_promo_cta.rect.is_none(),
             "open dropdown must suppress the header CTA rect"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "click where the header CTA used to be must not open under a dropdown"
@@ -797,6 +856,7 @@ mod link_click_tests {
         use agent_client_protocol as acp;
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         agent.session.state = AgentState::TurnRunning;
         agent.session.handle_update(
@@ -824,12 +884,16 @@ mod link_click_tests {
             "setup: overlay-free frame must accumulate no occluders"
         );
         agent.frame_occluder_rects.push(Rect::new(0, stop.y, 80, 1));
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(stop.x, stop.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(stop.x, stop.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
             "occluded [stop] click must not cancel the turn"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(bg.x, bg.y)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(bg.x, bg.y)), &reg, &mut effects);
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
             "occluded bg click must not demote the turn"
@@ -839,12 +903,16 @@ mod link_click_tests {
             "occluder guard is click-time: the rects stay armed"
         );
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(bg.x, bg.y)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(bg.x, bg.y)), &reg, &mut effects);
         assert!(
             matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
             "overlay-free bg click must dispatch again"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(stop.x, stop.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(stop.x, stop.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
             "overlay-free [stop] click must dispatch again"
@@ -942,6 +1010,7 @@ mod link_click_tests {
             })
         };
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (120, 30);
         let pinned = [announcements::Announcement {
             id: Some("promo-pin".into()),
@@ -968,7 +1037,11 @@ mod link_click_tests {
             !header_row.contains("Ctrl+O"),
             "top-header button must stay bare; row={header_row:?}"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(rect.x + 1, rect.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "header CTA click opens with the Header surface"
@@ -1041,6 +1114,7 @@ mod link_click_tests {
     fn frame_occluder_over_banner_swallows_clicks_and_drops_cta_link_span() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_terminal_size = (80, 30);
         let promo = [announcements::Announcement {
             id: Some("promo-1".into()),
@@ -1065,12 +1139,20 @@ mod link_click_tests {
         let mut spans = Vec::new();
         agent.push_promo_cta_link_span(&mut spans, &promo, &no_hidden);
         assert!(spans.is_empty(), "occluded [label] must emit no OSC 8 span");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(cta.x + 1, cta.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(cta.x + 1, cta.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "occluded [label] click must not open a URL"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(hide.x + 1, hide.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(hide.x + 1, hide.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "occluded [hide] click must not hide-and-persist"
@@ -1084,12 +1166,20 @@ mod link_click_tests {
             "span must cover exactly the [label] button cells"
         );
         assert_eq!(&*spans[0].url, "https://example.com/promo");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(cta.x + 1, cta.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(cta.x + 1, cta.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "overlay-free [label] click must dispatch"
         );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(hide.x + 1, hide.y)), &reg);
+        let outcome = agent.handle_input(
+            &Event::Mouse(mouse_down(hide.x + 1, hide.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "overlay-free [hide] click must dispatch"
@@ -1098,6 +1188,7 @@ mod link_click_tests {
     #[test]
     fn drag_clears_pending_link_click() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         agent.pending_link_click = Some((
@@ -1106,7 +1197,7 @@ mod link_click_tests {
             crate::render::osc8::LinkTarget::Url("https://example.com".into()),
         ));
         agent.left_mouse_down = true;
-        let outcome = agent.handle_mouse(&mouse_drag(16, 5));
+        let outcome = agent.handle_mouse(&mouse_drag(16, 5), &mut effects);
         assert!(matches!(
             outcome,
             InputOutcome::Changed | InputOutcome::Unchanged
@@ -1116,6 +1207,7 @@ mod link_click_tests {
     #[test]
     fn up_at_same_position_returns_open_link_action() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         agent.pending_link_click = Some((
@@ -1124,7 +1216,7 @@ mod link_click_tests {
             crate::render::osc8::LinkTarget::Url("https://example.com".into()),
         ));
         agent.left_mouse_down = true;
-        let outcome = agent.handle_mouse(&mouse_up(15, 5));
+        let outcome = agent.handle_mouse(&mouse_up(15, 5), &mut effects);
         match outcome {
             InputOutcome::Action(Action::OpenLink(target)) => {
                 assert_eq!(
@@ -1142,6 +1234,7 @@ mod link_click_tests {
     #[cfg(not(target_os = "macos"))]
     fn modifier_click_on_file_link_opens_via_our_handler() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         add_visible_target(
@@ -1155,8 +1248,11 @@ mod link_click_tests {
         );
         let mut down = mouse_down(15, 5);
         down.modifiers = crossterm::event::KeyModifiers::CONTROL;
-        assert!(matches!(agent.handle_mouse(&down), InputOutcome::Changed));
-        match agent.handle_mouse(&mouse_up(15, 5)) {
+        assert!(matches!(
+            agent.handle_mouse(&down, &mut effects),
+            InputOutcome::Changed
+        ));
+        match agent.handle_mouse(&mouse_up(15, 5), &mut effects) {
             InputOutcome::Action(Action::OpenLink(target)) => {
                 assert_eq!(
                     target,
@@ -1262,12 +1358,13 @@ mod link_click_tests {
         }
         agent.pane_areas.prompt = Rect::new(0, 20, 80, 3);
         let registry = ActionRegistry::defaults();
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 21)), &registry);
+        let mut effects = Vec::new();
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 21)), &registry, &mut effects);
         assert!(
             agent.plan_prompt_mouse_drag,
             "down in prompt should arm the prompt drag"
         );
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(40, 5)), &registry);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(40, 5)), &registry, &mut effects);
         assert!(
             agent.plan_prompt_mouse_drag,
             "drag should keep the prompt drag armed"
@@ -1281,7 +1378,7 @@ mod link_click_tests {
                 .is_none(),
             "forwarded drag must not start a plan-line gutter selection"
         );
-        let _ = agent.handle_input(&Event::Mouse(mouse_up(40, 5)), &registry);
+        let _ = agent.handle_input(&Event::Mouse(mouse_up(40, 5)), &registry, &mut effects);
         assert!(
             !agent.plan_prompt_mouse_drag,
             "up should disarm the prompt drag"
@@ -1290,6 +1387,7 @@ mod link_click_tests {
     #[test]
     fn up_at_different_position_does_not_open_url() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         agent.pending_link_click = Some((
@@ -1298,7 +1396,7 @@ mod link_click_tests {
             crate::render::osc8::LinkTarget::Url("https://example.com".into()),
         ));
         agent.left_mouse_down = true;
-        let outcome = agent.handle_mouse(&mouse_up(16, 5));
+        let outcome = agent.handle_mouse(&mouse_up(16, 5), &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::OpenLink(_))
@@ -1308,6 +1406,7 @@ mod link_click_tests {
     #[test]
     fn down_on_non_link_clears_pending_link_click() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         add_visible_link(&mut agent, 5, 10, 30, "https://example.com");
@@ -1316,13 +1415,14 @@ mod link_click_tests {
             5,
             crate::render::osc8::LinkTarget::Url("https://example.com".into()),
         ));
-        let outcome = agent.handle_mouse(&mouse_down(5, 3));
+        let outcome = agent.handle_mouse(&mouse_down(5, 3), &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.pending_link_click.is_none());
     }
     #[test]
     fn moved_with_left_mouse_down_clears_pending_link_click() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         let area = Rect::new(0, 0, 80, 24);
         setup_scrollback_area(&mut agent, area);
         agent.pending_link_click = Some((
@@ -1342,7 +1442,7 @@ mod link_click_tests {
             },
             anchor_content_width: None,
         });
-        let _outcome = agent.handle_mouse(&mouse_moved(16, 5));
+        let _outcome = agent.handle_mouse(&mouse_moved(16, 5), &mut effects);
         assert!(
             agent.pending_link_click.is_none(),
             "Moved with left_mouse_down should clear pending_link_click"
@@ -1351,6 +1451,7 @@ mod link_click_tests {
     #[test]
     fn pending_link_click_survives_up_on_non_scrollback_pane() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         setup_scrollback_area(&mut agent, Rect::new(0, 0, 80, 20));
         agent.active_pane = AgentPane::Prompt;
         agent.pending_link_click = Some((
@@ -1359,7 +1460,7 @@ mod link_click_tests {
             crate::render::osc8::LinkTarget::Url("https://example.com".into()),
         ));
         agent.left_mouse_down = true;
-        let outcome = agent.handle_mouse(&mouse_up(15, 5));
+        let outcome = agent.handle_mouse(&mouse_up(15, 5), &mut effects);
         match outcome {
             InputOutcome::Action(Action::OpenLink(target)) => {
                 assert_eq!(
@@ -1376,6 +1477,7 @@ mod link_click_tests {
     #[test]
     fn btw_panel_pending_link_click_opens_on_up() {
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_btw_area = Rect::new(2, 18, 70, 6);
         agent.active_pane = AgentPane::Prompt;
         agent.btw_focused = true;
@@ -1386,7 +1488,7 @@ mod link_click_tests {
             crate::render::osc8::LinkTarget::Url("https://example.com/btw".into()),
         ));
         agent.left_mouse_down = true;
-        let outcome = agent.handle_mouse(&mouse_up(10, 20));
+        let outcome = agent.handle_mouse(&mouse_up(10, 20), &mut effects);
         match outcome {
             InputOutcome::Action(Action::OpenLink(target)) => {
                 assert_eq!(
@@ -1405,10 +1507,11 @@ mod link_click_tests {
             return;
         }
         let mut agent = make_agent();
+        let mut effects = Vec::new();
         agent.last_btw_area = Rect::new(2, 18, 70, 6);
         agent.active_pane = AgentPane::Prompt;
         add_visible_link(&mut agent, 20, 4, 40, "https://example.com/btw");
-        let outcome = agent.handle_mouse(&mouse_down(10, 20));
+        let outcome = agent.handle_mouse(&mouse_down(10, 20), &mut effects);
         assert!(matches!(
             outcome,
             InputOutcome::Changed | InputOutcome::Unchanged
@@ -1418,7 +1521,7 @@ mod link_click_tests {
         {
             let mut down = mouse_down(10, 20);
             down.modifiers = crossterm::event::KeyModifiers::CONTROL;
-            let outcome = agent.handle_mouse(&down);
+            let outcome = agent.handle_mouse(&down, &mut effects);
             assert!(matches!(outcome, InputOutcome::Changed));
             assert_eq!(
                 agent.pending_link_click.as_ref(),
@@ -1554,8 +1657,9 @@ mod link_click_tests {
         add_multiple_links(&mut agent);
         agent.highlighted_link_idx = Some(1);
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
         match outcome {
             InputOutcome::Action(Action::OpenLink(target)) => {
                 assert_eq!(
@@ -1574,8 +1678,9 @@ mod link_click_tests {
         add_multiple_links(&mut agent);
         assert_eq!(agent.highlighted_link_idx, None);
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
         assert!(!matches!(
             outcome,
             InputOutcome::Action(Action::OpenLink(_))
@@ -1597,8 +1702,9 @@ mod link_click_tests {
         agent.scrollback.prepare_layout(80, 40);
         agent.scrollback.set_selected(Some(0));
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
         if crate::app::inline_edit::INLINE_EDIT_ENABLED {
             assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
             assert!(agent.inline_edit.is_some(), "Enter must start inline edit");
@@ -1621,8 +1727,9 @@ mod link_click_tests {
         agent.scrollback.prepare_layout(80, 40);
         agent.scrollback.set_selected(Some(0));
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
         assert!(agent.inline_edit.is_none());
         assert!(
             matches!(outcome, InputOutcome::Action(Action::OpenBlockViewer)),
@@ -1703,8 +1810,9 @@ mod link_click_tests {
         agent.scrollback.set_selected(Some(0));
         assert!(agent.scrollback.is_selected_group_header());
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
         assert!(
             agent.active_subagent.is_none(),
             "Enter on a group header must not open the hidden entry's subagent fullscreen"
@@ -1756,8 +1864,9 @@ mod link_click_tests {
         add_multiple_links(&mut agent);
         agent.highlighted_link_idx = Some(0);
         let registry = ActionRegistry::defaults();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&esc, &registry);
+        let outcome = agent.handle_scrollback_key(&esc, &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.highlighted_link_idx, None);
     }
@@ -1791,7 +1900,8 @@ mod link_click_tests {
         (agent, ActionRegistry::defaults())
     }
     fn press(agent: &mut AgentView, reg: &ActionRegistry, code: KeyCode) -> InputOutcome {
-        agent.handle_scrollback_key(&KeyEvent::new(code, KeyModifiers::NONE), reg)
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
+        agent.handle_scrollback_key(&KeyEvent::new(code, KeyModifiers::NONE), reg, &mut effects)
     }
     fn type_query(agent: &mut AgentView, reg: &ActionRegistry, query: &str) {
         for c in query.chars() {
@@ -1878,23 +1988,30 @@ mod link_click_tests {
     }
     /// Drive the FULL input router with an unmodified `/` so the overlay
     /// intercepts ahead of `handle_scrollback_key` are exercised.
-    fn route_slash(agent: &mut AgentView, reg: &ActionRegistry) -> InputOutcome {
+    fn route_slash(
+        agent: &mut AgentView,
+        reg: &ActionRegistry,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> InputOutcome {
         agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
             reg,
+            effects,
         )
     }
     #[test]
     fn router_slash_opens_search_when_no_overlay_pending() {
         let (mut agent, reg) = make_search_agent();
-        route_slash(&mut agent, &reg);
+        let mut effects = Vec::new();
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_some());
     }
     /// Router-level symmetry with the non-empty case: empty scrollback focuses the prompt, not search.
     #[test]
     fn router_slash_focuses_prompt_when_scrollback_empty() {
         let (mut agent, reg) = make_empty_vim_agent();
-        let out = route_slash(&mut agent, &reg);
+        let mut effects = Vec::new();
+        let out = route_slash(&mut agent, &reg, &mut effects);
         assert!(
             matches!(out, InputOutcome::ActionThenForward(Action::FocusPrompt)),
             "router `/` on empty scrollback must focus the prompt, got {out:?}"
@@ -1904,55 +2021,61 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_permission_pending() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         agent
             .permission_queue
             .push_back(super::paste_key_tests::make_followup_permission_state());
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
     fn router_slash_blocked_while_plan_approval_pending() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         agent.plan_approval_view = Some(super::paste_key_tests::make_plan_approval_view_state());
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
     fn router_slash_blocked_while_cancel_turn_pending() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
             active_idx: 0,
             running_count: 1,
         });
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
     fn router_slash_blocked_while_question_pending() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         agent.replace_question_view(Some(
             super::paste_key_tests::make_question_view_state_in_input_mode(),
         ));
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
     fn router_slash_blocked_while_btw_panel_open() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
             question: "q".into(),
         });
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
     fn router_slash_restarts_search_while_browsing() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects = Vec::new();
         press(&mut agent, &reg, KeyCode::Char('/'));
         type_query_and_settle(&mut agent, &reg, "foo");
         press(&mut agent, &reg, KeyCode::Enter);
         assert!(!agent.scrollback_search.as_ref().unwrap().is_composing());
-        route_slash(&mut agent, &reg);
+        route_slash(&mut agent, &reg, &mut effects);
         assert!(agent.scrollback_search.as_ref().unwrap().is_composing());
     }
     #[test]
@@ -1980,6 +2103,7 @@ mod link_click_tests {
     #[test]
     fn enter_accepts_then_n_and_shift_n_navigate() {
         let (mut agent, reg) = make_search_agent();
+        let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         press(&mut agent, &reg, KeyCode::Char('/'));
         type_query_and_settle(&mut agent, &reg, "foo");
         press(&mut agent, &reg, KeyCode::Enter);
@@ -2002,6 +2126,7 @@ mod link_click_tests {
         agent.handle_scrollback_key(
             &KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
             &reg,
+            &mut effects,
         );
         assert_eq!(
             agent.scrollback_search.as_ref().unwrap().current_index(),
@@ -2071,10 +2196,11 @@ mod link_click_tests {
     #[test]
     fn open_scrollback_search_focuses_pane_and_starts_composing() {
         let (mut agent, _reg) = make_search_agent();
-        agent.set_active_pane(AgentPane::Prompt, false);
+        let mut effects = Vec::new();
+        agent.set_active_pane(AgentPane::Prompt, &mut effects);
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert!(agent.scrollback_search.is_none());
-        agent.open_scrollback_search(None);
+        agent.open_scrollback_search(None, &mut effects);
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
         let search = agent.scrollback_search.as_ref().expect("search opened");
         assert!(search.is_composing());
@@ -2086,8 +2212,9 @@ mod link_click_tests {
         let (mut agent, _reg) = make_search_agent();
         agent.scrollback.push_block(RenderBlock::user_prompt("abc"));
         agent.scrollback.prepare_layout(80, 24);
-        agent.set_active_pane(AgentPane::Prompt, false);
-        agent.open_scrollback_search(Some("a.c"));
+        let mut effects = Vec::new();
+        agent.set_active_pane(AgentPane::Prompt, &mut effects);
+        agent.open_scrollback_search(Some("a.c"), &mut effects);
         settle_search(&mut agent);
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
         let search = agent.scrollback_search.as_ref().expect("search opened");
@@ -2106,7 +2233,8 @@ mod link_click_tests {
     #[test]
     fn open_scrollback_search_blocked_by_dirty_edit_does_not_orphan_session() {
         let (mut agent, _reg) = make_search_agent();
-        agent.set_active_pane(AgentPane::Prompt, false);
+        let mut effects = Vec::new();
+        agent.set_active_pane(AgentPane::Prompt, &mut effects);
         agent.prompt_mode = PromptMode::EditingQueued {
             id: 0,
             original: "queued text".into(),
@@ -2117,7 +2245,8 @@ mod link_click_tests {
             agent.prompt.text() != "queued text",
             "empty prompt must read dirty against the snapshot"
         );
-        agent.open_scrollback_search(Some("foo"));
+        let mut effects = Vec::new();
+        agent.open_scrollback_search(Some("foo"), &mut effects);
         assert!(
             agent.scrollback_search.is_none(),
             "blocked pane switch must not open a search session"
@@ -2140,6 +2269,7 @@ mod link_click_tests {
             agents: Vec::new(),
             skills: Vec::new(),
         };
+        let mut link_spans = Vec::<ratatui_inline::LinkSpan>::new();
         agent.draw(
             area,
             &mut buf,
@@ -2150,7 +2280,7 @@ mod link_click_tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &bundle,
             false,
-            &mut Vec::new(),
+            &mut link_spans,
             crate::app::agent_view::AppRenderParams::default(),
         );
         buf
@@ -2234,6 +2364,7 @@ mod link_click_tests {
             agents: Vec::new(),
             skills: Vec::new(),
         };
+        let mut link_spans = Vec::<ratatui_inline::LinkSpan>::new();
         agent.draw(
             tall,
             &mut buf,
@@ -2247,7 +2378,7 @@ mod link_click_tests {
             },
             &bundle,
             false,
-            &mut Vec::new(),
+            &mut link_spans,
             crate::app::agent_view::AppRenderParams::default(),
         );
         let tip_y = (0..tall.height)
@@ -2304,6 +2435,7 @@ mod link_click_tests {
             agents: Vec::new(),
             skills: Vec::new(),
         };
+        let mut link_spans = Vec::<ratatui_inline::LinkSpan>::new();
         agent.draw(
             tall,
             &mut buf,
@@ -2319,7 +2451,7 @@ mod link_click_tests {
             },
             &bundle,
             false,
-            &mut Vec::new(),
+            &mut link_spans,
             crate::app::agent_view::AppRenderParams::default(),
         );
         let frame: String = (0..tall.height)
@@ -2458,7 +2590,8 @@ mod link_click_tests {
         let (mut agent, reg) = make_search_agent();
         press(&mut agent, &reg, KeyCode::Char('/'));
         assert!(agent.scrollback_search.is_some());
-        agent.set_active_pane(AgentPane::Prompt, false);
+        let mut effects = Vec::new();
+        agent.set_active_pane(AgentPane::Prompt, &mut effects);
         assert!(agent.scrollback_search.is_none());
     }
     #[test]
@@ -2468,7 +2601,8 @@ mod link_click_tests {
         press(&mut agent, &reg, KeyCode::Char('/'));
         type_query(&mut agent, &reg, "foo");
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        let out = agent.handle_input(&esc, &reg);
+        let mut effects = Vec::new();
+        let out = agent.handle_input(&esc, &reg, &mut effects);
         assert!(!matches!(out, InputOutcome::Action(Action::CancelTurn)));
         assert!(agent.scrollback_search.is_none());
     }
@@ -2499,7 +2633,8 @@ mod link_click_tests {
             .insert(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        parent.handle_input(&esc, &reg);
+        let mut effects = Vec::new();
+        parent.handle_input(&esc, &reg, &mut effects);
         assert!(
             parent.active_subagent.is_some(),
             "view stays open while the child's search is cancelled"
@@ -2510,7 +2645,7 @@ mod link_click_tests {
                 .is_none(),
             "the forwarded Esc cancels the child's search"
         );
-        parent.handle_input(&esc, &reg);
+        parent.handle_input(&esc, &reg, &mut effects);
         assert!(
             parent.active_subagent.is_none(),
             "Esc closes the subagent view once no search is open"
@@ -2530,7 +2665,8 @@ mod link_click_tests {
             .insert(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
         let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        parent.handle_input(&q, &reg);
+        let mut effects = Vec::new();
+        parent.handle_input(&q, &reg, &mut effects);
         assert!(
             parent.active_subagent.is_some(),
             "view stays open while a search is composing"
@@ -2557,10 +2693,12 @@ mod link_click_tests {
             .subagent_views
             .insert(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
+        let mut effects = Vec::new();
         for c in "foo".chars() {
             parent.handle_input(
                 &Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
                 &reg,
+                &mut effects,
             );
             let mut delivered = false;
             for _ in 0..1000 {

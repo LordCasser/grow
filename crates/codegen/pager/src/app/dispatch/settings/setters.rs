@@ -823,7 +823,8 @@ pub(in crate::app::dispatch) fn set_combine_queued_prompts(
 ///
 /// Propagates to every agent's `input_mode` so the toggle takes
 /// effect immediately (not just on new agents).
-pub(super) fn set_simple_mode_inner(app: &mut AppView, new: bool) {
+pub(super) fn set_simple_mode_inner(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let mut effects = Vec::new();
     app.current_ui.simple_mode = Some(new);
     crate::appearance::cache::set_simple_mode(new);
 
@@ -835,9 +836,10 @@ pub(super) fn set_simple_mode_inner(app: &mut AppView, new: bool) {
     };
     for agent in app.agents.values_mut() {
         if agent.input_mode != target_mode {
-            agent.set_input_mode(target_mode);
+            agent.set_input_mode(target_mode, &mut effects);
         }
     }
+    effects
 }
 
 pub(in crate::app::dispatch) fn set_simple_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
@@ -845,18 +847,19 @@ pub(in crate::app::dispatch) fn set_simple_mode(app: &mut AppView, new: bool) ->
     // No idempotency gate — fans out to every agent's `input_mode`.
     // A newly-inserted agent may have a stale default, so we always
     // propagate. The inner is per-agent idempotent.
-    set_simple_mode_inner(app, new);
+    let mut effects = set_simple_mode_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "simple_mode", value = new, "setting changed");
     // Toast label mirrors the renamed registry label
     // ("Disable vim input mode") so the user sees the same name in the
     // modal and the toast.
     app.show_toast(&save_success_toast("Disable vim input mode", new));
-    vec![Effect::PersistSetting {
+    effects.push(Effect::PersistSetting {
         key: "simple_mode",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
+    });
+    effects
 }
 
 // ---------------------------------------------------------------------------

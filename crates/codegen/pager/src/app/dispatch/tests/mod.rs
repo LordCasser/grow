@@ -44,7 +44,9 @@ use crate::acp::model_state::ModelState;
 use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
 use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
-use crate::app::app_view::{ActiveView, AppView, TrustState, WelcomeAnnouncementState};
+use crate::app::app_view::{
+    ActiveView, AppView, PasteProvenance, TrustState, WelcomeAnnouncementState,
+};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::scrollback::state::ScrollbackState;

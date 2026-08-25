@@ -61,7 +61,11 @@ impl AgentView {
     /// not matched as a raw key here.
     ///
     /// Returns `None` when not editing or unhandled — must fall through to the widget.
-    pub(super) fn handle_editing_queued_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+    pub(super) fn handle_editing_queued_key(
+        &mut self,
+        key: &KeyEvent,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> Option<InputOutcome> {
         if let PromptMode::EditingQueued { id, server_id, .. } = &self.prompt_mode {
             let (id, server_id) = (*id, server_id.clone());
             let ctrl_c_empty = key!('c', CONTROL).matches(key) && self.prompt.text().is_empty();
@@ -73,10 +77,12 @@ impl AgentView {
                 return Some(InputOutcome::Changed);
             }
             if key!(Enter).matches(key) && !self.prompt.text().trim().is_empty() {
-                return Some(self.save_edited_queued_row(id, server_id, true));
+                return Some(self.save_edited_queued_row(id, server_id, true, effects));
             }
             if key.code == KeyCode::Esc || ctrl_c_empty {
-                self.exit_editing_mode();
+                if let Some(effect) = self.exit_editing_mode() {
+                    effects.push(effect);
+                }
                 return Some(InputOutcome::Action(Action::DrainQueue));
             }
         }
@@ -88,7 +94,11 @@ impl AgentView {
     /// `None` = not editing / no lock — the caller proceeds with the normal
     /// pane switch. `Some(switched)` = the lock handled the switch: `false`
     /// when blocked behind the confirm modal, `true` after a clean exit.
-    pub(super) fn editing_lock_on_pane_switch(&mut self, target: AgentPane) -> Option<bool> {
+    pub(super) fn editing_lock_on_pane_switch(
+        &mut self,
+        target: AgentPane,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> Option<bool> {
         if let PromptMode::EditingQueued { ref original, .. } = self.prompt_mode
             && target != AgentPane::Prompt
         {
@@ -108,7 +118,9 @@ impl AgentView {
                 return Some(false); // blocked, no modal armed
             }
             // Clean edit — silently exit editing mode.
-            self.exit_editing_mode();
+            if let Some(effect) = self.exit_editing_mode() {
+                effects.push(effect);
+            }
             self.active_pane = target;
             return Some(true);
         }
@@ -122,6 +134,7 @@ impl AgentView {
         confirm: ModalConfirmation<EditConfirmResult>,
         pending_target: AgentPane,
         ch: char,
+        effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
         if let Some(result) = confirm.resolve(ch) {
             let was_drain_blocked = self.drain_blocked();
@@ -134,8 +147,10 @@ impl AgentView {
                     // Empty edit: keep the original row text — a
                     // queued prompt must never be blanked by Save.
                     if self.prompt.text().trim().is_empty() {
-                        self.exit_editing_mode();
-                        self.set_active_pane(pending_target, true);
+                        if let Some(effect) = self.exit_editing_mode() {
+                            effects.push(effect);
+                        }
+                        self.force_active_pane(pending_target);
                         if was_drain_blocked {
                             return InputOutcome::Action(Action::DrainQueue);
                         }
@@ -145,22 +160,26 @@ impl AgentView {
                         PromptMode::EditingQueued { id, server_id, .. } => {
                             // Drain only when "save & send" was the
                             // advertised label (see helper doc).
-                            self.save_edited_queued_row(id, server_id, was_drain_blocked)
+                            self.save_edited_queued_row(id, server_id, was_drain_blocked, effects)
                         }
                         // Unreachable in practice: the modal only
                         // opens from `EditingQueued`.
                         _ => {
-                            self.exit_editing_mode();
+                            if let Some(effect) = self.exit_editing_mode() {
+                                effects.push(effect);
+                            }
                             InputOutcome::Changed
                         }
                     };
-                    self.set_active_pane(pending_target, true);
+                    self.force_active_pane(pending_target);
                     return outcome;
                 }
                 EditConfirmResult::Discard => {
                     // Discard changes (revert to original), exit editing.
-                    self.exit_editing_mode();
-                    self.set_active_pane(pending_target, true);
+                    if let Some(effect) = self.exit_editing_mode() {
+                        effects.push(effect);
+                    }
+                    self.force_active_pane(pending_target);
                     if was_drain_blocked {
                         return InputOutcome::Action(Action::DrainQueue);
                     }
@@ -184,8 +203,10 @@ impl AgentView {
                             .find(|e| e.id == server_id)
                             .map(|e| e.version)
                             .unwrap_or(0);
-                        self.exit_editing_mode();
-                        self.set_active_pane(pending_target, true);
+                        if let Some(effect) = self.exit_editing_mode() {
+                            effects.push(effect);
+                        }
+                        self.force_active_pane(pending_target);
                         return InputOutcome::Action(Action::QueueRemoveShared {
                             id: server_id,
                             expected_version,
@@ -194,8 +215,10 @@ impl AgentView {
                     if let PromptMode::EditingQueued { id, .. } = self.prompt_mode {
                         self.session.pending_prompts.retain(|p| p.id != id);
                     }
-                    self.exit_editing_mode();
-                    self.set_active_pane(pending_target, true);
+                    if let Some(effect) = self.exit_editing_mode() {
+                        effects.push(effect);
+                    }
+                    self.force_active_pane(pending_target);
                     // If drain was blocked and we deleted the front,
                     // the next prompt (if any) should now drain.
                     if was_drain_blocked {
@@ -216,7 +239,13 @@ impl AgentView {
 
     /// Enter editing mode for the queue row selected via
     /// `QueueEvent::EditSelected` (called from `handle_queue_key`).
-    pub(super) fn enter_queue_edit(&mut self, id: u64, is_server: bool, row: Option<QueueRowRef>) {
+    pub(super) fn enter_queue_edit(
+        &mut self,
+        id: u64,
+        is_server: bool,
+        row: Option<QueueRowRef>,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
         use crate::app::agent::QueueEntryKind;
         // Still an optimistic echo: its `session/prompt` RPC is in flight, so
         // the shell has no row to hold yet — the `hold_edit` would no-op and
@@ -304,13 +333,12 @@ impl AgentView {
             } else {
                 PromptInputMode::Normal
             };
-            self.set_active_pane(AgentPane::Prompt, false);
+            self.set_active_pane(AgentPane::Prompt, effects);
             if let (Some(sid), Some(session_id)) = (server_id, self.session.session_id.clone()) {
-                self.pending_effects
-                    .push(crate::app::actions::Effect::QueueHoldEdit {
-                        session_id,
-                        id: sid,
-                    });
+                effects.push(crate::app::actions::Effect::QueueHoldEdit {
+                    session_id,
+                    id: sid,
+                });
             }
         }
     }
@@ -329,6 +357,7 @@ impl AgentView {
         id: u64,
         server_id: Option<String>,
         drain: bool,
+        effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
         match server_id {
             Some(server_id) => {
@@ -377,7 +406,9 @@ impl AgentView {
                     entry.display_as_skill = false;
                 }
                 crate::prompt_images::drain_and_cleanup(&mut images);
-                self.exit_editing_mode();
+                if let Some(effect) = self.exit_editing_mode() {
+                    effects.push(effect);
+                }
                 if drain {
                     InputOutcome::Action(Action::DrainQueue)
                 } else {
@@ -392,7 +423,10 @@ impl AgentView {
     /// Falling through would strand `EditingQueued` with the row still
     /// queued (dirty-modal loop + blocked drain). `None` = not editing —
     /// the arm proceeds with its normal interject handling.
-    pub(super) fn interject_editing_queued_intercept(&mut self) -> Option<InputOutcome> {
+    pub(super) fn interject_editing_queued_intercept(
+        &mut self,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> Option<InputOutcome> {
         if let PromptMode::EditingQueued {
             id,
             server_id,
@@ -401,7 +435,7 @@ impl AgentView {
         } = &self.prompt_mode
         {
             let (id, server_id, kind) = (*id, server_id.clone(), *kind);
-            return Some(self.interject_edited_queued(id, server_id, kind));
+            return Some(self.interject_edited_queued(id, server_id, kind, effects));
         }
         None
     }
@@ -414,23 +448,24 @@ impl AgentView {
         id: u64,
         server_id: Option<String>,
         kind: crate::app::agent::QueueEntryKind,
+        effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
         let text = self.prompt.text().trim().to_string();
         if text.is_empty() {
             return InputOutcome::Changed;
         }
         if !self.session.state.is_turn_running() {
-            return self.save_edited_queued_row(id, server_id, true);
+            return self.save_edited_queued_row(id, server_id, true, effects);
         }
         // Non-prompt rows stay queued (see `queue_row_prompt_like`): save the edit.
         let row_prompt_like = self.queue_row_prompt_like(id);
         if row_prompt_like == Some(false) {
             self.show_toast("Can't send this mid-turn — it runs when the current turn ends");
-            return self.save_edited_queued_row(id, server_id, true);
+            return self.save_edited_queued_row(id, server_id, true, effects);
         }
         if row_prompt_like.is_none() && kind != crate::app::agent::QueueEntryKind::Prompt {
             self.show_toast("Queued prompt is no longer in the queue");
-            return self.save_edited_queued_row(id, server_id, true);
+            return self.save_edited_queued_row(id, server_id, true, effects);
         }
         match server_id {
             Some(server_id) => {
@@ -446,7 +481,9 @@ impl AgentView {
                 // here: interject removes the row from the queue (no
                 // combine-on-stale-text window for a still-queued hold).
                 let expected_version = self.queue.row_ref(id).map(|r| r.version);
-                self.exit_editing_mode();
+                if let Some(effect) = self.exit_editing_mode() {
+                    effects.push(effect);
+                }
                 match expected_version {
                     Some(expected_version) => InputOutcome::Action(Action::QueueInterjectShared {
                         id: server_id,
@@ -464,8 +501,10 @@ impl AgentView {
                 // Exit before row removal so auto-hide cannot re-enter or strand edit mode.
                 let edited = self.prompt.stash();
                 let (_, images, _) = edited.into_submission();
-                self.exit_editing_mode();
-                if let Some(mut row) = self.remove_local_queue_row(id) {
+                if let Some(effect) = self.exit_editing_mode() {
+                    effects.push(effect);
+                }
+                if let Some(mut row) = self.remove_local_queue_row(id, effects) {
                     let retained: std::collections::HashSet<u64> = images
                         .iter()
                         .map(|image| image.preview.identity())
@@ -496,7 +535,9 @@ impl AgentView {
     }
 
     /// Exit a server-origin queue edit whose row vanished, restoring the pre-edit draft.
-    pub(crate) fn cancel_editing_queued_for_lost_row(&mut self) {
+    pub(crate) fn cancel_editing_queued_for_lost_row(
+        &mut self,
+    ) -> Option<crate::app::actions::Effect> {
         if !matches!(
             self.prompt_mode,
             PromptMode::EditingQueued {
@@ -504,12 +545,13 @@ impl AgentView {
                 ..
             }
         ) {
-            return;
+            return None;
         }
         // Restore the pre-edit draft; keeping the orphaned edit text would look
         // "duplicated" (the row is now the running turn). A concurrent-removal edit is lost.
-        self.exit_editing_mode();
+        let effect = self.exit_editing_mode();
         self.show_toast("Queued prompt is no longer in the queue");
+        effect
     }
 
     /// Exit editing mode: restore stashed text, clear mode, focus queue pane.
@@ -518,40 +560,46 @@ impl AgentView {
     ///
     /// Always resets `prompt_input_mode` to `Normal` so it doesn't leak
     /// into subsequent normal prompt entry.
-    pub(super) fn exit_editing_mode(&mut self) {
-        self.exit_editing_mode_inner(true);
+    pub(super) fn exit_editing_mode(&mut self) -> Option<crate::app::actions::Effect> {
+        self.exit_editing_mode_inner(true)
     }
 
     /// Exit editing without emitting `QueueReleaseEdit` — the server-row save
     /// path's `QueueEditShared` clears the hold on the shell instead. Releasing
-    /// here would flush first (via `pending_effects`) and let combine merge the
+    /// here would flush first (via the caller's root effect mailbox) and let combine merge the
     /// row on stale text before the edit lands.
     fn exit_editing_mode_keeping_hold(&mut self) {
-        self.exit_editing_mode_inner(false);
+        let release_effect = self.exit_editing_mode_inner(false);
+        debug_assert!(release_effect.is_none());
     }
 
-    fn exit_editing_mode_inner(&mut self, release_hold: bool) {
+    fn exit_editing_mode_inner(
+        &mut self,
+        release_hold: bool,
+    ) -> Option<crate::app::actions::Effect> {
         // Idempotent: remove_local_queue_row's guard may have exited already;
         // a second take() of the spent stash would wipe the composer.
         if !matches!(self.prompt_mode, PromptMode::EditingQueued { .. }) {
-            return;
+            return None;
         }
-        if release_hold
+        let release_effect = if release_hold
             && let PromptMode::EditingQueued {
                 server_id: Some(sid),
                 ..
             } = &self.prompt_mode
             && let Some(session_id) = self.session.session_id.clone()
         {
-            self.pending_effects
-                .push(crate::app::actions::Effect::QueueReleaseEdit {
-                    session_id,
-                    id: sid.clone(),
-                });
-        }
+            Some(crate::app::actions::Effect::QueueReleaseEdit {
+                session_id,
+                id: sid.clone(),
+            })
+        } else {
+            None
+        };
         let stash = self.stashed_prompt.take().unwrap_or_default();
         self.prompt.restore(stash);
         self.finish_editing_exit();
+        release_effect
     }
 
     /// Shared tail of every edit exit — stash policy stays with the callers.
@@ -567,9 +615,9 @@ impl AgentView {
         // Return focus to queue pane (if still visible).
         // Force=true: we just cleared editing mode, no lock to check.
         if self.queue.is_visible() {
-            self.set_active_pane(AgentPane::Queue, true);
+            self.force_active_pane(AgentPane::Queue);
         } else {
-            self.set_active_pane(AgentPane::Scrollback, true);
+            self.force_active_pane(AgentPane::Scrollback);
         }
     }
 }

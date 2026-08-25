@@ -1490,6 +1490,36 @@ fn set_simple_mode_propagates_to_active_agent() {
         "set_simple_mode(false) must switch back to Vim input mode"
     );
 }
+
+#[test]
+fn simple_mode_rollback_preserves_queue_release_effect() {
+    crate::appearance::cache::set_simple_mode(true);
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.input_mode = crate::views::agent::InputMode::Simple;
+    agent.session.session_id = Some(agent_client_protocol::SessionId::new("s1"));
+    agent.prompt_mode = PromptMode::EditingQueued {
+        id: 7,
+        original: String::new(),
+        server_id: Some("q1".into()),
+        kind: crate::app::agent::QueueEntryKind::Prompt,
+    };
+    agent.prompt.set_text("");
+    agent.force_active_pane(crate::views::agent::ActivePane::Prompt);
+
+    let effects = apply_setting_rollback(
+        &mut app,
+        "simple_mode",
+        &crate::settings::SettingValue::Bool(false),
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueueReleaseEdit { session_id, id }]
+            if session_id == &agent_client_protocol::SessionId::new("s1") && id == "q1"
+    ));
+}
+
 /// `set_simple_mode_inner` is a no-op on the agent-propagation
 /// path when there's no active agent — the persist effect still
 /// fires (the setting is global, not agent-local).

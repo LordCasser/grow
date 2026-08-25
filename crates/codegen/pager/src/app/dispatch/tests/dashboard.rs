@@ -606,20 +606,19 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
     crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook::with_raster(
         None,
     ));
+    let mut input_effects: Vec<Effect> = Vec::new();
     {
         let reg = crate::actions::ActionRegistry::defaults();
         let d = app.dashboard.as_mut().unwrap();
         d.dispatch.set_text("look at this");
-        let _ = d.handle_input(
+        let _ = d.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
             &reg,
+            PasteProvenance::Terminal,
+            &mut input_effects,
         );
     }
-    let ctx = app
-        .dashboard
-        .as_ref()
-        .unwrap()
-        .pending_effects
+    let ctx = input_effects
         .iter()
         .find_map(|e| match e {
             Effect::ProbeClipboardAttachment { ctx, .. } => Some(ctx.clone()),
@@ -718,19 +717,18 @@ fn dashboard_second_stash_does_not_overwrite_first() {
     crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook::with_raster(
         None,
     ));
+    let mut input_effects: Vec<Effect> = Vec::new();
     {
         let reg = crate::actions::ActionRegistry::defaults();
         let d = app.dashboard.as_mut().unwrap();
-        let _ = d.handle_input(
+        let _ = d.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
             &reg,
+            PasteProvenance::Terminal,
+            &mut input_effects,
         );
     }
-    let ctx = app
-        .dashboard
-        .as_ref()
-        .unwrap()
-        .pending_effects
+    let ctx = input_effects
         .iter()
         .find_map(|e| match e {
             Effect::ProbeClipboardAttachment { ctx, .. } => Some(ctx.clone()),
@@ -3061,6 +3059,7 @@ fn dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_rename_end_to_end_top_level_row() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
     let id = AgentId(0);
@@ -3081,13 +3080,19 @@ fn dashboard_rename_end_to_end_top_level_row() {
     );
     let registry = crate::actions::ActionRegistry::defaults();
     for character in "My renamed session".chars() {
-        let outcome = app.dashboard.as_mut().unwrap().handle_input(
-            &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(character),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            &registry,
-        );
+        let outcome = app
+            .dashboard
+            .as_mut()
+            .unwrap()
+            .handle_input_with_paste_provenance(
+                &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(character),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                &registry,
+                PasteProvenance::Terminal,
+                &mut input_effects,
+            );
         assert!(matches!(
             outcome,
             crate::app::app_view::InputOutcome::Changed
@@ -3180,7 +3185,13 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
     });
-    let outcome = state.handle_input(&esc, &registry);
+    let mut input_effects: Vec<Effect> = Vec::new();
+    let outcome = state.handle_input_with_paste_provenance(
+        &esc,
+        &registry,
+        PasteProvenance::Terminal,
+        &mut input_effects,
+    );
     assert!(
         matches!(outcome, InputOutcome::Action(Action::DashboardCancelRename)),
         "Esc in rename mode must produce DashboardCancelRename, got {outcome:?}",
@@ -3194,6 +3205,7 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crate::actions::ActionRegistry;
     use crate::app::app_view::InputOutcome;
     use crate::views::dashboard::HeaderPromoCta;
@@ -3247,7 +3259,12 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
         "pinned dashboard promo shows its configured caption; header={header:?}"
     );
     assert!(matches!(
-        state.handle_input(&ctrl_o(), &registry),
+        state.handle_input_with_paste_provenance(
+            &ctrl_o(),
+            &registry,
+            PasteProvenance::Terminal,
+            &mut input_effects
+        ),
         InputOutcome::Action(Action::AnnouncementsOpenCta)
     ));
     let click = Event::Mouse(MouseEvent {
@@ -3257,7 +3274,12 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
         modifiers: KeyModifiers::empty(),
     });
     assert!(matches!(
-        state.handle_input(&click, &registry),
+        state.handle_input_with_paste_provenance(
+            &click,
+            &registry,
+            PasteProvenance::Terminal,
+            &mut input_effects
+        ),
         InputOutcome::Action(Action::AnnouncementsOpenCta)
     ));
     let mut buf = Buffer::empty(area);
@@ -3318,7 +3340,12 @@ fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
     );
     assert!(
         !matches!(
-            state.handle_input(&ctrl_o(), &registry),
+            state.handle_input_with_paste_provenance(
+                &ctrl_o(),
+                &registry,
+                PasteProvenance::Terminal,
+                &mut input_effects
+            ),
             InputOutcome::Action(Action::AnnouncementsOpenCta)
         ),
         "dismissible promo must not steal Ctrl+O in the dashboard"

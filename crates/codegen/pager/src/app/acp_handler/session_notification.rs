@@ -431,7 +431,7 @@ fn handle_session_notification_inner(
             let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
             child_scrollback.set_appearance(agent.scrollback.appearance().clone());
             let mut child_view = AgentView::new(child_session, child_scrollback);
-            child_view.set_input_mode(InputMode::Vim);
+            child_view.input_mode = InputMode::Vim;
             child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
             let dashboard_visible = agent
                 .prompt

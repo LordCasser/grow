@@ -542,7 +542,7 @@ impl AgentView {
     /// Install the plugin currently surfaced by the CTA. Transitions the CTA
     /// into `Installing` and queues the install effect. Usable from `Matched`
     /// (Connect) and `Error` (Retry); a no-op otherwise or without a session.
-    pub(in crate::app) fn connect_matched_plugin(&mut self) {
+    pub(in crate::app) fn connect_matched_plugin(&mut self) -> Option<super::actions::Effect> {
         let (plugin_relative_path, name, is_retry) = match &self.plugin_cta.phase {
             CtaPhase::Matched {
                 plugin_relative_path,
@@ -553,14 +553,14 @@ impl AgentView {
                 name,
                 ..
             } => (plugin_relative_path.clone(), name.clone(), true),
-            _ => return,
+            _ => return None,
         };
         diagnostics::session_ctx::log_event(diagnostics::events::PluginCtaConnectClicked {
             plugin_name: name.clone(),
             is_retry,
         });
         let Some(session_id) = self.session.session_id.clone() else {
-            return;
+            return None;
         };
         // Probe when the canonical inventory declares MCP servers. Remote
         // entries without a SHA-verified inventory remain unknown, so probe
@@ -584,17 +584,16 @@ impl AgentView {
         self.plugin_cta.mcp_attempt = 0;
         self.plugin_cta.hit_connect.clear();
         self.plugin_cta.hit_dismiss.clear();
-        self.pending_effects
-            .push(super::actions::Effect::InstallPluginFromCta {
-                agent_id: self.session.id,
-                session_id,
-                source_url_or_path: self
-                    .plugin_cta
-                    .featured_source_url
-                    .clone()
-                    .unwrap_or_default(),
-                plugin_relative_path,
-            });
+        Some(super::actions::Effect::InstallPluginFromCta {
+            agent_id: self.session.id,
+            session_id,
+            source_url_or_path: self
+                .plugin_cta
+                .featured_source_url
+                .clone()
+                .unwrap_or_default(),
+            plugin_relative_path,
+        })
     }
 }
 
@@ -665,7 +664,7 @@ mod plugin_cta_notify_tests {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
         };
-        agent.connect_matched_plugin();
+        let effect = agent.connect_matched_plugin();
 
         match &agent.plugin_cta.phase {
             CtaPhase::Installing {
@@ -677,8 +676,8 @@ mod plugin_cta_notify_tests {
             }
             other => panic!("expected Installing, got {other:?}"),
         }
-        assert_eq!(agent.pending_effects.len(), 1);
-        match &agent.pending_effects[0] {
+        let effect = effect.expect("install effect");
+        match &effect {
             Effect::InstallPluginFromCta {
                 source_url_or_path,
                 plugin_relative_path,
@@ -701,13 +700,16 @@ mod plugin_cta_notify_tests {
             name: "figma".into(),
             message: "boom".into(),
         };
-        agent.connect_matched_plugin();
+        let effect = agent.connect_matched_plugin();
 
         assert!(matches!(
             agent.plugin_cta.phase,
             CtaPhase::Installing { .. }
         ));
-        assert_eq!(agent.pending_effects.len(), 1);
+        assert!(matches!(
+            effect,
+            Some(crate::app::actions::Effect::InstallPluginFromCta { .. })
+        ));
     }
 
     #[test]
@@ -718,9 +720,9 @@ mod plugin_cta_notify_tests {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
         };
-        agent.connect_matched_plugin();
+        let effect = agent.connect_matched_plugin();
         assert!(matches!(agent.plugin_cta.phase, CtaPhase::Matched { .. }));
-        assert!(agent.pending_effects.is_empty());
+        assert!(effect.is_none());
     }
 
     #[test]
@@ -739,7 +741,7 @@ mod plugin_cta_notify_tests {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
         };
-        agent.connect_matched_plugin();
+        assert!(agent.connect_matched_plugin().is_some());
         assert!(agent.plugin_cta.expects_mcp);
         assert_eq!(agent.plugin_cta.mcp_attempt, 0);
     }
@@ -755,7 +757,7 @@ mod plugin_cta_notify_tests {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
         };
-        agent.connect_matched_plugin();
+        assert!(agent.connect_matched_plugin().is_some());
         assert!(!agent.plugin_cta.expects_mcp);
     }
 
@@ -773,7 +775,7 @@ mod plugin_cta_notify_tests {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
         };
-        agent.connect_matched_plugin();
+        assert!(agent.connect_matched_plugin().is_some());
         assert!(agent.plugin_cta.expects_mcp);
     }
 
@@ -1036,15 +1038,15 @@ mod plugin_cta_notify_tests {
         };
         let registry = crate::actions::ActionRegistry::defaults();
         let ev = Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
-        let outcome = agent.handle_input(&ev, &registry);
+        let mut effects = Vec::new();
+        let outcome = agent.handle_input(&ev, &registry, &mut effects);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(matches!(
             agent.plugin_cta.phase,
             CtaPhase::Installing { .. }
         ));
         assert!(
-            agent
-                .pending_effects
+            effects
                 .iter()
                 .any(|e| matches!(e, crate::app::actions::Effect::InstallPluginFromCta { .. }))
         );
@@ -1058,8 +1060,9 @@ mod plugin_cta_notify_tests {
         assert_eq!(agent.plugin_cta.phase, CtaPhase::Hidden);
         let registry = crate::actions::ActionRegistry::defaults();
         let ev = Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
-        agent.handle_input(&ev, &registry);
+        let mut effects = Vec::new();
+        agent.handle_input(&ev, &registry, &mut effects);
         assert_eq!(agent.plugin_cta.phase, CtaPhase::Hidden);
-        assert!(agent.pending_effects.is_empty());
+        assert!(effects.is_empty());
     }
 }

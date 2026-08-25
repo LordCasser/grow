@@ -194,7 +194,7 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .set_active_pane(AgentPane::Scrollback, true);
+            .force_active_pane(AgentPane::Scrollback);
 
         let (msg, _rx) = make_permission_message("sess-1");
         handle(msg, &mut app);
@@ -213,7 +213,7 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .set_active_pane(AgentPane::Prompt, true);
+            .force_active_pane(AgentPane::Prompt);
 
         let (msg, _rx) = make_permission_message("sess-1");
         handle(msg, &mut app);
@@ -233,7 +233,7 @@
             app.agents
                 .get_mut(&AgentId(0))
                 .unwrap()
-                .set_active_pane(pane, true);
+                .force_active_pane(pane);
 
             let (msg, _rx) = make_permission_message("sess-1");
             handle(msg, &mut app);
@@ -253,14 +253,14 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .set_active_pane(AgentPane::Scrollback, true);
+            .force_active_pane(AgentPane::Scrollback);
 
         let (msg1, _rx1) = make_permission_message("sess-1");
         handle(msg1, &mut app);
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .set_active_pane(AgentPane::Scrollback, true);
+            .force_active_pane(AgentPane::Scrollback);
 
         let (msg2, _rx2) = make_permission_message("sess-1");
         handle(msg2, &mut app);
@@ -282,7 +282,7 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .set_active_pane(AgentPane::Scrollback, true);
+            .force_active_pane(AgentPane::Scrollback);
 
         let (msg, _rx) = make_permission_message("sess-1");
         handle(msg, &mut app);

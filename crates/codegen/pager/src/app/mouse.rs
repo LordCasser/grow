@@ -33,7 +33,11 @@ impl AgentView {
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
     ///
     /// Scroll events are handled at app level (not here).
-    pub(super) fn handle_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
+    pub(super) fn handle_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> InputOutcome {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
@@ -41,7 +45,7 @@ impl AgentView {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
                     if self.active_pane == AgentPane::Todo {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
@@ -49,21 +53,21 @@ impl AgentView {
                     self.queue.overlay.escape();
                     self.queue.on_state_change();
                     if self.active_pane == AgentPane::Queue {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
                 if self.hit_queue_badge.contains(mouse.column, mouse.row) {
-                    self.toggle_queue_pane();
+                    self.toggle_queue_pane(effects);
                     return InputOutcome::Changed;
                 }
                 if self.hit_bg_status.contains(mouse.column, mouse.row) {
                     self.tasks.overlay.toggle();
                     self.tasks.on_state_change();
                     if self.tasks.overlay.focused {
-                        self.set_active_pane(AgentPane::Tasks, false);
+                        self.set_active_pane(AgentPane::Tasks, effects);
                     } else if self.active_pane == AgentPane::Tasks {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
@@ -113,7 +117,7 @@ impl AgentView {
                     self.catalog.overlay.escape();
                     self.catalog.on_state_change();
                     if self.active_pane == AgentPane::Catalog {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
@@ -121,7 +125,7 @@ impl AgentView {
                     self.tasks.overlay.escape();
                     self.tasks.on_state_change();
                     if self.active_pane == AgentPane::Tasks {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
@@ -143,9 +147,9 @@ impl AgentView {
                     self.tasks.overlay.toggle();
                     self.tasks.on_state_change();
                     if self.tasks.overlay.focused {
-                        self.set_active_pane(AgentPane::Tasks, false);
+                        self.set_active_pane(AgentPane::Tasks, effects);
                     } else if self.active_pane == AgentPane::Tasks {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     if !was_visible && !self.watching_cue_toast_shown {
                         self.watching_cue_toast_shown = true;
@@ -192,7 +196,9 @@ impl AgentView {
                         CtaPhase::Matched { .. } | CtaPhase::Error { .. }
                     )
                 {
-                    self.connect_matched_plugin();
+                    if let Some(effect) = self.connect_matched_plugin() {
+                        effects.push(effect);
+                    }
                     return InputOutcome::Changed;
                 }
                 if let Some(idx) = self.follow_up_chip_at(mouse.column, mouse.row)
@@ -218,9 +224,9 @@ impl AgentView {
                     self.todo.overlay.toggle();
                     self.todo.on_state_change();
                     if self.todo.overlay.focused {
-                        self.set_active_pane(AgentPane::Todo, false);
+                        self.set_active_pane(AgentPane::Todo, effects);
                     } else if self.active_pane == AgentPane::Todo {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                     }
                     return InputOutcome::Changed;
                 }
@@ -265,7 +271,7 @@ impl AgentView {
                         self.prompt.textarea.set_cursor(len);
                         self.prompt.file_search.clear_context();
                     }
-                    self.set_active_pane(AgentPane::Prompt, false);
+                    self.set_active_pane(AgentPane::Prompt, effects);
                     return InputOutcome::Changed;
                 }
                 if let Some(dd_area) = self.dropdown_items_area
@@ -292,7 +298,7 @@ impl AgentView {
                             self.prompt.accept_file_search_result();
                         }
                     }
-                    self.set_active_pane(AgentPane::Prompt, false);
+                    self.set_active_pane(AgentPane::Prompt, effects);
                     return InputOutcome::Changed;
                 }
                 if let Some(dd_area) = self.slash_dropdown_items_area
@@ -321,7 +327,7 @@ impl AgentView {
                             self.prompt.accept_slash_completion(&self.session.models);
                         }
                     }
-                    self.set_active_pane(AgentPane::Prompt, false);
+                    self.set_active_pane(AgentPane::Prompt, effects);
                     return InputOutcome::Changed;
                 }
                 if let Some(dd_area) = self.completion_dropdown_items_area
@@ -347,14 +353,14 @@ impl AgentView {
                         let row_idx = (mouse.row - dd_area.y) as usize + offset;
                         self.prompt.set_completion_hovered(Some(row_idx));
                         if self.prompt.select_completion_hovered() {
-                            self.accept_completion_dropdown_item();
+                            self.accept_completion_dropdown_item(effects);
                         }
                     }
-                    self.set_active_pane(AgentPane::Prompt, false);
+                    self.set_active_pane(AgentPane::Prompt, effects);
                     return InputOutcome::Changed;
                 }
                 if self.hit_scrollbar.contains(mouse.column, mouse.row) {
-                    self.set_active_pane(AgentPane::Scrollback, false);
+                    self.set_active_pane(AgentPane::Scrollback, effects);
                     self.scrollbar_dragging = true;
                     self.apply_scrollbar_click(mouse.row);
                     return InputOutcome::Changed;
@@ -366,7 +372,7 @@ impl AgentView {
                         .hit(mouse.column, mouse.row)
                         .and_then(|hit| crate::views::timeline::chevron_target(rail, hit));
                     if let Some(turn_idx) = target {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                         self.scrollback.jump_to_turn(turn_idx);
                         return InputOutcome::Changed;
                     }
@@ -384,7 +390,7 @@ impl AgentView {
                         .contains((mouse.column, mouse.row).into())
                     && !self.hit_btw_close.contains(mouse.column, mouse.row)
                 {
-                    self.set_active_pane(AgentPane::Prompt, false);
+                    self.set_active_pane(AgentPane::Prompt, effects);
                     self.btw_focused = true;
                     if !has_native_link_hover()
                         && is_link_modifier_held(mouse.modifiers)
@@ -404,7 +410,7 @@ impl AgentView {
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Todo) => {
-                        self.set_active_pane(AgentPane::Todo, false);
+                        self.set_active_pane(AgentPane::Todo, effects);
                         self.todo.handle_mouse(
                             mouse.kind,
                             mouse.column,
@@ -427,7 +433,7 @@ impl AgentView {
                                 {
                                     self.session.shared_queue.retain(|e| e.id != server_id);
                                     if self.visible_queue_is_empty() {
-                                        self.hide_queue_pane();
+                                        self.hide_queue_pane(effects);
                                     }
                                     return InputOutcome::Action(Action::QueueRemoveShared {
                                         id: server_id,
@@ -437,7 +443,7 @@ impl AgentView {
                                 return InputOutcome::Changed;
                             }
                             let was_drain_blocked = self.drain_blocked();
-                            self.remove_local_queue_row(id);
+                            self.remove_local_queue_row(id, effects);
                             if was_drain_blocked {
                                 return InputOutcome::Action(Action::DrainQueue);
                             }
@@ -446,24 +452,24 @@ impl AgentView {
                         if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row) {
                             if self.session.state.is_turn_running()
                                 && let InputOutcome::Action(action) =
-                                    self.force_interject_queue_row(id)
+                                    self.force_interject_queue_row(id, effects)
                             {
                                 return InputOutcome::Action(action);
                             }
                         }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
                             && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
-                                || self.set_active_pane(AgentPane::Queue, false))
+                                || self.set_active_pane(AgentPane::Queue, effects))
                         {
                             let row = self.queue.row_ref(id);
                             let is_server = matches!(
                                 row.as_ref().map(|r| r.origin),
                                 Some(crate::views::queue_pane::QueueRowOrigin::Server)
                             );
-                            self.enter_queue_edit(id, is_server, row);
+                            self.enter_queue_edit(id, is_server, row, effects);
                             return InputOutcome::Changed;
                         }
-                        self.set_active_pane(AgentPane::Queue, false);
+                        self.set_active_pane(AgentPane::Queue, effects);
                         self.queue.handle_mouse(
                             mouse.kind,
                             mouse.column,
@@ -475,13 +481,13 @@ impl AgentView {
                     Some(AgentPane::Prompt) => {
                         let was_collapsed = self.active_pane != AgentPane::Prompt
                             && self.scrollback.appearance().prompt.collapse_unfocused;
-                        self.set_active_pane(AgentPane::Prompt, false);
+                        self.set_active_pane(AgentPane::Prompt, effects);
                         self.btw_focused = false;
                         if !was_collapsed {
                             if matches!(self.prompt.handle_mouse(mouse), PromptEvent::Edited) {
                                 self.prompt.refresh_slash(&self.session.models);
                                 if let Some(eff) = self.notify_suggestion_text_changed() {
-                                    self.pending_effects.push(eff);
+                                    effects.push(eff);
                                 }
                             }
                             if self.prompt_click_is_double() {
@@ -503,7 +509,7 @@ impl AgentView {
                     }
                     Some(AgentPane::Tasks) => {
                         use crate::views::tasks_pane::TaskEntryId;
-                        self.set_active_pane(AgentPane::Tasks, false);
+                        self.set_active_pane(AgentPane::Tasks, effects);
                         for (entry_id, rect) in &self.tasks.kill_button_rects {
                             if rect.contains((mouse.column, mouse.row).into()) {
                                 match entry_id {
@@ -560,7 +566,7 @@ impl AgentView {
                                                     is_running,
                                                 ),
                                             );
-                                            self.set_active_pane(AgentPane::Scrollback, true);
+                                            self.force_active_pane(AgentPane::Scrollback);
                                             return InputOutcome::Changed;
                                         }
                                     }
@@ -633,7 +639,7 @@ impl AgentView {
                                         &task.stdout,
                                         is_running,
                                     ));
-                                self.set_active_pane(AgentPane::Scrollback, true);
+                                self.force_active_pane(AgentPane::Scrollback);
                                 self.last_bg_click = None;
                                 return InputOutcome::Changed;
                             }
@@ -659,7 +665,7 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Catalog) => {
-                        self.set_active_pane(AgentPane::Catalog, false);
+                        self.set_active_pane(AgentPane::Catalog, effects);
                         self.catalog.handle_mouse(
                             mouse.kind,
                             mouse.column,
@@ -669,7 +675,7 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Scrollback) => {
-                        self.set_active_pane(AgentPane::Scrollback, false);
+                        self.set_active_pane(AgentPane::Scrollback, effects);
                         if self.block_viewer.is_some() {
                             self.handle_block_viewer_mouse(mouse);
                             return InputOutcome::Changed;
@@ -927,7 +933,7 @@ impl AgentView {
                     if matches!(event, PromptEvent::Edited)
                         && let Some(eff) = self.notify_suggestion_text_changed()
                     {
-                        self.pending_effects.push(eff);
+                        effects.push(eff);
                     }
                     InputOutcome::Changed
                 } else {

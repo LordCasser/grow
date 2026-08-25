@@ -1718,6 +1718,7 @@ mod tests {
 
     #[test]
     fn word_select_mouse_pipeline_still_opens_permission_detail() {
+        let mut effects = Vec::new();
         use crate::appearance::TextSelection;
         use crate::scrollback::blocks::{SubagentPermissionBlock, SubagentPermissionEvent};
         use shell::extensions::notification::SubagentPermissionOutcome;
@@ -1757,8 +1758,16 @@ mod tests {
         agent.last_scrollback_selection_model = stacked_lines_model(0, member_row, 1);
         let registry = ActionRegistry::defaults();
         for _ in 0..2 {
-            let _ = agent.handle_input(&Event::Mouse(mouse_down(8, member_row)), &registry);
-            let _ = agent.handle_input(&Event::Mouse(mouse_up(8, member_row)), &registry);
+            let _ = agent.handle_input(
+                &Event::Mouse(mouse_down(8, member_row)),
+                &registry,
+                &mut effects,
+            );
+            let _ = agent.handle_input(
+                &Event::Mouse(mouse_up(8, member_row)),
+                &registry,
+                &mut effects,
+            );
         }
         assert!(
             agent.block_viewer.is_some(),
@@ -1971,13 +1980,17 @@ mod tests {
 
     /// Down→Drag→Drag through `handle_input` on `stacked_lines_model(0, 5, 3)`
     /// so the drag is genuinely promoted and `last_drag_mouse` is (10, 7).
-    fn latch_drag_with_mouse_held(agent: &mut AgentView, reg: &ActionRegistry) {
+    fn latch_drag_with_mouse_held(
+        agent: &mut AgentView,
+        reg: &ActionRegistry,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
         agent.active_pane = AgentPane::Scrollback;
         agent.last_scrollback_selection_model = stacked_lines_model(0, 5, 3);
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), reg, effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), reg, effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), reg, effects);
         let drag = agent.drag_selection.expect("drag promoted");
         assert_eq!(drag.anchor.block_line_idx, 0, "setup: anchor on line 0");
         assert_eq!(drag.head.block_line_idx, 2, "setup: head on line 2");
@@ -1990,7 +2003,8 @@ mod tests {
     fn reclamp_follows_held_pointer_onto_rebuilt_model() {
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
-        latch_drag_with_mouse_held(&mut agent, &reg);
+        let mut effects = Vec::new();
+        latch_drag_with_mouse_held(&mut agent, &reg, &mut effects);
 
         // Scrolled down by two rows: lines 2..=6 now occupy rows 5..=9.
         agent.last_scrollback_selection_model = stacked_lines_model(2, 5, 5);
@@ -2010,13 +2024,14 @@ mod tests {
     /// scroll between mouse-down and the promoting move).
     #[test]
     fn promotion_stores_pointer_for_reclamp() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
         agent.active_pane = AgentPane::Scrollback;
         agent.last_scrollback_selection_model = stacked_lines_model(0, 5, 3);
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), &reg, &mut effects);
         assert!(agent.drag_selection.is_some(), "setup: drag promoted");
         assert_eq!(
             agent.last_drag_mouse,
@@ -2184,6 +2199,7 @@ mod tests {
     /// width and promotion carries it onto the active drag.
     #[test]
     fn drag_promotion_carries_anchor_width_snapshot() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
@@ -2201,12 +2217,12 @@ mod tests {
         });
         agent.last_scrollback_selection_model = model;
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg, &mut effects);
         assert_eq!(
             agent.pending_text_drag.and_then(|p| p.anchor_content_width),
             Some(46)
         );
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 6)), &reg, &mut effects);
         assert_eq!(
             agent.drag_selection.and_then(|d| d.anchor_content_width),
             Some(46)
@@ -2218,17 +2234,18 @@ mod tests {
     /// anchor — the live successor of the deleted clamp-to-anchor helper.
     #[test]
     fn promotion_miss_collapses_head_to_anchor() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
         agent.active_pane = AgentPane::Scrollback;
         agent.last_scrollback_selection_model = stacked_lines_model(0, 5, 3);
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg, &mut effects);
         assert!(agent.pending_text_drag.is_some(), "setup: pending armed");
 
         // The rebuilt frame lost the range entirely.
         agent.last_scrollback_selection_model = ResolvedSelectionModel::default();
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), &reg, &mut effects);
 
         let drag = agent.drag_selection.expect("promoted despite the miss");
         assert_eq!(drag.head, drag.anchor, "head collapsed to the anchor");
@@ -2239,18 +2256,19 @@ mod tests {
     /// of the deleted keep-previous-head helper.
     #[test]
     fn active_drag_motion_miss_keeps_previous_head() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
         agent.active_pane = AgentPane::Scrollback;
         agent.last_scrollback_selection_model = stacked_lines_model(0, 5, 3);
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 5)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 7)), &reg, &mut effects);
         let head_before = agent.drag_selection.expect("setup: active").head;
         assert_eq!(head_before.block_line_idx, 2, "setup: head extended");
 
         agent.last_scrollback_selection_model = ResolvedSelectionModel::default();
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(30, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(30, 9)), &reg, &mut effects);
 
         let drag = agent.drag_selection.expect("still active");
         assert_eq!(drag.head, head_before, "head kept across the miss");
@@ -2448,20 +2466,21 @@ mod tests {
     /// both directions exactly as before, with the latch armed but idle.
     #[test]
     fn chrome_press_drag_within_chrome_is_block_drag_unchanged() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg, &mut effects);
         assert_eq!(agent.deferred_text_press, Some((6, 4)));
         let pending = agent.pending_block_drag.expect("block drag pends");
         assert_eq!(pending.anchor_entry_idx, 0);
         assert!(agent.pending_text_drag.is_none());
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg, &mut effects);
         let drag = agent.block_drag_selection.expect("block drag promoted");
         assert_eq!((drag.anchor_entry_idx, drag.head_entry_idx), (0, 1));
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 4)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 4)), &reg, &mut effects);
         let drag = agent.block_drag_selection.expect("still a block drag");
         assert_eq!((drag.anchor_entry_idx, drag.head_entry_idx), (0, 0));
         assert!(agent.drag_selection.is_none());
@@ -2474,14 +2493,15 @@ mod tests {
     /// already in flight.
     #[test]
     fn chrome_press_drag_into_text_converts_at_entry_point() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 9)), &reg, &mut effects);
         assert!(agent.block_drag_selection.is_some(), "setup: block active");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 10)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(10, 10)), &reg, &mut effects);
 
         let drag = agent.drag_selection.expect("converted to text drag");
         let entry_hit = RangeHit {
@@ -2504,18 +2524,19 @@ mod tests {
     /// row/col where the pointer first enters text.
     #[test]
     fn gap_press_drag_through_gap_anchors_at_entry_row_and_col() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg, &mut effects);
         assert_eq!(agent.deferred_text_press, Some((6, 7)));
         assert!(agent.pending_block_drag.is_none(), "gap is outside areas");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 8)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 8)), &reg, &mut effects);
         assert!(agent.drag_selection.is_none(), "still dead: no conversion");
         assert!(agent.block_drag_selection.is_none());
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
         let drag = agent.drag_selection.expect("converted on text entry");
         assert_eq!(
             drag.anchor,
@@ -2534,16 +2555,17 @@ mod tests {
     /// kind, and the click cascade still consumes the press.
     #[test]
     fn deferred_press_release_without_motion_is_plain_click() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg, &mut effects);
         assert!(
             agent.pending_scrollback_click.is_some(),
             "setup: click pends"
         );
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_up(6, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_up(6, 7)), &reg, &mut effects);
 
         assert!(agent.deferred_text_press.is_none());
         assert!(agent.drag_selection.is_none());
@@ -2559,6 +2581,7 @@ mod tests {
     /// exactly as without the latch (payload content pinned by e2e).
     #[test]
     fn deferred_press_never_entering_text_finishes_block_copy() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
         agent
@@ -2572,11 +2595,11 @@ mod tests {
                 "BLOCKCOPY one",
             ));
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 4)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg, &mut effects);
         assert!(agent.block_drag_selection.is_some(), "setup: block active");
 
-        let outcome = agent.handle_input(&Event::Mouse(mouse_up(6, 9)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_up(6, 9)), &reg, &mut effects);
 
         assert!(
             matches!(outcome, InputOutcome::Changed),
@@ -2593,21 +2616,22 @@ mod tests {
     /// nearest line within the anchor's range) and never re-arms block drag.
     #[test]
     fn converted_drag_stays_text_over_chrome_and_gap() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
         assert!(agent.drag_selection.is_some(), "setup: converted");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 4)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 4)), &reg, &mut effects);
         let drag = agent.drag_selection.expect("still a text drag");
         assert_eq!(drag.head.block_line_idx, 0, "head snapped within range");
         assert_eq!(drag.head.col_within_range, 6);
         assert!(agent.block_drag_selection.is_none(), "no block re-arm");
         assert!(agent.pending_block_drag.is_none());
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg, &mut effects);
         let drag = agent.drag_selection.expect("still a text drag");
         assert_eq!(drag.head.block_line_idx, 1, "head follows nearest line");
         assert_eq!(drag.anchor.entry_idx, 0, "anchor pinned to entry 0");
@@ -2617,21 +2641,22 @@ mod tests {
     /// (any non-drag event, e.g. Esc, while latched).
     #[test]
     fn deferred_latch_cleared_on_recovery_and_stale_event() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg, &mut effects);
         assert!(agent.scrollback_drag_latched(), "latch counts as a drag");
         agent.clear_stuck_scrollback_drag();
         assert!(agent.deferred_text_press.is_none());
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 7)), &reg, &mut effects);
         assert!(agent.deferred_text_press.is_some());
         let esc = Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::empty(),
         ));
-        let _ = agent.handle_input(&esc, &reg);
+        let _ = agent.handle_input(&esc, &reg, &mut effects);
         assert!(
             agent.deferred_text_press.is_none(),
             "stale-latch guard cleared the deferred press"
@@ -2653,10 +2678,11 @@ mod tests {
     /// nothing, as the band did before).
     #[test]
     fn strip_press_arms_deferred_latch_only() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
 
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
 
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.deferred_text_press, Some((10, 17)));
@@ -2669,11 +2695,12 @@ mod tests {
     /// entry point, exactly like the in-pane deferred press.
     #[test]
     fn strip_press_drag_into_text_converts_at_entry_point() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
 
         let drag = agent.drag_selection.expect("converted on text entry");
         assert_eq!(
@@ -2694,11 +2721,12 @@ mod tests {
     /// before the latch existed: nothing.
     #[test]
     fn strip_press_release_without_motion_does_nothing() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_up(10, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_up(10, 17)), &reg, &mut effects);
 
         assert!(agent.deferred_text_press.is_none());
         assert!(agent.drag_selection.is_none());
@@ -2711,14 +2739,15 @@ mod tests {
     /// state behind on release.
     #[test]
     fn strip_press_drag_never_entering_text_selects_nothing() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(30, 18)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(30, 18)), &reg, &mut effects);
         assert!(agent.drag_selection.is_none(), "no text under the pointer");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_up(30, 18)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_up(30, 18)), &reg, &mut effects);
 
         assert!(agent.deferred_text_press.is_none());
         assert!(agent.drag_selection.is_none());
@@ -2730,17 +2759,18 @@ mod tests {
     /// first, and the prompt box routes to the prompt pane.
     #[test]
     fn interactive_rows_do_not_arm_deferred_latch() {
+        let mut effects = Vec::new();
         let reg = ActionRegistry::defaults();
 
         let mut agent = agent_with_above_prompt_strip();
         agent.hit_scrollbar.set(Some(Rect::new(79, 0, 1, 20)));
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(79, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(79, 17)), &reg, &mut effects);
         assert!(agent.scrollbar_dragging, "scrollbar owns the press");
         assert!(agent.deferred_text_press.is_none());
 
         let mut agent = agent_with_above_prompt_strip();
         agent.hit_cancel_button.set(Some(Rect::new(30, 17, 6, 1)));
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(32, 17)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(32, 17)), &reg, &mut effects);
         assert!(
             matches!(
                 outcome,
@@ -2751,7 +2781,7 @@ mod tests {
         assert!(agent.deferred_text_press.is_none());
 
         let mut agent = agent_with_above_prompt_strip();
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 21)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(5, 21)), &reg, &mut effects);
         assert!(agent.deferred_text_press.is_none(), "prompt is a pane");
     }
 
@@ -2760,16 +2790,17 @@ mod tests {
     /// armed latch would convert on (and copy) text hidden under it.
     #[test]
     fn strip_press_with_block_viewer_open_arms_nothing() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
         agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
             "t", "content",
         ));
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
         assert!(agent.deferred_text_press.is_none(), "viewer owns the press");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
         assert!(agent.drag_selection.is_none(), "nothing converts");
         assert!(agent.persistent_text_selection.is_none());
     }
@@ -2780,21 +2811,22 @@ mod tests {
     /// handlers, and the gesture must still convert once it reaches text.
     #[test]
     fn strip_gesture_does_not_leak_motion_into_prompt() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
         agent.active_pane = AgentPane::Prompt;
         agent.prompt.set_text("draft text");
         let cursor_before = agent.prompt.cursor();
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
         assert!(agent.deferred_text_press.is_some(), "setup: latch armed");
 
-        let outcome = agent.handle_input(&Event::Mouse(mouse_drag(5, 21)), &reg);
+        let outcome = agent.handle_input(&Event::Mouse(mouse_drag(5, 21)), &reg, &mut effects);
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert_eq!(agent.prompt.text(), "draft text", "prompt text untouched");
         assert_eq!(agent.prompt.cursor(), cursor_before, "cursor untouched");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
         assert!(
             agent.drag_selection.is_some(),
             "conversion survives crossing the prompt region"
@@ -2805,6 +2837,7 @@ mod tests {
     /// the in-pane press's eager clear.
     #[test]
     fn strip_press_clears_previous_persistent_selection() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_above_prompt_strip();
         let reg = ActionRegistry::defaults();
         let anchor = RangeHit {
@@ -2833,7 +2866,7 @@ mod tests {
         agent.selection_created_at = Some(Instant::now());
         assert!(agent.persistent_text_selection.is_some(), "setup: held");
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg, &mut effects);
 
         assert!(agent.persistent_text_selection.is_none(), "highlight gone");
         assert!(agent.table_selection_geometry.is_none());
@@ -2847,6 +2880,7 @@ mod tests {
     /// press still feeds the normal scrollback click cascade.
     #[test]
     fn recap_block_press_converts_on_text_entry_and_clicks_as_before() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_chrome_and_gap();
         let reg = ActionRegistry::defaults();
         // Real entries so the click cascade has something to resolve; the
@@ -2880,14 +2914,14 @@ mod tests {
                 drag_startable: true,
             });
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 13)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(6, 13)), &reg, &mut effects);
         assert_eq!(agent.deferred_text_press, Some((6, 13)));
         assert!(
             agent.pending_scrollback_click.is_some(),
             "click still pends"
         );
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(14, 6)), &reg, &mut effects);
         let drag = agent.drag_selection.expect("converted on text entry");
         assert_eq!(drag.anchor.entry_idx, 0);
         assert_eq!(drag.anchor.block_line_idx, 1);
@@ -2920,9 +2954,13 @@ mod tests {
             .entry_screen_area(2, agent2.pane_areas.scrollback)
             .expect("recap entry laid out");
 
-        let _ = agent2.handle_input(&Event::Mouse(mouse_down(6, recap_area.y)), &reg);
+        let _ = agent2.handle_input(
+            &Event::Mouse(mouse_down(6, recap_area.y)),
+            &reg,
+            &mut effects,
+        );
         assert!(agent2.deferred_text_press.is_some(), "latch armed on recap");
-        let _ = agent2.handle_input(&Event::Mouse(mouse_up(6, recap_area.y)), &reg);
+        let _ = agent2.handle_input(&Event::Mouse(mouse_up(6, recap_area.y)), &reg, &mut effects);
 
         assert_eq!(
             agent2.scrollback.selected(),
@@ -3023,6 +3061,7 @@ mod tests {
     /// oscillation.
     #[test]
     fn conversion_at_bottom_edge_ticks_without_oscillation() {
+        let mut effects = Vec::new();
         let mut agent = agent_with_tall_scrollback();
         let reg = ActionRegistry::defaults();
 
@@ -3033,11 +3072,11 @@ mod tests {
 
         // Real gesture: strip press, drag up onto the bottom text row
         // (conversion), then a held motion there arms Down autoscroll.
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 12)), &reg);
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(2, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(2, 12)), &reg, &mut effects);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(2, 9)), &reg, &mut effects);
         let drag = agent.drag_selection.expect("converted on the bottom row");
         assert_eq!(drag.anchor.block_line_idx, 1, "anchored on the edge row");
-        let _ = agent.handle_input(&Event::Mouse(mouse_drag(2, 9)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(2, 9)), &reg, &mut effects);
         assert_eq!(
             agent.drag_autoscroll.map(|a| a.direction),
             Some(AutoScrollDirection::Down),
@@ -3133,11 +3172,12 @@ mod tests {
     /// hitbox (a press on its non-text area arms nothing).
     #[test]
     fn btw_press_does_not_arm_deferred_latch() {
+        let mut effects = Vec::new();
         let mut agent = make_agent();
         let reg = ActionRegistry::defaults();
         agent.last_btw_area = Rect::new(10, 10, 30, 6);
 
-        let _ = agent.handle_input(&Event::Mouse(mouse_down(12, 12)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(12, 12)), &reg, &mut effects);
 
         assert!(agent.deferred_text_press.is_none(), "btw stays exact-only");
         assert!(agent.pending_block_drag.is_none());

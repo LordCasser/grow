@@ -470,21 +470,22 @@ mod workflows_overlay_key_tests {
     fn ctrl_q_bubbles_and_g_closes_from_detail() {
         let mut agent = workflows_agent(&["wf_old", "wf_new"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
         let ctrl_q = modified_key(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert!(matches!(
-            agent.handle_input(&ctrl_q, &reg),
+            agent.handle_input(&ctrl_q, &reg, &mut effects),
             InputOutcome::Unchanged
         ));
         assert!(agent.show_workflows);
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Enter), &reg),
+            agent.handle_input(&key(KeyCode::Enter), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert!(agent.workflows_view.detail_run_id.is_some());
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Char('g')), &reg),
+            agent.handle_input(&key(KeyCode::Char('g')), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert!(!agent.show_workflows);
@@ -494,9 +495,10 @@ mod workflows_overlay_key_tests {
     fn left_in_detail_returns_to_runs_list() {
         let mut agent = workflows_agent(&["wf_old", "wf_new"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Enter), &reg),
+            agent.handle_input(&key(KeyCode::Enter), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(
@@ -505,7 +507,7 @@ mod workflows_overlay_key_tests {
         );
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Left), &reg),
+            agent.handle_input(&key(KeyCode::Left), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(agent.workflows_view.detail_run_id, None);
@@ -516,11 +518,12 @@ mod workflows_overlay_key_tests {
     fn left_in_detail_has_no_run_count_guard() {
         let mut agent = workflows_agent(&["wf_only"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         agent.workflows_view.detail_run_id = Some("wf_only".to_string());
         agent.workflows_view.phase_pinned = true;
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Left), &reg),
+            agent.handle_input(&key(KeyCode::Left), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(agent.workflows_view.detail_run_id, None);
@@ -532,9 +535,10 @@ mod workflows_overlay_key_tests {
     fn left_on_list_is_consumed_noop() {
         let mut agent = workflows_agent(&["wf_old", "wf_new"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         assert_eq!(agent.workflows_view.detail_run_id, None);
 
-        let out = agent.handle_input(&key(KeyCode::Left), &reg);
+        let out = agent.handle_input(&key(KeyCode::Left), &reg, &mut effects);
         assert!(
             matches!(out, InputOutcome::Changed),
             "Left on the list must stay consumed by the overlay, got {out:?}"
@@ -548,9 +552,10 @@ mod workflows_overlay_key_tests {
     fn run_selection_survives_newest_first_insert() {
         let mut agent = workflows_agent(&["wf_old", "wf_selected"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Down), &reg),
+            agent.handle_input(&key(KeyCode::Down), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(
@@ -563,7 +568,7 @@ mod workflows_overlay_key_tests {
             .push(make_workflow_run("wf_newest"));
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Enter), &reg),
+            agent.handle_input(&key(KeyCode::Enter), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(
@@ -602,9 +607,10 @@ mod workflows_overlay_key_tests {
             .subagent_views
             .insert("child-running".to_owned(), Box::new(make_agent()));
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Enter), &reg),
+            agent.handle_input(&key(KeyCode::Enter), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(agent.active_subagent.as_deref(), Some("child-running"));
@@ -615,6 +621,7 @@ mod workflows_overlay_key_tests {
     fn modified_local_chars_do_not_trigger_workflow_controls() {
         let mut agent = workflows_agent(&["wf_run"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         agent.workflows_view.detail_run_id = Some("wf_run".to_string());
 
         for ch in ['p', 'r', 'x', 's', 'q', 'j', 'k'] {
@@ -622,6 +629,7 @@ mod workflows_overlay_key_tests {
             let out = agent.handle_input(
                 &modified_key(KeyCode::Char(ch), KeyModifiers::CONTROL),
                 &reg,
+                &mut effects,
             );
             assert!(agent.show_workflows, "Ctrl+{ch} must not close the modal");
             assert!(
@@ -638,10 +646,11 @@ mod workflows_overlay_key_tests {
     fn paused_budget_limited_and_failed_runs_are_resumable_others_fail_closed() {
         let mut agent = workflows_agent(&["wf_run"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
         agent.session.workflow_runs[0].status = "user_paused".to_string();
         agent.workflows_view.detail_run_id = Some("wf_run".to_string());
 
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(matches!(
             out,
             InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
@@ -650,7 +659,7 @@ mod workflows_overlay_key_tests {
 
         agent.show_workflows = true;
         agent.session.workflow_runs[0].status = "budget_limited".to_string();
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(matches!(
             out,
             InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
@@ -663,7 +672,7 @@ mod workflows_overlay_key_tests {
 
         agent.show_workflows = true;
         agent.session.workflow_runs[0].status = "failed".to_string();
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(
             matches!(
                 out,
@@ -679,19 +688,19 @@ mod workflows_overlay_key_tests {
 
         agent.show_workflows = true;
         agent.session.workflow_runs[0].status = "complete".to_string();
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows, "completed runs must not be resumed");
 
         agent.session.workflow_runs[0].status = "user_paused".to_string();
         agent.session.workflow_runs[0].management_available = false;
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows, "unsupported resume must fail closed");
 
         agent.session.workflow_runs[0].status = "budget_limited".to_string();
         agent.session.workflow_runs[0].management_available = false;
-        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(
             agent.show_workflows,
@@ -703,9 +712,10 @@ mod workflows_overlay_key_tests {
     fn right_on_list_opens_selected_run_detail() {
         let mut agent = workflows_agent(&["wf_old", "wf_new"]);
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Right), &reg),
+            agent.handle_input(&key(KeyCode::Right), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(
@@ -714,7 +724,7 @@ mod workflows_overlay_key_tests {
         );
 
         assert!(matches!(
-            agent.handle_input(&key(KeyCode::Right), &reg),
+            agent.handle_input(&key(KeyCode::Right), &reg, &mut effects),
             InputOutcome::Changed
         ));
         assert_eq!(
@@ -744,8 +754,9 @@ mod workflows_overlay_key_tests {
             .subagent_views
             .insert("child-1".to_string(), Box::new(make_agent()));
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
-        let out = agent.handle_input(&mouse_down(12, 5), &reg);
+        let out = agent.handle_input(&mouse_down(12, 5), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(
             agent.active_subagent.as_deref(),
@@ -763,8 +774,9 @@ mod workflows_overlay_key_tests {
         let mut agent = workflows_agent(&["wf_run"]);
         agent.workflows_view.agent_hits = vec![(rect(10, 5, 30, 1), "ghost".to_string())];
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
-        let out = agent.handle_input(&mouse_down(12, 5), &reg);
+        let out = agent.handle_input(&mouse_down(12, 5), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(agent.active_subagent, None);
         assert!(agent.show_workflows);
@@ -785,8 +797,9 @@ mod workflows_overlay_key_tests {
             (rect(2, 4, 12, 1), "Do".to_owned()),
         ];
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
-        let out = agent.handle_input(&mouse_down(3, 4), &reg);
+        let out = agent.handle_input(&mouse_down(3, 4), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(agent.workflows_view.selected_phase, 1);
         assert_eq!(
@@ -807,8 +820,9 @@ mod workflows_overlay_key_tests {
             (rect(5, 5, 60, 1), "wf_old".to_string()),
         ];
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
-        let out = agent.handle_input(&mouse_down(6, 5), &reg);
+        let out = agent.handle_input(&mouse_down(6, 5), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert_eq!(
             agent.workflows_view.detail_run_id.as_deref(),
@@ -825,8 +839,9 @@ mod workflows_overlay_key_tests {
         agent.workflows_view.run_hits = vec![(rect(5, 4, 60, 1), "wf_new".to_string())];
         agent.workflows_view.window.popup_area = Some(rect(0, 0, 100, 30));
         let reg = ActionRegistry::defaults();
+        let mut effects = Vec::new();
 
-        let out = agent.handle_input(&mouse_down(50, 20), &reg);
+        let out = agent.handle_input(&mouse_down(50, 20), &reg, &mut effects);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows);
         assert_eq!(agent.workflows_view.detail_run_id, None);

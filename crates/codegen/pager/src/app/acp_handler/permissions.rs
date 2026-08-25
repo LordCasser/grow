@@ -167,7 +167,7 @@ fn enqueue_permission(
         && agent.permission_stashed_pane.is_none()
     {
         agent.permission_stashed_pane = Some(AgentPane::Scrollback);
-        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.force_active_pane(AgentPane::Prompt);
     }
 
     // 6. Clone options before moving perm into the struct.

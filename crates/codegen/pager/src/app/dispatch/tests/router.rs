@@ -1990,6 +1990,7 @@ fn mouse_event(
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn mouse_left_click_attaches_immediately() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
@@ -1998,9 +1999,11 @@ fn mouse_left_click_attaches_immediately() {
     d.row_rects
         .push((id.clone(), ratatui::layout::Rect::new(0, 5, 80, 1)));
     d.selected = None;
-    let outcome = d.handle_input(
+    let outcome = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &crate::actions::ActionRegistry::defaults(),
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     match outcome {
         crate::app::app_view::InputOutcome::Action(
@@ -2020,6 +2023,7 @@ fn mouse_left_click_attaches_immediately() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn mouse_repeated_click_keeps_attaching() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
@@ -2028,9 +2032,11 @@ fn mouse_repeated_click_keeps_attaching() {
     d.row_rects
         .push((id.clone(), ratatui::layout::Rect::new(0, 5, 80, 1)));
     let reg = crate::actions::ActionRegistry::defaults();
-    let outcome1 = d.handle_input(
+    let outcome1 = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &reg,
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     match outcome1 {
         crate::app::app_view::InputOutcome::Action(
@@ -2038,9 +2044,11 @@ fn mouse_repeated_click_keeps_attaching() {
         ) => assert_eq!(actual, id),
         other => panic!("expected DashboardAttach on first click, got {other:?}"),
     }
-    let outcome2 = d.handle_input(
+    let outcome2 = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &reg,
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     match outcome2 {
         crate::app::app_view::InputOutcome::Action(
@@ -2055,6 +2063,7 @@ fn mouse_repeated_click_keeps_attaching() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn mouse_click_after_long_pause_still_attaches() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     use std::time::{Duration, Instant};
     let mut app = test_app_with_agent();
@@ -2064,16 +2073,20 @@ fn mouse_click_after_long_pause_still_attaches() {
     d.row_rects
         .push((id.clone(), ratatui::layout::Rect::new(0, 5, 80, 1)));
     let reg = crate::actions::ActionRegistry::defaults();
-    let _ = d.handle_input(
+    let _ = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &reg,
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     if let Some((_, t)) = d.last_click.as_mut() {
         *t = Instant::now() - Duration::from_millis(600);
     }
-    let outcome = d.handle_input(
+    let outcome = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5)),
         &reg,
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     match outcome {
         crate::app::app_view::InputOutcome::Action(
@@ -2086,6 +2099,7 @@ fn mouse_click_after_long_pause_still_attaches() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn mouse_click_on_peek_close_rect_clears_peek() {
+    let mut input_effects: Vec<Effect> = Vec::new();
     use crossterm::event::{Event, MouseButton, MouseEventKind};
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
@@ -2106,9 +2120,11 @@ fn mouse_click_on_peek_close_rect_clears_peek() {
     ));
     d.peek_close_rect = Some(ratatui::layout::Rect::new(70, 8, 3, 1));
     let reg = crate::actions::ActionRegistry::defaults();
-    let outcome = d.handle_input(
+    let outcome = d.handle_input_with_paste_provenance(
         &Event::Mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 71, 8)),
         &reg,
+        PasteProvenance::Terminal,
+        &mut input_effects,
     );
     assert!(matches!(
         outcome,

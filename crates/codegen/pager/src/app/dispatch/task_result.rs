@@ -153,28 +153,34 @@ fn apply_clipboard_paste_result(
     image: ProbedAttachment,
     file_urls: Option<String>,
     app: &mut AppView,
-) -> ClipboardPasteCompletion {
-    match ctx.target.clone() {
+) -> (ClipboardPasteCompletion, Vec<Effect>) {
+    let mut effects = Vec::new();
+    let completion = match ctx.target.clone() {
         ClipboardPasteTarget::AgentPrompt { agent_id, .. } => app
             .agents
             .get_mut(&agent_id)
             .map_or(ClipboardPasteCompletion::Dropped, |agent| {
-                agent.complete_clipboard_attachment_paste(ctx, image, file_urls)
+                agent.complete_clipboard_attachment_paste(ctx, image, file_urls, &mut effects)
             }),
         ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => app
             .dashboard
             .as_mut()
             .map_or(ClipboardPasteCompletion::Dropped, |dashboard| {
-                dashboard.complete_clipboard_attachment_paste(ctx, image, file_urls)
+                dashboard.complete_clipboard_attachment_paste(ctx, image, file_urls, &mut effects)
             }),
-    }
+    };
+    (completion, effects)
 }
-fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> Vec<Effect> {
+fn drain_clipboard_target(
+    target: &ClipboardPasteTarget,
+    app: &mut AppView,
+    mut effects: Vec<Effect>,
+) -> Vec<Effect> {
     match target {
         ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
             let is_active = app.active_view == ActiveView::Agent(*agent_id);
             let Some(agent) = app.agents.get_mut(agent_id) else {
-                return vec![];
+                return effects;
             };
             let resend = agent.take_deferred_send_after_paste();
             let action = if is_active {
@@ -182,7 +188,6 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
             } else {
                 None
             };
-            let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
             }
@@ -190,10 +195,9 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
         }
         ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => {
             let Some(dashboard) = app.dashboard.as_mut() else {
-                return vec![];
+                return effects;
             };
             let resends = dashboard.take_deferred_sends_after_paste();
-            let mut effects = std::mem::take(&mut dashboard.pending_effects);
             if matches!(app.active_view, ActiveView::AgentDashboard) {
                 for action in resends {
                     effects.extend(dispatch(action, app));
@@ -676,7 +680,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             } else {
                 None
             };
-            let completion = apply_clipboard_paste_result(ctx, image, file_urls, app);
+            let (completion, completion_effects) =
+                apply_clipboard_paste_result(ctx, image, file_urls, app);
             let wrap_request_emitted = wrap_host_image_request_eligible(completion)
                 && is_clipboard_key
                 && crate::wrap_clipboard_image::maybe_request_wrap_host_image(
@@ -684,7 +689,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     wrap_text.as_deref(),
                     None,
                 );
-            let effects = drain_clipboard_target(&target, app);
+            let effects = drain_clipboard_target(&target, app, completion_effects);
             maybe_show_x11_primary_paste_hint(
                 primary_hint_eligible && !wrap_request_emitted,
                 completion,
@@ -1253,11 +1258,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .on_suggestions_loaded(response, &request_text, request_cursor);
             let text = agent.prompt.text().to_owned();
             agent.prompt.suggestions.set_last_request_text(&text);
-            let mark = agent.pending_effects.len();
+            let mut effects = Vec::new();
             if agent.prompt.suggestions.take_pending_tab(generation) {
-                agent.shell_completion_tab();
+                agent.shell_completion_tab(&mut effects);
             }
-            agent.pending_effects.split_off(mark)
+            effects
         }
         TaskResult::PromptSuggestionLoaded {
             agent_id,
