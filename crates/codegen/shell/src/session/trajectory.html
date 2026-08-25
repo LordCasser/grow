@@ -239,7 +239,8 @@ main.inspecting .inspector{display:block}
 .payload[open] summary{border-bottom-color:var(--line-soft)}
 .payload-status{margin-left:auto;color:var(--muted);font-size:10px;text-align:right}
 .payload pre{
-  margin:0;padding:13px;max-height:min(52dvh,520px);overflow:auto;white-space:pre-wrap;word-break:break-word;
+  margin:0;padding:13px;height:clamp(180px,42dvh,520px);overflow:auto;overscroll-behavior:contain;overflow-anchor:none;
+  white-space:pre-wrap;word-break:break-word;
   color:var(--foreground);font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace
 }
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -389,6 +390,7 @@ function trimRows(items,keep){
   return keep==='start'?items.slice(0,MAX_WINDOW_ROWS):items.slice(-MAX_WINDOW_ROWS)
 }
 function annotateGroups(items){
+  items=items.map(row=>({...row}));
   const actorTurns=new Map(),actorSteps=new Map();
   for(const row of items){
     const actor=row.actor;
@@ -629,32 +631,37 @@ function showSummary(row){
   $('meta').innerHTML=fields.map(field=>'<div class="meta"><label>'+esc(field[0])+'</label><span title="'+esc(field[1])+'">'+esc(field[1])+'</span></div>').join('');
   if(detailEntry===row.entry_id&&detailRow){
     $('details').textContent=JSON.stringify(detailRow,null,2);
-    if(copyController==null){$('payloadStatus').textContent='Preview ready';$('copy').disabled=false}
-  }else{
-    $('payload').open=false;$('details').textContent='';$('payloadStatus').textContent='Expand to load';$('copy').disabled=true
+    if(copyController==null&&detailController==null){$('payloadStatus').textContent='Preview ready';$('copy').disabled=false}
+  }else if(!$('payload').open){
+    $('details').textContent='';$('payloadStatus').textContent='Expand to load';$('copy').disabled=true
   }
 }
-async function loadDetail(entry){
-  detailController?.abort();detailController=new AbortController();
-  $('payloadStatus').textContent='Loading…';$('details').textContent='';$('copy').disabled=true;
+async function loadDetail(entry,preserveContent=false){
+  detailController?.abort();const controller=detailController=new AbortController();
+  $('payloadStatus').textContent=preserveContent?'Refreshing…':'Loading…';
+  if(!preserveContent)$('details').textContent='';
+  $('copy').disabled=true;
   try{
-    const response=await fetchEvent(entry,detailController.signal);
-    if(selected!==entry)return;
+    const response=await fetchEvent(entry,controller.signal);
+    if(selected!==entry||detailController!==controller)return;
     detailEntry=entry;detailRow=response.row;
     $('details').textContent=JSON.stringify(detailRow,null,2);$('payloadStatus').textContent=response.detailsTruncated?'Bounded preview':'Preview ready';$('copy').disabled=false
   }catch(error){
-    if(error.name==='AbortError')return;
+    if(error.name==='AbortError'||selected!==entry||detailController!==controller)return;
     $('payloadStatus').textContent='Unable to load';$('details').textContent=error.message
-  }
+  }finally{if(detailController===controller)detailController=null}
 }
 function selectEntry(entry,scroll,fromFocus=false){
   const index=displayRows.findIndex(row=>row.entry_id===entry);
   if(index<0){focusOrLoad(entry);return}
   if(!fromFocus){invalidateFocus();invalidateEarlier()}
   const previousRow=rows.querySelector('.selected');
-  if(selected!==entry){copyController?.abort();copyController=null}
+  const selectionChanged=selected!==entry;
+  if(selectionChanged){
+    copyController?.abort();copyController=null;detailController?.abort();detailController=null;detailEntry=null;detailRow=null;
+    $('payload').open=false;$('details').textContent='';$('payloadStatus').textContent='Expand to load';$('copy').disabled=true
+  }
   selected=entry;pauseFollow();history.replaceState(null,'','#'+encodeURIComponent(entry));
-  if(detailEntry!==entry){detailController?.abort();detailEntry=null;detailRow=null}
   if(scroll){
     ledger.scrollTop=Math.max(0,index*ROW_HEIGHT-ledger.clientHeight/2);
     renderLedger()
@@ -714,8 +721,9 @@ async function poll(){
       if(fresh&&index>=0&&JSON.stringify(windowRows[index])!==JSON.stringify(fresh)){
         windowRows[index]=fresh;
         renderRows=true;
-        detailController?.abort();detailController=null;detailEntry=null;detailRow=null;
-        showSummary(fresh)
+        const refreshDetail=$('payload').open&&detailEntry===selected&&detailRow&&detailController==null;
+        showSummary(fresh);
+        if(refreshDetail)loadDetail(selected,true)
       }
     }
     renderData(data,follow,renderRows);setHealth('Live','--green')

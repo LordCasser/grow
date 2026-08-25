@@ -3938,6 +3938,17 @@ mod tests {
     }
 
     #[test]
+    fn page_keeps_detail_disclosure_owned_by_the_selected_entry() {
+        assert!(PAGE.contains("items=items.map(row=>({...row}));"));
+        assert!(PAGE.contains("const selectionChanged=selected!==entry;"));
+        assert!(PAGE.contains("else if(!$('payload').open)"));
+        assert!(PAGE.contains("copyController==null&&detailController==null"));
+        assert!(PAGE.contains("if(refreshDetail)loadDetail(selected,true)"));
+        assert!(PAGE.contains("height:clamp(180px,42dvh,520px)"));
+        assert!(PAGE.contains("overscroll-behavior:contain"));
+    }
+
+    #[test]
     fn four_dimension_filters_intersect() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("timeline.jsonl");
