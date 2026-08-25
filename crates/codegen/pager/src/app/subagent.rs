@@ -587,7 +587,7 @@ mod tests {
     fn make_min_child_view() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let session = {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 AgentId(0),
                 tx,
                 Some(acp::SessionId::new(Arc::from("child"))),

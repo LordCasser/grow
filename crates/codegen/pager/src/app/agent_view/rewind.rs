@@ -187,7 +187,7 @@ mod sync_rewind_anchor_to_picker_tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
             {
-                let mut session = AgentSession::new(
+                let session = AgentSession::new(
                     AgentId(0),
                     tx,
                     None,

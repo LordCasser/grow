@@ -333,7 +333,7 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
 fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     let mut agent = AgentView::new(
         {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 id,
                 app.acp_tx.clone(),
                 Some("placeholder".into()),
@@ -453,7 +453,7 @@ fn two_agent_app_with_bg_task() -> AppView {
     let id1 = AgentId(1);
     let mut agent1 = AgentView::new(
         {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 id1,
                 app.acp_tx.clone(),
                 Some(acp::SessionId::new("sess-B")),

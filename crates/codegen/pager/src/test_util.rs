@@ -7,7 +7,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
     use crate::app::agent::{AgentId, AgentSession};
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let session = {
-        let mut session = AgentSession::new(
+        let session = AgentSession::new(
             AgentId(0),
             tx,
             session_id.map(agent_client_protocol::SessionId::new),

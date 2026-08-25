@@ -1762,7 +1762,7 @@ mod tests {
             models.set_current(acp::ModelId::new(std::sync::Arc::from(m)), None);
         }
         let session = {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 AgentId(0),
                 tx,
                 Some(acp::SessionId::new("test-session")),

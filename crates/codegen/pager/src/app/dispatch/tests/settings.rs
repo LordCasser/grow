@@ -1514,7 +1514,7 @@ fn set_simple_mode_propagates_to_every_agent() {
     let id_b = AgentId(1);
     let mut agent_b = AgentView::new(
         {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 id_b,
                 app.acp_tx.clone(),
                 Some("test-session-b".into()),

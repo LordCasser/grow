@@ -4085,7 +4085,7 @@ pub(crate) mod tests {
         sid: &str,
     ) -> AgentSession {
         {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 id,
                 app.acp_tx.clone(),
                 Some(sid.to_string().into()),
@@ -4517,7 +4517,7 @@ pub(crate) mod tests {
     /// Build an idle subagent child `AgentView` for child gate↔tick symmetry tests.
     fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         let session = {
-            let mut session = AgentSession::new(
+            let session = AgentSession::new(
                 super::super::agent::AgentId(id_n),
                 app.acp_tx.clone(),
                 Some(sid.to_string().into()),

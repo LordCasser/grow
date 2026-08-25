@@ -13,7 +13,7 @@ use shell::extensions::notification::SessionUpdate as GrowSessionUpdate;
 pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     {
-        let mut session = AgentSession::new(
+        let session = AgentSession::new(
             AgentId(0),
             tx,
             session_id.map(acp::SessionId::new),
