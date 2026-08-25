@@ -459,41 +459,21 @@ fn handle_session_notification_inner(
                 &agent.session.cwd,
                 agent.subagent_sessions.get(&child_session_id),
             );
-            let child_session = AgentSession {
-                id: AgentId(0),
-                acp_tx: agent.session.acp_tx.clone(),
-                session_id: Some(acp::SessionId::new(child_session_id.clone())),
-                models: agent.session.models.clone(),
-                state: AgentState::TurnRunning,
-                tracker: AcpUpdateTracker::new(),
-                cwd: effective_child_cwd,
-                is_worktree: effective_is_worktree,
-                forked_from: None,
-                pending_prompts: std::collections::VecDeque::new(),
-                next_queue_id: 0,
-                permission_mode: effective_permission_mode
-                    .as_deref()
-                    .map(shell::util::config::parse_permission_mode_canonical)
-                    .unwrap_or(shell::util::config::PermissionMode::Ask),
-                prompt_history: Vec::new(),
-                prompt_history_loading: false,
-                loading_replay: false,
-                restore_degree: None,
-                rate_limited: false,
-                model_incompatible: false,
-                bg_tasks: std::collections::BTreeMap::new(),
-                bg_tool_call_to_task: std::collections::HashMap::new(),
-                scheduled_tasks: std::collections::HashMap::new(),
-                available_commands: Vec::new(),
-                available_commands_generation: 0,
-                available_tools: None,
-                model_switch_pending: false,
-                user_model_preference: None,
-                deferred_model_switch: None,
-                in_flight_prompt: None,
-                compact_held_prompt: None,
-                current_prompt_id: None,
-                created_via_new: false,
+            let child_session = {
+                let mut session = AgentSession::new(
+                    AgentId(0),
+                    agent.session.acp_tx.clone(),
+                    Some(acp::SessionId::new(child_session_id.clone())),
+                    agent.session.models.clone(),
+                    effective_child_cwd,
+                    effective_permission_mode
+                        .as_deref()
+                        .map(shell::util::config::parse_permission_mode_canonical)
+                        .unwrap_or(shell::util::config::PermissionMode::Ask),
+                );
+                session.state = AgentState::TurnRunning;
+                session.set_worktree(effective_is_worktree);
+                session
             };
             let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
             child_scrollback.set_appearance(agent.scrollback.appearance().clone());

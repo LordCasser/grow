@@ -619,6 +619,71 @@ pub struct ChipElement {
 const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
 const DEEP_RESEARCH_COMMAND_NAME: &str = "deep-research";
 impl AgentSession {
+    /// Construct a session with the state shared by every lifecycle entry point.
+    ///
+    /// Lifecycle-specific facts (fork ancestry, replay, worktree membership,
+    /// and bootstrap metadata) are applied by the named methods or direct
+    /// domain updates at the call site after construction.
+    pub(crate) fn new(
+        id: AgentId,
+        acp_tx: AcpAgentTx,
+        session_id: Option<acp::SessionId>,
+        models: ModelState,
+        cwd: PathBuf,
+        permission_mode: shell::util::config::PermissionMode,
+    ) -> Self {
+        Self {
+            id,
+            acp_tx,
+            session_id,
+            models,
+            state: AgentState::Idle,
+            cwd,
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: VecDeque::new(),
+            next_queue_id: 0,
+            permission_mode,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            tracker: AcpUpdateTracker::new(),
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: BTreeMap::new(),
+            bg_tool_call_to_task: HashMap::new(),
+            scheduled_tasks: HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+        }
+    }
+
+    pub(crate) fn mark_forked_from(&mut self, parent_id: AgentId) {
+        self.forked_from = Some(parent_id);
+    }
+
+    pub(crate) fn set_worktree(&mut self, is_worktree: bool) {
+        self.is_worktree = is_worktree;
+    }
+
+    pub(crate) fn begin_replay(&mut self) {
+        self.prompt_history_loading = true;
+        self.loading_replay = true;
+    }
+
+    pub(crate) fn mark_created_via_new(&mut self) {
+        self.created_via_new = true;
+    }
+
     pub fn permission_mode(&self) -> shell::util::config::PermissionMode {
         self.permission_mode
     }
@@ -939,39 +1004,14 @@ mod tests {
     use super::*;
     fn test_session() -> AgentSession {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        AgentSession {
-            id: AgentId(0),
-            acp_tx: tx,
-            session_id: None,
-            models: ModelState::default(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: BTreeMap::new(),
-            bg_tool_call_to_task: HashMap::new(),
-            scheduled_tasks: HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
-        }
+        AgentSession::new(
+            AgentId(0),
+            tx,
+            None,
+            ModelState::default(),
+            PathBuf::from("/tmp"),
+            shell::util::config::PermissionMode::Ask,
+        )
     }
     #[test]
     fn workflows_available_true_when_workflow_tool_advertised() {

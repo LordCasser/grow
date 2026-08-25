@@ -1513,38 +1513,16 @@ fn set_simple_mode_propagates_to_every_agent() {
     let mut app = test_app_with_agent();
     let id_b = AgentId(1);
     let mut agent_b = AgentView::new(
-        AgentSession {
-            id: id_b,
-            acp_tx: app.acp_tx.clone(),
-            session_id: Some("test-session-b".into()),
-            models: ModelState::default(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        {
+            let mut session = AgentSession::new(
+                id_b,
+                app.acp_tx.clone(),
+                Some("test-session-b".into()),
+                ModelState::default(),
+                PathBuf::from("/tmp"),
+                shell::util::config::PermissionMode::Ask,
+            );
+            session
         },
         ScrollbackState::new(),
     );

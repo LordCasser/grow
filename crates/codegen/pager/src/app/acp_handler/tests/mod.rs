@@ -1,7 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::acp::model_state::ModelState;
-use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::agent::{AgentId, AgentSession, AgentState, InFlightPrompt};
 use crate::app::agent_view::AgentView;
 use crate::scrollback::entry::EntryId;
@@ -13,38 +12,16 @@ use shell::extensions::notification::RetryState;
 use shell::extensions::notification::SessionUpdate as GrowSessionUpdate;
 pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    AgentSession {
-        id: AgentId(0),
-        acp_tx: tx,
-        session_id: session_id.map(acp::SessionId::new),
-        models: ModelState::default(),
-        state: AgentState::Idle,
-        tracker: AcpUpdateTracker::new(),
-        cwd: PathBuf::from("/tmp"),
-        is_worktree: false,
-        forked_from: None,
-        pending_prompts: std::collections::VecDeque::new(),
-        next_queue_id: 0,
-        permission_mode: shell::util::config::PermissionMode::Ask,
-        prompt_history: Vec::new(),
-        prompt_history_loading: false,
-        loading_replay: false,
-        restore_degree: None,
-        rate_limited: false,
-        model_incompatible: false,
-        available_commands: Vec::new(),
-        available_commands_generation: 0,
-        available_tools: None,
-        model_switch_pending: false,
-        user_model_preference: None,
-        deferred_model_switch: None,
-        bg_tasks: std::collections::BTreeMap::new(),
-        bg_tool_call_to_task: std::collections::HashMap::new(),
-        scheduled_tasks: std::collections::HashMap::new(),
-        in_flight_prompt: None,
-        compact_held_prompt: None,
-        current_prompt_id: None,
-        created_via_new: false,
+    {
+        let mut session = AgentSession::new(
+            AgentId(0),
+            tx,
+            session_id.map(acp::SessionId::new),
+            ModelState::default(),
+            PathBuf::from("/tmp"),
+            shell::util::config::PermissionMode::Ask,
+        );
+        session
     }
 }
 pub(super) fn make_agent(session_id: Option<&str>) -> AgentView {

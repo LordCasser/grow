@@ -2257,38 +2257,17 @@ pub(crate) mod test_fixtures {
     }
     pub fn make_running_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut session = AgentSession {
-            id: AgentId(0),
-            acp_tx: tx,
-            session_id: Some(acp::SessionId::new("test-session")),
-            models: ModelState::default(),
-            state: AgentState::TurnRunning,
-            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        let mut session = {
+            let mut session = AgentSession::new(
+                AgentId(0),
+                tx,
+                Some(acp::SessionId::new("test-session")),
+                ModelState::default(),
+                std::path::PathBuf::from("/tmp"),
+                shell::util::config::PermissionMode::Ask,
+            );
+            session.state = AgentState::TurnRunning;
+            session
         };
         session.enqueue_prompt("local one".to_string());
         let mut agent = AgentView::new(session, ScrollbackState::new());
@@ -2315,38 +2294,16 @@ pub(crate) mod test_fixtures {
     pub fn make_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
-            AgentSession {
-                id: AgentId(0),
-                acp_tx: tx,
-                session_id: None,
-                models: ModelState::default(),
-                state: AgentState::Idle,
-                tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-                cwd: std::path::PathBuf::from("/tmp"),
-                is_worktree: false,
-                forked_from: None,
-                pending_prompts: std::collections::VecDeque::new(),
-                next_queue_id: 0,
-                permission_mode: shell::util::config::PermissionMode::Ask,
-                prompt_history: Vec::new(),
-                prompt_history_loading: false,
-                loading_replay: false,
-                restore_degree: None,
-                rate_limited: false,
-                model_incompatible: false,
-                available_commands: Vec::new(),
-                available_commands_generation: 0,
-                available_tools: None,
-                model_switch_pending: false,
-                user_model_preference: None,
-                deferred_model_switch: None,
-                bg_tasks: std::collections::BTreeMap::new(),
-                bg_tool_call_to_task: std::collections::HashMap::new(),
-                scheduled_tasks: std::collections::HashMap::new(),
-                in_flight_prompt: None,
-                compact_held_prompt: None,
-                current_prompt_id: None,
-                created_via_new: false,
+            {
+                let mut session = AgentSession::new(
+                    AgentId(0),
+                    tx,
+                    None,
+                    ModelState::default(),
+                    std::path::PathBuf::from("/tmp"),
+                    shell::util::config::PermissionMode::Ask,
+                );
+                session
             },
             ScrollbackState::new(),
         )
@@ -3059,39 +3016,14 @@ pub(crate) mod test_fixtures {
 pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AgentView::new(
-        crate::app::agent::AgentSession {
-            id: crate::app::agent::AgentId(0),
-            acp_tx: tx,
-            session_id: session_id.map(agent_client_protocol::SessionId::new),
-            models: crate::acp::model_state::ModelState::default(),
-            state: crate::app::agent::AgentState::Idle,
-            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
+        AgentSession::new(
+            crate::app::agent::AgentId(0),
+            tx,
+            session_id.map(agent_client_protocol::SessionId::new),
+            crate::acp::model_state::ModelState::default(),
             cwd,
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
-        },
+            shell::util::config::PermissionMode::Ask,
+        ),
         crate::scrollback::state::ScrollbackState::new(),
     )
 }

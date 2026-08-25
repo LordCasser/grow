@@ -20,7 +20,6 @@ use workspace::permission::bash_command_splitting::BashCommandHighlights;
 use super::agent_view::{AgentPane, AgentView, InputMode};
 use super::app_view::{ActiveView, AppView};
 use crate::acp::meta::NotificationMeta;
-use crate::acp::tracker::AcpUpdateTracker;
 use crate::acp::tracker::TurnActivity;
 use crate::app::agent::{
     AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayState,

@@ -41,9 +41,8 @@ use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
-use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
-use crate::app::agent::{AgentId, AgentSession, AgentState};
+use crate::app::agent::{AgentId, AgentSession};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{ActiveView, AppView, TrustState, WelcomeAnnouncementState};
 use crate::scrollback::block::RenderBlock;
@@ -183,38 +182,17 @@ fn test_app() -> AppView {
 /// `deferred_model_switch` is pulled from the `AppView`'s CLI
 /// overrides for parity with `dispatch_new_session_inner`.
 fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSession {
-    AgentSession {
-        id,
-        acp_tx: app.acp_tx.clone(),
-        session_id: Some(sid.to_string().into()),
-        models: ModelState::default(),
-        state: AgentState::Idle,
-        tracker: AcpUpdateTracker::new(),
-        cwd: PathBuf::from("/tmp"),
-        is_worktree: false,
-        forked_from: None,
-        pending_prompts: std::collections::VecDeque::new(),
-        next_queue_id: 0,
-        permission_mode: shell::util::config::PermissionMode::Ask,
-        prompt_history: Vec::new(),
-        prompt_history_loading: false,
-        loading_replay: false,
-        restore_degree: None,
-        rate_limited: false,
-        model_incompatible: false,
-        available_commands: Vec::new(),
-        available_commands_generation: 0,
-        available_tools: None,
-        model_switch_pending: false,
-        user_model_preference: None,
-        deferred_model_switch: app.deferred_model_switch_from_cli(),
-        bg_tasks: std::collections::BTreeMap::new(),
-        bg_tool_call_to_task: std::collections::HashMap::new(),
-        scheduled_tasks: std::collections::HashMap::new(),
-        in_flight_prompt: None,
-        compact_held_prompt: None,
-        current_prompt_id: None,
-        created_via_new: false,
+    {
+        let mut session = AgentSession::new(
+            id,
+            app.acp_tx.clone(),
+            Some(sid.to_string().into()),
+            ModelState::default(),
+            PathBuf::from("/tmp"),
+            shell::util::config::PermissionMode::Ask,
+        );
+        session.deferred_model_switch = app.deferred_model_switch_from_cli();
+        session
     }
 }
 pub(super) fn test_app_with_agent() -> AppView {
@@ -354,38 +332,16 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
 /// either field.
 fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     let mut agent = AgentView::new(
-        AgentSession {
-            id,
-            acp_tx: app.acp_tx.clone(),
-            session_id: Some("placeholder".into()),
-            models: ModelState::default(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        {
+            let mut session = AgentSession::new(
+                id,
+                app.acp_tx.clone(),
+                Some("placeholder".into()),
+                ModelState::default(),
+                PathBuf::from("/tmp"),
+                shell::util::config::PermissionMode::Ask,
+            );
+            session
         },
         ScrollbackState::new(),
     );
@@ -496,38 +452,16 @@ fn two_agent_app_with_bg_task() -> AppView {
     app.agents[&AgentId(0)].session.session_id = Some(acp::SessionId::new("sess-A"));
     let id1 = AgentId(1);
     let mut agent1 = AgentView::new(
-        AgentSession {
-            id: id1,
-            acp_tx: app.acp_tx.clone(),
-            session_id: Some(acp::SessionId::new("sess-B")),
-            models: ModelState::default(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        {
+            let mut session = AgentSession::new(
+                id1,
+                app.acp_tx.clone(),
+                Some(acp::SessionId::new("sess-B")),
+                ModelState::default(),
+                PathBuf::from("/tmp"),
+                shell::util::config::PermissionMode::Ask,
+            );
+            session
         },
         ScrollbackState::new(),
     );

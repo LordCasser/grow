@@ -1,8 +1,7 @@
 //! Fork and project-selection dispatchers and fork placeholder builders.
 use super::lifecycle::dispatch_new_session_inner_with_id;
-use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::Effect;
-use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
+use crate::app::agent::{AgentCommand, AgentId, AgentSession};
 use crate::app::agent_view::{AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::{SwitchCause, switch_to_agent};
@@ -369,38 +368,20 @@ fn build_fork_placeholder(
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
     let mut agent = AgentView::new(
-        AgentSession {
-            id: new_id,
-            acp_tx: app.acp_tx.clone(),
-            session_id: None,
-            models: app.models.clone(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: parent_cwd.to_path_buf(),
-            is_worktree: false,
-            forked_from: Some(parent_id),
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: inherit_permission_mode(app),
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: app.bootstrap_acp_commands.clone(),
-            available_commands_generation: 1,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: app.deferred_model_switch_from_cli(),
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        {
+            let mut session = AgentSession::new(
+                new_id,
+                app.acp_tx.clone(),
+                None,
+                app.models.clone(),
+                parent_cwd.to_path_buf(),
+                inherit_permission_mode(app),
+            );
+            session.mark_forked_from(parent_id);
+            session.available_commands = app.bootstrap_acp_commands.clone();
+            session.available_commands_generation = 1;
+            session.deferred_model_switch = app.deferred_model_switch_from_cli();
+            session
         },
         scrollback,
     );

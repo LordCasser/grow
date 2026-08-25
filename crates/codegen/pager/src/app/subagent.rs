@@ -535,13 +535,11 @@ mod tests {
     use super::*;
     use crate::acp::meta::NotificationMeta;
     use crate::acp::model_state::ModelState;
-    use crate::acp::tracker::AcpUpdateTracker;
-    use crate::app::agent::{AgentId, AgentSession, AgentState};
+    use crate::app::agent::{AgentId, AgentSession};
     use crate::app::agent_view::AgentView;
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Instant;
@@ -588,38 +586,16 @@ mod tests {
     }
     fn make_min_child_view() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let session = AgentSession {
-            id: AgentId(0),
-            acp_tx: tx,
-            session_id: Some(acp::SessionId::new(Arc::from("child"))),
-            models: ModelState::default(),
-            state: AgentState::Idle,
-            tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
-            is_worktree: false,
-            forked_from: None,
-            pending_prompts: VecDeque::new(),
-            next_queue_id: 0,
-            permission_mode: shell::util::config::PermissionMode::Ask,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            bg_tasks: BTreeMap::new(),
-            bg_tool_call_to_task: HashMap::new(),
-            scheduled_tasks: HashMap::new(),
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
+        let session = {
+            let mut session = AgentSession::new(
+                AgentId(0),
+                tx,
+                Some(acp::SessionId::new(Arc::from("child"))),
+                ModelState::default(),
+                PathBuf::from("/tmp"),
+                shell::util::config::PermissionMode::Ask,
+            );
+            session
         };
         AgentView::new(session, ScrollbackState::new())
     }

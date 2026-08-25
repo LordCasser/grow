@@ -674,44 +674,22 @@ mod prompt_flag_tests {
 mod plan_chip_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession, AgentState};
+    use crate::app::agent::{AgentId, AgentSession};
     use crate::appearance::AppearanceConfig;
     use crate::scrollback::state::ScrollbackState;
     fn make_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
-            AgentSession {
-                id: AgentId(0),
-                acp_tx: tx,
-                session_id: None,
-                models: ModelState::default(),
-                state: AgentState::Idle,
-                tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-                cwd: std::path::PathBuf::from("/tmp"),
-                is_worktree: false,
-                forked_from: None,
-                pending_prompts: std::collections::VecDeque::new(),
-                next_queue_id: 0,
-                permission_mode: shell::util::config::PermissionMode::Ask,
-                prompt_history: Vec::new(),
-                prompt_history_loading: false,
-                loading_replay: false,
-                restore_degree: None,
-                rate_limited: false,
-                model_incompatible: false,
-                available_commands: Vec::new(),
-                available_commands_generation: 0,
-                available_tools: None,
-                model_switch_pending: false,
-                user_model_preference: None,
-                deferred_model_switch: None,
-                bg_tasks: std::collections::BTreeMap::new(),
-                bg_tool_call_to_task: std::collections::HashMap::new(),
-                scheduled_tasks: std::collections::HashMap::new(),
-                in_flight_prompt: None,
-                compact_held_prompt: None,
-                current_prompt_id: None,
-                created_via_new: false,
+            {
+                let mut session = AgentSession::new(
+                    AgentId(0),
+                    tx,
+                    None,
+                    ModelState::default(),
+                    std::path::PathBuf::from("/tmp"),
+                    shell::util::config::PermissionMode::Ask,
+                );
+                session
             },
             ScrollbackState::new(),
         )
