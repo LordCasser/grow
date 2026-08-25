@@ -462,9 +462,7 @@ async fn authenticate(
     Ok(())
 }
 
-fn build_headless_init_request(
-    rules: Option<&str>,
-) -> acp::InitializeRequest {
+fn build_headless_init_request(rules: Option<&str>) -> acp::InitializeRequest {
     let mut meta = serde_json::json!({
         "clientType": HEADLESS_CLIENT_TYPE,
         "clientVersion": PAGER_CLIENT_VERSION,

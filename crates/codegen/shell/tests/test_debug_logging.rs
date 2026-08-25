@@ -83,15 +83,22 @@ fn debug_cmd(
         .set_env("USERPROFILE", home)
         .set_env("GROW_HOME", home.join(".grow"));
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hi", "--permission-mode", "always-approve", "--output-format", "json"])
-        .args(extra)
-        .arg("--cwd")
-        .arg(workdir)
-        .current_dir(workdir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args([
+        "-p",
+        "say hi",
+        "--permission-mode",
+        "always-approve",
+        "--output-format",
+        "json",
+    ])
+    .args(extra)
+    .arg("--cwd")
+    .arg(workdir)
+    .current_dir(workdir)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
     sandbox.apply_to_tokio_command(&mut cmd);
     (cmd, sandbox)
 }

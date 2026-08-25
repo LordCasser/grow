@@ -2255,9 +2255,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
         std::fs::create_dir(&state_path).unwrap();
-        let persistence = Arc::new(
-            crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap(),
-        );
+        let persistence =
+            Arc::new(crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap());
         let mut task = ScheduledTask::new(300, "retry".into(), true, true);
         task.id = "retry".into();
         let (handle, cancel, mut notifications, resources) =
@@ -2295,10 +2294,8 @@ mod tests {
         assert_eq!(removed.revision, 1);
         delivery.acknowledgement.unwrap().send(Ok(())).unwrap();
         assert!(pending.await.unwrap().unwrap());
-        let persisted: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&state_path).unwrap(),
-        )
-        .unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
         assert_eq!(persisted["state"]["grow_build.WebCitation"]["counter"], 7);
         assert_eq!(
             persisted["state"]["grow_build.Scheduler"]["tasks"],
@@ -2356,9 +2353,8 @@ mod tests {
         let mut task = ScheduledTask::new(300, "stuck".into(), true, true);
         task.id = "stuck".into();
         let (mut actor, _) = make_boundary_actor(vec![task], 0);
-        actor.resources_persistence = Arc::new(
-            crate::persistence::ResourcesPersistence::local(state_path).unwrap(),
-        );
+        actor.resources_persistence =
+            Arc::new(crate::persistence::ResourcesPersistence::local(state_path).unwrap());
         let (plain, mut notifications) = ToolNotificationHandle::channel();
         let (durable, durable_rx) = ToolNotificationHandle::acknowledged_channel();
         actor.notification_handle = ToolNotificationHandle::tee(vec![plain, durable]);
@@ -2615,9 +2611,8 @@ mod tests {
         let mut actor = make_boundary_actor(tasks, 0).0;
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        actor.resources_persistence = Arc::new(
-            crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap(),
-        );
+        actor.resources_persistence =
+            Arc::new(crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap());
         let (notification_handle, mut notifications) =
             ToolNotificationHandle::acknowledged_channel();
         actor.notification_handle = notification_handle;

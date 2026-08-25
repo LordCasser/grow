@@ -425,12 +425,7 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
             let snapshot = agent
-                .query_subagent(
-                    &req.session_id,
-                    &req.subagent_id,
-                    block,
-                    Some(timeout_ms),
-                )
+                .query_subagent(&req.session_id, &req.subagent_id, block, Some(timeout_ms))
                 .await;
             let inspection = agent
                 .inspect_subagent(&req.session_id, &req.subagent_id)

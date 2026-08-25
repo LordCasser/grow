@@ -212,10 +212,14 @@ mod tests {
         std::fs::write(artifact_dir.join("unrelated.file"), b"leave me").unwrap();
 
         let mut candidates = Vec::new();
-        visit_payload_hash_batches(&session, || false, |batch| {
-            candidates.extend(batch);
-            Ok(())
-        })
+        visit_payload_hash_batches(
+            &session,
+            || false,
+            |batch| {
+                candidates.extend(batch);
+                Ok(())
+            },
+        )
         .unwrap();
         candidates.retain(|hash| hash != &retained.blake3);
         assert_eq!(remove_payload_hashes(&session, &candidates).unwrap(), 1);
@@ -254,15 +258,22 @@ mod tests {
         }
 
         let mut batches = Vec::new();
-        visit_payload_hash_batches(&session, || false, |batch| {
-            assert!(batch.len() <= ORPHAN_SWEEP_BATCH_SIZE);
-            batches.push(batch);
-            Ok(())
-        })
+        visit_payload_hash_batches(
+            &session,
+            || false,
+            |batch| {
+                assert!(batch.len() <= ORPHAN_SWEEP_BATCH_SIZE);
+                batches.push(batch);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(batches.len(), 2);
         assert_eq!(
-            batches.concat().into_iter().collect::<std::collections::BTreeSet<_>>(),
+            batches
+                .concat()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
             expected
         );
     }

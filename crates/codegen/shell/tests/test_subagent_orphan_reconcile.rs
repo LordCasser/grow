@@ -68,12 +68,10 @@ async fn resume_reconciles_orphaned_running_subagent() {
         let grow_home = shared_sandbox.grow_home().to_path_buf();
         let session_dir = locate_session_dir(&grow_home, session_id.0.as_ref());
         let sub_id = "sa-orphan";
-        let mut timeline = shell::session::storage::load_timeline_by_id_at(
-            session_id.0.as_ref(),
-            &grow_home,
-        )
-        .expect("read parent Timeline")
-        .expect("parent session exists");
+        let mut timeline =
+            shell::session::storage::load_timeline_by_id_at(session_id.0.as_ref(), &grow_home)
+                .expect("read parent Timeline")
+                .expect("parent session exists");
         let spawn = timeline
             .record(chat_state::TimelineEventKind::Subagent(
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
@@ -115,12 +113,10 @@ async fn resume_reconciles_orphaned_running_subagent() {
             .load_session_with_timeout(&session_id, workdir.workspace())
             .await;
 
-        let reread = shell::session::storage::load_timeline_by_id_at(
-            session_id.0.as_ref(),
-            &grow_home,
-        )
-        .expect("read reconciled Timeline")
-        .expect("parent session exists");
+        let reread =
+            shell::session::storage::load_timeline_by_id_at(session_id.0.as_ref(), &grow_home)
+                .expect("read reconciled Timeline")
+                .expect("parent session exists");
         assert!(
             reread.events().iter().any(|event| matches!(
                 &event.kind,

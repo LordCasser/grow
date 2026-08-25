@@ -914,11 +914,7 @@ pub fn model_image_input_key_from_parts(
         endpoint.update(b"=");
         endpoint.update(value.as_bytes());
     }
-    ModelImageInputKey::new(
-        model,
-        api_backend,
-        endpoint.finalize().to_hex().to_string(),
-    )
+    ModelImageInputKey::new(model, api_backend, endpoint.finalize().to_hex().to_string())
 }
 
 // ============ Responses API wrapper ============

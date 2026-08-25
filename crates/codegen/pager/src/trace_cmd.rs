@@ -32,7 +32,9 @@ pub async fn run(args: TraceArgs) -> Result<()> {
 
 const MAX_TRACE_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 
-pub fn build_session_tar(snapshot: shell::session::storage::SessionTraceSnapshot) -> Result<Vec<u8>> {
+pub fn build_session_tar(
+    snapshot: shell::session::storage::SessionTraceSnapshot,
+) -> Result<Vec<u8>> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 

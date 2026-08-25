@@ -47,14 +47,21 @@ stream_tool_calls = true
     .expect("write config.toml");
 
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hi", "--permission-mode", "always-approve", "--output-format", "json"])
-        .arg("--cwd")
-        .arg(workdir.workspace())
-        .current_dir(workdir.workspace())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args([
+        "-p",
+        "say hi",
+        "--permission-mode",
+        "always-approve",
+        "--output-format",
+        "json",
+    ])
+    .arg("--cwd")
+    .arg(workdir.workspace())
+    .current_dir(workdir.workspace())
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
 
     let result = run_headless_in_sandbox(cmd, sandbox).await;
     assert_headless_success(&result, "global models config e2e", Some(&server));

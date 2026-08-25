@@ -35,13 +35,16 @@ impl LocalResourcesStateStore {
         let parent = state_path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
         })?;
-        let name = state_path.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no file name")
-        })?.to_os_string();
-        let directory = cap_std::fs::Dir::open_ambient_dir(
-            parent,
-            cap_std::ambient_authority(),
-        )?;
+        let name = state_path
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "resources state has no file name",
+                )
+            })?
+            .to_os_string();
+        let directory = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
         Ok(Self {
             display_path: state_path,
             directory,
@@ -757,15 +760,19 @@ mod tests {
         let state_path = dir.path().join("resources_state.json");
         std::fs::create_dir(&state_path).unwrap();
         let persistence = ResourcesPersistence::local(state_path).unwrap();
-        assert!(persistence
-            .save_and_flush(serde_json::json!({"state": {}}))
-            .await
-            .is_err());
         assert!(
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            persistence
+                .save_and_flush(serde_json::json!({"state": {}}))
+                .await
+                .is_err()
         );
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -802,10 +809,12 @@ mod tests {
 
         std::fs::remove_file(moved.join("resources_state.json")).unwrap();
         symlink(external.join("secret"), moved.join("resources_state.json")).unwrap();
-        assert!(persistence
-            .save_and_flush(serde_json::json!({"state": {}}))
-            .await
-            .is_err());
+        assert!(
+            persistence
+                .save_and_flush(serde_json::json!({"state": {}}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

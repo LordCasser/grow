@@ -78,7 +78,10 @@ impl SessionActor {
             Err(error) => tracing::warn!(%error, "notification payload enumerator failed"),
         }
         if removed_total > 0 {
-            tracing::info!(removed = removed_total, "reclaimed orphaned notification payloads");
+            tracing::info!(
+                removed = removed_total,
+                "reclaimed orphaned notification payloads"
+            );
         }
     }
 

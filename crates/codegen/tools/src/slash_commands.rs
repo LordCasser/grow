@@ -72,8 +72,9 @@ pub const GOAL_COMMAND_NAME: &str = "goal";
 
 /// Bare subcommand tokens reserved for goal lifecycle control rather than
 /// being treated as an objective, matching the shell's /goal grammar.
-pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] =
-    &["status", "pause", "restart", "clear", "edit", "budget", "set"];
+pub const GOAL_RESERVED_SUBCOMMANDS: &[&str] = &[
+    "status", "pause", "restart", "clear", "edit", "budget", "set",
+];
 
 pub fn goal_usage_message() -> &'static str {
     "Usage: /goal <objective>\n\

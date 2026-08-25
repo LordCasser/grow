@@ -13,7 +13,12 @@ async fn plan_revise_empty_enter_does_not_approve() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--permission-mode", "always-approve", "--trust", "--no-leader"],
+        &[
+            "--permission-mode",
+            "always-approve",
+            "--trust",
+            "--no-leader",
+        ],
         &[],
         Some(content.home()),
     )

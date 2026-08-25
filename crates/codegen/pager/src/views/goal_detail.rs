@@ -124,7 +124,11 @@ pub(crate) fn render_goal_detail(
     Span::styled(
         close_text,
         Style::default()
-            .fg(if close_hovered { theme.text_primary } else { theme.gray })
+            .fg(if close_hovered {
+                theme.text_primary
+            } else {
+                theme.gray
+            })
             .bg(theme.bg_base)
             .add_modifier(close_hovered.then_some(Modifier::BOLD).unwrap_or_default()),
     )
@@ -145,7 +149,9 @@ pub(crate) fn render_goal_detail(
         Line::default(),
         Line::from(Span::styled(
             "Objective",
-            Style::default().fg(theme.text_primary).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD),
         )),
     ];
     lines.extend(wrapped_lines(
@@ -167,7 +173,10 @@ pub(crate) fn render_goal_detail(
         Style::default().fg(theme.gray),
     )));
     lines.push(Line::from(Span::styled(
-        format!("Elapsed  {}", format_elapsed(goal.live_elapsed_ms_at(frame_stamp.now()))),
+        format!(
+            "Elapsed  {}",
+            format_elapsed(goal.live_elapsed_ms_at(frame_stamp.now()))
+        ),
         Style::default().fg(theme.gray),
     )));
     lines.push(Line::from(Span::styled(
@@ -178,7 +187,9 @@ pub(crate) fn render_goal_detail(
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             "Status message",
-            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.extend(wrapped_lines(
             message,
@@ -194,9 +205,15 @@ pub(crate) fn render_goal_detail(
 
     let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
     renderer.scroll = renderer.scroll.min(max_scroll);
-    Paragraph::new(lines)
-        .scroll((renderer.scroll, 0))
-        .render(Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), inner.height), buf);
+    Paragraph::new(lines).scroll((renderer.scroll, 0)).render(
+        Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height,
+        ),
+        buf,
+    );
 
     Some(GoalDetailRenderOutput {
         area,

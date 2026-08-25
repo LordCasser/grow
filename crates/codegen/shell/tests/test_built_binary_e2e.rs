@@ -150,7 +150,12 @@ async fn test_headless_session_in_git_repo() {
         .await
         .expect("start mock server");
     let workdir = git_workdir();
-    let result = run_headless(&server, &["-p", "say hello", "--permission-mode", "always-approve"], workdir.workspace()).await;
+    let result = run_headless(
+        &server,
+        &["-p", "say hello", "--permission-mode", "always-approve"],
+        workdir.workspace(),
+    )
+    .await;
 
     assert_headless_success(&result, "grow -p in git repo", Some(&server));
     assert_no_crashes(&result.stderr);
@@ -177,7 +182,12 @@ async fn test_headless_session_in_non_git_dir() {
     let workdir = tempfile::tempdir().unwrap();
     std::fs::write(workdir.path().join("test.txt"), "test\n").unwrap();
 
-    let result = run_headless(&server, &["-p", "say hello", "--permission-mode", "always-approve"], workdir.path()).await;
+    let result = run_headless(
+        &server,
+        &["-p", "say hello", "--permission-mode", "always-approve"],
+        workdir.path(),
+    )
+    .await;
 
     assert_headless_success(&result, "grow -p in non-git dir", Some(&server));
     assert_no_crashes(&result.stderr);
@@ -195,7 +205,8 @@ async fn test_headless_tools_allowlist_keeps_enabled_web_fetch() {
         &[
             "-p",
             "say hello",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--tools",
             "read_file,grep,list_dir,web_fetch",
         ],
@@ -240,7 +251,8 @@ async fn test_headless_tools_allowlist_does_not_fail_open_for_disabled_web_fetch
         &[
             "-p",
             "say hello",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--tools",
             "read_file,web_fetch",
         ],
@@ -273,7 +285,14 @@ async fn test_headless_terminal_only_allowlist_is_foreground_only() {
 
     let result = run_headless(
         &server,
-        &["-p", "say hello", "--permission-mode", "always-approve", "--tools", "run_terminal_cmd"],
+        &[
+            "-p",
+            "say hello",
+            "--permission-mode",
+            "always-approve",
+            "--tools",
+            "run_terminal_cmd",
+        ],
         workdir.workspace(),
     )
     .await;
@@ -312,7 +331,8 @@ async fn test_headless_streaming_json_output() {
         &[
             "-p",
             "say hello",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--output-format",
             "streaming-json",
         ],
@@ -378,7 +398,8 @@ async fn test_headless_streaming_messages_json_output() {
         &[
             "-p",
             "say hello",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--output-format",
             "streaming-messages-json",
         ],
@@ -467,7 +488,8 @@ async fn test_headless_streaming_messages_json_carries_per_response_metadata() {
         &[
             "-p",
             "say hi",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             model,
             "--max-turns",
@@ -571,7 +593,8 @@ async fn test_headless_streaming_messages_json_carries_stop_sequence() {
         &[
             "-p",
             "emit the stop token",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             model,
             "--max-turns",
@@ -648,7 +671,8 @@ async fn test_headless_json_reports_server_cost() {
         &[
             "-p",
             "what is 2+2",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--max-turns",
@@ -700,7 +724,8 @@ async fn test_headless_json_reports_usage_on_max_turns() {
         &[
             "-p",
             "read the readme",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--max-turns",
@@ -728,7 +753,8 @@ async fn test_headless_streaming_json_usage() {
         &[
             "-p",
             "say hello",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--output-format",
@@ -824,7 +850,8 @@ async fn headless_json_schema_responses_uses_text_format() {
         &[
             "-p",
             "extract name and age",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             "grow-4.5",
             "--json-schema",
@@ -962,7 +989,8 @@ async fn headless_json_schema_messages_validates_text_when_tool_not_called() {
         &[
             "-p",
             "extract name and age",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             "messages-compatible-model",
             "--json-schema",
@@ -1009,7 +1037,8 @@ async fn headless_json_schema_messages_retries_on_schema_violation() {
         &[
             "-p",
             "extract name and age",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             "messages-compatible-model",
             "--json-schema",
@@ -1048,7 +1077,8 @@ async fn invalid_json_schema_disables_structured_output_and_surfaces_error() {
         &[
             "-p",
             "extract name and age",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             // Valid JSON object, but `pattern` is an invalid regex → schema
@@ -1691,7 +1721,8 @@ async fn test_headless_timeout_exit_kills_pending_background_task() {
         &[
             "-p",
             "start the server",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--background-wait-timeout",
             "1",
         ],
@@ -1732,7 +1763,8 @@ async fn test_headless_no_wait_exit_kills_background_task() {
         &[
             "-p",
             "start the server",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--no-wait-for-background",
         ],
         workdir.workspace(),
@@ -1796,7 +1828,8 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
         &[
             "-p",
             "start it",
-            "--permission-mode", "always-approve",
+            "--permission-mode",
+            "always-approve",
             "--background-wait-timeout",
             "30",
         ],

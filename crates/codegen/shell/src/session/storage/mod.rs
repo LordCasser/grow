@@ -343,13 +343,8 @@ impl ContainedDirectory {
         durable: bool,
     ) -> io::Result<()> {
         let name = Self::component(name)?;
-        if unsafe {
-            libc::unlinkat(
-                self.handle.as_raw_fd(),
-                name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        } == -1
+        if unsafe { libc::unlinkat(self.handle.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
+            == -1
         {
             return Err(io::Error::last_os_error());
         }
@@ -407,17 +402,17 @@ impl ContainedDirectory {
                 return Err(if error.raw_os_error() == Some(libc::EEXIST) {
                     io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        self.path.join(target.to_string_lossy().as_ref()).display().to_string(),
+                        self.path
+                            .join(target.to_string_lossy().as_ref())
+                            .display()
+                            .to_string(),
                     )
                 } else {
                     error
                 });
             }
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos"
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = (source, target);
             return Err(io::Error::new(
@@ -953,8 +948,8 @@ impl ContainedDirectory {
         use std::os::windows::io::AsRawHandle as _;
         use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
         use windows::Win32::Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
+            FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
         };
 
         Self::component(source)?;
@@ -970,7 +965,9 @@ impl ContainedDirectory {
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
             .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
+            })?;
         let words = byte_len.div_ceil(std::mem::size_of::<usize>());
         let mut buffer = vec![0usize; words];
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
@@ -979,9 +976,10 @@ impl ContainedDirectory {
                 ReplaceIfExists: false,
             };
             (*info).RootDirectory = HANDLE(parent_file.as_raw_handle());
-            (*info).FileNameLength = u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
-            })?;
+            (*info).FileNameLength =
+                u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
+                })?;
             std::ptr::copy_nonoverlapping(
                 target.as_ptr(),
                 (*info).FileName.as_mut_ptr(),
@@ -999,10 +997,7 @@ impl ContainedDirectory {
                 if error.code() == ERROR_ALREADY_EXISTS.to_hresult()
                     || error.code() == ERROR_FILE_EXISTS.to_hresult()
                 {
-                    io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        target_display,
-                    )
+                    io::Error::new(io::ErrorKind::AlreadyExists, target_display)
                 } else {
                     io::Error::other(error)
                 }
@@ -1512,14 +1507,12 @@ fn collect_session_trace_files(
                             ),
                         )
                     })?;
-                *total_bytes = total_bytes
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "session trace byte count overflow",
-                        )
-                    })?;
+                *total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "session trace byte count overflow",
+                    )
+                })?;
                 if *total_bytes > MAX_SESSION_TRACE_TOTAL_BYTES {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1649,12 +1642,7 @@ impl CommittedJsonlLines {
         description: &str,
         offset: u64,
     ) -> io::Result<Self> {
-        let mut lines = Self::from_file(
-            file,
-            label,
-            description.to_owned(),
-            MAX_JSONL_ENTRY_BYTES,
-        );
+        let mut lines = Self::from_file(file, label, description.to_owned(), MAX_JSONL_ENTRY_BYTES);
         lines.reader.seek(SeekFrom::Start(offset))?;
         lines.committed_position = offset;
         Ok(lines)
@@ -2700,11 +2688,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>>;
 
     /// Atomically replace the complete typed rewind projection.
-    async fn replace_rewind_points(
-        &self,
-        info: &Info,
-        points: &[RewindPoint],
-    ) -> io::Result<()>;
+    async fn replace_rewind_points(&self, info: &Info, points: &[RewindPoint]) -> io::Result<()>;
 
     async fn write_rewind_transaction(
         &self,
@@ -2731,7 +2715,6 @@ pub trait StorageAdapter: Send + Sync {
     /// cannot be redirected to a replacement session directory after identity
     /// validation.
     fn open_timeline_reader(&self, info: &Info) -> io::Result<TimelineLedgerReader>;
-
 }
 
 pub use jsonl::JsonlStorageAdapter;
@@ -2992,7 +2975,8 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(reader) = open_replay_updates_reader(session_id, &crate::util::grow_home::grow_home())?
+    let Some(reader) =
+        open_replay_updates_reader(session_id, &crate::util::grow_home::grow_home())?
     else {
         return Ok(None);
     };
@@ -3444,8 +3428,7 @@ mod tests {
         std::fs::write(root.path().join("source/source-marker"), b"source").unwrap();
         std::fs::write(root.path().join("target/target-marker"), b"target").unwrap();
         let directory =
-            ContainedDirectory::open(root.path(), Path::new(""), "rename fixture", false)
-                .unwrap();
+            ContainedDirectory::open(root.path(), Path::new(""), "rename fixture", false).unwrap();
 
         let error = directory
             .rename_child_no_replace(

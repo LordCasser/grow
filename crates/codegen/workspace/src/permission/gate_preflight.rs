@@ -133,11 +133,8 @@ mod tests {
 
         // Rule-match Ask in auto mode stays binding with its gate label — a
         // rule match never defers, even alongside a fail-closed floor.
-        let rule_match = GatePreflight::evaluate(
-            Some(&policy),
-            &bash("echo hi && git push origin main"),
-            cwd,
-        );
+        let rule_match =
+            GatePreflight::evaluate(Some(&policy), &bash("echo hi && git push origin main"), cwd);
         assert!(!rule_match.admits_auto_classifier());
         assert_eq!(
             rule_match.prompt_trigger(None),

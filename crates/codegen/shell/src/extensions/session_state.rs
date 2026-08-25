@@ -177,11 +177,7 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
             .ok_or_else(|| {
                 acp::Error::internal_error().data("existing session summary is not an object")
             })?;
-        sanitize_summary_for_host(
-            existing_summary,
-            &request.session_id,
-            &request.cwd,
-        );
+        sanitize_summary_for_host(existing_summary, &request.session_id, &request.cwd);
         let existing_summary = Summary::deserialize(&*existing_summary).map_err(|error| {
             acp::Error::internal_error().data(format!(
                 "existing session summary cannot be normalized: {error}"
@@ -205,12 +201,7 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
         .ensure_session_parent(&info)
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
     let target_name = info.id.to_string();
-    write_import(
-        &parent,
-        std::ffi::OsStr::new(&target_name),
-        &request.state,
-    )
-    .map_err(|error| {
+    write_import(&parent, std::ffi::OsStr::new(&target_name), &request.state).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             acp::Error::invalid_params().data(error.to_string())
         } else {
@@ -228,11 +219,7 @@ fn validate_import_state_columns(
         .filter(|column| {
             !matches!(
                 column.as_str(),
-                SUMMARY_COLUMN
-                    | TIMELINE_COLUMN
-                    | SIDEBANDS_COLUMN
-                    | BLOBS_COLUMN
-                    | UPDATES_COLUMN
+                SUMMARY_COLUMN | TIMELINE_COLUMN | SIDEBANDS_COLUMN | BLOBS_COLUMN | UPDATES_COLUMN
             )
         })
         .cloned()
@@ -377,11 +364,7 @@ fn read_entity_blobs(
                 "immutable blob path has no parent",
             )
         })?;
-        let directory = session.open_relative(
-            parent,
-            "session immutable blob directory",
-            false,
-        )?;
+        let directory = session.open_relative(parent, "session immutable blob directory", false)?;
         let file_name = relative.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -959,12 +942,8 @@ mod tests {
                 .ends_with("import-staging")
         }));
 
-        let error = write_import(
-            &parent,
-            std::ffi::OsStr::new("target-session"),
-            &state,
-        )
-        .unwrap_err();
+        let error =
+            write_import(&parent, std::ffi::OsStr::new("target-session"), &state).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read_to_string(dir.join(st::SUMMARY_FILE)).unwrap(),
@@ -1001,11 +980,7 @@ mod tests {
             (UPDATES_COLUMN.to_string(), json!([])),
         ]);
 
-        let error = write_import(
-            &parent,
-            std::ffi::OsStr::new("target-session"),
-            &state,
-        )
+        let error = write_import(&parent, std::ffi::OsStr::new("target-session"), &state)
             .expect_err("session import must not traverse a symlinked target");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(std::fs::read_dir(&outside).unwrap().next().is_none());

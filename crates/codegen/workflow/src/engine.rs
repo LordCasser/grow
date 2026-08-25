@@ -290,12 +290,8 @@ fn host_call<T>(
         Ok(Some(OperationReplay::Pending { operation_id })) => operation_id,
         Ok(None) => {
             let operation_id = uuid::Uuid::new_v4().to_string();
-            ctx.borrow_mut().begin_operation(
-                seq,
-                kind,
-                hash.clone(),
-                operation_id.clone(),
-            )?;
+            ctx.borrow_mut()
+                .begin_operation(seq, kind, hash.clone(), operation_id.clone())?;
             operation_id
         }
         Err(error) => return Err(journal_fatal(error)),
@@ -457,10 +453,7 @@ fn spawn_agent_call(ctx: &Rc<RefCell<Ctx>>, opts: AgentOpts) -> ScriptResult<Dyn
     let hash = request_hash("spawn_agent", &payload);
     let is_live = {
         let ctx = ctx.borrow();
-        match ctx
-            .journal
-            .replay_operation(ctx.seq, "spawn_agent", &hash)
-        {
+        match ctx.journal.replay_operation(ctx.seq, "spawn_agent", &hash) {
             Ok(Some(_)) => false,
             Ok(None) => true,
             Err(error) => return Err(journal_fatal(error)),
@@ -692,11 +685,11 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                                     .get_or_insert_with(|| TERMINAL_DROPPED_REPLY.to_string());
                                 host_terminal_sentinel(TERMINAL_DROPPED_REPLY)
                             }
-                            Ok(Err(error @ (
-                                HostError::AgentCallQuotaExceeded { .. }
+                            Ok(Err(
+                                error @ (HostError::AgentCallQuotaExceeded { .. }
                                 | HostError::Unsupported(_)
-                                | HostError::Failed(_)
-                            ))) => {
+                                | HostError::Failed(_)),
+                            )) => {
                                 let message = error.to_string();
                                 terminal_error
                                     .get_or_insert_with(|| runtime_error(message.clone()));
@@ -715,14 +708,12 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                     let Some((seq, hash)) = live else {
                         continue;
                     };
-                    if let Err(error) =
-                        c.borrow_mut().complete_operation(
-                            *seq,
-                            "spawn_agent",
-                            hash.clone(),
-                            value.clone(),
-                        )
-                    {
+                    if let Err(error) = c.borrow_mut().complete_operation(
+                        *seq,
+                        "spawn_agent",
+                        hash.clone(),
+                        value.clone(),
+                    ) {
                         terminal_error.get_or_insert(error);
                         break;
                     }

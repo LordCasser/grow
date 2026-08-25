@@ -785,9 +785,8 @@ mod tests {
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "stream-empty";
         let root = tempfile::TempDir::new().unwrap();
-        let storage = crate::session::storage::JsonlStorageAdapter::with_root(
-            root.path().to_path_buf(),
-        );
+        let storage =
+            crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
 
         let (gw, mut rx) = capturing_gateway();
         let response = handle_with_storage(
@@ -859,9 +858,8 @@ mod tests {
             id: acp::SessionId::new(session_id),
             cwd: cwd.to_string(),
         };
-        let storage = crate::session::storage::JsonlStorageAdapter::with_root(
-            root.path().to_path_buf(),
-        );
+        let storage =
+            crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
         storage
             .init_session(&session_info, acp::ModelId::new("test-model"))
             .await

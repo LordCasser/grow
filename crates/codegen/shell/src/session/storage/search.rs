@@ -1421,9 +1421,7 @@ fn push_search_text(output: &mut String, text: &str, limit: usize) {
     output.push_str(&text[..take]);
 }
 
-fn collect_timeline_indexable_content(
-    reader: TimelineLedgerReader,
-) -> io::Result<(String, u64)> {
+fn collect_timeline_indexable_content(reader: TimelineLedgerReader) -> io::Result<(String, u64)> {
     let bytes_read = reader.snapshot_len();
     let events = reader.read_events()?;
     let timeline = Timeline::from_events(events)
@@ -1833,11 +1831,9 @@ mod tests {
         file.flush().unwrap();
         let file_size = std::fs::metadata(file.path()).unwrap().len();
 
-        let reader = TimelineLedgerReader::from_file(
-            file.reopen().unwrap(),
-            file.path().to_path_buf(),
-        )
-        .unwrap();
+        let reader =
+            TimelineLedgerReader::from_file(file.reopen().unwrap(), file.path().to_path_buf())
+                .unwrap();
         let (content, bytes_read) = collect_timeline_indexable_content(reader).unwrap();
         assert!(content.contains("hello"));
         assert!(content.contains("world"));
@@ -1853,7 +1849,14 @@ mod tests {
         let displaced = temp.path().join("original.jsonl");
 
         let mut original = Timeline::default();
-        record_search_turn(&mut original, 1, 0, "original prompt", "original answer", vec![]);
+        record_search_turn(
+            &mut original,
+            1,
+            0,
+            "original prompt",
+            "original answer",
+            vec![],
+        );
         let mut file = std::fs::File::create(&path).unwrap();
         for event in original.events() {
             serde_json::to_writer(&mut file, event).unwrap();
@@ -1861,11 +1864,9 @@ mod tests {
         }
         file.sync_all().unwrap();
 
-        let reader = TimelineLedgerReader::from_file(
-            std::fs::File::open(&path).unwrap(),
-            path.clone(),
-        )
-        .unwrap();
+        let reader =
+            TimelineLedgerReader::from_file(std::fs::File::open(&path).unwrap(), path.clone())
+                .unwrap();
 
         std::fs::rename(&path, &displaced).unwrap();
         let mut decoy = Timeline::default();

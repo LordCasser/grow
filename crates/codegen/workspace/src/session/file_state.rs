@@ -421,20 +421,18 @@ impl FileStateTracker {
         let Some(lazy_file) = source.as_ref() else {
             return; // already loaded, or never lazy
         };
-        let loaded = match read_rewind_jsonl_from_file::<RewindPoint>(
-            &lazy_file.file,
-            &lazy_file.label,
-        ) {
-            Ok(points) => points,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    path = %lazy_file.label.display(),
-                    "deferred rewind-point load failed; leaving lazy source set to retry"
-                );
-                return;
-            }
-        };
+        let loaded =
+            match read_rewind_jsonl_from_file::<RewindPoint>(&lazy_file.file, &lazy_file.label) {
+                Ok(points) => points,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %lazy_file.label.display(),
+                        "deferred rewind-point load failed; leaving lazy source set to retry"
+                    );
+                    return;
+                }
+            };
         if !loaded.is_empty() {
             let mut points = self.rewind_points.lock().await;
             for p in loaded {

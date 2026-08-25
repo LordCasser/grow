@@ -199,16 +199,9 @@ impl WorkflowRunStore {
                     ),
                 ));
             }
-            let run_dir = session.open_relative(
-                &run_relative,
-                "Workflow run directory",
-                false,
-            )?;
-            let scripts = run_dir.open_relative(
-                Path::new("scripts"),
-                "Workflow scripts directory",
-                false,
-            )?;
+            let run_dir = session.open_relative(&run_relative, "Workflow run directory", false)?;
+            let scripts =
+                run_dir.open_relative(Path::new("scripts"), "Workflow scripts directory", false)?;
             run_dir.write_atomic(std::ffi::OsStr::new("args.json"), &args_json, true, false)?;
             scripts.write_atomic(
                 std::ffi::OsStr::new("0000.rhai"),
@@ -316,7 +309,6 @@ impl WorkflowRunStore {
             .get(run_id)
             .map(|source| source.args.clone())
     }
-
 }
 
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
@@ -359,11 +351,7 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
     let run_id = &manifest.state.run_id;
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
-    let run_dir = session.open_relative(
-        &run_relative,
-        "Workflow run directory",
-        true,
-    )?;
+    let run_dir = session.open_relative(&run_relative, "Workflow run directory", true)?;
     #[cfg(any(unix, windows))]
     let lock = lock_workflow_state(&run_dir)?;
     #[cfg(any(unix, windows))]
@@ -463,11 +451,7 @@ pub(crate) fn tombstone_workflow_run_in_directory(
 ) -> io::Result<()> {
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
-    let run_dir = session.open_relative(
-        &run_relative,
-        "Workflow run directory",
-        true,
-    )?;
+    let run_dir = session.open_relative(&run_relative, "Workflow run directory", true)?;
     #[cfg(any(unix, windows))]
     {
         let lock = lock_workflow_state(&run_dir)?;

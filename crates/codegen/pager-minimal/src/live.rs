@@ -1101,7 +1101,10 @@ mod tests {
             shell::util::config::PermissionMode::AlwaysApprove,
         );
         let text = render(&a);
-        assert!(text.contains("always-approve"), "always-approve flag: {text:?}");
+        assert!(
+            text.contains("always-approve"),
+            "always-approve flag: {text:?}"
+        );
         minimal_api::set_permission_mode_for_test(
             &mut a.session,
             shell::util::config::PermissionMode::Auto,

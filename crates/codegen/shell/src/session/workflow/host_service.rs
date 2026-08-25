@@ -757,7 +757,11 @@ impl HostService {
         {
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(HostError::Failed(format!("scratch target is invalid: {error}"))),
+            Err(error) => {
+                return Err(HostError::Failed(format!(
+                    "scratch target is invalid: {error}"
+                )));
+            }
         };
         let resulting_files = other_files.saturating_add(usize::from(!target_exists));
         let resulting_bytes = other_bytes.saturating_add(content.len() as u64);

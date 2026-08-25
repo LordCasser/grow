@@ -287,11 +287,8 @@ pub fn persist_user_images(
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let assets_dir = session.open_relative(
-        Path::new("assets"),
-        "session image asset directory",
-        true,
-    )?;
+    let assets_dir =
+        session.open_relative(Path::new("assets"), "session image asset directory", true)?;
     let mut out = Vec::with_capacity(images.len());
     for img in images {
         let bytes = base64::engine::general_purpose::STANDARD

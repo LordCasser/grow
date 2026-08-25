@@ -872,11 +872,7 @@ impl SessionSignalsHandle {
     /// Response tokens = completion_tokens - reasoning_tokens.
     /// Multiple calls per turn are accumulated (e.g. multi-round tool use).
     #[tracing::instrument(skip_all, fields(completion_tokens, reasoning_tokens))]
-    pub fn record_response_output_usage(
-        &self,
-        completion_tokens: u32,
-        reasoning_tokens: u32,
-    ) {
+    pub fn record_response_output_usage(&self, completion_tokens: u32, reasoning_tokens: u32) {
         let span = tracing::Span::current();
         span.record("completion_tokens", i64::from(completion_tokens));
         span.record("reasoning_tokens", i64::from(reasoning_tokens));

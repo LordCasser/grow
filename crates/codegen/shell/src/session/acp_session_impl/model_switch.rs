@@ -247,14 +247,16 @@ impl SessionActor {
         // remaining resource refreshes may query foreground-derived command
         // availability, so release admission before those projections.
         drop(foreground_admission);
-        if let Err(e) = self.workspace_ops.bind_local_session(
-            &self.session_id_string(),
-            self.tool_context.cwd.as_path().to_path_buf(),
-            self.tool_context.hunk_tracker_handle.clone(),
-            self.agent.borrow().tool_bridge().toolset(),
-            None,
-        )
-        .await
+        if let Err(e) = self
+            .workspace_ops
+            .bind_local_session(
+                &self.session_id_string(),
+                self.tool_context.cwd.as_path().to_path_buf(),
+                self.tool_context.hunk_tracker_handle.clone(),
+                self.agent.borrow().tool_bridge().toolset(),
+                None,
+            )
+            .await
         {
             tracing::warn!(error = %e, "failed to rebind local session toolset after agent rebuild");
         }

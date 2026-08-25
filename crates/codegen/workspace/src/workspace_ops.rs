@@ -1421,7 +1421,8 @@ mod tests {
             "bind must wait while a workspace rebuild owns update_lock"
         );
         drop(update_guard);
-        bind.await.expect("bind succeeds after rebuild releases lock");
+        bind.await
+            .expect("bind succeeds after rebuild releases lock");
 
         assert!(std::sync::Arc::ptr_eq(
             &session.toolset(),

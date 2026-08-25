@@ -75,7 +75,8 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--permission-mode", "always-approve",
+        "--permission-mode",
+        "always-approve",
         "--model",
         "mock/proxied-gateway",
         "--max-turns",
@@ -178,7 +179,8 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--permission-mode", "always-approve",
+        "--permission-mode",
+        "always-approve",
         "--model",
         "mock/proxied-gateway",
         "--max-turns",
@@ -286,7 +288,8 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--permission-mode", "always-approve",
+        "--permission-mode",
+        "always-approve",
         "--model",
         "mock/proxied-gateway",
         "--max-turns",

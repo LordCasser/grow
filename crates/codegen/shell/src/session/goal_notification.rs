@@ -47,12 +47,11 @@ impl GoalNotifySender {
             crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
         ));
         if let Some(raw) = raw {
-            self.gateway.forward_fire_and_forget(
-                agent_client_protocol::ExtNotification::new(
+            self.gateway
+                .forward_fire_and_forget(agent_client_protocol::ExtNotification::new(
                     "grow/session_notification",
                     raw.into(),
-                ),
-            );
+                ));
         }
     }
 }

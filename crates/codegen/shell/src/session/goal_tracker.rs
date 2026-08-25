@@ -117,10 +117,7 @@ impl GoalTracker {
     }
 
     pub fn restore_runtime_snapshot(&mut self, snapshot: GoalState) {
-        self.active_since = snapshot
-            .status
-            .continues_automatically()
-            .then(Instant::now);
+        self.active_since = snapshot.status.continues_automatically().then(Instant::now);
         self.goal = Some(snapshot);
     }
 

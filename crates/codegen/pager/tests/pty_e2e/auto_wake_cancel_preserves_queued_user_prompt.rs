@@ -199,7 +199,12 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--continue", "--permission-mode", "always-approve", "--trust"],
+        &[
+            "--continue",
+            "--permission-mode",
+            "always-approve",
+            "--trust",
+        ],
         Some(content.home()),
     )
     .expect("spawn resumed pager");
