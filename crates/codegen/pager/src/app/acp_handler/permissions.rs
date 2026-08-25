@@ -201,7 +201,7 @@ fn enqueue_permission(
     // the dashboard's age column for `NeedsInput` rows reflects
     // "time since permission arrived" rather than "time since last
     // turn ended". The same field powers the dashboard relative-time label.
-    agent.last_active_at = Some(std::time::Instant::now());
+    agent.session.last_active_at = Some(std::time::Instant::now());
 
     true // needs redraw
 }

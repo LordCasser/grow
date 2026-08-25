@@ -335,7 +335,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             // queued/removed without ever showing a fake LLM response.
             agent.session.current_prompt_id = Some(prompt_id.clone());
             agent.session.state = crate::app::agent::AgentState::TurnSubmitting;
-            agent.turn_started_at = Some(Instant::now());
+            agent.session.turn_started_at = Some(Instant::now());
             // Scrollback shows display text (never raw skill XML). Combined
             // drains paint one bubble per original follow-up.
             let is_skill = queued.display_as_skill;
@@ -381,7 +381,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     chip_elements: queued.chip_elements.clone(),
                 });
             }
-            agent.turn_started_at = Some(Instant::now());
+            agent.session.turn_started_at = Some(Instant::now());
             let flip = page_flip_on_send();
             agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
 
@@ -469,7 +469,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         QueueEntryKind::Command => {
             // Currently only `/compact` — future slash commands will branch here.
             agent.session.start_command(AgentCommand::Compact);
-            agent.turn_started_at = Some(Instant::now());
+            agent.session.turn_started_at = Some(Instant::now());
 
             QueueDrain {
                 effects: vec![Effect::Compact {
@@ -491,7 +491,7 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             // The execute block from the shell IS the visual entry.
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
-            agent.turn_started_at = Some(Instant::now());
+            agent.session.turn_started_at = Some(Instant::now());
 
             agent.scrollback.follow_new_turn(None, page_flip_on_send());
 
@@ -725,7 +725,7 @@ pub(crate) fn apply_turn_start_shim(
         None
     };
 
-    agent.turn_started_at = Some(Instant::now());
+    agent.session.turn_started_at = Some(Instant::now());
 
     if agent.session.tracker.activity().is_some() {
         agent.session.in_flight_prompt = None;

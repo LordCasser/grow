@@ -65,7 +65,7 @@ pub(crate) fn handle_ask_user_question(
 
     // If a question is already active, cancel it before replacing.
     if let Some(mut old_qv) = agent.question_view.take() {
-        agent.turn_paused_duration += old_qv.opened_at.elapsed();
+        agent.session.turn_paused_duration += old_qv.opened_at.elapsed();
         tracing::warn!(
             old_tool_call_id = %old_qv.tool_call_id,
             new_tool_call_id = %ext_req.tool_call_id,
@@ -118,7 +118,7 @@ pub(crate) fn handle_ask_user_question(
     // Stamp the "last activity" anchor so the
     // dashboard's NeedsInput row reflects "time since this question
     // arrived" rather than the previous turn's end time.
-    agent.last_active_at = Some(std::time::Instant::now());
+    agent.session.last_active_at = Some(std::time::Instant::now());
 
     tracing::info!(
         mode = ?ext_req.mode,

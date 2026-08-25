@@ -234,7 +234,7 @@ pub fn agent_context_total(agent: &AgentView) -> Option<u64> {
 }
 
 pub fn agent_activity_started_at(agent: &AgentView) -> Option<std::time::Instant> {
-    agent.activity_started_at
+    agent.session.activity_started_at
 }
 
 pub fn agent_turn_elapsed_at(
@@ -511,14 +511,14 @@ pub fn set_minimal_committed_plan_id(app: &mut AppView, id: Option<String>) {
 
 // ── AgentView field accessors ────────────────────────────────────────────────
 
-/// `AgentView::last_activity` (read).
+/// `AgentSession::last_activity` (read).
 pub fn last_activity(v: &AgentView) -> Option<&TurnActivity> {
-    v.last_activity.as_ref()
+    v.session.last_activity.as_ref()
 }
 
-/// `AgentView::last_activity` (write).
+/// `AgentSession::last_activity` (write).
 pub fn set_last_activity(v: &mut AgentView, val: Option<TurnActivity>) {
-    v.last_activity = val;
+    v.session.last_activity = val;
 }
 
 /// `AgentView::extensions_modal`.

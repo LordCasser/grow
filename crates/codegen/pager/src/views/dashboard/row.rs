@@ -549,15 +549,16 @@ fn top_level_row(
     let secondary_line = top_level_secondary_line(agent, state, activity.as_deref());
     let anchor: Instant = match state {
         RowState::Working => agent
+            .session
             .turn_started_at
-            .or(agent.last_active_at)
+            .or(agent.session.last_active_at)
             .unwrap_or_else(fallback_epoch),
         RowState::NeedsInput
         | RowState::Idle
         | RowState::Inactive
         | RowState::Completed
         | RowState::Failed
-        | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
+        | RowState::Blocked => agent.session.last_active_at.unwrap_or_else(fallback_epoch),
     };
     let last_change_at = crate::util::system_time_from_instant_at(anchor, now, wall_now);
     let mut badges = Vec::new();

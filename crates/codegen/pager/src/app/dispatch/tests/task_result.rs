@@ -896,8 +896,8 @@ fn running_status_shims_only_while_submitting() {
         agent.follow_ups.is_none(),
         "the turn-start shim clears the previous response's follow-up chips"
     );
-    assert!(agent.turn_start_ms.is_some());
-    assert!(agent.turn_started_at.is_some());
+    assert!(agent.session.turn_start_ms.is_some());
+    assert!(agent.session.turn_started_at.is_some());
     assert!(agent.prompt_status_query_for.is_none());
 }
 
@@ -936,8 +936,8 @@ fn running_status_skips_shim_when_turn_already_running() {
         agent.follow_ups.is_some(),
         "an already-Running turn must not re-run the shim (it would drop the chips)"
     );
-    assert!(agent.turn_start_ms.is_some());
-    assert!(agent.turn_started_at.is_some());
+    assert!(agent.session.turn_start_ms.is_some());
+    assert!(agent.session.turn_started_at.is_some());
     assert!(agent.prompt_status_query_for.is_none());
 }
 

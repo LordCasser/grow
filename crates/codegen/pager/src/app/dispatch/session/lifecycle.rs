@@ -604,7 +604,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         AgentCommand::CreateWorktree
     };
     agent.session.start_command(cmd);
-    agent.turn_started_at = Some(Instant::now());
+    agent.session.turn_started_at = Some(Instant::now());
     app.agents.insert(agent_id, agent);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();

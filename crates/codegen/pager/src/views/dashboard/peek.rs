@@ -388,6 +388,7 @@ pub fn compute_peek_fields(
             let response_type = extract_last_response_type(agent);
             let last_user_message = extract_last_user_message(agent);
             let time_ago = agent
+                .session
                 .last_active_at
                 .map(|t| crate::util::format_time_ago(now.saturating_duration_since(t)))
                 .unwrap_or_default();

@@ -237,8 +237,8 @@ pub(super) fn finalize_prompt_terminal(
 
     // ── Full turn-end teardown (the PR rail's sequence, now shared) ──
     agent.mark_turn_finished();
-    agent.activity_started_at = None;
-    agent.last_activity = None;
+    agent.session.activity_started_at = None;
+    agent.session.last_activity = None;
 
     // Drain all queued permission requests — the turn is over, so any
     // pending permissions are stale. Send Cancelled to each.

@@ -283,7 +283,7 @@
         {
             let agent_a = app.agents.get_mut(&AgentId(0)).unwrap();
             agent_a.session.current_prompt_id = Some("foreground-A".into());
-            agent_a.last_prompt_event_at = Some(
+            agent_a.session.last_prompt_event_at = Some(
                 std::time::Instant::now() - std::time::Duration::from_secs(30),
             );
             agent_a.session.bg_tasks.insert(
@@ -329,6 +329,7 @@
         );
         assert!(
             agent_a
+                .session
                 .last_prompt_event_at
                 .unwrap()
                 .elapsed()
@@ -344,12 +345,12 @@
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.current_prompt_id = Some("foreground".into());
-            agent.last_prompt_event_at = Some(stale_anchor);
+            agent.session.last_prompt_event_at = Some(stale_anchor);
         }
 
         let _ = handle(make_plan_message("sess-A", &["unstamped plan"]), &mut app);
         assert_eq!(
-            app.agents[&AgentId(0)].last_prompt_event_at,
+            app.agents[&AgentId(0)].session.last_prompt_event_at,
             Some(stale_anchor),
             "an unstamped plan cannot prove foreground liveness"
         );
@@ -359,7 +360,7 @@
             &mut app,
         );
         assert_eq!(
-            app.agents[&AgentId(0)].last_prompt_event_at,
+            app.agents[&AgentId(0)].session.last_prompt_event_at,
             Some(stale_anchor),
             "a stale plan may update its plan projection but cannot renew foreground liveness"
         );
@@ -369,7 +370,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&AgentId(0)].last_prompt_event_at.unwrap() > stale_anchor,
+            app.agents[&AgentId(0)].session.last_prompt_event_at.unwrap() > stale_anchor,
             "matching prompt activity must renew foreground liveness"
         );
     }

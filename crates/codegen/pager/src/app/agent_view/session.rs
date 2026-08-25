@@ -182,22 +182,11 @@ impl AgentView {
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
             pending_stop_hooks: None,
             show_goal_detail: false,
-            turn_start_ms: None,
-            turn_start_ms_prompt: None,
-            turn_started_at: None,
-            last_prompt_event_at: None,
-            last_status_observed_at: None,
-            first_activity_logged_for: None,
-            turn_paused_duration: std::time::Duration::ZERO,
-            turn_paused_wall: std::time::Duration::ZERO,
             self_interjection_ids: std::collections::HashSet::new(),
-            last_active_at: Some(Instant::now()),
             current_branch: None,
             is_worktree: false,
             main_repo: None,
             worktree_label: None,
-            activity_started_at: None,
-            last_activity: None,
             pane_areas: PaneAreas::default(),
             hovered_entry: None,
             pending_text_drag: None,
@@ -407,14 +396,14 @@ impl AgentView {
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
         self.prompt_status_query_for = None;
-        self.last_prompt_event_at = None;
-        self.last_status_observed_at = None;
-        self.turn_started_at = None;
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_paused_wall = std::time::Duration::ZERO;
-        self.turn_start_ms = None;
-        self.turn_start_ms_prompt = None;
-        self.last_active_at = Some(Instant::now());
+        self.session.last_prompt_event_at = None;
+        self.session.last_status_observed_at = None;
+        self.session.turn_started_at = None;
+        self.session.turn_paused_duration = std::time::Duration::ZERO;
+        self.session.turn_paused_wall = std::time::Duration::ZERO;
+        self.session.turn_start_ms = None;
+        self.session.turn_start_ms_prompt = None;
+        self.session.last_active_at = Some(Instant::now());
     }
     /// Invalidate and clear a minimal `/btw` lifecycle at a session boundary.
     pub(crate) fn clear_minimal_btw_lifecycle(&mut self) {
@@ -445,8 +434,8 @@ impl AgentView {
         // the reload, and its in-flight guard would otherwise block
         // re-querying the prompt's authoritative status forever.
         self.prompt_status_query_for = None;
-        self.last_prompt_event_at = None;
-        self.last_status_observed_at = None;
+        self.session.last_prompt_event_at = None;
+        self.session.last_status_observed_at = None;
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.workflow_blocks.clear();
@@ -534,8 +523,8 @@ impl AgentView {
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
         self.prompt_status_query_for = None;
-        self.last_prompt_event_at = None;
-        self.last_status_observed_at = None;
+        self.session.last_prompt_event_at = None;
+        self.session.last_status_observed_at = None;
         // A new turn invalidates the previous turn's finalized marker: a
         // late PromptResponse for the OLD pid must be discarded (not merged)
         // once a newer turn owns the slot.
@@ -551,7 +540,7 @@ impl AgentView {
     pub(crate) fn adopt_running_prompt(&mut self, prompt_id: String) {
         self.start_turn_boundary(Some(&prompt_id));
         self.session.current_prompt_id = Some(prompt_id.clone());
-        self.turn_started_at = Some(Instant::now());
+        self.session.turn_started_at = Some(Instant::now());
         self.scrollback.enable_follow_with_preserve();
         self.flush_pending_follow_ups(&prompt_id);
     }
@@ -730,8 +719,8 @@ impl AgentView {
             self.scrollback.remove_entry(id);
         }
         self.mark_turn_finished();
-        self.activity_started_at = None;
-        self.last_activity = None;
+        self.session.activity_started_at = None;
+        self.session.last_activity = None;
         self.reset_follow_ups_for_reload();
         dropped_heavy
     }
@@ -742,10 +731,10 @@ impl AgentView {
     }
 
     pub fn turn_elapsed_at(&self, now: Instant) -> Option<std::time::Duration> {
-        let instant_elapsed = now.saturating_duration_since(self.turn_started_at?);
+        let instant_elapsed = now.saturating_duration_since(self.session.turn_started_at?);
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let mut instant_paused = self.turn_paused_duration;
-        let mut wall_paused = self.turn_paused_wall;
+        let mut instant_paused = self.session.turn_paused_duration;
+        let mut wall_paused = self.session.turn_paused_wall;
         if let Some(qv) = &self.question_view {
             instant_paused += now.saturating_duration_since(qv.opened_at);
             wall_paused += wall_since_ms(qv.opened_at_wall_ms, now_ms);
@@ -753,9 +742,9 @@ impl AgentView {
         Some(honest_turn_elapsed(TurnElapsedParams {
             instant_elapsed,
             instant_paused,
-            wall_anchor_ms: self.turn_start_ms,
+            wall_anchor_ms: self.session.turn_start_ms,
             wall_paused,
-            anchor_prompt: self.turn_start_ms_prompt.as_deref(),
+            anchor_prompt: self.session.turn_start_ms_prompt.as_deref(),
             current_prompt: self.session.current_prompt_id.as_deref(),
             now_ms,
         }))
@@ -798,11 +787,12 @@ impl AgentView {
     /// Reconcile the derived activity phase outside rendering.
     pub(crate) fn reconcile_activity_phase(&mut self, now: Instant) {
         let activity = self.resolve_turn_activity();
-        if activity == self.last_activity {
+        if activity == self.session.last_activity {
             return;
         }
-        if let Some(previous) = &self.last_activity {
+        if let Some(previous) = &self.session.last_activity {
             let phase_ms = self
+                .session
                 .activity_started_at
                 .map(|at| now.saturating_duration_since(at).as_millis() as u64)
                 .unwrap_or(0);
@@ -817,8 +807,8 @@ impl AgentView {
                 })),
             );
         }
-        self.activity_started_at = activity.as_ref().map(|_| now);
-        self.last_activity = activity;
+        self.session.activity_started_at = activity.as_ref().map(|_| now);
+        self.session.last_activity = activity;
     }
     /// Fill in a `TaskOutput` wait's display subject from live task state.
     fn enrich_waiting_activity(
@@ -1221,20 +1211,20 @@ mod honest_turn_elapsed_tests {
     #[test]
     fn turn_elapsed_reflects_wall_span_for_current_prompt() {
         let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        view.turn_started_at = Some(Instant::now());
-        view.turn_start_ms = Some(chrono::Utc::now().timestamp_millis() - 60_000);
-        view.turn_start_ms_prompt = Some("p1".to_string());
+        view.session.turn_started_at = Some(Instant::now());
+        view.session.turn_start_ms = Some(chrono::Utc::now().timestamp_millis() - 60_000);
+        view.session.turn_start_ms_prompt = Some("p1".to_string());
         view.session.current_prompt_id = Some("p1".to_string());
         assert!(view.turn_elapsed().unwrap() >= Duration::from_secs(59));
     }
     #[test]
     fn turn_elapsed_nets_wall_pauses_against_wall_span() {
         let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        view.turn_started_at = Some(Instant::now());
-        view.turn_start_ms = Some(chrono::Utc::now().timestamp_millis() - 60_000);
-        view.turn_start_ms_prompt = Some("p1".to_string());
+        view.session.turn_started_at = Some(Instant::now());
+        view.session.turn_start_ms = Some(chrono::Utc::now().timestamp_millis() - 60_000);
+        view.session.turn_start_ms_prompt = Some("p1".to_string());
         view.session.current_prompt_id = Some("p1".to_string());
-        view.turn_paused_wall = Duration::from_secs(45);
+        view.session.turn_paused_wall = Duration::from_secs(45);
         let elapsed = view.turn_elapsed().unwrap();
         assert!(elapsed >= Duration::from_secs(14) && elapsed <= Duration::from_secs(16));
     }

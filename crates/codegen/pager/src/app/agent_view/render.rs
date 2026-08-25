@@ -2060,7 +2060,7 @@ impl AgentView {
                         state: &self.session.state,
                         activity: &activity,
                         turn_elapsed: self.turn_elapsed_at(frame_stamp.now()),
-                        activity_started_at: self.activity_started_at,
+                        activity_started_at: self.session.activity_started_at,
                         frame: frame_stamp,
                         drain_blocked,
                         buttons: Some(turn_status::MouseButtons {

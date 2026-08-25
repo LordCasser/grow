@@ -747,6 +747,46 @@ pub struct AgentSession {
     /// whose `meta.promptId` is set and doesn't match this id is silently
     /// dropped. `None` between turns.
     pub current_prompt_id: Option<String>,
+    /// UTC ms when the current turn started (`turnStartMs` from notification meta).
+    /// Used for turn elapsed display.
+    pub turn_start_ms: Option<i64>,
+    /// Prompt id the stored `turn_start_ms` belongs to (stamped together from
+    /// the same delta meta): wake markers may only claim an elapsed whose
+    /// anchor is provably their own turn's.
+    pub turn_start_ms_prompt: Option<String>,
+    /// Local wall-clock time when the current turn started.
+    /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
+    /// elapsed time for "Worked for Xm Ys" system messages.
+    pub turn_started_at: Option<Instant>,
+    /// Last reducer-observed prompt activity for lifecycle reconciliation.
+    /// Never updated by rendering.
+    pub(crate) last_prompt_event_at: Option<Instant>,
+    /// Last authoritative Running status observation for the current prompt.
+    pub(crate) last_status_observed_at: Option<Instant>,
+    /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
+    pub first_activity_logged_for: Option<Instant>,
+    /// Accumulated duration the turn timer was paused (while the user was
+    /// answering questions via `AskUserQuestion`). Reset when the turn ends.
+    pub turn_paused_duration: Duration,
+    /// Wall-clock twin of `turn_paused_duration`: the same pauses measured on
+    /// the wall clock, which keeps counting through OS suspend while `Instant`
+    /// does not. Netted against the wall-anchored turn span so a suspend
+    /// during an open question isn't reported as worked time.
+    pub turn_paused_wall: Duration,
+    /// Local wall-clock time when the most recent turn finished
+    /// (success, failure, or cancellation). Used by the dashboard
+    /// modal to display "Nm ago" idle markers. Initialised to the
+    /// session-creation time in [`AgentSession::new`] so newly-created
+    /// agents that have never run a turn still show a sensible
+    /// relative time.
+    pub last_active_at: Option<Instant>,
+    /// Local wall-clock time when the current activity phase started.
+    /// Reset on each activity transition (thinking → responding → tool, etc.).
+    /// Used for the `(5s)` phase timer in the turn status line.
+    pub activity_started_at: Option<Instant>,
+    /// Last observed [`TurnActivity`] — used to detect phase transitions
+    /// and reset `activity_started_at`.
+    pub(crate) last_activity: Option<TurnActivity>,
     /// Per-agent mirror of the server-authoritative shared prompt queue
     /// (`AppView::shared_prompt_queues[sid]`), kept in sync by
     /// `handle_queue_changed` and the immediate-send path. The queue pane
@@ -927,6 +967,17 @@ impl AgentSession {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            turn_start_ms: None,
+            turn_start_ms_prompt: None,
+            turn_started_at: None,
+            last_prompt_event_at: None,
+            last_status_observed_at: None,
+            first_activity_logged_for: None,
+            turn_paused_duration: Duration::ZERO,
+            turn_paused_wall: Duration::ZERO,
+            last_active_at: Some(Instant::now()),
+            activity_started_at: None,
+            last_activity: None,
             shared_queue: Vec::new(),
             attached_as_viewer: false,
             self_originated_prompt_ids: VecDeque::new(),

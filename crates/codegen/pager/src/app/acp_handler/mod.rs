@@ -228,8 +228,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             confirm_context_used(agent, tokens);
                         }
                         if let Some(ts) = meta.turn_start_ms {
-                            agent.turn_start_ms = Some(ts);
-                            agent.turn_start_ms_prompt = meta.prompt_id.clone();
+                            agent.session.turn_start_ms = Some(ts);
+                            agent.session.turn_start_ms_prompt = meta.prompt_id.clone();
                         }
                     }
 
@@ -286,7 +286,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 agent.session.current_prompt_id.as_ref() == Some(prompt_id)
                             })
                         {
-                            agent.last_prompt_event_at = Some(observed_at);
+                            agent.session.last_prompt_event_at = Some(observed_at);
                         }
                         let items: Vec<_> = plan
                             .entries
@@ -339,7 +339,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         let release_behavior_fifo =
                             !meta.is_replay && behavior_mode_update_applied(&notif.request.update);
                         if !meta.is_replay {
-                            agent.last_prompt_event_at = Some(observed_at);
+                            agent.session.last_prompt_event_at = Some(observed_at);
                         }
                         // Adopt a mismatching `promptId` so subsequent chunks for
                         // the same turn match and render — but ONLY for a viewer
@@ -388,10 +388,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             agent.session.in_flight_prompt = None;
 
                             // Log initial TTFA once per turn (activity flips None→Some each loop).
-                            if let Some(started) = agent.turn_started_at
-                                && agent.first_activity_logged_for != Some(started)
+                            if let Some(started) = agent.session.turn_started_at
+                                && agent.session.first_activity_logged_for != Some(started)
                             {
-                                agent.first_activity_logged_for = Some(started);
+                                agent.session.first_activity_logged_for = Some(started);
                                 let activity_label = agent
                                     .session
                                     .tracker
@@ -490,11 +490,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             && !matches!(agent.session.state, AgentState::TurnRunning)
                         {
                             agent.session.state = AgentState::TurnRunning;
-                            agent.last_status_observed_at = Some(observed_at);
+                            agent.session.last_status_observed_at = Some(observed_at);
                             // Back-date from the authoritative `turnStartMs` so a
                             // viewer's elapsed matches the driver's instead of
                             // starting at the time-to-first-delta.
-                            agent.turn_started_at = Some(viewer_turn_anchor(agent.turn_start_ms));
+                            agent.session.turn_started_at =
+                                Some(viewer_turn_anchor(agent.session.turn_start_ms));
                         }
 
                         advance_reconnect_cursor(agent, &mut meta);
@@ -541,7 +542,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             confirm_context_used(child_view, tokens);
                         }
                         if let Some(ts) = meta.turn_start_ms {
-                            child_view.turn_start_ms = Some(ts);
+                            child_view.session.turn_start_ms = Some(ts);
                         }
                         child_view.session.handle_update(
                             notif.request.update,

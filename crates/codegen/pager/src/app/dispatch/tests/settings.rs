@@ -205,7 +205,7 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
     dispatch(Action::SendPrompt("rewind me".into()), &mut app);
     assert!(app.agents[&id].session.state.is_turn_running());
     assert_eq!(app.agents[&id].scrollback.len(), 1);
-    assert!(app.agents[&id].turn_started_at.is_some());
+    assert!(app.agents[&id].session.turn_started_at.is_some());
     let cancelled_pid = app.agents[&id].session.current_prompt_id.clone();
     assert!(cancelled_pid.is_some());
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -214,9 +214,9 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
     assert!(app.agents[&id].session.state.is_idle());
     assert_eq!(app.agents[&id].prompt.text(), "rewind me");
     assert_eq!(app.agents[&id].scrollback.len(), 0);
-    assert!(app.agents[&id].turn_started_at.is_none());
-    assert!(app.agents[&id].activity_started_at.is_none());
-    assert!(app.agents[&id].last_activity.is_none());
+    assert!(app.agents[&id].session.turn_started_at.is_none());
+    assert!(app.agents[&id].session.activity_started_at.is_none());
+    assert!(app.agents[&id].session.last_activity.is_none());
     assert!(app.agents[&id].session.in_flight_prompt.is_none());
     assert!(app.agents[&id].session.current_prompt_id.is_none());
     dispatch(

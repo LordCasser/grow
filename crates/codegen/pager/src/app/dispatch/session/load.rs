@@ -154,7 +154,7 @@ fn dispatch_load_session_ungated(
     agent_mut.scrollback.begin_batch();
     if matches!(app.restore_code, Some(true)) {
         agent_mut.session.start_command(AgentCommand::RestoreCode);
-        agent_mut.turn_started_at = Some(std::time::Instant::now());
+        agent_mut.session.turn_started_at = Some(std::time::Instant::now());
     }
     agent_mut.apply_app_scoped_gates(app.screen_mode, &app.active_announcements);
 

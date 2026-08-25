@@ -650,7 +650,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 let track_foreground = agent.session.state.is_idle();
                 if track_foreground {
                     agent.session.start_command(AgentCommand::Compact);
-                    agent.turn_started_at = Some(std::time::Instant::now());
+                    agent.session.turn_started_at = Some(std::time::Instant::now());
                 }
                 let user_context = cmd_text
                     .strip_prefix("/compact")
@@ -1366,8 +1366,8 @@ pub(super) fn handle_compact_complete(
         }
 
         agent.mark_turn_finished();
-        agent.activity_started_at = None;
-        agent.last_activity = None;
+        agent.session.activity_started_at = None;
+        agent.session.last_activity = None;
 
         if app.reconnect_pending {
             return vec![];

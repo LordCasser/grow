@@ -23,7 +23,7 @@ fn running_viewer(prompt_id: &str) -> AgentView {
     agent.session.attached_as_viewer = true;
     agent.session.start_turn(&mut agent.scrollback);
     agent.session.current_prompt_id = Some(prompt_id.into());
-    agent.turn_started_at = Some(Instant::now());
+    agent.session.turn_started_at = Some(Instant::now());
     agent
 }
 
@@ -33,7 +33,7 @@ fn running_driver(prompt_id: &str) -> AgentView {
     let mut agent = super::super::agent_view::test_agent_view(Some("s1"), PathBuf::from("/tmp"));
     agent.session.start_turn(&mut agent.scrollback);
     agent.session.current_prompt_id = Some(prompt_id.into());
-    agent.turn_started_at = Some(Instant::now());
+    agent.session.turn_started_at = Some(Instant::now());
     agent
 }
 
@@ -70,7 +70,7 @@ fn viewer_finalize_idles_and_pushes_completed_marker() {
     assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
     assert!(agent.session.state.is_idle());
     assert!(agent.session.current_prompt_id.is_none());
-    assert!(agent.turn_started_at.is_none());
+    assert!(agent.session.turn_started_at.is_none());
     assert!(matches!(
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCompleted { .. })
@@ -480,8 +480,8 @@ fn viewer_finalize_runs_full_teardown_once() {
         .cancel_turn_buttons
         .push(ratatui::layout::Rect::default());
     agent.bash_turn = true;
-    agent.activity_started_at = Some(Instant::now());
-    agent.last_activity = Some(crate::acp::tracker::TurnActivity::Thinking);
+    agent.session.activity_started_at = Some(Instant::now());
+    agent.session.last_activity = Some(crate::acp::tracker::TurnActivity::Thinking);
     let generation = agent.prompt.prompt_suggestion.begin_fetch();
     assert!(
         agent
@@ -517,8 +517,8 @@ fn viewer_finalize_runs_full_teardown_once() {
         "cancel buttons cleared"
     );
     assert!(!agent.bash_turn, "bash turn flag reset");
-    assert!(agent.activity_started_at.is_none());
-    assert!(agent.last_activity.is_none());
+    assert!(agent.session.activity_started_at.is_none());
+    assert!(agent.session.last_activity.is_none());
     assert!(
         !agent.prompt.prompt_suggestion.has_suggestion(),
         "stale prompt suggestion wiped"

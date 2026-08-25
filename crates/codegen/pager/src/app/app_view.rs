@@ -4169,7 +4169,11 @@ pub(crate) mod tests {
             .unwrap()
             .session
             .current_prompt_id = Some("background-prompt".into());
-        app.agents.get_mut(&background).unwrap().turn_started_at = Some(
+        app.agents
+            .get_mut(&background)
+            .unwrap()
+            .session
+            .turn_started_at = Some(
             Instant::now()
                 - crate::app::dispatch::PROMPT_STATUS_WATCHDOG_DELAY
                 - Duration::from_millis(1),

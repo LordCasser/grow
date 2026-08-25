@@ -416,14 +416,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         None
                     };
                     let turn_start_ms = i64::try_from(turn_start_ms).unwrap_or(i64::MAX);
-                    agent.turn_start_ms = Some(turn_start_ms);
-                    agent.turn_start_ms_prompt = Some(prompt_id);
-                    if agent.turn_started_at.is_none() {
-                        agent.turn_started_at = Some(crate::app::acp_handler::viewer_turn_anchor(
-                            Some(turn_start_ms),
-                        ));
+                    agent.session.turn_start_ms = Some(turn_start_ms);
+                    agent.session.turn_start_ms_prompt = Some(prompt_id);
+                    if agent.session.turn_started_at.is_none() {
+                        agent.session.turn_started_at = Some(
+                            crate::app::acp_handler::viewer_turn_anchor(Some(turn_start_ms)),
+                        );
                     }
-                    agent.last_status_observed_at = Some(observed_at);
+                    agent.session.last_status_observed_at = Some(observed_at);
                     super::queue::note_peek_page_flip(app, agent_id, page_flip);
                     vec![]
                 }
@@ -449,7 +449,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         // A non-terminal observation must never rewrite the
                         // display anchor or fabricate completion. Re-arm the
                         // reducer-owned liveness window only.
-                        agent.last_status_observed_at = Some(std::time::Instant::now());
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
                     }
                     vec![]
                 }
@@ -489,7 +489,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
                 Ok(PromptStatusWire::Unknown) => {
                     if agent.session.state.is_turn_running() {
-                        agent.last_status_observed_at = Some(std::time::Instant::now());
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
                         return vec![];
                     }
                     agent.session.state = crate::app::agent::AgentState::Idle;
@@ -503,7 +503,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
                 Err(error) => {
                     if agent.session.state.is_turn_running() {
-                        agent.last_status_observed_at = Some(std::time::Instant::now());
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
                         tracing::warn!(%error, %prompt_id, "prompt watchdog status query failed");
                         return vec![];
                     }
@@ -563,8 +563,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     }
                     agent.session.finish_turn(&mut agent.scrollback);
                     agent.mark_turn_finished();
-                    agent.activity_started_at = None;
-                    agent.last_activity = None;
+                    agent.session.activity_started_at = None;
+                    agent.session.last_activity = None;
                 }
                 agent
                     .session

@@ -390,15 +390,15 @@ fn mark_turn_finished_clears_start_and_stamps_active() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.turn_started_at = Some(std::time::Instant::now());
-    agent.last_active_at = None;
+    agent.session.turn_started_at = Some(std::time::Instant::now());
+    agent.session.last_active_at = None;
     agent.mark_turn_finished();
     assert!(
-        agent.turn_started_at.is_none(),
+        agent.session.turn_started_at.is_none(),
         "turn_started_at must be cleared"
     );
     assert!(
-        agent.last_active_at.is_some(),
+        agent.session.last_active_at.is_some(),
         "last_active_at must be stamped"
     );
 }
@@ -1791,8 +1791,8 @@ fn build_rows_idle_anchor_is_frozen_last_active_at() {
     mark_agent_nonempty(&mut app, AgentId(0));
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let anchor = std::time::Instant::now() - std::time::Duration::from_secs(300);
-    agent.last_active_at = Some(anchor);
-    agent.turn_started_at = None;
+    agent.session.last_active_at = Some(anchor);
+    agent.session.turn_started_at = None;
     agent.session.state = crate::app::agent::AgentState::Idle;
     let rows1 = build_rows(
         &app.agents,
@@ -1835,8 +1835,8 @@ fn build_rows_working_anchor_is_turn_started_at() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let turn_start = std::time::Instant::now() - std::time::Duration::from_secs(5);
     let stale = std::time::Instant::now() - std::time::Duration::from_secs(600);
-    agent.turn_started_at = Some(turn_start);
-    agent.last_active_at = Some(stale);
+    agent.session.turn_started_at = Some(turn_start);
+    agent.session.last_active_at = Some(stale);
     agent.session.state = crate::app::agent::AgentState::TurnRunning;
     let rows = build_rows(
         &app.agents,
@@ -1868,8 +1868,8 @@ fn build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    agent.last_active_at = None;
-    agent.turn_started_at = None;
+    agent.session.last_active_at = None;
+    agent.session.turn_started_at = None;
     agent.session.state = crate::app::agent::AgentState::Idle;
     let rows1 = build_rows(
         &app.agents,

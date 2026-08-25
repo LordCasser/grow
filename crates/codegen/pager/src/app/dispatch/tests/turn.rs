@@ -777,7 +777,7 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnSubmitting;
         agent.session.current_prompt_id = Some("pid-submitting".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_WATCHDOG_DELAY
                 - std::time::Duration::from_millis(1),
@@ -812,7 +812,7 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-running".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
@@ -854,12 +854,12 @@ fn running_turn_with_recent_activity_skips_query() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-busy".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(60),
         );
-        agent.last_prompt_event_at =
+        agent.session.last_prompt_event_at =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
     }
 
@@ -880,17 +880,17 @@ fn running_turn_with_stale_activity_queries_prompt_status() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-stale".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
         );
-        agent.last_prompt_event_at = Some(
+        agent.session.last_prompt_event_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
         );
-        agent.last_activity = Some(crate::acp::tracker::TurnActivity::Responding);
+        agent.session.last_activity = Some(crate::acp::tracker::TurnActivity::Responding);
     }
 
     let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
@@ -913,7 +913,7 @@ fn running_turn_below_threshold_skips_query() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-young".into());
-        agent.turn_started_at =
+        agent.session.turn_started_at =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
     }
 
@@ -936,7 +936,7 @@ fn running_turn_query_in_flight_skips_duplicate() {
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-inflight".into());
         agent.prompt_status_query_for = Some("pid-inflight".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
@@ -961,7 +961,7 @@ fn running_status_response_rearms_from_observation_time() {
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-running".into());
         agent.prompt_status_query_for = Some("pid-running".into());
-        agent.turn_started_at = Some(old_start);
+        agent.session.turn_started_at = Some(old_start);
     }
 
     let _ = dispatch(
@@ -975,13 +975,14 @@ fn running_status_response_rearms_from_observation_time() {
 
     let agent = &app.agents[&id];
     assert_eq!(
-        agent.turn_started_at,
+        agent.session.turn_started_at,
         Some(old_start),
         "display anchor is stable"
     );
     assert!(agent.prompt_status_query_for.is_none());
     assert!(
         agent
+            .session
             .last_status_observed_at
             .is_some_and(|at| at >= old_start)
     );
@@ -1012,7 +1013,7 @@ fn nonterminal_watchdog_answers_never_end_a_running_turn() {
             agent.session.state = AgentState::TurnRunning;
             agent.session.current_prompt_id = Some("pid-running".into());
             agent.prompt_status_query_for = Some("pid-running".into());
-            agent.turn_started_at = Some(old_start);
+            agent.session.turn_started_at = Some(old_start);
         }
 
         let effects = dispatch(
@@ -1031,8 +1032,8 @@ fn nonterminal_watchdog_answers_never_end_a_running_turn() {
             agent.session.current_prompt_id.as_deref(),
             Some("pid-running")
         );
-        assert_eq!(agent.turn_started_at, Some(old_start));
-        assert!(agent.last_status_observed_at.is_some());
+        assert_eq!(agent.session.turn_started_at, Some(old_start));
+        assert!(agent.session.last_status_observed_at.is_some());
         assert!(
             next_prompt_watchdog_deadline(&app)
                 .is_some_and(|deadline| deadline > std::time::Instant::now())
@@ -1052,7 +1053,7 @@ fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-terminal".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
@@ -1112,7 +1113,7 @@ fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.current_prompt_id = Some("pid-queued".into());
         agent.prompt_status_query_for = Some("pid-queued".into());
-        agent.turn_started_at = Some(old_start);
+        agent.session.turn_started_at = Some(old_start);
     }
 
     let effects = dispatch(
@@ -1136,11 +1137,11 @@ fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
     );
     assert!(agent.prompt_status_query_for.is_none());
     assert_eq!(
-        agent.turn_started_at,
+        agent.session.turn_started_at,
         Some(old_start),
         "a queue observation must not rewrite the user-visible turn anchor"
     );
-    assert!(agent.last_status_observed_at.is_some());
+    assert!(agent.session.last_status_observed_at.is_some());
     assert_eq!(
         next_prompt_watchdog_deadline(&app),
         None,
@@ -1171,7 +1172,7 @@ fn queued_prompt_status_resolves_submitting_state() {
             chip_elements: vec![],
         });
         agent.prompt_status_query_for = Some("pid-queued".into());
-        agent.turn_started_at = Some(
+        agent.session.turn_started_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
@@ -1203,7 +1204,7 @@ fn queued_prompt_status_resolves_submitting_state() {
     assert!(agent.session.in_flight_prompt.is_none());
     assert!(agent.prompt_status_query_for.is_none());
     assert!(
-        agent.turn_started_at.is_none(),
+        agent.session.turn_started_at.is_none(),
         "the submitting watchdog must NOT re-arm (mark_turn_finished cleared the window)"
     );
 }
@@ -1216,7 +1217,7 @@ fn terminal_prompt_status_uses_same_first_wins_finalizer() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.current_prompt_id = Some("pid-terminal".into());
         agent.prompt_status_query_for = Some("pid-terminal".into());
-        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.turn_started_at = Some(std::time::Instant::now());
     }
 
     let effects = dispatch(
@@ -1361,7 +1362,7 @@ fn prompt_response_clears_cancel_turn_panel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-    app.agents.get_mut(&id).unwrap().turn_started_at = Some(std::time::Instant::now());
+    app.agents.get_mut(&id).unwrap().session.turn_started_at = Some(std::time::Instant::now());
     app.agents.get_mut(&id).unwrap().cancel_turn_view =
         Some(crate::views::modal::CancelTurnViewState {
             active_idx: 0,

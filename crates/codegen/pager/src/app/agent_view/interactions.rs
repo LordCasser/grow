@@ -1133,7 +1133,7 @@ impl AgentView {
             return self.submit_question_answers(true);
         }
         if let Some(qv) = self.question_view.take() {
-            self.turn_paused_duration += qv.opened_at.elapsed();
+            self.session.turn_paused_duration += qv.opened_at.elapsed();
             self.prompt.restore(qv.stashed_prompt);
         }
         self.cleanup_question_state();
@@ -1204,7 +1204,7 @@ impl AgentView {
         let Some(mut qv) = self.question_view.take() else {
             return InputOutcome::Changed;
         };
-        self.turn_paused_duration += qv.opened_at.elapsed();
+        self.session.turn_paused_duration += qv.opened_at.elapsed();
         if let Some(kind) = qv.local_kind.take() {
             let is_doctor_fix = matches!(
                 kind,
@@ -1333,7 +1333,7 @@ impl AgentView {
             self.question_view = Some(qv);
             return PeekAnswerOutcome::Advanced;
         }
-        self.turn_paused_duration += qv.opened_at.elapsed();
+        self.session.turn_paused_duration += qv.opened_at.elapsed();
         let response = qv.build_accepted_response();
         qv.send_ext_response(response);
         self.prompt.restore(qv.stashed_prompt);

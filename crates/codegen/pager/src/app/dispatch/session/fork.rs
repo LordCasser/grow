@@ -391,7 +391,7 @@ fn build_fork_placeholder(
         AgentCommand::ForkSession
     };
     agent.session.start_command(cmd);
-    agent.turn_started_at = Some(Instant::now());
+    agent.session.turn_started_at = Some(Instant::now());
     agent
 }
 /// Build the discoverability banner for the child agent. Includes the

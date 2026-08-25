@@ -382,8 +382,8 @@ pub(super) fn do_cancel_turn_with_pause(
         // fields + clear current_prompt_id.
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
-        agent.activity_started_at = None;
-        agent.last_activity = None;
+        agent.session.activity_started_at = None;
+        agent.session.last_activity = None;
     } else {
         agent.session.cancel_turn(&mut agent.scrollback);
     }
@@ -454,7 +454,7 @@ pub(crate) fn poll_stalled_prompt_submissions(
             let stalled = if agent.session.state.is_turn_submitting() {
                 // Submission is silent client-side (no activity can exist),
                 // so the elapsed window alone decides.
-                agent.turn_started_at.is_some_and(|started| {
+                agent.session.turn_started_at.is_some_and(|started| {
                     now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
                 })
             } else if agent.session.state.is_turn_running() {
@@ -502,15 +502,15 @@ pub(crate) fn poll_stalled_prompt_submissions(
 /// without re-running the turn-start shim (see the `PromptStatusResolved`
 /// `Running` arm), so it is safe by construction.
 fn running_turn_stalled(agent: &AgentView, now: std::time::Instant) -> bool {
-    let Some(started) = agent.turn_started_at else {
+    let Some(started) = agent.session.turn_started_at else {
         return false;
     };
     if now.saturating_duration_since(started) < PROMPT_STATUS_RUNNING_WATCHDOG_DELAY {
         return false;
     }
     let liveness = [
-        agent.last_prompt_event_at,
-        agent.last_status_observed_at,
+        agent.session.last_prompt_event_at,
+        agent.session.last_status_observed_at,
         Some(started),
     ]
     .into_iter()
@@ -531,6 +531,7 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
             }
             if agent.session.state.is_turn_submitting() {
                 return agent
+                    .session
                     .turn_started_at?
                     .checked_add(PROMPT_STATUS_WATCHDOG_DELAY);
             }
@@ -538,9 +539,9 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
                 return None;
             }
             [
-                agent.last_prompt_event_at,
-                agent.last_status_observed_at,
-                agent.turn_started_at,
+                agent.session.last_prompt_event_at,
+                agent.session.last_status_observed_at,
+                agent.session.turn_started_at,
             ]
             .into_iter()
             .flatten()

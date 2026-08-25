@@ -708,32 +708,6 @@ pub struct AgentView {
     /// Toggled by `Action::ToggleGoalDetail`. Only shown when
     /// `session.goal_state` is `Some`.
     pub show_goal_detail: bool,
-    /// UTC ms when the current turn started (`turnStartMs` from notification meta).
-    /// Used for turn elapsed display.
-    pub turn_start_ms: Option<i64>,
-    /// Prompt id the stored `turn_start_ms` belongs to (stamped together from
-    /// the same delta meta): wake markers may only claim an elapsed whose
-    /// anchor is provably their own turn's.
-    pub turn_start_ms_prompt: Option<String>,
-    /// Local wall-clock time when the current turn started.
-    /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
-    /// elapsed time for "Worked for Xm Ys" system messages.
-    pub turn_started_at: Option<Instant>,
-    /// Last reducer-observed prompt activity for lifecycle reconciliation.
-    /// Never updated by rendering.
-    pub(crate) last_prompt_event_at: Option<Instant>,
-    /// Last authoritative Running status observation for the current prompt.
-    pub(crate) last_status_observed_at: Option<Instant>,
-    /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
-    pub first_activity_logged_for: Option<Instant>,
-    /// Accumulated duration the turn timer was paused (while the user was
-    /// answering questions via `AskUserQuestion`). Reset when the turn ends.
-    pub turn_paused_duration: std::time::Duration,
-    /// Wall-clock twin of `turn_paused_duration`: the same pauses measured on
-    /// the wall clock, which keeps counting through OS suspend while `Instant`
-    /// does not. Netted against the wall-anchored turn span so a suspend
-    /// during an open question isn't reported as worked time.
-    pub turn_paused_wall: std::time::Duration,
     /// IDs of interjections this client sent and already rendered locally
     /// (optimistic echo). The shell broadcasts `grow/session/interjection` to
     /// every attached pane; when our own broadcast echoes back carrying an id
@@ -742,13 +716,6 @@ pub struct AgentView {
     /// queue's optimistic-echo + reconcile-by-id pattern, applied so the
     /// originator gets instant feedback AND viewers stay in sync.
     pub self_interjection_ids: std::collections::HashSet<String>,
-    /// Local wall-clock time when the most recent turn finished
-    /// (success, failure, or cancellation). Used by the dashboard
-    /// modal to display "Nm ago" idle markers. Initialised to the
-    /// agent-creation time in [`AgentView::new`] so newly-created
-    /// agents that have never run a turn still show a sensible
-    /// relative time.
-    pub last_active_at: Option<Instant>,
     pub current_branch: Option<String>,
     pub is_worktree: bool,
     pub main_repo: Option<String>,
@@ -757,13 +724,6 @@ pub struct AgentView {
     /// caches when the dashboard opens; drives the dashboard row's
     /// worktree-name subtitle. `None` for non-worktree agents.
     pub worktree_label: Option<String>,
-    /// Local wall-clock time when the current activity phase started.
-    /// Reset on each activity transition (thinking → responding → tool, etc.).
-    /// Used for the `(5s)` phase timer in the turn status line.
-    pub activity_started_at: Option<Instant>,
-    /// Last observed [`TurnActivity`] — used to detect phase transitions
-    /// and reset `activity_started_at`.
-    pub(crate) last_activity: Option<crate::acp::tracker::TurnActivity>,
     /// Cached pane areas from last render, for mouse hit-testing.
     pub pane_areas: PaneAreas,
     /// Entry index currently hovered by the mouse (for dimmed selection box).
