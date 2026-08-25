@@ -246,7 +246,8 @@ fn handle_session_notification_inner(
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
-    let mut terminal_outcome: Option<super::super::turn_completion::TerminalOutcome> = None;
+    let mut terminal_outcome: Option<super::super::agent_view::turn_completion::TerminalOutcome> =
+        None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
         ref update @ (GrowSessionUpdate::AutoCompactStarted { .. }
@@ -794,8 +795,8 @@ fn handle_session_notification_inner(
                 false
             } else if let Some(pending_id) = agent.pending_recap_entry.take() {
                 agent.scrollback.remove_entry(pending_id);
-                agent.show_toast(crate::app::dispatch::recap_unavailable_toast(
-                    crate::app::dispatch::scrollback_has_user_messages(&agent.scrollback),
+                agent.show_toast(crate::app::root::dispatch::recap_unavailable_toast(
+                    crate::app::root::dispatch::scrollback_has_user_messages(&agent.scrollback),
                 ));
                 true
             } else {
@@ -1220,9 +1221,9 @@ pub(super) fn apply_retry_state(
                 });
             }
             let error = if *rate_limited {
-                crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(Some(
-                    reason.as_str(),
-                )))
+                crate::app::root::effects::sanitize_user_error(&format_rate_limited_user_message(
+                    Some(reason.as_str()),
+                ))
             } else {
                 format!("failed after {attempts} retries: {reason}")
             };

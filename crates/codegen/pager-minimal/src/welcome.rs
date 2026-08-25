@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use pager::app::PagerTerminal;
-use pager::app::app_view::{ActiveView, AppView};
+use pager::app::root::{ActiveView, AppView};
 use pager::minimal_api;
 use pager::theme::Theme;
 

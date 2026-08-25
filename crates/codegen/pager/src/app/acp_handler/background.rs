@@ -6,7 +6,7 @@ use super::*;
 /// `false` if it should be passed to the normal tracker.
 pub(super) fn route_bg_task_stdout(
     tcu: &acp::ToolCallUpdate,
-    session: &mut super::super::agent::AgentSession,
+    session: &mut super::super::session::AgentSession,
 ) -> bool {
     let tc_id = tcu.tool_call_id.0.to_string();
 
@@ -312,7 +312,7 @@ pub(super) fn handle_scheduled_task_created(
             info.next_fire_at = next_fire_at;
         }
         Entry::Vacant(e) => {
-            e.insert(crate::app::agent::ScheduledTaskInfo {
+            e.insert(crate::app::session::ScheduledTaskInfo {
                 task_id,
                 prompt,
                 human_schedule,
@@ -366,7 +366,7 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
                 return is_active;
             }
             let task_id = e.key().clone();
-            e.insert(crate::app::agent::ScheduledTaskInfo {
+            e.insert(crate::app::session::ScheduledTaskInfo {
                 task_id,
                 prompt,
                 human_schedule,

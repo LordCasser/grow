@@ -5,7 +5,7 @@ use super::AgentView;
 #[cfg(test)]
 use super::test_fixtures;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -1847,7 +1847,7 @@ impl AgentView {
 #[cfg(test)]
 mod marketplace_modal_action_tests {
     use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::extensions_modal::{
         ButtonAction, ExtensionsModalState, ExtensionsTab, TabDataState,
     };
@@ -2049,7 +2049,7 @@ mod extensions_action_target_tests {
         agent.extensions_modal = Some(modal);
         let outcome = agent.execute_modal_button_action(ButtonAction::UpdateSelectedPlugin);
         match outcome {
-            crate::app::app_view::InputOutcome::Action(
+            crate::app::root::InputOutcome::Action(
                 crate::app::actions::Action::ExecutePluginsAction(
                     extension_types::PluginsAction::Update { plugin_id },
                 ),
@@ -2306,7 +2306,7 @@ mod extensions_action_target_tests {
 
 #[cfg(test)]
 mod extensions_modal_search_key_tests {
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -2532,7 +2532,7 @@ mod editor_paste_routing_tests {
 #[cfg(test)]
 mod extensions_modal_confirmation_tests {
     use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::extensions_modal::{
         ButtonAction, ConfirmationAction, ExtensionsModalState, ExtensionsTab, ModalMessage,
         TabDataState,

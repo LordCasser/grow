@@ -338,7 +338,7 @@ pub struct StashedPrompt {
     pub text: String,
     pub cursor: usize,
     pub(crate) images: Vec<PastedImage>,
-    pub(crate) chip_elements: Vec<crate::app::agent::ChipElement>,
+    pub(crate) chip_elements: Vec<crate::app::session::ChipElement>,
     pub(crate) image_counter: usize,
     pub(crate) image_undo_stash: Vec<PastedImage>,
 }
@@ -354,7 +354,7 @@ impl StashedPrompt {
     pub(crate) fn from_submission(
         text: String,
         images: Vec<PastedImage>,
-        chip_elements: Vec<crate::app::agent::ChipElement>,
+        chip_elements: Vec<crate::app::session::ChipElement>,
     ) -> Self {
         Self {
             cursor: text.len(),
@@ -371,7 +371,7 @@ impl StashedPrompt {
     ) -> (
         String,
         Vec<PastedImage>,
-        Vec<crate::app::agent::ChipElement>,
+        Vec<crate::app::session::ChipElement>,
     ) {
         (
             std::mem::take(&mut self.text),
@@ -862,7 +862,7 @@ impl PromptWidget {
             .textarea
             .elements()
             .iter()
-            .map(|element| crate::app::agent::ChipElement {
+            .map(|element| crate::app::session::ChipElement {
                 range: element.range.clone(),
                 kind: element.kind,
                 display: element.display.clone(),
@@ -2659,7 +2659,7 @@ impl PromptWidget {
     /// Re-register all chip elements (paste blocks, @-file refs, image
     /// chips) after a `set_text` restore. Uses the byte ranges stored at
     /// capture time — no buffer re-scanning.
-    pub fn restore_chip_elements(&mut self, elems: &[crate::app::agent::ChipElement]) {
+    pub fn restore_chip_elements(&mut self, elems: &[crate::app::session::ChipElement]) {
         self.textarea.restore_elements(
             elems
                 .iter()

@@ -299,7 +299,7 @@
         );
         let parent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            crate::app::activity::AgentActivityProjection::from_sessions(
+            crate::app::session::activity::AgentActivityProjection::from_sessions(
                 &parent.session,
                 parent.subagent_views.values().map(|child| &child.session),
             )

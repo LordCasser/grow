@@ -54,11 +54,11 @@ use tokio::task::JoinSet;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
+use super::acp_handler;
 use super::actions::{Action, TaskResult};
-use super::agent::AgentState;
 use super::agent_view::AgentView;
-use super::app_view::{AppView, TrustState};
-use super::{acp_handler, dispatch, effects};
+use super::root::{AppView, TrustState, dispatch, effects};
+use super::session::AgentState;
 use crate::acp::leader_bridge::bridge_channels;
 use crate::acp::model_state::ModelState;
 use crate::scrollback::block::RenderBlock;

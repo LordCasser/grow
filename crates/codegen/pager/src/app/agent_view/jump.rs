@@ -2,7 +2,7 @@
 
 use super::AgentView;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::views::jump::{
     JumpInput, JumpRestore, handle_jump_key, jump_activate, jump_row_at, move_cursor,
     set_jump_cursor,

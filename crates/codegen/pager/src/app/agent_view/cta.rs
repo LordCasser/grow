@@ -1027,7 +1027,7 @@ mod plugin_cta_notify_tests {
     #[test]
     fn ctrl_slash_installs_matched_plugin() {
         use crate::app::agent_view::CtaPhase;
-        use crate::app::app_view::InputOutcome;
+        use crate::app::root::InputOutcome;
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());

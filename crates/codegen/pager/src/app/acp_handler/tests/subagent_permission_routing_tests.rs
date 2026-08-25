@@ -70,7 +70,7 @@ fn child_permission_queues_on_primary_and_approval_resolves() {
     );
 
     // Standard approval path (same dispatch the Enter key on the modal uses).
-    let _ = crate::app::dispatch::dispatch(
+    let _ = crate::app::root::dispatch::dispatch(
         crate::app::actions::Action::PermissionSelect(acp::PermissionOptionId::new(
             std::sync::Arc::from("allow-once"),
         )),

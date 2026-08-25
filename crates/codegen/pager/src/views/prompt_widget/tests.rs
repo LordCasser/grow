@@ -2304,7 +2304,7 @@
     /// "duplicate element_id" warn.
     #[test]
     fn set_images_with_two_same_length_chips_preserves_distinct_element_ids() {
-        use crate::app::agent::ChipElement;
+        use crate::app::session::ChipElement;
 
         let mut pw = PromptWidget::new();
         // Build a buffer that matches the rewind-restore shape:
@@ -2387,7 +2387,7 @@
     /// unbounded images.
     #[test]
     fn set_images_truncates_input_exceeding_image_cap() {
-        use crate::app::agent::ChipElement;
+        use crate::app::session::ChipElement;
 
         let mut pw = PromptWidget::new();
 
@@ -2555,11 +2555,11 @@
         let images = pw.drain_images();
         assert_eq!(images[0].display_number, 1);
         assert_eq!(images[1].display_number, 2);
-        let chip_elements: Vec<crate::app::agent::ChipElement> = pw
+        let chip_elements: Vec<crate::app::session::ChipElement> = pw
             .textarea
             .elements()
             .iter()
-            .map(|e| crate::app::agent::ChipElement {
+            .map(|e| crate::app::session::ChipElement {
                 range: e.range.clone(),
                 kind: e.kind,
                 display: e.display.clone(),

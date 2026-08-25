@@ -6,8 +6,8 @@ use super::{
     ActivePane, AgentView, InlineMediaHitAreas, InputMode, PaneAreas, PluginCtaState,
     PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, SELF_ORIGINATED_PROMPT_CAP, SessionReload,
 };
-use crate::app::agent::AgentSession;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
+use crate::app::session::AgentSession;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
@@ -761,7 +761,7 @@ impl AgentView {
     /// else command) so the spinner can read `{description}…`.
     pub(crate) fn resolve_turn_activity(&self) -> Option<crate::acp::tracker::TurnActivity> {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
-        use crate::app::agent::AgentState;
+        use crate::app::session::AgentState;
         if let Some(activity) = self.session.turn_activity() {
             return Some(self.enrich_waiting_activity(activity));
         }
@@ -1230,7 +1230,7 @@ mod honest_turn_elapsed_tests {
 mod resolve_turn_activity_tests {
     use super::*;
     use crate::acp::tracker::{TurnActivity, WaitingReason};
-    use crate::app::agent::AgentState;
+    use crate::app::session::AgentState;
     fn running_view() -> AgentView {
         let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         view.session.state = AgentState::TurnRunning;
@@ -1270,7 +1270,7 @@ mod resolve_turn_activity_tests {
     #[test]
     fn task_output_wait_uses_bg_task_description() {
         use crate::acp::meta::NotificationMeta;
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
@@ -1344,7 +1344,7 @@ mod resolve_turn_activity_tests {
     #[test]
     fn task_output_wait_falls_back_to_short_command() {
         use crate::acp::meta::NotificationMeta;
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
@@ -1399,7 +1399,7 @@ mod resolve_turn_activity_tests {
     #[test]
     fn task_output_wait_multi_id_uses_full_task_count() {
         use crate::acp::meta::NotificationMeta;
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
@@ -1462,7 +1462,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_multi_id_preserves_suffix_when_first_is_long() {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
@@ -1608,7 +1608,7 @@ mod resolve_turn_activity_tests {
     #[test]
     fn task_output_wait_long_command_keeps_generic_label() {
         use crate::acp::meta::NotificationMeta;
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
@@ -1739,7 +1739,7 @@ mod status_window_tests {
 #[cfg(test)]
 mod reconnect_workflow_maps_tests {
     use super::super::test_agent_view;
-    use crate::app::agent::WorkflowRunSnapshot;
+    use crate::app::session::WorkflowRunSnapshot;
     fn wf_snapshot(run_id: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_string(),

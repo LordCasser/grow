@@ -231,8 +231,8 @@ pub(crate) fn replay_inherited_updates(
 /// feed only lifecycle records through the normal notification projection so
 /// pending grandchild interactions can route immediately after load.
 pub(crate) fn restore_descendant_lifecycle(
-    app: &mut crate::app::app_view::AppView,
-    root_agent_id: crate::app::agent::AgentId,
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
 ) {
     use shell::extensions::notification::SessionUpdate;
 
@@ -538,8 +538,8 @@ mod tests {
     use super::*;
     use crate::acp::meta::NotificationMeta;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession};
     use crate::app::agent_view::AgentView;
+    use crate::app::session::{AgentId, AgentSession};
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;

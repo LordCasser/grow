@@ -173,20 +173,20 @@ mod tests {
 
     #[test]
     fn todo_panel_visibility_auto_hides_when_work_is_done() {
-        use pager::app::agent::AgentState;
+        use pager::app::session::AgentState;
         let mut a = agent();
         // No todos → hidden.
         assert!(!todo_panel_visible(&a, false));
 
         // At least one unfinished todo → shown.
-        a.todo.update_todos(vec![
+        minimal_api::agent_todo_mut(&mut a).update_todos(vec![
             todo("done", TodoStatus::Completed),
             todo("doing", TodoStatus::InProgress),
         ]);
         assert!(todo_panel_visible(&a, false));
 
         // All completed + idle → auto-hidden (don't linger forever).
-        a.todo.update_todos(vec![
+        minimal_api::agent_todo_mut(&mut a).update_todos(vec![
             todo("a", TodoStatus::Completed),
             todo("b", TodoStatus::Completed),
         ]);
@@ -197,14 +197,14 @@ mod tests {
 
         // …and stays hidden even while a turn is actively running, so a previous
         // turn's finished list never lingers at the start of the next turn.
-        a.session.state = AgentState::TurnRunning;
+        minimal_api::set_agent_state_for_test(&mut a, AgentState::TurnRunning);
         assert!(
             !todo_panel_visible(&a, false),
             "all-complete list hides even mid-turn"
         );
 
         // The Ctrl+T force-show pin overrides the auto-hide.
-        a.session.state = AgentState::Idle;
+        minimal_api::set_agent_state_for_test(&mut a, AgentState::Idle);
         assert!(
             todo_panel_visible(&a, true),
             "Ctrl+T pin keeps a finished list visible"

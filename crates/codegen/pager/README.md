@@ -9,11 +9,10 @@ dialogs.
 ```
 src/
 ├── app/                 # Application state and event handling
-│   ├── app_view.rs      # Top-level state (welcome screen, agents, config)
-│   ├── agent_view/      # Per-session agent view (struct in mod.rs + per-domain impl modules)
-│   ├── dispatch/        # Action → Effect dispatcher (router + per-domain modules)
-│   ├── effects.rs       # Async side effects (ACP calls, file I/O)
-│   └── event_loop.rs    # Main event loop (input, ticks, ACP messages)
+│   ├── root/            # AppView, Action → Effect dispatch, effects, event loop
+│   ├── session/         # AgentSession and read-only activity projection
+│   ├── agent_view/      # Per-session presentation owner and domain methods
+│   └── acp_handler/     # ACP protocol routing into semantic owner methods
 ├── views/               # UI components
 │   ├── prompt_widget.rs # Text editor with file search, slash, history
 │   ├── welcome/         # Welcome screen (logo, menu, prompt)

@@ -338,7 +338,7 @@ impl AgentView {
                 .selected_task_id()
                 .and_then(|tid| self.session.bg_tasks.get(tid))
                 .is_some_and(|t| {
-                    t.status == crate::app::agent::BgTaskStatus::Running && !t.pending_kill
+                    t.status == crate::app::session::BgTaskStatus::Running && !t.pending_kill
                 })
         } else if self.active_pane == ActivePane::Scrollback {
             !selected_is_group_header
@@ -352,7 +352,7 @@ impl AgentView {
                     })
                     .and_then(|tid| self.session.bg_tasks.get(tid))
                     .is_some_and(|t| {
-                        t.status == crate::app::agent::BgTaskStatus::Running && !t.pending_kill
+                        t.status == crate::app::session::BgTaskStatus::Running && !t.pending_kill
                     })
         } else {
             false
@@ -1055,7 +1055,7 @@ impl AgentView {
             prompt_height
         };
         {
-            use crate::app::agent::PENDING_KILL_TIMEOUT_SECS;
+            use crate::app::session::PENDING_KILL_TIMEOUT_SECS;
             let now = frame_stamp.now();
             for task in self.session.bg_tasks.values_mut() {
                 if let Some(requested) = task.kill_requested_at
@@ -4391,7 +4391,7 @@ mod behavior_status_tests {
         // Some(Some(sid)) = ACP question owned by `sid`.
         let render = |child_question_source: Option<Option<&str>>, finished: bool| {
             let mut parent = make_agent();
-            parent.session.state = crate::app::agent::AgentState::TurnRunning;
+            parent.session.state = crate::app::session::AgentState::TurnRunning;
             if let Some(source) = child_question_source {
                 let mut child = make_agent();
                 let stashed_prompt = child.prompt.stash();

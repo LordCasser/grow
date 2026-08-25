@@ -12,7 +12,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 use pager::app::PagerTerminal;
-use pager::app::app_view::{ActiveView, AppView};
+use pager::app::root::{ActiveView, AppView};
 use pager::appearance::AppearanceConfig;
 use pager::minimal_api;
 use pager::render::Renderable;

@@ -260,7 +260,7 @@ pub enum ActiveModal {
         /// Unified picker state.
         state: crate::views::picker::PickerState,
         /// Fetched session entries (None = not yet loaded).
-        entries: Option<Vec<crate::app::app_view::SessionPickerEntry>>,
+        entries: Option<Vec<crate::app::root::SessionPickerEntry>>,
         /// Whether the session list is being fetched.
         loading: bool,
         /// Previous command palette state (if opened from palette). Restored on Esc.
@@ -358,7 +358,7 @@ pub enum ActiveModal {
         window: ModalWindowState,
         cached_lines: Option<(u16, Vec<ratatui::text::Line<'static>>)>,
         cwd: std::path::PathBuf,
-        agent_id: crate::app::agent::AgentId,
+        agent_id: crate::app::session::AgentId,
         /// Monotonic nonce to correlate async rewrite results with the modal
         /// that requested them, preventing stale results from populating a
         /// different note's review modal.

@@ -4,8 +4,8 @@
 //! minimal mode (no interactive panes). Kept out of `dispatch` for easy
 //! unit tests.
 
-use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
+use crate::app::session::BgTaskStatus;
 use crate::app::subagent::format_subagent_label;
 use crate::util::{format_duration, group_thousands};
 
@@ -430,7 +430,7 @@ mod tests {
         agent
             .session
             .private_workflow_runs
-            .push(crate::app::agent::WorkflowRunSnapshot {
+            .push(crate::app::session::WorkflowRunSnapshot {
                 run_id: "wf_private".into(),
                 definition_id: None,
                 definition_scope: None,
@@ -442,7 +442,7 @@ mod tests {
                 builtin: false,
                 phases: Vec::new(),
                 current_phase: Some("Research".into()),
-                agents: vec![crate::app::agent::WorkflowAgentRowView {
+                agents: vec![crate::app::session::WorkflowAgentRowView {
                     agent_id: "a1".into(),
                     label: "researcher-0".into(),
                     phase: None,

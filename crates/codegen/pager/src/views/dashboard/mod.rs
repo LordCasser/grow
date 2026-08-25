@@ -56,8 +56,8 @@ pub use state::{
 /// are skipped — only attachable top-level rows show up.
 pub fn overlay_cycle_order(
     state: &DashboardState,
-    agents: &indexmap::IndexMap<crate::app::agent::AgentId, crate::app::agent_view::AgentView>,
-) -> Vec<crate::app::agent::AgentId> {
+    agents: &indexmap::IndexMap<crate::app::session::AgentId, crate::app::agent_view::AgentView>,
+) -> Vec<crate::app::session::AgentId> {
     let home = render::cached_home();
     let rows = build_rows(
         agents,

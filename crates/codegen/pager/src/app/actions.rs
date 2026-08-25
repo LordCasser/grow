@@ -6,7 +6,7 @@
 //! - [`Action`] — produced by input handling, consumed by dispatch (sync).
 //! - [`Effect`] — produced by dispatch, consumed by the event loop (async).
 //! - [`TaskResult`] — produced by spawned tasks, fed back into dispatch.
-use super::agent::AgentId;
+use super::session::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use shell::sampling::types::ReasoningEffort;
@@ -21,7 +21,7 @@ pub enum CompactRequestStatus {
 /// Synchronous, side-effect-free user intent.
 ///
 /// Produced by [`super::input`] from key/mouse events.
-/// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
+/// Consumed by [`super::root::dispatch::dispatch`] to mutate state and return effects.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
@@ -207,7 +207,7 @@ pub enum Action {
     /// Focus the scrollback pane (leave prompt).
     FocusScrollback,
     /// Clear the prompt (history-aware). Armed by idle Esc double-press via
-    /// [`super::app_view::InputOutcome::ArmPending`] (no ActionDef; not a keybinding).
+    /// [`super::root::InputOutcome::ArmPending`] (no ActionDef; not a keybinding).
     ClearPrompt,
     /// Focus the scrollback pane and open an incremental search over it.
     /// Drives the `/find` slash command so simple-mode users (where a bare
@@ -659,7 +659,7 @@ pub enum Action {
         directive: Option<String>,
         /// When `Some`, also persist this worktree mode preference so
         /// future `/fork` invocations skip the popup.
-        persist_mode: Option<crate::app::app_view::WorktreeMode>,
+        persist_mode: Option<crate::app::root::WorktreeMode>,
     },
     /// Submit-path action emitted by the local `/new` worktree question
     /// modal. `worktree: true` creates the new session in a worktree;
@@ -668,7 +668,7 @@ pub enum Action {
         worktree: bool,
         /// When `Some`, also persist this worktree mode preference so
         /// future `/new` invocations skip the popup.
-        persist_mode: Option<crate::app::app_view::WorktreeMode>,
+        persist_mode: Option<crate::app::root::WorktreeMode>,
     },
     DoctorFixConfirmed {
         target: DoctorFixTarget,
@@ -1009,7 +1009,7 @@ mod permission_mode_kind_tests {
         }
     }
 }
-/// Async side effect produced by [`super::dispatch::dispatch`].
+/// Async side effect produced by [`super::root::dispatch::dispatch`].
 ///
 /// The event loop spawns these into a `JoinSet`. When they complete,
 /// the result is wrapped in [`TaskResult`] and fed back through
@@ -1305,7 +1305,7 @@ pub enum Effect {
         /// Text search pushed down to `grow/session/list` as `query`.
         /// `None` fetches the unfiltered list.
         query: Option<String>,
-        /// Snapshot of [`crate::app::app_view::AppView::session_picker_list_seq`];
+        /// Snapshot of [`crate::app::root::AppView::session_picker_list_seq`];
         /// the response is dropped when no longer current, so out-of-order
         /// completions can't clobber newer results.
         seq: u64,
@@ -1445,7 +1445,7 @@ pub enum Effect {
     /// config.toml. `config_key` is the TOML key under `[hints]`
     /// (`"new_session_worktree_mode"` or `"fork_worktree_mode"`).
     PersistWorktreeMode {
-        mode: crate::app::app_view::WorktreeMode,
+        mode: crate::app::root::WorktreeMode,
         config_key: &'static str,
     },
     /// Persist preferred model (and effort if Some) to config.toml.
@@ -2047,7 +2047,7 @@ pub enum TaskResult {
     },
     /// Session list fetched for the welcome screen picker.
     SessionListLoaded {
-        sessions: Vec<crate::app::app_view::SessionPickerEntry>,
+        sessions: Vec<crate::app::root::SessionPickerEntry>,
         /// Directory scope `sessions` were drawn from (`grow/listScope`).
         scope: shell::session::unified_list::ListScope,
         /// Echo of [`Effect::FetchSessionList::seq`]; stale results are dropped.
@@ -2092,7 +2092,7 @@ pub enum TaskResult {
     CardDetailLoaded {
         session_id: String,
         generation: u64,
-        detail: crate::app::app_view::CardDetail,
+        detail: crate::app::root::CardDetail,
     },
     /// Prompt response received (turn ended).
     PromptResponse {

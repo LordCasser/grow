@@ -40,7 +40,7 @@
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
 //!         open history search / post-cancel grace, or empty + no messages) →
 //!         Changed (swallow Esc; not FocusScrollback)
-//!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
+//!   → 4. return Unchanged → bubbles to the AppView root for global actions (quit)
 //! ```
 //!
 //! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
@@ -101,8 +101,8 @@ pub(crate) struct InlineMediaHitAreas {
     pub mermaid_sources: Vec<String>,
 }
 use super::actions::Action;
-use super::agent::AgentSession;
-use super::app_view::InputOutcome;
+use super::root::InputOutcome;
+use super::session::AgentSession;
 use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
@@ -136,27 +136,38 @@ mod cta;
 mod goal;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
+/// Off-thread full-file syntax highlight upgrade for edit diffs.
+pub mod edit_highlight_worker;
+pub(crate) mod inline_edit;
 mod interactions;
 mod jump;
 mod links;
 mod media;
+/// Off-thread Mermaid diagram render worker (out of process) + per-session cache.
+pub mod mermaid_worker;
+mod modal_routing;
 mod modals;
+pub(crate) mod mouse;
 mod notices;
 mod panes;
 mod paste;
 mod plan;
 mod prompt;
 mod queue;
+pub(crate) mod queue_edit;
 mod render;
 pub use render::AppRenderParams;
 mod rewind;
 mod selection;
 mod session;
 mod shell_completion;
+pub(in crate::app) mod turn_completion;
 mod viewer;
+mod workflow_ingest;
+pub(in crate::app) use workflow_ingest::is_builtin_workflow_handle;
 mod workflows_overlay;
 use super::actions;
-use super::dispatch;
+use crate::app::root::dispatch;
 pub(super) fn active_contexts_for_pane(pane: ActivePane) -> Vec<crate::actions::When> {
     use crate::actions::When;
     match pane {
@@ -233,7 +244,7 @@ impl HitArea {
         self.hovered = false;
     }
 }
-pub use super::queue_edit::PromptMode;
+pub use queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 ///
 /// These modes are **mutually exclusive**: only one can be active at a time.
@@ -484,8 +495,8 @@ pub(crate) struct SessionReload {
     /// Pre-outage todo list (replayed Plan updates overwrite the live pane).
     todo: TodoPane,
     workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
-    workflow_runs: Vec<crate::app::agent::WorkflowRunSnapshot>,
-    private_workflow_runs: Vec<crate::app::agent::WorkflowRunSnapshot>,
+    workflow_runs: Vec<crate::app::session::WorkflowRunSnapshot>,
+    private_workflow_runs: Vec<crate::app::session::WorkflowRunSnapshot>,
     workflow_run_revisions: std::collections::HashMap<String, u64>,
     cleared_workflow_runs: std::collections::HashSet<String>,
     /// Reconnect cursor as of window open, restored with the stash so a
@@ -874,10 +885,10 @@ pub struct AgentView {
     /// Off-thread Mermaid render runtime (worker channels + the on-click renders
     /// awaiting their result). Lazily created on the first *cache-missing*
     /// `[Open]`/`[Copy path]` click; `None` until then.
-    pub(crate) mermaid: Option<crate::app::mermaid_worker::MermaidRuntime>,
+    pub(crate) mermaid: Option<crate::app::agent_view::mermaid_worker::MermaidRuntime>,
     /// Off-thread edit-diff full-file syntax highlight upgrade. Lazily created
     /// on the first successful Edit tool completion that has hunks.
-    pub(crate) edit_hl: Option<crate::app::edit_highlight_worker::EditHlRuntime>,
+    pub(crate) edit_hl: Option<crate::app::agent_view::edit_highlight_worker::EditHlRuntime>,
     /// Whether any inline media is currently placed on screen.
     pub(crate) inline_media_active: bool,
     /// Image IDs that were placed on screen last frame. Used to detect
@@ -1046,7 +1057,7 @@ pub struct AgentView {
     /// replay the same decision on a stuck-turn retry — a second Esc/Ctrl+C
     /// while `TurnCancelling` re-sends the cancel with the original
     /// pause_goal / cancel_subagents, never a new default).
-    pub(crate) last_interrupt: Option<crate::app::agent::InterruptIntent>,
+    pub(crate) last_interrupt: Option<crate::app::session::InterruptIntent>,
     /// Per-agent mirror of cancel-subagents preference (`Some(true)` = always
     /// stop, `Some(false)` = always continue). Always choices set this on every
     /// agent and persist to `[ui].cancel_subagents_on_turn_cancel`; when unset,
@@ -1061,7 +1072,7 @@ pub struct AgentView {
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
     /// In-place edit of a previous user prompt. See `inline_edit.rs`.
-    pub(crate) inline_edit: Option<crate::app::inline_edit::InlineEditState>,
+    pub(crate) inline_edit: Option<crate::app::agent_view::inline_edit::InlineEditState>,
     /// Edited text awaiting its rewind; `dispatch_rewind_success` resubmits it.
     /// Set only when the rewind flow emits `Effect::RewindExecute` while the
     /// inline editor is open (see `stash_inline_resubmit_if_editing`).
@@ -1258,8 +1269,8 @@ pub(crate) fn translate_local_submit_for_test(
 /// for out-of-range indices.
 fn worktree_choice_from_index(
     idx: usize,
-) -> Option<(bool, Option<crate::app::app_view::WorktreeMode>)> {
-    use crate::app::app_view::WorktreeMode;
+) -> Option<(bool, Option<crate::app::root::WorktreeMode>)> {
+    use crate::app::root::WorktreeMode;
     match idx {
         0 => Some((true, None)),
         1 => Some((false, None)),
@@ -1780,8 +1791,8 @@ fn collect_citation_links(
 pub(crate) mod test_fixtures {
     use super::{AgentPane, AgentView};
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession, AgentState};
     use crate::app::prompt_queue::QueueEntryWire;
+    use crate::app::session::{AgentId, AgentSession, AgentState};
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1948,14 +1959,14 @@ pub(crate) mod test_fixtures {
     pub fn add_running_bg_task(agent: &mut AgentView) {
         agent.session.bg_tasks.insert(
             "task-1".into(),
-            crate::app::agent::BgTaskState {
+            crate::app::session::BgTaskState {
                 task_id: "task-1".into(),
                 tool_call_id: "tool-1".into(),
                 command: "sleep 5".into(),
                 description: None,
                 cwd: String::new(),
                 output_file: String::new(),
-                status: crate::app::agent::BgTaskStatus::Running,
+                status: crate::app::session::BgTaskStatus::Running,
                 start_time: std::time::SystemTime::now(),
                 end_time: None,
                 exit_code: None,
@@ -2248,8 +2259,8 @@ pub(crate) mod test_fixtures {
         assert!(agent.follow_up_seen.is_empty());
         assert_eq!(agent.follow_up_next_gen, 0);
     }
-    fn wf_snapshot(run_id: &str, status: &str) -> crate::app::agent::WorkflowRunSnapshot {
-        crate::app::agent::WorkflowRunSnapshot {
+    fn wf_snapshot(run_id: &str, status: &str) -> crate::app::session::WorkflowRunSnapshot {
+        crate::app::session::WorkflowRunSnapshot {
             run_id: run_id.to_string(),
             definition_id: None,
             definition_scope: None,
@@ -2776,7 +2787,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AgentView::new(
         AgentSession::new(
-            crate::app::agent::AgentId(0),
+            crate::app::session::AgentId(0),
             tx,
             session_id.map(agent_client_protocol::SessionId::new),
             crate::acp::model_state::ModelState::default(),

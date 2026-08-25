@@ -269,8 +269,8 @@ mod link_click_tests {
     use super::test_fixtures::make_agent;
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentState};
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::{AgentId, AgentState};
     use crate::render::osc8::{LinkOverlay, OverlayLink};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
@@ -1705,7 +1705,7 @@ mod link_click_tests {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_scrollback_key(&enter, &registry, &mut effects);
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED {
+        if crate::app::agent_view::inline_edit::INLINE_EDIT_ENABLED {
             assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
             assert!(agent.inline_edit.is_some(), "Enter must start inline edit");
         } else {
@@ -1760,7 +1760,7 @@ mod link_click_tests {
             false,
             None,
         );
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED {
+        if crate::app::agent_view::inline_edit::INLINE_EDIT_ENABLED {
             assert!(
                 agent.inline_edit.is_some(),
                 "double-click must start inline edit"
@@ -2239,7 +2239,7 @@ mod link_click_tests {
             id: 0,
             original: "queued text".into(),
             server_id: None,
-            kind: crate::app::agent::QueueEntryKind::Prompt,
+            kind: crate::app::session::QueueEntryKind::Prompt,
         };
         assert!(
             agent.prompt.text() != "queued text",
@@ -2751,8 +2751,8 @@ mod link_click_tests {
     #[test]
     fn navigation_clears_highlighted_link_via_dispatch() {
         use crate::app::actions::Action;
-        use crate::app::app_view::AppView;
-        use crate::app::dispatch::{SwitchCause, dispatch, switch_to_agent};
+        use crate::app::root::AppView;
+        use crate::app::root::dispatch::{SwitchCause, dispatch, switch_to_agent};
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
         let id = AgentId(0);

@@ -6,7 +6,7 @@ use super::{ActivePane, InputMode, test_fixtures};
 #[cfg(test)]
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::{PlanApprovalFocus, PlanComment};
@@ -675,7 +675,7 @@ mod prompt_flag_tests {
 mod plan_chip_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession};
+    use crate::app::session::{AgentId, AgentSession};
     use crate::appearance::AppearanceConfig;
     use crate::scrollback::state::ScrollbackState;
     fn make_agent() -> AgentView {

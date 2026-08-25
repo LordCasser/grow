@@ -12,8 +12,8 @@ use super::peek::PeekPanelState;
 use super::row::DashboardRow;
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
-use crate::app::agent::AgentId;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
+use crate::app::session::AgentId;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::key;
 use crate::views::prompt_widget::PromptWidget;
@@ -702,9 +702,9 @@ pub struct DashboardState {
     pub cwd: PathBuf,
     /// Worktree-label dialog — `Some` while the user is naming a worktree
     /// for a dashboard-dispatched agent. Reuses the welcome screen's
-    /// [`NewWorktreeDialogState`](crate::app::app_view::NewWorktreeDialogState)
+    /// [`NewWorktreeDialogState`](crate::app::root::NewWorktreeDialogState)
     /// widget; input is routed here and the renderer overlays it.
-    pub worktree_dialog: Option<crate::app::app_view::NewWorktreeDialogState>,
+    pub worktree_dialog: Option<crate::app::root::NewWorktreeDialogState>,
     /// Prompt state stashed while [`Self::worktree_dialog`] is open.
     pub pending_worktree_prompt: Option<crate::views::prompt_widget::StashedPrompt>,
     /// Whether confirming the in-flight [`Self::worktree_dialog`] should open
@@ -1146,14 +1146,14 @@ fn location_picker_config<'a>() -> crate::views::picker::PickerConfig<'a> {
 /// happens to have the same `AgentId(usize)`.
 pub struct SessionIdResolver {
     /// session_id → AgentId (top-level).
-    top: std::collections::HashMap<String, crate::app::agent::AgentId>,
+    top: std::collections::HashMap<String, crate::app::session::AgentId>,
     /// agent_session_id → set of (child_session_id, AgentId-of-parent).
     subs: std::collections::HashMap<
         String,
-        std::collections::HashMap<String, crate::app::agent::AgentId>,
+        std::collections::HashMap<String, crate::app::session::AgentId>,
     >,
     /// Reverse: AgentId → session_id (for `to_persisted`).
-    top_rev: std::collections::HashMap<crate::app::agent::AgentId, String>,
+    top_rev: std::collections::HashMap<crate::app::session::AgentId, String>,
 }
 
 impl SessionIdResolver {
@@ -1167,13 +1167,16 @@ impl SessionIdResolver {
     /// the first-seen `AgentId`, which is deterministic given the
     /// `IndexMap` iteration order.
     pub fn from_agents(
-        agents: &indexmap::IndexMap<crate::app::agent::AgentId, crate::app::agent_view::AgentView>,
+        agents: &indexmap::IndexMap<
+            crate::app::session::AgentId,
+            crate::app::agent_view::AgentView,
+        >,
     ) -> Self {
         let mut top = std::collections::HashMap::new();
         let mut top_rev = std::collections::HashMap::new();
         let mut subs: std::collections::HashMap<
             String,
-            std::collections::HashMap<String, crate::app::agent::AgentId>,
+            std::collections::HashMap<String, crate::app::session::AgentId>,
         > = std::collections::HashMap::new();
         for (id, agent) in agents {
             if let Some(sid) = agent.session.session_id.as_ref() {
@@ -2049,12 +2052,12 @@ impl DashboardState {
         &mut self,
         ev: &Event,
         registry: &ActionRegistry,
-        paste_provenance: crate::app::app_view::PasteProvenance,
+        paste_provenance: crate::app::root::PasteProvenance,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> InputOutcome {
         debug_assert!(
             matches!(ev, Event::Paste(_))
-                || paste_provenance == crate::app::app_view::PasteProvenance::Terminal,
+                || paste_provenance == crate::app::root::PasteProvenance::Terminal,
             "non-paste dashboard events cannot carry paste provenance"
         );
         // Cheatsheet modal owns the keyboard / mouse when open —
@@ -3638,7 +3641,7 @@ impl DashboardState {
 
             // Slash / @-file dropdown hover wins over row hover so the
             // completion list tracks the pointer while open (mirrors
-            // agent-view mouse handling in `app/mouse.rs`).
+            // agent-view mouse handling in `app/agent_view/mouse.rs`).
             if let Some(dd_area) = self.slash_dropdown_items_area {
                 let has_scrollbar = self.slash_dropdown_hit.has_scrollbar;
                 let on_scrollbar =
@@ -4212,7 +4215,7 @@ impl DashboardState {
     /// has confirmed `worktree_dialog.is_some()` (the gate in
     /// [`Self::handle_input`]).
     fn handle_worktree_dialog_input(&mut self, ev: &Event) -> InputOutcome {
-        use crate::app::app_view::NewWorktreeDialogOutcome;
+        use crate::app::root::NewWorktreeDialogOutcome;
         let Some(dialog) = self.worktree_dialog.as_mut() else {
             return InputOutcome::Unchanged;
         };
@@ -5667,13 +5670,13 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             &registry,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste("中\r\n".to_owned()),
             &registry,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -5697,13 +5700,13 @@ mod tests {
         state.dispatch.set_cursor(draft_end);
         state.dispatch.insert_image(peek_test_image()).unwrap();
         state.pending_worktree_prompt = Some(state.dispatch.stash());
-        state.worktree_dialog = Some(crate::app::app_view::NewWorktreeDialogState::new());
+        state.worktree_dialog = Some(crate::app::root::NewWorktreeDialogState::new());
         state.dispatch.set_text("");
 
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
 
@@ -5728,13 +5731,13 @@ mod tests {
         let mut state = DashboardState::new();
         let reg = crate::actions::ActionRegistry::defaults();
         let mut effects = Vec::new();
-        state.worktree_dialog = Some(crate::app::app_view::NewWorktreeDialogState::new());
+        state.worktree_dialog = Some(crate::app::root::NewWorktreeDialogState::new());
         state.dispatch.set_text("");
 
         let _ = state.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
 
@@ -5760,7 +5763,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(
@@ -5988,7 +5991,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let deferred = deferred_probe_target(&effects).is_some();
@@ -6012,7 +6015,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         crate::clipboard::clear_clipboard_probe_hook();
@@ -6032,7 +6035,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let target = deferred_probe_target(&effects);
@@ -6060,7 +6063,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects).expect("failed text read must probe attachments");
@@ -6084,7 +6087,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(paste),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -6121,7 +6124,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(paste),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(state.peek_reply.images.is_empty());
@@ -6943,7 +6946,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste("ignored".to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -6962,7 +6965,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste("real feedback".to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -8101,7 +8104,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(state.dispatch.text(), pasted, "raw paste text is preserved");
@@ -8123,7 +8126,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         state.dispatch.set_cursor(0);
@@ -8154,7 +8157,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         // handle_paste leaves the cursor after the chip.
@@ -8182,7 +8185,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(state.peek_reply.textarea.elements().len(), 1);
@@ -8213,7 +8216,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(state.peek_reply.textarea.elements().len(), 1);
@@ -8316,7 +8319,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(pasted.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(state.peek_reply.textarea.elements().len(), 1);
@@ -8342,7 +8345,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(crate::wrap_clipboard_image::MAGIC_NONE.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -8362,7 +8365,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(crate::wrap_clipboard_image::MAGIC_NONE.to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -8386,7 +8389,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(paste),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -8426,7 +8429,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(paste),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -8460,7 +8463,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste("hello\nworld".to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -8605,7 +8608,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects).expect("an image paste must defer a probe");
@@ -8630,7 +8633,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(String::new()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -8664,7 +8667,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste("中".to_owned()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects);
@@ -8690,7 +8693,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects);
@@ -8718,7 +8721,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste("a caption".to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects);
@@ -8759,7 +8762,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -8785,7 +8788,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Paste(String::new()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -8814,7 +8817,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -8842,7 +8845,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste("hello world".to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -8877,7 +8880,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Paste(png.display().to_string()),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let calls = crate::clipboard::clipboard_probe_call_count();
@@ -9120,7 +9123,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ctrl_v_event(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         let ctx = deferred_probe_ctx(&effects).expect("an image paste must defer a probe");
@@ -9268,7 +9271,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &ev,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(state.dispatch.text(), "/", "/ must type a literal slash");
@@ -9289,7 +9292,7 @@ mod tests {
         let o1 = state.handle_input_with_paste_provenance(
             &ctrl_slash,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(o1, InputOutcome::Changed));
@@ -9297,7 +9300,7 @@ mod tests {
         let o2 = state.handle_input_with_paste_provenance(
             &ctrl_slash,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(o2, InputOutcome::Changed));
@@ -9317,7 +9320,7 @@ mod tests {
             let _ = state.handle_input_with_paste_provenance(
                 &ev,
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects,
             );
         }
@@ -9331,7 +9334,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &enter,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -9359,7 +9362,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
             &registry,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -9381,7 +9384,7 @@ mod tests {
         let outcome = state.handle_input_with_paste_provenance(
             &esc,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -9406,7 +9409,7 @@ mod tests {
             let _ = state.handle_input_with_paste_provenance(
                 &ev,
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects,
             );
         }
@@ -9851,7 +9854,7 @@ mod tests {
         );
 
         state.focus_idle_overflow();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         assert!(!state.selected_idle_overflow, "row focus clears overflow");
     }
 
@@ -9958,7 +9961,7 @@ mod tests {
         assert!(state.selected.is_none());
         assert!(!state.new_agent_button_focused);
 
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         assert!(
             state.selected_section.is_none(),
             "focus_row clears the section"
@@ -10008,7 +10011,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &over,
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Changed
@@ -10033,7 +10036,7 @@ mod tests {
                 state.handle_input_with_paste_provenance(
                     &click,
                     &reg,
-                    crate::app::app_view::PasteProvenance::Terminal,
+                    crate::app::root::PasteProvenance::Terminal,
                     &mut effects
                 ),
                 InputOutcome::Action(Action::DashboardCloseShortcutsHelp)
@@ -10080,7 +10083,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &right(),
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Changed
@@ -10089,14 +10092,14 @@ mod tests {
         state.handle_input_with_paste_provenance(
             &right(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(expanded_len(&state), 0, "second press collapses it");
         state.handle_input_with_paste_provenance(
             &right(),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert_eq!(expanded_len(&state), 1, "third press expands it again");
@@ -10149,7 +10152,7 @@ mod tests {
         state.handle_input_with_paste_provenance(
             &enter,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(
@@ -10161,7 +10164,7 @@ mod tests {
         state.handle_input_with_paste_provenance(
             &esc,
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(
@@ -10331,7 +10334,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &repeat,
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Unchanged
@@ -10342,7 +10345,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &press,
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Action(Action::DashboardStop)
@@ -10421,7 +10424,7 @@ mod tests {
         use crate::views::dashboard::DashboardRowId;
 
         let reg = crate::actions::ActionRegistry::defaults();
-        let id = DashboardRowId::TopLevel(crate::app::agent::AgentId(42));
+        let id = DashboardRowId::TopLevel(crate::app::session::AgentId(42));
         let l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
 
         crate::appearance::cache::set_vim_mode(true);
@@ -11001,7 +11004,7 @@ mod tests {
     /// per-key serial lock. The `GROW_AGENT_DASHBOARD` key means this
     /// test runs serially with any other test that decorates itself
     /// with `#[serial_test::serial(GROW_AGENT_DASHBOARD)]` — see the
-    /// `dispatch_open_dashboard`-calling tests in `app::dispatch`.
+    /// `dispatch_open_dashboard`-calling tests in `app::root::dispatch`.
     /// A function-local `Mutex` would only serialize
     /// against itself; readers in other tests
     /// could still observe the transient `0` value.
@@ -11229,7 +11232,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &Event::Key(key),
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Action(Action::DashboardOpenLocationPicker)
@@ -11249,7 +11252,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &Event::Key(esc),
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Action(Action::DashboardCloseLocationPicker)
@@ -11272,7 +11275,7 @@ mod tests {
         let _ = state.handle_input_with_paste_provenance(
             &Event::Key(key),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         );
         assert!(
@@ -11295,7 +11298,7 @@ mod tests {
         match state.handle_input_with_paste_provenance(
             &Event::Key(enter),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         ) {
             InputOutcome::Action(Action::DashboardChangeLocation { input }) => {
@@ -11322,7 +11325,7 @@ mod tests {
             state.handle_input_with_paste_provenance(
                 &Event::Key(tab),
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects
             ),
             InputOutcome::Changed
@@ -11348,7 +11351,7 @@ mod tests {
         match state.handle_input_with_paste_provenance(
             &Event::Key(enter),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         ) {
             InputOutcome::Action(Action::DashboardChangeLocation { input }) => {
@@ -11374,7 +11377,7 @@ mod tests {
             let _ = state.handle_input_with_paste_provenance(
                 &Event::Key(key),
                 &reg,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects,
             );
         }
@@ -11382,7 +11385,7 @@ mod tests {
         match state.handle_input_with_paste_provenance(
             &Event::Key(enter),
             &reg,
-            crate::app::app_view::PasteProvenance::Terminal,
+            crate::app::root::PasteProvenance::Terminal,
             &mut effects,
         ) {
             InputOutcome::Action(Action::DashboardChangeLocation { input }) => {

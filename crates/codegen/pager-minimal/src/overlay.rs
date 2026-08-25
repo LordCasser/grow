@@ -37,7 +37,7 @@ use ratatui::style::Style;
 
 use pager::app::PagerTerminal;
 use pager::app::agent_view::AgentView;
-use pager::app::app_view::{ActiveView, AppView};
+use pager::app::root::{ActiveView, AppView};
 use pager::appearance::LayoutConfig;
 use pager::minimal_api;
 use pager::render::SafeBuf as _;

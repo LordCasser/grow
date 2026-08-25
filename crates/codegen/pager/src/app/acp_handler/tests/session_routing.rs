@@ -227,7 +227,7 @@
         use crate::views::modal::ActiveModal;
 
         let mut app = make_app_with_agent("sess-A");
-        let _ = crate::app::dispatch::dispatch(Action::OpenSettings, &mut app);
+        let _ = crate::app::root::dispatch::dispatch(Action::OpenSettings, &mut app);
         let before = match &app.agents[&AgentId(0)].active_modal {
             Some(ActiveModal::Settings { state }) => state.pager_snapshot.goal_available,
             _ => panic!("expected settings modal"),

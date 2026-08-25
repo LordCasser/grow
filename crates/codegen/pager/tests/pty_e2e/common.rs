@@ -405,14 +405,14 @@ pub(crate) fn inject_keys_paced(harness: &mut PtyHarness, keys: &[u8]) {
 }
 
 /// Widens the pager's idle-Esc double-press window (bounded by
-/// `esc_double_press_ttl` in `app_view.rs`) so a loaded shard's inter-press
+/// `esc_double_press_ttl` in `app/root/mod.rs`) so a loaded shard's inter-press
 /// render round-trip can't expire the arm.
 pub(crate) const ESC_DOUBLE_PRESS_ENV: &str = "GROW_ESC_DOUBLE_PRESS_MS";
 
 /// Spawn the pager with [`ESC_DOUBLE_PRESS_ENV`] set to the 60s cap.
 pub(crate) fn spawn_esc_double_press_pager(content: &ContentController) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
-    let value = pager::app::app_view::ESC_DOUBLE_PRESS_TEST_MS.to_string();
+    let value = pager::app::root::ESC_DOUBLE_PRESS_TEST_MS.to_string();
     PtyHarness::spawn_with_content_env_ops(
         &binary,
         DEFAULT_ROWS,

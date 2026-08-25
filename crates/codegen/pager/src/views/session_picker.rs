@@ -1,7 +1,7 @@
 //! Shared session picker helpers.
 //!
 //! Centralises data types, entry building, and index-mapping logic used by
-//! both the welcome-screen session picker (`welcome/mod.rs` + `app_view.rs`)
+//! both the welcome-screen session picker (`welcome/mod.rs` + `app/root/mod.rs`)
 //! and the modal session picker (`ActiveModal::SessionPicker` in
 //! `agent_view.rs`).
 
@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
-use crate::app::app_view::SessionPickerEntry;
+use crate::app::root::SessionPickerEntry;
 use crate::views::picker::{PickerEntry, PickerField, PickerRow, PickerState};
 
 // ---------------------------------------------------------------------------

@@ -2,13 +2,13 @@ use super::AgentView;
 #[cfg(test)]
 use super::test_fixtures;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 
 fn management_command(
     op: &str,
-    target: Option<&crate::app::agent::WorkflowRunSnapshot>,
+    target: Option<&crate::app::session::WorkflowRunSnapshot>,
 ) -> Option<String> {
     let run = target?;
     let allowed = match op {
@@ -25,7 +25,7 @@ fn management_command(
 
 fn resolve_management_command(
     op: &str,
-    target: Option<&crate::app::agent::WorkflowRunSnapshot>,
+    target: Option<&crate::app::session::WorkflowRunSnapshot>,
 ) -> Option<String> {
     management_command(op, target).or_else(|| {
         if op == "resume"
@@ -74,7 +74,7 @@ fn definition_command(
 }
 
 fn transcript_target(
-    run: &crate::app::agent::WorkflowRunSnapshot,
+    run: &crate::app::session::WorkflowRunSnapshot,
     phase: Option<&str>,
 ) -> Option<String> {
     let all_agents = run.phases.is_empty() && run.current_phase.is_none();
@@ -419,8 +419,8 @@ mod workflows_overlay_key_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
-    use crate::app::agent::WorkflowRunSnapshot;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::WorkflowRunSnapshot;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> Event {
@@ -584,7 +584,7 @@ mod workflows_overlay_key_tests {
         run.phases = vec![("Research".to_owned(), "active".to_owned())];
         run.current_phase = Some("Research".to_owned());
         run.agents = vec![
-            crate::app::agent::WorkflowAgentRowView {
+            crate::app::session::WorkflowAgentRowView {
                 agent_id: "child-done".to_owned(),
                 label: "done".to_owned(),
                 phase: Some("Research".to_owned()),
@@ -593,7 +593,7 @@ mod workflows_overlay_key_tests {
                 tokens_used: 0,
                 duration_ms: 0,
             },
-            crate::app::agent::WorkflowAgentRowView {
+            crate::app::session::WorkflowAgentRowView {
                 agent_id: "child-running".to_owned(),
                 label: "running".to_owned(),
                 phase: Some("Research".to_owned()),

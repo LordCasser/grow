@@ -22,8 +22,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::context_bar::SEPARATOR;
-use crate::app::agent::McpInitProgress;
-use crate::app::agent::{GoalDisplayState, GoalDisplayStatus};
+use crate::app::session::McpInitProgress;
+use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
 use crate::theme::Theme;
 
 /// A named status bar item.

@@ -18,10 +18,10 @@ use shell::tools::todo::todo_item_from_plan_entry;
 use workspace::permission::bash_command_splitting::BashCommandHighlights;
 
 use super::agent_view::{AgentPane, AgentView, InputMode};
-use super::app_view::{ActiveView, AppView};
+use super::root::{ActiveView, AppView};
 use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::TurnActivity;
-use crate::app::agent::{
+use crate::app::session::{
     AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayState,
     GoalDisplayStatus,
 };
@@ -45,7 +45,6 @@ mod routing;
 mod session_notification;
 mod settings;
 mod subagent_activity;
-mod workflow_ingest;
 
 #[cfg(test)]
 use permissions::{MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, mcp_args_lines};
@@ -429,7 +428,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                         // Tools list arrives in the same update's `meta` payload.
                         // Stash it on the session so the per-frame sync in
-                        // `app_view.rs` can push it through to the slash registry
+                        // `app/root/mod.rs` can push it through to the slash registry
                         // alongside the command catalog.
                         if let Some(tools) = agent.session.tracker.take_pending_acp_tools() {
                             agent.session.available_tools = Some(tools.into_iter().collect());
@@ -495,19 +494,24 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         advance_reconnect_cursor(agent, &mut meta);
 
                         if release_behavior_fifo {
-                            behavior_drain = Some(crate::app::dispatch::maybe_drain_queue(agent));
+                            behavior_drain =
+                                Some(crate::app::root::dispatch::maybe_drain_queue(agent));
                         }
 
                         !meta.is_replay && !agent.session.loading_replay
                     };
 
                     if let Some(drain) = behavior_drain {
-                        crate::app::dispatch::note_peek_page_flip(app, id, drain.page_flip_entry);
+                        crate::app::root::dispatch::note_peek_page_flip(
+                            app,
+                            id,
+                            drain.page_flip_entry,
+                        );
                         app.pending_effects.extend(drain.effects);
                     }
 
                     if settings_modal_refresh_needed {
-                        crate::app::dispatch::refresh_open_settings_modals(app);
+                        crate::app::root::dispatch::refresh_open_settings_modals(app);
                     }
                     if workflows_modal_refresh {
                         queue_open_workflows_modal_refresh(app, id);
@@ -600,29 +604,6 @@ fn workflow_commands(
         .collect()
 }
 
-pub(super) fn is_builtin_workflow_handle(
-    commands: &[acp::AvailableCommand],
-    display_name: &str,
-) -> bool {
-    let is_builtin = |command: &acp::AvailableCommand| {
-        command.meta.as_ref().is_some_and(|meta| {
-            meta.get("workflowSource")
-                .and_then(serde_json::Value::as_str)
-                == Some("builtin")
-        })
-    };
-    if let Some(exact) = commands.iter().find(|command| command.name == display_name) {
-        return is_builtin(exact);
-    }
-    commands.iter().any(|command| {
-        is_builtin(command)
-            && display_name
-                .strip_prefix(command.name.as_str())
-                .and_then(|suffix| suffix.strip_prefix('-'))
-                .is_some_and(|ordinal| ordinal.parse::<u32>().is_ok_and(|n| n >= 2))
-    })
-}
-
 pub(crate) fn refresh_workflow_run_capabilities(agent: &mut AgentView) {
     let management_available = agent
         .session
@@ -631,7 +612,10 @@ pub(crate) fn refresh_workflow_run_capabilities(agent: &mut AgentView) {
         .any(|command| command.name == "workflow");
     for run in &mut agent.session.workflow_runs {
         run.management_available = management_available;
-        run.builtin = is_builtin_workflow_handle(&agent.session.available_commands, &run.name);
+        run.builtin = super::agent_view::is_builtin_workflow_handle(
+            &agent.session.available_commands,
+            &run.name,
+        );
     }
 }
 

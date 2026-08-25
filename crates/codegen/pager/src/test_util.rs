@@ -4,7 +4,7 @@
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules
 /// (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
-    use crate::app::agent::{AgentId, AgentSession};
+    use crate::app::session::{AgentId, AgentSession};
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let session = {
         let session = AgentSession::new(

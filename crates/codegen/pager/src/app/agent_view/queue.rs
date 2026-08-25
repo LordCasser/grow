@@ -6,7 +6,7 @@ use super::test_fixtures;
 use super::{AgentPane, AgentView, PromptMode, overlay_action_to_outcome};
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crossterm::event::KeyEvent;
 
 impl AgentView {
@@ -16,7 +16,7 @@ impl AgentView {
         &mut self,
         id: u64,
         effects: &mut Vec<super::actions::Effect>,
-    ) -> Option<crate::app::agent::QueuedPrompt> {
+    ) -> Option<crate::app::session::QueuedPrompt> {
         let pos = self
             .session
             .pending_prompts
@@ -129,10 +129,10 @@ impl AgentView {
             .find(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
         {
             return crate::views::queue_pane::kind_from_wire(&entry.kind)
-                == crate::app::agent::QueueEntryKind::Prompt;
+                == crate::app::session::QueueEntryKind::Prompt;
         }
         self.session.pending_prompts.front().is_some_and(|p| {
-            p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
+            p.kind == crate::app::session::QueueEntryKind::Prompt && p.wire_matches_display()
         })
     }
 
@@ -162,7 +162,7 @@ impl AgentView {
             .session
             .bg_tasks
             .values()
-            .filter(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+            .filter(|t| t.status == crate::app::session::BgTaskStatus::Running)
         {
             if task.is_monitor {
                 watchers.monitors += 1;
@@ -210,7 +210,7 @@ impl AgentView {
     /// kinds stay queued: interjecting them would send the display text, not
     /// the payload.
     pub(in crate::app) fn queue_row_prompt_like(&self, id: u64) -> Option<bool> {
-        use crate::app::agent::QueueEntryKind;
+        use crate::app::session::QueueEntryKind;
         use crate::views::queue_pane::{QueueRowOrigin, kind_from_wire};
 
         if let Some(local) = self.session.pending_prompts.iter().find(|p| p.id == id) {
@@ -537,7 +537,7 @@ mod queue_steering_tests {
             id: 7,
             original: "queued".into(),
             server_id: Some("q1".into()),
-            kind: crate::app::agent::QueueEntryKind::Prompt,
+            kind: crate::app::session::QueueEntryKind::Prompt,
         };
         agent.prompt.set_text("queued");
         agent.force_active_pane(AgentPane::Prompt);
@@ -557,7 +557,7 @@ mod queue_steering_tests {
 #[cfg(test)]
 mod watcher_tests {
     use super::super::{test_agent_view, test_fixtures};
-    use crate::app::agent::WorkflowRunSnapshot;
+    use crate::app::session::WorkflowRunSnapshot;
     use crate::views::turn_status::Watchers;
 
     fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
@@ -593,14 +593,14 @@ mod watcher_tests {
     ) {
         agent.session.bg_tasks.insert(
             task_id.into(),
-            crate::app::agent::BgTaskState {
+            crate::app::session::BgTaskState {
                 task_id: task_id.into(),
                 tool_call_id: format!("call-{task_id}"),
                 command: "sleep 5".into(),
                 description: None,
                 cwd: "/tmp".into(),
                 output_file: "/tmp/out".into(),
-                status: crate::app::agent::BgTaskStatus::Running,
+                status: crate::app::session::BgTaskStatus::Running,
                 start_time: std::time::SystemTime::now(),
                 end_time: None,
                 exit_code: None,
@@ -624,7 +624,7 @@ mod watcher_tests {
         insert_bg_task(&mut agent, "mon-1", true);
         insert_bg_task(&mut agent, "done-1", false);
         agent.session.bg_tasks.get_mut("done-1").unwrap().status =
-            crate::app::agent::BgTaskStatus::Done;
+            crate::app::session::BgTaskStatus::Done;
         assert_eq!(
             agent.watchers(),
             Watchers {

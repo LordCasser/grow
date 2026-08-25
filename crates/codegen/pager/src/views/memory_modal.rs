@@ -23,7 +23,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 
 use crate::render::SafeBuf;

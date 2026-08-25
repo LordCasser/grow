@@ -12,7 +12,7 @@ use super::{
 };
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crate::views::modal::ActiveModal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
@@ -186,7 +186,7 @@ impl AgentView {
     }
     pub(crate) fn workflow_runs_newest_first(
         &self,
-    ) -> Vec<&crate::app::agent::WorkflowRunSnapshot> {
+    ) -> Vec<&crate::app::session::WorkflowRunSnapshot> {
         self.session.workflow_runs.iter().rev().collect()
     }
     /// No per-pane `Esc` consumer is pending (text selection, link highlight,
@@ -247,7 +247,10 @@ impl AgentView {
             _ => false,
         };
         pane_clear
-            && matches!(self.prompt_mode, crate::app::queue_edit::PromptMode::Normal)
+            && matches!(
+                self.prompt_mode,
+                crate::app::agent_view::queue_edit::PromptMode::Normal
+            )
             && self.inline_edit.is_none()
             && !self.is_subagent_view
             && self.agents_modal.is_none()
@@ -368,7 +371,7 @@ impl AgentView {
     /// Routes key events through three levels:
     /// 1. Pane-specific (prompt widget or scrollback navigation)
     /// 2. Agent-level (cancel, always-approve -- checked if pane didn't consume)
-    /// 3. Return Unchanged (bubbles to app_view for global actions)
+    /// 3. Return Unchanged (bubbles to the AppView root for global actions)
     pub fn handle_input(
         &mut self,
         ev: &Event,
@@ -1378,7 +1381,7 @@ impl AgentView {
             self.session
                 .goal_state
                 .as_ref()
-                .filter(|goal| goal.status != crate::app::agent::GoalDisplayStatus::Complete)
+                .filter(|goal| goal.status != crate::app::session::GoalDisplayStatus::Complete)
                 .map(|goal| goal.objective.clone()),
             auto_permission,
             permission,
@@ -1576,7 +1579,7 @@ mod background_and_tasks_shortcut_tests {
     use super::super::test_fixtures::{add_running_bg_task, add_running_execute, make_agent};
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1822,7 +1825,7 @@ mod leader_key_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use agent_client_protocol as acp;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -1969,7 +1972,7 @@ mod btw_focus_tests {
     use super::test_fixtures::make_agent;
     use super::{AgentPane, AgentView};
     use crate::actions::ActionRegistry;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::btw_overlay::BtwOverlayState;
     use crate::views::jump::{JumpRestore, JumpState};
     use crossterm::event::{
@@ -2205,7 +2208,7 @@ mod btw_focus_tests {
         assert!(block.block_viewer.is_none(), "block viewer handled Esc");
         assert_minimal_btw_active(&block, "block viewer");
         let mut goal = minimal_btw_agent();
-        goal.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        goal.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
         goal.show_goal_detail = true;
         goal.handle_minimal_input(&key(KeyCode::Esc), &reg, &mut effects);
         assert!(!goal.show_goal_detail, "goal detail handled Esc");
@@ -2326,7 +2329,7 @@ mod focus_gained_restore_tests {
     };
     use super::test_fixtures::make_agent;
     use super::{AgentPane, AgentView};
-    use crate::app::agent::AgentState;
+    use crate::app::session::AgentState;
     use crate::views::modal::{ActiveModal, CancelTurnViewState};
     fn scrollback_agent() -> AgentView {
         let mut agent = make_agent();
@@ -2429,7 +2432,7 @@ mod focus_gained_restore_tests {
 mod esc_would_cancel_turn_tests {
     use super::test_fixtures::make_agent;
     use super::{AgentPane, AgentView};
-    use crate::app::agent::AgentState;
+    use crate::app::session::AgentState;
     /// Running-turn agent on the prompt pane with no Esc consumers layered.
     fn running_agent(vim_mode: bool) -> AgentView {
         let mut agent = make_agent();
@@ -2455,18 +2458,18 @@ mod esc_would_cancel_turn_tests {
     #[test]
     fn queued_edit_and_inline_edit_steal_esc() {
         let mut agent = running_agent(false);
-        agent.prompt_mode = crate::app::queue_edit::PromptMode::EditingQueued {
+        agent.prompt_mode = crate::app::agent_view::queue_edit::PromptMode::EditingQueued {
             id: 1,
             original: "queued row".into(),
             server_id: None,
-            kind: crate::app::agent::QueueEntryKind::Prompt,
+            kind: crate::app::session::QueueEntryKind::Prompt,
         };
         assert!(
             !agent.esc_would_cancel_turn(false),
             "queued-prompt editing owns Esc (discard edit), not cancel"
         );
         let mut agent = running_agent(false);
-        agent.inline_edit = Some(crate::app::inline_edit::InlineEditState {
+        agent.inline_edit = Some(crate::app::agent_view::inline_edit::InlineEditState {
             entry_id: crate::scrollback::entry::EntryId::new(1),
             prompt_index: 0,
             original: "sent".into(),
@@ -2551,8 +2554,8 @@ mod jump_backout_key_tests {
     use super::{AgentPane, AgentView};
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
-    use crate::app::agent::{AgentCommand, AgentState};
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::{AgentCommand, AgentState};
     use crate::views::jump::{JumpRestore, JumpState};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     fn open_jump(agent: &mut AgentView) {
@@ -2628,7 +2631,7 @@ mod jump_backout_key_tests {
 mod rich_textarea_paste_routing_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
-    use crate::app::inline_edit::InlineEditState;
+    use crate::app::agent_view::inline_edit::InlineEditState;
     use crate::scrollback::entry::EntryId;
     use crossterm::event::Event;
     use ratatui_textarea::{TextArea, TextAreaState};

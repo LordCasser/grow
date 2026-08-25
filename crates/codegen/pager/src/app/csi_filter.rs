@@ -4,7 +4,7 @@
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
-use super::event_loop::{TimedInputEvent, is_bare_esc_press};
+use super::root::event_loop::{TimedInputEvent, is_bare_esc_press};
 
 /// Persistent filter that reassembles CSI fragments leaked by crossterm when a
 /// control sequence splits across `read()` boundaries — SGR mouse reports

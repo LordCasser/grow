@@ -8,7 +8,7 @@
 //! scroll up into native scrollback via [`super::commit`]. When idle the tail is
 //! empty and only status + prompt (+ optional panels) show.
 use pager::app::PagerTerminal;
-use pager::app::app_view::AppView;
+use pager::app::root::AppView;
 use pager::minimal_api;
 use pager::render::Renderable;
 use pager::scrollback::state::ScrollbackState;
@@ -691,7 +691,7 @@ fn render_prompt_info(
 /// Ctrl+q again to quit"), or `None` when nothing is armed / it has expired or
 /// is a silent arm (no label). Mirrors the full-TUI shortcuts-bar `PendingHint`,
 /// which minimal does not render.
-fn minimal_pending_hint(pending: &Option<pager::app::app_view::PendingAction>) -> Option<String> {
+fn minimal_pending_hint(pending: &Option<pager::app::root::PendingAction>) -> Option<String> {
     let pending = pending.as_ref()?;
     if pending.expired() {
         return None;
@@ -771,7 +771,7 @@ mod tests {
     }
     #[test]
     fn tail_height_uses_owning_session_cwd_for_tool_paths() {
-        use pager::app::agent::AgentState;
+        use pager::app::session::AgentState;
         use pager::scrollback::RenderBlock;
         use pager::scrollback::entry::ScrollbackEntry;
         use pager::scrollback::types::DisplayMode;
@@ -871,7 +871,7 @@ mod tests {
     #[test]
     fn minimal_status_shows_rich_activity_and_idle_hint() {
         use pager::acp::tracker::TurnActivity;
-        use pager::app::agent::AgentState;
+        use pager::app::session::AgentState;
         let theme = Theme::current();
         let area = Rect::new(0, 0, 60, 1);
         let read = |buf: &Buffer| -> String {
@@ -915,7 +915,7 @@ mod tests {
         );
         pager::app::set_minimal_show_switch_back_to_fullscreen_for_test(false);
         let mut a = agent();
-        a.session.state = AgentState::TurnRunning;
+        minimal_api::set_agent_state_for_test(&mut a, AgentState::TurnRunning);
         let mut buf = Buffer::empty(area);
         render_minimal_status(
             &mut buf,
@@ -946,7 +946,7 @@ mod tests {
     }
     #[test]
     fn minimal_status_shows_idle_watching_cue() {
-        use pager::app::agent::AgentState;
+        use pager::app::session::AgentState;
         let theme = Theme::current();
         let area = Rect::new(0, 0, 60, 1);
         let read = |buf: &Buffer| -> String {
@@ -955,10 +955,10 @@ mod tests {
                 .collect()
         };
         let mut a = agent();
-        a.session.state = AgentState::Idle;
-        a.session.scheduled_tasks.insert(
-            "loop-1".to_string(),
-            pager::app::agent::ScheduledTaskInfo {
+        minimal_api::set_agent_state_for_test(&mut a, AgentState::Idle);
+        minimal_api::insert_scheduled_task_for_test(
+            &mut a,
+            pager::app::session::ScheduledTaskInfo {
                 task_id: "loop-1".to_string(),
                 prompt: "do the thing".to_string(),
                 human_schedule: "every 5m".to_string(),
@@ -1011,11 +1011,14 @@ mod tests {
     #[test]
     fn prompt_info_renders_model_context_and_queued() {
         let mut a = agent();
-        a.context_state = Some(shell::session::ContextInfo {
-            used: 276_000,
-            total: 2_000_000,
-            ..Default::default()
-        });
+        minimal_api::set_agent_context_for_test(
+            &mut a,
+            shell::session::ContextInfo {
+                used: 276_000,
+                total: 2_000_000,
+                ..Default::default()
+            },
+        );
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -1036,12 +1039,15 @@ mod tests {
     fn prompt_info_bash_mode_shows_run_shell_command() {
         use pager::app::agent_view::PromptInputMode;
         let mut a = agent();
-        a.prompt_input_mode = PromptInputMode::Bash;
-        a.context_state = Some(shell::session::ContextInfo {
-            used: 276_000,
-            total: 2_000_000,
-            ..Default::default()
-        });
+        minimal_api::set_agent_prompt_input_mode_for_test(&mut a, PromptInputMode::Bash);
+        minimal_api::set_agent_context_for_test(
+            &mut a,
+            shell::session::ContextInfo {
+                used: 276_000,
+                total: 2_000_000,
+                ..Default::default()
+            },
+        );
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -1106,7 +1112,7 @@ mod tests {
             render(&a)
         );
         minimal_api::set_permission_mode_for_test(
-            &mut a.session,
+            &mut a,
             shell::util::config::PermissionMode::AlwaysApprove,
         );
         let text = render(&a);
@@ -1115,7 +1121,7 @@ mod tests {
             "always-approve flag: {text:?}"
         );
         minimal_api::set_permission_mode_for_test(
-            &mut a.session,
+            &mut a,
             shell::util::config::PermissionMode::Auto,
         );
         let text = render(&a);
@@ -1125,7 +1131,7 @@ mod tests {
     fn pending_hint_formats_press_again() {
         use crossterm::event::{KeyCode, KeyModifiers};
         use pager::app::actions::Action;
-        use pager::app::app_view::PendingAction;
+        use pager::app::root::PendingAction;
         use pager::input::key::KeyShortcut;
         assert!(minimal_pending_hint(&None).is_none());
         let shortcut = KeyShortcut::new(KeyCode::Char('q'), KeyModifiers::CONTROL);

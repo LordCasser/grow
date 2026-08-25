@@ -2,7 +2,7 @@
 //! handling, and mermaid diagram affordances.
 
 use super::AgentView;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::render::SafeBuf;
 use crate::terminal::overlay::{self, PostFlush};
 use crate::theme::Theme;
@@ -517,9 +517,9 @@ impl AgentView {
             }
             AffordanceKind::Open | AffordanceKind::CopyPath => {
                 let action = if matches!(kind, AffordanceKind::Open) {
-                    crate::app::mermaid_worker::MermaidClickAction::Open
+                    crate::app::agent_view::mermaid_worker::MermaidClickAction::Open
                 } else {
-                    crate::app::mermaid_worker::MermaidClickAction::CopyPath
+                    crate::app::agent_view::mermaid_worker::MermaidClickAction::CopyPath
                 };
                 self.request_mermaid_render(source, action);
             }

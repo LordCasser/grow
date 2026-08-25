@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::app_view::NewWorktreeDialogState;
+use crate::app::root::NewWorktreeDialogState;
 use crate::theme::Theme;
 
 /// Minimum dialog width (fits title + empty input + hints comfortably).

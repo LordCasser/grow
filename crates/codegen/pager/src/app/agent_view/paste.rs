@@ -5,7 +5,7 @@ use super::{ActivePane, AgentViewLayout, PromptInputMode, render_dropdown_chrome
 use super::{AgentDeferredSend, AgentView};
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 #[cfg(test)]
 use crate::key;
 #[cfg(test)]
@@ -62,7 +62,7 @@ impl AgentView {
     ) -> bool {
         if !matches!(
             self.prompt_mode,
-            crate::app::queue_edit::PromptMode::EditingQueued {
+            crate::app::agent_view::queue_edit::PromptMode::EditingQueued {
                 server_id: Some(_),
                 ..
             }
@@ -438,8 +438,8 @@ impl AgentView {
 pub(super) mod paste_key_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession, AgentState};
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::{AgentId, AgentSession, AgentState};
     use crate::clipboard::ImageData;
     use crate::scrollback::state::ScrollbackState;
     use crate::views::prompt_widget::KIND_PASTE;
@@ -1554,7 +1554,7 @@ pub(super) mod paste_key_tests {
         assert_refused(&mut agent, &mut counts, "agents modal");
         agent.agents_modal = None;
         agent.show_goal_detail = true;
-        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
         assert_refused(&mut agent, &mut counts, "goal detail overlay");
         agent.show_goal_detail = false;
         agent.session.goal_state = None;

@@ -377,7 +377,7 @@ fn pending_interaction_peek(
 /// surfacing on both row kinds.
 pub fn compute_peek_fields(
     row: &DashboardRowId,
-    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    agents: &indexmap::IndexMap<crate::app::session::AgentId, AgentView>,
     now: std::time::Instant,
 ) -> Option<PeekFields> {
     use crate::views::session_title::{entry_title, sanitize_display_text};
@@ -468,7 +468,7 @@ pub struct PeekModeBadge {
 /// All-default for a vanished agent or a roster-only row.
 pub fn peek_model_and_mode(
     row: &DashboardRowId,
-    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    agents: &indexmap::IndexMap<crate::app::session::AgentId, AgentView>,
 ) -> PeekModeBadge {
     let default = || PeekModeBadge {
         agent: None,
@@ -1290,7 +1290,7 @@ pub fn peek_number_key(state: &super::state::DashboardState, n: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::agent::AgentId;
+    use crate::app::session::AgentId;
     use crate::views::dashboard::state::DashboardState;
 
     /// Build a `PeekFields` for tests with sensible defaults.

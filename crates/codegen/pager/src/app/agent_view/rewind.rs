@@ -1,7 +1,7 @@
 //! Rewind picker: anchor syncing, dim ranges, and key/mouse handling.
 use super::AgentView;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 impl AgentView {
     pub(super) fn sync_rewind_anchor_to_picker(&mut self) {
@@ -21,7 +21,7 @@ impl AgentView {
             };
             point.prompt_index
         };
-        let entry_idx = crate::app::dispatch::find_user_prompt_entry_for_shell_index(
+        let entry_idx = crate::app::root::dispatch::find_user_prompt_entry_for_shell_index(
             &self.scrollback,
             prompt_index,
         );
@@ -179,7 +179,7 @@ impl AgentView {
 mod sync_rewind_anchor_to_picker_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession};
+    use crate::app::session::{AgentId, AgentSession};
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::blocks::UserPromptBlock;
     use crate::scrollback::state::ScrollbackState;

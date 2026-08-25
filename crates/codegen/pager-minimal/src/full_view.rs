@@ -18,7 +18,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 
-use pager::app::app_view::AppView;
+use pager::app::root::AppView;
 use pager::minimal_api;
 use pager::render::Renderable;
 use pager::scrollback::entry::ScrollbackEntry;
@@ -122,7 +122,7 @@ pub fn pump_transcript(app: &mut AppView) {
 /// event loop adds `-R` for `less`). Errors surface as a system block on the
 /// build's owning agent (which may differ from the active view — the user can
 /// tab away while the build runs).
-fn finish_transcript(app: &mut AppView, id: pager::app::agent::AgentId, out: String) {
+fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: String) {
     if out.is_empty() {
         if let Some(agent) = minimal_api::app_agent_mut(app, id) {
             minimal_api::agent_scrollback_mut(agent).push_block(

@@ -163,7 +163,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         .is_some_and(|agent| agent.session.state.is_turn_submitting())
                     {
                         let page_flip_entry = app.agents.get_mut(&aid).and_then(|agent| {
-                            super::super::dispatch::apply_turn_start_shim(
+                            super::super::root::dispatch::apply_turn_start_shim(
                                 agent,
                                 pid,
                                 running_text,
@@ -171,7 +171,11 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                                 running_combined,
                             )
                         });
-                        super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
+                        super::super::root::dispatch::note_peek_page_flip(
+                            app,
+                            aid,
+                            page_flip_entry,
+                        );
                     }
                 }
                 // A different local id is a stale snapshot or a cross-channel
@@ -179,7 +183,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 // terminals remain keyed by their own turn id.
                 None | Some(_) => {
                     let page_flip_entry = app.agents.get_mut(&aid).and_then(|agent| {
-                        super::super::dispatch::apply_turn_start_shim(
+                        super::super::root::dispatch::apply_turn_start_shim(
                             agent,
                             pid,
                             running_text,
@@ -187,7 +191,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                             running_combined,
                         )
                     });
-                    super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
+                    super::super::root::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
                 }
             }
         }

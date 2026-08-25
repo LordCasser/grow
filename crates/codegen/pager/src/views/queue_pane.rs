@@ -8,8 +8,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::prompt_queue::QueueEntryWire;
+use crate::app::session::{QueueEntryKind, QueuedPrompt};
 use crate::render::line_utils::truncate_str;
 use crate::theme::{Theme, ThemeKind};
 

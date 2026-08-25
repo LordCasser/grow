@@ -60,7 +60,7 @@ pub(super) fn handle_permission_request(
             cancel_permission(perm);
             return false;
         };
-        crate::app::dispatch::respond_permission(
+        crate::app::root::dispatch::respond_permission(
             agent,
             perm,
             acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(

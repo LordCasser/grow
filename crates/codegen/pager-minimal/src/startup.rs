@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use pager::app::app_view::TrustState;
+use pager::app::root::TrustState;
 use pager::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

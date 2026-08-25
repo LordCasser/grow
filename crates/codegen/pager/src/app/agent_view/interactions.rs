@@ -11,7 +11,7 @@ use super::{
 #[cfg(test)]
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crate::views::modal::CancelTurnChoice;
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
@@ -1437,8 +1437,8 @@ impl AgentView {
 mod cancel_turn_mouse_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::app::agent::{AgentId, AgentSession, AgentState};
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::{AgentId, AgentSession, AgentState};
     use crate::scrollback::state::ScrollbackState;
     use crate::views::modal::{CancelTurnChoice, CancelTurnViewState};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -1684,7 +1684,7 @@ mod cancel_turn_mouse_tests {
 mod permission_mouse_tests {
     use super::test_fixtures::make_agent;
     use super::*;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use agent_client_protocol as acp;
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;

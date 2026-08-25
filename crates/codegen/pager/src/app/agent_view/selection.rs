@@ -4,7 +4,7 @@
 use super::{
     AgentPane, AgentView, DEFAULT_SELECTION_HIGHLIGHT_DURATION_MS, MULTI_CLICK_TIMEOUT_MS,
 };
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::scrollback::table_geometry::{CellRef, TableGeometry};
 use crate::scrollback::text_selection::{
     ActiveBlockDrag, ActiveTextDrag, AutoScrollDirection, PendingBlockDrag, PendingTextDrag,
@@ -989,7 +989,7 @@ impl AgentView {
                     let eid = task
                         .scrollback_entry_id
                         .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
-                    let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+                    let is_running = task.status == crate::app::session::BgTaskStatus::Running;
                     self.block_viewer =
                         Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
                             eid,
@@ -1039,7 +1039,9 @@ impl AgentView {
                 // no-op, so the block below runs and restores the EXACT
                 // pre-feature double-click behavior for a prompt: fold (if
                 // foldable) + scroll the entry to the top.
-                if !(crate::app::inline_edit::INLINE_EDIT_ENABLED && self.enter_inline_edit(idx)) {
+                if !(crate::app::agent_view::inline_edit::INLINE_EDIT_ENABLED
+                    && self.enter_inline_edit(idx))
+                {
                     if foldable {
                         self.scrollback.toggle_fold_selected();
                     }
@@ -1826,7 +1828,7 @@ mod tests {
 
     #[test]
     fn workflow_double_click_opens_matching_run_id_and_closes_goal_detail() {
-        use crate::app::agent::WorkflowRunSnapshot;
+        use crate::app::session::WorkflowRunSnapshot;
         use crate::scrollback::blocks::WorkflowBlock;
 
         let run = |run_id: &str| WorkflowRunSnapshot {

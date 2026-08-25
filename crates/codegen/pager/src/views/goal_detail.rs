@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 
-use crate::app::agent::{GoalDisplayState, GoalDisplayStatus};
+use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
 use crate::theme::Theme;
 use crate::views::agent_status::format_tokens_compact;
 

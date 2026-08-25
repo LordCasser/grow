@@ -1,9 +1,9 @@
 //! Dashboard rows: classification, build, filter, sort.
 use super::state::{DashboardRowId, Filter, RowState};
 use crate::acp::tracker::TurnActivity;
-use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::roster::{RosterActivity, RosterEntry};
+use crate::app::session::AgentId;
 use crate::app::subagent::{SubagentInfo, format_activity_label, format_subagent_label};
 use indexmap::IndexMap;
 use std::path::PathBuf;
@@ -410,7 +410,7 @@ fn append_roster_rows(
 /// monitors / loops can wake the agent for a fresh turn — so the agent
 /// isn't meaningfully idle while any are running.
 pub fn classify_top_level(agent: &AgentView) -> RowState {
-    let activity = crate::app::activity::AgentActivityProjection::from_sessions(
+    let activity = crate::app::session::activity::AgentActivityProjection::from_sessions(
         &agent.session,
         agent.subagent_views.values().map(|child| &child.session),
     );
@@ -435,7 +435,7 @@ pub fn has_background_work(agent: &AgentView) -> bool {
         .session
         .bg_tasks
         .values()
-        .any(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+        .any(|t| t.status == crate::app::session::BgTaskStatus::Running)
         || !agent.session.scheduled_tasks.is_empty()
 }
 /// Compact `"… still running"` label summarising a turn-idle agent's live
@@ -576,7 +576,7 @@ fn top_level_row(
         .session
         .bg_tasks
         .values()
-        .any(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+        .any(|t| t.status == crate::app::session::BgTaskStatus::Running)
     {
         badges.push(RowBadge::BgTask);
     }
@@ -1047,7 +1047,7 @@ struct ClusterKey {
 ///   Working one (Idle → Working → Idle). Keeping `state` first confines
 ///   the reorder to one group, matching the documented contract
 ///   ("float to position inside the row's group") in
-///   [`super::super::app::dispatch`]'s `dispatch_dashboard_reorder`.
+///   [`crate::app::root::dispatch`]'s `dispatch_dashboard_reorder`.
 /// - **Directory grouping (`false`)** — the cwd is the grouping
 ///   primitive (sorted ahead of this key in
 ///   [`sort_within_directory_groups`]), so within a cwd the reorder is
@@ -1759,7 +1759,7 @@ mod tests {
     /// session listed on the dashboard that the user hasn't opened yet.
     fn make_idle_agent_with_model(model: Option<&str>) -> AgentView {
         use crate::acp::model_state::ModelState;
-        use crate::app::agent::AgentSession;
+        use crate::app::session::AgentSession;
         use crate::scrollback::state::ScrollbackState;
         use agent_client_protocol as acp;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1870,7 +1870,7 @@ mod tests {
     /// row forever.
     #[test]
     fn bg_badge_only_for_running_tasks() {
-        use crate::app::agent::{BgTaskState, BgTaskStatus};
+        use crate::app::session::{BgTaskState, BgTaskStatus};
         let make_task = |status: BgTaskStatus| BgTaskState {
             task_id: "t1".into(),
             tool_call_id: String::new(),
@@ -1919,15 +1919,15 @@ mod tests {
         }
     }
     /// A running background task (`run_terminal_command background=true`).
-    fn running_bg_task(task_id: &str, is_monitor: bool) -> crate::app::agent::BgTaskState {
-        crate::app::agent::BgTaskState {
+    fn running_bg_task(task_id: &str, is_monitor: bool) -> crate::app::session::BgTaskState {
+        crate::app::session::BgTaskState {
             task_id: task_id.into(),
             tool_call_id: String::new(),
             command: "sleep 99".into(),
             description: None,
             cwd: String::new(),
             output_file: String::new(),
-            status: crate::app::agent::BgTaskStatus::Running,
+            status: crate::app::session::BgTaskStatus::Running,
             start_time: std::time::SystemTime::now(),
             end_time: None,
             exit_code: None,
@@ -1943,8 +1943,8 @@ mod tests {
         }
     }
     /// An active scheduled `/loop` task.
-    fn scheduled_loop(task_id: &str) -> crate::app::agent::ScheduledTaskInfo {
-        crate::app::agent::ScheduledTaskInfo {
+    fn scheduled_loop(task_id: &str) -> crate::app::session::ScheduledTaskInfo {
+        crate::app::session::ScheduledTaskInfo {
             task_id: task_id.into(),
             prompt: "check things".into(),
             human_schedule: "every 5m".into(),
@@ -1959,7 +1959,7 @@ mod tests {
     /// linger in `bg_tasks` only for the tasks-pane history.
     #[test]
     fn running_bg_task_classifies_as_working() {
-        use crate::app::agent::BgTaskStatus;
+        use crate::app::session::BgTaskStatus;
         for (status, expected) in [
             (BgTaskStatus::Running, RowState::Working),
             (BgTaskStatus::Done, RowState::Idle),

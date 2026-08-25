@@ -88,7 +88,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
                 .filter(|a| a.session.is_auto())
                 .filter_map(|a| a.session.session_id.clone())
                 .collect();
-            super::super::dispatch::downgrade_displayed_auto_if_gated(app);
+            super::super::root::dispatch::downgrade_displayed_auto_if_gated(app);
             notify_sessions_leave_auto(app, &leaving_auto);
         }
         // Reveal/hide `/auto` on every slash surface in lockstep with the gate

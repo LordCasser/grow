@@ -9,7 +9,7 @@ use super::{
 };
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -836,7 +836,7 @@ impl AgentView {
                 action: Action::ClearPrompt,
                 shortcut: crate::input::key::KeyShortcut::from(*key),
                 label: Some("clear"),
-                ttl: crate::app::app_view::esc_double_press_ttl(),
+                ttl: crate::app::root::esc_double_press_ttl(),
             });
         }
 
@@ -870,7 +870,7 @@ impl AgentView {
                 action: Action::RewindShowPicker,
                 shortcut: crate::input::key::KeyShortcut::from(*key),
                 label: None,
-                ttl: crate::app::app_view::esc_double_press_ttl(),
+                ttl: crate::app::root::esc_double_press_ttl(),
             });
         }
 
@@ -1070,7 +1070,7 @@ impl AgentView {
 #[cfg(test)]
 mod configuration_shortcut_tests {
     use super::*;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Guards the full routed path, not just registry resolution.
@@ -1183,7 +1183,7 @@ mod configuration_shortcut_tests {
     fn goal_edit_tab_fills_the_current_objective() {
         let mut effects = Vec::new();
         let mut agent = super::test_fixtures::make_agent();
-        agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
         agent.session.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
         let commands = vec![agent_client_protocol::AvailableCommand::new(
             "goal".to_string(),
@@ -1404,7 +1404,7 @@ mod combined_prompt_history_tests {
 #[cfg(test)]
 mod history_browse_panel_tests {
     use super::*;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1682,7 +1682,7 @@ mod rewind_grace_tests {
     fn esc_cancel_rewind_grace_outlives_double_press_ttl() {
         assert!(
             AgentView::ESC_CANCEL_REWIND_GRACE
-                > crate::app::app_view::PendingAction::ESC_DOUBLE_PRESS_TTL
+                > crate::app::root::PendingAction::ESC_DOUBLE_PRESS_TTL
         );
     }
 }
@@ -1690,7 +1690,7 @@ mod rewind_grace_tests {
 #[cfg(test)]
 mod prompt_suggestion_key_tests {
     use super::*;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Idle agent with the gate open and a loaded suggestion — the state

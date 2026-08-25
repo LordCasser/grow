@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::app::agent::WorkflowRunSnapshot;
+use crate::app::session::WorkflowRunSnapshot;
 use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::agent_status::format_tokens_compact;
@@ -1323,7 +1323,7 @@ fn render_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::agent::WorkflowAgentRowView;
+    use crate::app::session::WorkflowAgentRowView;
 
     pub(crate) fn make_run(run_id: &str, name: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {

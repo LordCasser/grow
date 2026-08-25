@@ -42,7 +42,7 @@ use crossterm::QueueableCommand;
 use crossterm::terminal::BeginSynchronizedUpdate;
 
 use pager::app::PagerTerminal;
-use pager::app::app_view::AppView;
+use pager::app::root::AppView;
 
 /// Per-frame entry point for minimal mode, called from [`AppView::draw`].
 ///

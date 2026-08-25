@@ -21,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
 use pager::app::agent_view::AgentView;
-use pager::app::app_view::{ActiveView, AppView};
+use pager::app::root::{ActiveView, AppView};
 use pager::minimal_api;
 use pager::scrollback::block::RenderBlock;
 use pager::theme::Theme;

@@ -1366,7 +1366,7 @@ fn dispatch_du_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
-    if let Some(code) = pager::app::mermaid_worker::maybe_run_render_subprocess() {
+    if let Some(code) = pager::app::agent_view::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }
     let args = PagerArgs::parse_cli();

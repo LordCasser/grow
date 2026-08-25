@@ -2,49 +2,34 @@
 //!
 //! Submodule overview:
 //! - [`actions`] — Action, Effect, TaskResult enums
-//! - [`agent`] — AgentSession, AgentId, TurnState (business types)
+//! - [`session`] — AgentSession, AgentId, TurnState (business types)
 //! - [`agent_view`] — AgentView (per-agent view-model: input + draw)
-//! - [`app_view`] — AppView (root component: input routing + draw)
-//! - [`dispatch`] — Action → state mutation + Vec<Effect> (sync, testable)
-//! - [`effects`] — Effect → async task spawning
+//! - [`root`] — AppView and root dispatch/effects/event loop
 //! - [`acp_handler`] — ACP notification routing
-//! - [`event_loop`] — biased tokio::select! loop
+//! - [`session::activity`] — Session activity projections
 pub mod actions;
-pub mod activity;
-pub mod agent;
 pub mod agent_view;
-pub mod app_view;
 pub mod bundle;
 pub mod cli;
+pub mod root;
+pub mod session;
 pub use crate::link_opener;
-/// Off-thread full-file syntax highlight upgrade for edit diffs.
-pub mod edit_highlight_worker;
-/// Off-thread Mermaid diagram render worker (out of process) + per-session cache.
-pub mod mermaid_worker;
 pub use prompt_queue;
 mod acp_handler;
 mod csi_filter;
-mod dispatch;
 /// Display-refresh probe + motion cadence + terminal diagnostics at startup.
 mod display_refresh_startup;
-mod effects;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
 pub mod status_blocks;
 pub mod subagent;
-pub(crate) use effects::sanitize_user_error;
-mod event_loop;
+pub(crate) use root::effects::sanitize_user_error;
 pub(crate) mod external_editor;
-mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
-mod modals;
-mod mouse;
-mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
 pub mod signal_handler;
-mod turn_completion;
 mod xt_filter;
 pub(crate) use crate::terminal::kitty_flags_pushed;
 pub use cli::{
@@ -696,7 +681,7 @@ pub async fn run(
     let minimal_live_rows = config_watcher.current().minimal_live_rows;
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
         crate::render::draw::spawn_writer_thread();
-    let cursor_blink = event_loop::load_initial_ui_config().cursor_blink;
+    let cursor_blink = root::event_loop::load_initial_ui_config().cursor_blink;
     let (mut terminal, screen_mode) = init_terminal(
         screen_mode,
         minimal_live_rows,
@@ -768,14 +753,14 @@ pub async fn run(
         fork_session: false,
         ..args
     };
-    let term_state = event_loop::TerminalState {
+    let term_state = root::event_loop::TerminalState {
         is_control_mode,
         screen_mode,
         relaunched_into_minimal,
         relaunched_into_fullscreen,
         initial_theme: crate::theme::cache::current_kind(),
     };
-    let result = event_loop::run(
+    let result = root::event_loop::run(
         &mut terminal,
         connection,
         &mut config_watcher,

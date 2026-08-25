@@ -14,8 +14,8 @@ use super::state::{
     DashboardRowId, DashboardState, Filter, Focusable, Grouping, LocationPickerState, RenameDraft,
     RowState, SectionKey,
 };
-use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
+use crate::app::session::AgentId;
 use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::util::format_time_ago;
@@ -68,7 +68,7 @@ const ROW_HEIGHT: u16 = 3;
 const GROUP_HEADER_HEIGHT: u16 = 2;
 
 /// Promo announcement CTA for the dashboard header, resolved through the shared
-/// slot gate by the producer (`app_view`).
+/// slot gate by the producer (`AppView` in `app::root`).
 #[derive(Clone, Copy)]
 pub struct HeaderPromoCta<'a> {
     /// The `[label]` button text.
@@ -4619,7 +4619,7 @@ mod tests {
         let now = SystemTime::now();
         let rows = vec![
             DashboardRow {
-                id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
+                id: DashboardRowId::TopLevel(crate::app::session::AgentId(1)),
                 label: "Add responsiveness to /context".to_string(),
                 subtitle: Some("grow my-branch-2 worktree".to_string()),
                 state: RowState::NeedsInput,
@@ -4638,7 +4638,7 @@ mod tests {
                 more_count: 0,
             },
             DashboardRow {
-                id: DashboardRowId::TopLevel(crate::app::agent::AgentId(2)),
+                id: DashboardRowId::TopLevel(crate::app::session::AgentId(2)),
                 label: "Add buttons for /models".to_string(),
                 subtitle: Some("grow my-branch-3 worktree".to_string()),
                 state: RowState::Completed,
@@ -4657,7 +4657,7 @@ mod tests {
                 more_count: 0,
             },
             DashboardRow {
-                id: DashboardRowId::TopLevel(crate::app::agent::AgentId(3)),
+                id: DashboardRowId::TopLevel(crate::app::session::AgentId(3)),
                 label: "Investigate bug".to_string(),
                 subtitle: Some("grow main".to_string()),
                 state: RowState::Working,
@@ -4676,7 +4676,7 @@ mod tests {
                 more_count: 0,
             },
             DashboardRow {
-                id: DashboardRowId::TopLevel(crate::app::agent::AgentId(4)),
+                id: DashboardRowId::TopLevel(crate::app::session::AgentId(4)),
                 label: "Add responsiveness to /context".to_string(),
                 subtitle: Some("grow my-branch-2 worktree".to_string()),
                 state: RowState::Working,
@@ -4695,7 +4695,7 @@ mod tests {
                 more_count: 0,
             },
             DashboardRow {
-                id: DashboardRowId::TopLevel(crate::app::agent::AgentId(5)),
+                id: DashboardRowId::TopLevel(crate::app::session::AgentId(5)),
                 label: "Add buttons for /models".to_string(),
                 subtitle: Some("grow mybranch worktree".to_string()),
                 state: RowState::Working,
@@ -5006,7 +5006,7 @@ mod tests {
         // Unfocused (a row holds the cursor instead).
         let mut unfocused = DashboardState::new();
         unfocused.focus_row(super::super::state::DashboardRowId::TopLevel(
-            crate::app::agent::AgentId(0),
+            crate::app::session::AgentId(0),
         ));
         let mut buf2 = Buffer::empty(area);
         render_header(&mut buf2, area, &theme, &rows, &mut unfocused, None);
@@ -5038,7 +5038,7 @@ mod tests {
         // (green) styling.
         let mut state = DashboardState::new();
         state.focus_row(super::super::state::DashboardRowId::TopLevel(
-            crate::app::agent::AgentId(0),
+            crate::app::session::AgentId(0),
         ));
 
         // First render populates the button's hit rect.
@@ -5274,7 +5274,7 @@ mod tests {
     /// and still registers row_rects.
     #[test]
     fn render_narrow_mode_registers_row_rects() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         let mut buf = Buffer::empty(Rect::new(0, 0, 30, 5));
         let mut state = DashboardState::new();
         let row = DashboardRow {
@@ -5722,7 +5722,7 @@ mod tests {
     /// RenameDraft sanitation keeps control characters out of both render paths.
     #[test]
     fn sanitized_rename_draft_is_safe_in_both_render_paths() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         let id = DashboardRowId::TopLevel(AgentId(7));
         let row = DashboardRow {
             id: id.clone(),
@@ -5786,7 +5786,7 @@ mod tests {
     /// Rename rendering preserves row chrome and title alignment in both layouts.
     #[test]
     fn render_rename_overlay_aligns_with_title_and_keeps_icon() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         let id = DashboardRowId::TopLevel(AgentId(7));
         let row = DashboardRow {
             id: id.clone(),
@@ -5892,7 +5892,7 @@ mod tests {
 
     #[test]
     fn rename_viewport_handles_long_unicode_in_wide_and_narrow_rows() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
         let id = DashboardRowId::TopLevel(AgentId(7));
@@ -5942,14 +5942,14 @@ mod tests {
             let _ = state.handle_input_with_paste_provenance(
                 &Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
                 &registry,
-                crate::app::app_view::PasteProvenance::Terminal,
+                crate::app::root::PasteProvenance::Terminal,
                 &mut effects,
             );
             for _ in 0..20 {
                 let _ = state.handle_input_with_paste_provenance(
                     &Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
                     &registry,
-                    crate::app::app_view::PasteProvenance::Terminal,
+                    crate::app::root::PasteProvenance::Terminal,
                     &mut effects,
                 );
             }
@@ -6163,7 +6163,7 @@ mod tests {
         let theme = Theme::current();
         let mut state = DashboardState::new();
         state.focus_row(super::super::state::DashboardRowId::TopLevel(
-            crate::app::agent::AgentId(0),
+            crate::app::session::AgentId(0),
         ));
         // Unfocus the input (placeholder only paints while unfocused).
         state.list_focused = true;
@@ -6255,7 +6255,7 @@ mod tests {
     /// the given id + state, all other fields filled with sensible
     /// defaults. Keeps the per-test setup compact.
     fn header_test_row(id: u32, state: RowState, label: &str) -> DashboardRow {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         DashboardRow {
             id: DashboardRowId::TopLevel(AgentId(id as usize)),
             label: label.to_string(),
@@ -6832,7 +6832,7 @@ mod tests {
         let mut state = DashboardState::new();
         state.motion_frame = frame_after(Duration::from_millis(264));
         let row = DashboardRow {
-            id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
+            id: DashboardRowId::TopLevel(crate::app::session::AgentId(1)),
             label: "who are you?".to_string(),
             subtitle: None,
             state: RowState::Working,
@@ -6914,7 +6914,7 @@ mod tests {
         use std::path::PathBuf;
         use std::time::SystemTime;
         let theme = Theme::current();
-        let id = DashboardRowId::TopLevel(crate::app::agent::AgentId(7));
+        let id = DashboardRowId::TopLevel(crate::app::session::AgentId(7));
         let row = DashboardRow {
             id: id.clone(),
             label: "investigate caching".to_string(),
@@ -6982,7 +6982,7 @@ mod tests {
         use std::time::SystemTime;
         let theme = Theme::current();
         let make_row = || DashboardRow {
-            id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
+            id: DashboardRowId::TopLevel(crate::app::session::AgentId(1)),
             label: "ask me".to_string(),
             subtitle: None,
             state: RowState::NeedsInput,
@@ -7072,7 +7072,7 @@ mod tests {
         let theme = Theme::current();
         let mut state = DashboardState::new();
         let row = DashboardRow {
-            id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
+            id: DashboardRowId::TopLevel(crate::app::session::AgentId(1)),
             label: "New session #abc12345".to_string(),
             subtitle: None,
             state: RowState::Idle,
@@ -7236,7 +7236,7 @@ mod tests {
     /// `Completed` / `Failed` ones tied to the subagents.
     #[test]
     fn render_rows_subagents_do_not_trigger_their_own_headers() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
         let mut state = DashboardState::new();
         let parent = DashboardRow {
@@ -8036,7 +8036,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         state.list_focused = true;
         let registry = crate::actions::ActionRegistry::defaults();
         crate::appearance::cache::set_vim_mode(true);
@@ -8072,7 +8072,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         state.list_focused = true;
         let registry = crate::actions::ActionRegistry::defaults();
         crate::appearance::cache::set_vim_mode(false);
@@ -8138,7 +8138,7 @@ mod tests {
         let theme = Theme::current();
         let mut state = DashboardState::new();
         state.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(crate::app::agent::AgentId(0)),
+            DashboardRowId::TopLevel(crate::app::session::AgentId(0)),
             crate::views::dashboard::peek::PeekFields {
                 label: "label".into(),
                 time_ago: String::new(),
@@ -8180,7 +8180,7 @@ mod tests {
         let mut state = DashboardState::new();
         state.list_focused = true; // used to steal the footer before the peek fix
         state.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(crate::app::agent::AgentId(0)),
+            DashboardRowId::TopLevel(crate::app::session::AgentId(0)),
             crate::views::dashboard::peek::PeekFields {
                 label: "label".into(),
                 time_ago: String::new(),
@@ -8231,7 +8231,7 @@ mod tests {
         let theme = Theme::current();
         let mut state = DashboardState::new();
         let mut peek = crate::views::dashboard::peek::PeekPanelState::new(
-            DashboardRowId::TopLevel(crate::app::agent::AgentId(0)),
+            DashboardRowId::TopLevel(crate::app::session::AgentId(0)),
             crate::views::dashboard::peek::PeekFields {
                 label: "label".into(),
                 time_ago: String::new(),
@@ -8281,7 +8281,7 @@ mod tests {
         let make_state = |focused: bool, selected: Option<usize>| {
             let mut state = DashboardState::new();
             let mut peek = crate::views::dashboard::peek::PeekPanelState::new(
-                DashboardRowId::TopLevel(crate::app::agent::AgentId(0)),
+                DashboardRowId::TopLevel(crate::app::session::AgentId(0)),
                 crate::views::dashboard::peek::PeekFields {
                     label: "label".into(),
                     time_ago: String::new(),
@@ -8364,7 +8364,7 @@ mod tests {
         // Rebuild under vim so focused defaults false.
         vim_q.peek = Some({
             let mut peek = crate::views::dashboard::peek::PeekPanelState::new(
-                DashboardRowId::TopLevel(crate::app::agent::AgentId(0)),
+                DashboardRowId::TopLevel(crate::app::session::AgentId(0)),
                 crate::views::dashboard::peek::PeekFields {
                     label: "label".into(),
                     time_ago: String::new(),
@@ -8406,7 +8406,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         let registry = crate::actions::ActionRegistry::defaults();
         render_footer(
             &mut buf,
@@ -8442,7 +8442,7 @@ mod tests {
 
         // Input focused, row selected.
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         render_footer(
             &mut buf,
@@ -8500,7 +8500,7 @@ mod tests {
         let theme = Theme::current();
         let registry = crate::actions::ActionRegistry::defaults();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
 
         // Working → `stop`.
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
@@ -8693,7 +8693,7 @@ mod tests {
     /// Rename mode shows only save and cancel actions.
     #[test]
     fn render_footer_rename_shows_save_and_cancel() {
-        use crate::app::agent::AgentId;
+        use crate::app::session::AgentId;
         let theme = Theme::current();
         let registry = crate::actions::ActionRegistry::defaults();
         let mut state = DashboardState::new();
@@ -8735,7 +8735,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(0)));
         state.dispatch.set_text("reply text");
         let registry = crate::actions::ActionRegistry::defaults();
         render_footer(
@@ -8883,7 +8883,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.arm_delete(DashboardRowId::TopLevel(crate::app::agent::AgentId(1)));
+        state.arm_delete(DashboardRowId::TopLevel(crate::app::session::AgentId(1)));
         let registry = crate::actions::ActionRegistry::defaults();
         render_footer(
             &mut buf,
@@ -8917,9 +8917,9 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(1)));
+        state.focus_row(DashboardRowId::TopLevel(crate::app::session::AgentId(1)));
         state.delete_confirm = Some((
-            DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
+            DashboardRowId::TopLevel(crate::app::session::AgentId(1)),
             Instant::now() - (super::super::state::CONFIRM_WINDOW + Duration::from_secs(1)),
         ));
         let registry = crate::actions::ActionRegistry::defaults();
@@ -8958,7 +8958,7 @@ mod tests {
         };
         let sub_completed = DashboardRow {
             id: DashboardRowId::Subagent {
-                parent: crate::app::agent::AgentId(1),
+                parent: crate::app::session::AgentId(1),
                 child_session_id: "c1".to_string(),
             },
             indent: 1,

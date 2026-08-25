@@ -3,7 +3,7 @@
 use super::{ActivePane, AgentPane, AgentView, overlay_action_to_outcome, resolve_action};
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crate::scrollback::ScrollbackSearchState;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -49,7 +49,7 @@ impl AgentView {
             self.highlighted_link_idx = None;
             return InputOutcome::Action(Action::OpenLink(target));
         }
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED
+        if crate::app::agent_view::inline_edit::INLINE_EDIT_ENABLED
             && key!(Enter).matches(key)
             && !self.scrollback.is_selected_group_header()
             && let Some(idx) = self.scrollback.selected()
@@ -83,7 +83,7 @@ impl AgentView {
                 .session
                 .bg_tasks
                 .get(&bt.task_id)
-                .is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+                .is_some_and(|t| t.status == crate::app::session::BgTaskStatus::Running)
         {
             return InputOutcome::Action(Action::KillBgTask(bt.task_id.clone()));
         }
@@ -358,7 +358,7 @@ impl AgentView {
                         let entry_id = task
                             .scrollback_entry_id
                             .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
-                        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+                        let is_running = task.status == crate::app::session::BgTaskStatus::Running;
                         self.block_viewer =
                             Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
                                 entry_id,
@@ -397,7 +397,7 @@ impl AgentView {
                         .session
                         .bg_tasks
                         .get(&task_id)
-                        .is_some_and(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+                        .is_some_and(|t| t.status == crate::app::session::BgTaskStatus::Running)
                     {
                         return InputOutcome::Action(Action::KillBgTask(task_id));
                     }
@@ -812,7 +812,7 @@ mod scroll_granularity_tests {
 mod paste_routing_tests {
     use super::super::{AgentPane, test_fixtures::make_agent};
     use crate::actions::ActionRegistry;
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::scrollback::ScrollbackSearchState;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     #[test]

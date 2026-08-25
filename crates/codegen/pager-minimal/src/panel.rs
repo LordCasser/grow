@@ -564,8 +564,8 @@ mod tests {
         a
     }
 
-    fn session_entry(id: &str) -> pager::app::app_view::SessionPickerEntry {
-        pager::app::app_view::SessionPickerEntry {
+    fn session_entry(id: &str) -> pager::app::root::SessionPickerEntry {
+        pager::app::root::SessionPickerEntry {
             id: id.into(),
             summary: id.into(),
             updated_at: chrono::Utc::now(),
@@ -582,7 +582,7 @@ mod tests {
         }
     }
 
-    fn with_resume(entries: Vec<pager::app::app_view::SessionPickerEntry>) -> AgentView {
+    fn with_resume(entries: Vec<pager::app::root::SessionPickerEntry>) -> AgentView {
         let mut a = agent();
         a.active_modal = Some(ActiveModal::SessionPicker {
             state: picker::PickerState::default(),

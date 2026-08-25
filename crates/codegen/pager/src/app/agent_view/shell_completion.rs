@@ -145,7 +145,7 @@ impl AgentView {
 mod shell_suggestion_key_tests {
     use super::*;
     use crate::app::actions::{Action, Effect};
-    use crate::app::app_view::InputOutcome;
+    use crate::app::root::InputOutcome;
     use crate::views::suggestion_controller::{CompletionItemParsed, SuggestionSource};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

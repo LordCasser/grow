@@ -18,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::app::app_view::{SessionPickerEntry, TrustState};
+use crate::app::root::{SessionPickerEntry, TrustState};
 use crate::startup::StartupWarning;
 use crate::theme::Theme;
 use crate::views::prompt_widget::PromptFlag;
@@ -663,7 +663,7 @@ pub(crate) fn render_session_picker(
     // (which receives the effective query) on row indices.
     let filter_query =
         crate::views::session_picker::effective_filter_query(ctx.state.query(), ctx.entries_query);
-    let filtered_indices = crate::app::app_view::filter_session_entries(ctx.sessions, filter_query);
+    let filtered_indices = crate::app::root::filter_session_entries(ctx.sessions, filter_query);
 
     let content_width = area.width; // approximate for truncation
     let picker_now = chrono::DateTime::<chrono::Utc>::from(ctx.frame.wall_now());
@@ -749,7 +749,7 @@ pub(crate) fn render_session_picker(
     // Only show the header when content results exist or when content
     // search is in progress with a non-empty query.  This must match the
     // header condition inside `build_entry_map` as called from
-    // `handle_welcome_input` (app_view.rs) so the input handler's
+    // `handle_welcome_input` (`app/root/mod.rs`) so the input handler's
     // `entry_count` agrees with the rendered entry list — a mismatch causes
     // arrow-key selection to target the wrong row. Both sides therefore gate
     // on the same EFFECTIVE query (`filter_query`), not the live one.
@@ -906,7 +906,7 @@ fn render_startup_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::app_view::SessionPickerEntry;
+    use crate::app::root::SessionPickerEntry;
     use crate::views::picker::PickerState;
     use crate::views::session_picker::{build_grouped_picker_entries, build_session_entry_data};
 

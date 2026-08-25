@@ -536,10 +536,10 @@
         // Insert a second agent and switch to it so the first agent is inactive.
         let other = make_agent(Some("other-sess"));
         app.agents.insert(AgentId(1), other);
-        crate::app::dispatch::switch_to_agent(
+        crate::app::root::dispatch::switch_to_agent(
             &mut app,
             AgentId(1),
-            crate::app::dispatch::SwitchCause::New,
+            crate::app::root::dispatch::SwitchCause::New,
         );
         assert!(matches!(app.active_view, ActiveView::Agent(AgentId(1))));
 
@@ -572,10 +572,10 @@
         // Now switch away.
         let other = make_agent(Some("other-sess"));
         app.agents.insert(AgentId(1), other);
-        crate::app::dispatch::switch_to_agent(
+        crate::app::root::dispatch::switch_to_agent(
             &mut app,
             AgentId(1),
-            crate::app::dispatch::SwitchCause::New,
+            crate::app::root::dispatch::SwitchCause::New,
         );
 
         let notif = make_task_completed_notif("child-sess", "task-compl-inact", "echo", Some(0));

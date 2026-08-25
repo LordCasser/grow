@@ -2,7 +2,7 @@
 //! and their key/mouse handlers.
 
 use super::{AgentView, render_char_buttons};
-use crate::app::app_view::InputOutcome;
+use crate::app::root::InputOutcome;
 use crate::key;
 use crate::scrollback::selection::SelectionBox;
 use crate::scrollback::types::DisplayMode;

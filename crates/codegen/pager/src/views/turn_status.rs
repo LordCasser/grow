@@ -22,8 +22,8 @@ use unicode_width::UnicodeWidthStr;
 use workspace::permission::mcp_pretty_name_if_qualified;
 
 use crate::acp::tracker::{TurnActivity, WaitingReason};
-use crate::app::agent::McpInitProgress;
-use crate::app::agent::{AgentCommand, AgentState};
+use crate::app::session::McpInitProgress;
+use crate::app::session::{AgentCommand, AgentState};
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 

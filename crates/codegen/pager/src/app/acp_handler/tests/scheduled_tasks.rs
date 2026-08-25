@@ -9,7 +9,7 @@
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.scheduled_tasks.insert(
                 "task-1".into(),
-                crate::app::agent::ScheduledTaskInfo {
+                crate::app::session::ScheduledTaskInfo {
                     task_id: "task-1".into(),
                     prompt: "original prompt".into(),
                     human_schedule: "every 5 minutes".into(),
@@ -111,7 +111,7 @@
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.scheduled_tasks.insert(
                 "task-1".into(),
-                crate::app::agent::ScheduledTaskInfo {
+                crate::app::session::ScheduledTaskInfo {
                     task_id: "task-1".into(),
                     prompt: "p".into(),
                     human_schedule: "every 1 minute".into(),
@@ -138,7 +138,7 @@
             let agent0 = app.agents.get_mut(&AgentId(0)).unwrap();
             agent0.session.scheduled_tasks.insert(
                 "task-owner".into(),
-                crate::app::agent::ScheduledTaskInfo {
+                crate::app::session::ScheduledTaskInfo {
                     task_id: "task-owner".into(),
                     prompt: "check PR".into(),
                     human_schedule: "every 5m".into(),
@@ -224,7 +224,7 @@
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.scheduled_tasks.insert(
                 "task-up".into(),
-                crate::app::agent::ScheduledTaskInfo {
+                crate::app::session::ScheduledTaskInfo {
                     task_id: "task-up".into(),
                     prompt: "old prompt".into(),
                     human_schedule: "every 5 minutes".into(),
@@ -299,7 +299,7 @@
             let agent0 = app.agents.get_mut(&AgentId(0)).unwrap();
             agent0.session.scheduled_tasks.insert(
                 "task-rm".into(),
-                crate::app::agent::ScheduledTaskInfo {
+                crate::app::session::ScheduledTaskInfo {
                     task_id: "task-rm".into(),
                     prompt: "check PR".into(),
                     human_schedule: "every 5m".into(),

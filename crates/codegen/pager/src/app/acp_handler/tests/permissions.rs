@@ -275,7 +275,7 @@
     fn enqueue_while_scrollback_then_select_restores_scrollback() {
         use crate::app::actions::Action;
         use crate::app::agent_view::AgentPane;
-        use crate::app::dispatch::dispatch;
+        use crate::app::root::dispatch::dispatch;
         use std::sync::Arc;
 
         let mut app = make_app_with_agent("sess-1");

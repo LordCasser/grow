@@ -1,5 +1,5 @@
 use super::AgentView;
-use crate::app::agent::{GoalDisplayState, GoalDisplayStatus};
+use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 

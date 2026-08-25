@@ -1010,7 +1010,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
         },
         // Session overlay (dashboard → agent attach)
         // bindings. They use `When::DashboardOverlay`: the agent-side
-        // overlay intercept (`app_view`) looks them up in that context, and
+        // overlay intercept (`AppView` root) looks them up in that context, and
         // the cheatsheet uses it to dim them on the dashboard LIST (where
         // they don't apply) while keeping them lit inside the overlay.
         ActionDef {
@@ -1028,7 +1028,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             //     no link highlight, no question/goal/rewind/
             //     permission overlays). Per-pane Esc consumers
             //     still take precedence — see `overlay_esc_*`
-            //     tests in `app_view`.
+            //     tests in `app::root`.
             //   - `[✗]` click — routed via this action by the
             //     mouse handler.
             // The `default_key` mirrors the real primary route, Ctrl+\

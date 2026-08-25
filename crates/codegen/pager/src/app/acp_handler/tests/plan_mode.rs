@@ -464,7 +464,7 @@
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(
             agent.session.state,
-            crate::app::agent::AgentState::TurnSubmitting
+            crate::app::session::AgentState::TurnSubmitting
         ));
         assert!(matches!(
             app.pending_effects.as_slice(),

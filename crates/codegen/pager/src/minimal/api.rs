@@ -33,13 +33,10 @@ use ratatui::style::Color;
 pub use tools::types::BehaviorId;
 
 use crate::acp::tracker::TurnActivity;
-// Only the test-only setters below reference `AgentSession`.
-#[cfg(any(test, feature = "test-support"))]
-use crate::app::agent::AgentSession;
-use crate::app::agent::McpInitProgress;
-use crate::app::agent::{AgentId, AgentState};
 use crate::app::agent_view::AgentView;
-use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry, TrustState};
+use crate::app::root::{ActiveView, AppView, SessionPickerEntry, TrustState};
+use crate::app::session::McpInitProgress;
+use crate::app::session::{AgentId, AgentState};
 use crate::appearance::AppearanceConfig;
 use crate::appearance::LayoutConfig;
 use crate::render::draw::CursorState;
@@ -90,7 +87,7 @@ pub fn app_trust_state(app: &AppView) -> &TrustState {
     &app.trust_state
 }
 
-pub fn app_pending_action(app: &AppView) -> &Option<crate::app::app_view::PendingAction> {
+pub fn app_pending_action(app: &AppView) -> &Option<crate::app::root::PendingAction> {
     &app.pending_action
 }
 
@@ -272,7 +269,7 @@ pub fn minimal_btw_visible_height(desired: u16, width: u16, available: u16) -> u
 #[derive(Debug)]
 pub enum MinimalBtwInput {
     /// Minimal consumed the event; the shared/fullscreen router must not run.
-    Handled(Box<crate::app::app_view::InputOutcome>),
+    Handled(Box<crate::app::root::InputOutcome>),
     /// Another minimal surface owns the event; delegate to its shared handler.
     Occluded,
     /// The plain live surface is active but `/btw` declined the event.
@@ -323,7 +320,7 @@ pub struct TranscriptBuild {
     /// session switch would silently stitch the transcript from another
     /// session's blocks. Keying by owner also keeps the build alive (and the
     /// pager opening) when the user tabs away mid-build.
-    pub agent: crate::app::agent::AgentId,
+    pub agent: crate::app::session::AgentId,
     /// Snapshot of the entry IDs to render, in conversation order. IDs are
     /// re-resolved per slice, so entries removed mid-build (rewind / clear)
     /// are skipped instead of skewing positions.
@@ -1038,19 +1035,40 @@ pub fn prompt_suggestions_mut(pw: &mut PromptWidget) -> &mut SuggestionControlle
     &mut pw.suggestions
 }
 
-/// Test-only setter for `AgentSession`'s canonical permission mode.
+/// Test-only setter for the active session's canonical permission mode.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_permission_mode_for_test(
-    session: &mut AgentSession,
-    mode: shell::util::config::PermissionMode,
-) {
-    session.set_permission_mode_for_test(mode);
+pub fn set_permission_mode_for_test(v: &mut AgentView, mode: shell::util::config::PermissionMode) {
+    v.session.set_permission_mode_for_test(mode);
 }
 
 /// Test-only setter for the session foreground state.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_agent_state_for_test(v: &mut AgentView, state: crate::app::agent::AgentState) {
+pub fn set_agent_state_for_test(v: &mut AgentView, state: crate::app::session::AgentState) {
     v.session.state = state;
+}
+
+/// Test-only setter for the session context projection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_agent_context_for_test(v: &mut AgentView, context: shell::session::ContextInfo) {
+    v.session.apply_full_context_info(context);
+}
+
+/// Test-only setter for the prompt input mode.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_agent_prompt_input_mode_for_test(
+    v: &mut AgentView,
+    mode: crate::app::agent_view::PromptInputMode,
+) {
+    v.prompt_input_mode = mode;
+}
+
+/// Test-only insertion into the session's scheduled-task projection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn insert_scheduled_task_for_test(
+    v: &mut AgentView,
+    task: crate::app::session::ScheduledTaskInfo,
+) {
+    v.session.scheduled_tasks.insert(task.task_id.clone(), task);
 }
 
 /// Test-only setter for the thread-local `show_thinking_blocks` appearance

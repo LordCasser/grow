@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use pager::app::mermaid_worker::render_via_subprocess;
+use pager::app::agent_view::mermaid_worker::render_via_subprocess;
 use pager::scrollback::blocks::mermaid_content::MermaidRenderQuality;
 use pager_pty_harness::pager_binary;
 

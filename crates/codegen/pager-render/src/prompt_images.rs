@@ -2,7 +2,7 @@
 //!
 //! This is the single source of truth for image data attached to the prompt.
 //! Both the view layer ([`crate::views::prompt_widget`]) and the app/dispatch
-//! layer ([`crate::app::dispatch`]) consume these types, so they live here
+//! layer ([`crate::app::root::dispatch`]) consume these types, so they live here
 //! rather than inside any single view or app module.
 
 use std::collections::HashSet;

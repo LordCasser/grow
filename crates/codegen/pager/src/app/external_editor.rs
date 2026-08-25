@@ -6,8 +6,8 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::app::agent::AgentId;
-use crate::app::app_view::{ActiveView, AppView};
+use crate::app::root::{ActiveView, AppView};
+use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
 
 const PROMPT_EDITOR_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -419,7 +419,7 @@ mod tests {
 
     fn app_with_prompt_request() -> (AppView, PendingEditorRequest) {
         let id = AgentId(0);
-        let mut app = crate::app::app_view::tests::test_app();
+        let mut app = crate::app::root::tests::test_app();
         let mut agent = crate::test_util::make_agent_view(Some("session"), "/work");
         agent.session.id = id;
         agent.prompt.set_text("original");
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn config_prepare_error_is_visible_in_fullscreen_and_minimal() {
         let id = AgentId(0);
-        let mut app = crate::app::app_view::tests::test_app();
+        let mut app = crate::app::root::tests::test_app();
         app.agents.insert(
             id,
             crate::test_util::make_agent_view(Some("session"), "/work"),
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn finish_success_failure_and_stale_paths_preserve_contracts() {
         let id = AgentId(0);
-        let mut app = crate::app::app_view::tests::test_app();
+        let mut app = crate::app::root::tests::test_app();
         let mut agent = crate::test_util::make_agent_view(Some("session"), "/work");
         agent.session.id = id;
         agent.prompt.set_text("original");

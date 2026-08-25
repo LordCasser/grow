@@ -1,7 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::acp::model_state::ModelState;
-use crate::app::agent::{AgentId, AgentSession, AgentState, InFlightPrompt};
+use crate::app::session::{AgentId, AgentSession, AgentState, InFlightPrompt};
 use crate::app::agent_view::AgentView;
 use crate::scrollback::entry::EntryId;
 use crate::scrollback::state::ScrollbackState;
@@ -157,10 +157,10 @@ pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
     app.agents.insert(id, agent);
-    crate::app::dispatch::switch_to_agent(
+    crate::app::root::dispatch::switch_to_agent(
         &mut app,
         id,
-        crate::app::dispatch::SwitchCause::New,
+        crate::app::root::dispatch::SwitchCause::New,
     );
     app
 }
@@ -226,7 +226,7 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
         .bg_tasks
         .insert(
             task_id.into(),
-            crate::app::agent::BgTaskState {
+            crate::app::session::BgTaskState {
                 task_id: task_id.into(),
                 tool_call_id: format!("call-{task_id}"),
                 command: command.into(),
@@ -392,10 +392,10 @@ pub(super) fn make_app_two_agents() -> AppView {
     let id1 = AgentId(1);
     let agent1 = make_agent(Some("sess-active"));
     app.agents.insert(id1, agent1);
-    crate::app::dispatch::switch_to_agent(
+    crate::app::root::dispatch::switch_to_agent(
         &mut app,
         id1,
-        crate::app::dispatch::SwitchCause::New,
+        crate::app::root::dispatch::SwitchCause::New,
     );
     assert_eq!(app.active_view, ActiveView::Agent(AgentId(1)));
     app
@@ -727,10 +727,10 @@ pub(super) fn last_interjection_text(sb: &ScrollbackState) -> Option<String> {
 /// here keeps the source-scan invariant test
 /// (`no_direct_active_view_assignment_outside_switch_to_agent`) happy.
 pub(super) fn switch_active_to(app: &mut AppView, id: AgentId) {
-    crate::app::dispatch::switch_to_agent(
+    crate::app::root::dispatch::switch_to_agent(
         app,
         id,
-        crate::app::dispatch::SwitchCause::Picker,
+        crate::app::root::dispatch::SwitchCause::Picker,
     );
 }
 /// Concatenate the text of every `AgentMessage` block in this view's scrollback.

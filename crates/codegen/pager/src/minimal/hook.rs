@@ -16,7 +16,7 @@
 use std::sync::OnceLock;
 
 use crate::app::PagerTerminal;
-use crate::app::app_view::AppView;
+use crate::app::root::AppView;
 
 /// Per-frame minimal render entry point
 /// (`pager_minimal::draw`).
