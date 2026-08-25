@@ -8,7 +8,7 @@
 //! scroll up into native scrollback via [`super::commit`]. When idle the tail is
 //! empty and only status + prompt (+ optional panels) show.
 use pager::app::PagerTerminal;
-use pager::app::app_view::{ActiveView, AppView};
+use pager::app::app_view::AppView;
 use pager::minimal_api;
 use pager::render::Renderable;
 use pager::scrollback::state::ScrollbackState;
@@ -46,9 +46,7 @@ fn inset_left(area: Rect, inset: u16) -> Rect {
 /// Drop cached `/btw` geometry so minimal input cannot scroll an invisible
 /// panel after a modal host path skipped painting it.
 fn clear_btw_geometry(agent: &mut pager::app::agent_view::AgentView) {
-    agent.last_btw_selection_model =
-        pager::scrollback::text_selection::ResolvedSelectionModel::default();
-    agent.last_btw_area = Rect::default();
+    minimal_api::clear_agent_btw_geometry(agent);
 }
 /// Keep a paintable `/btw` area only when it is wholly inside the frame buffer.
 fn paintable_btw_area(frame_area: Rect, area: Rect) -> Option<Rect> {
@@ -99,297 +97,311 @@ pub fn draw_live(
     frame_stamp: pager::motion::FrameStamp,
 ) {
     let force_todos = minimal_api::minimal_show_todos(app);
-    let auth_hint = crate::startup::minimal_startup_hint(&app.trust_state);
-    let pending_hint = minimal_pending_hint(&app.pending_action);
+    let auth_hint = crate::startup::minimal_startup_hint(minimal_api::app_trust_state(app));
+    let pending_hint = minimal_pending_hint(minimal_api::app_pending_action(app));
     let transcript_hint = if minimal_api::minimal_ctrl_o_opens_transcript(app) {
         "ctrl+o transcript"
     } else {
         "/transcript"
     };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
-    let AppView {
-        cursor,
-        agents,
-        active_view,
-        appearance,
-        ..
-    } = app;
-    let agent_id = match active_view {
-        ActiveView::Agent(id) => Some(*id),
-        _ => None,
-    };
-    let theme = Theme::current();
-    let commit_app = super::commit::committed_appearance(appearance);
-    let compact = appearance.prompt.compact;
-    let (input_mode, multiline) = agent_id
-        .and_then(|id| agents.get(&id))
-        .map(|a| (a.prompt_input_mode, a.multiline_mode))
-        .unwrap_or_default();
-    let style = prompt_style(appearance, input_mode, &theme, multiline);
-    let row_inset = live_left_inset(appearance);
-    let layout_cfg = &appearance.scrollback.layout;
-    let term_h = terminal.last_known_area().height;
-    if let Some(id) = agent_id
-        && let Some(agent) = agents.get_mut(&id)
-    {
-        clear_btw_geometry(agent);
-    }
-    pager::render::draw::draw_frame(terminal, cursor, |frame, _link_spans| {
-        let area = frame.area();
-        if area.height == 0 || area.width < 4 {
-            return (None, None);
+    minimal_api::with_minimal_live_state(app, |cursor, mut agent, appearance| {
+        let theme = Theme::current();
+        let commit_app = super::commit::committed_appearance(appearance);
+        let compact = appearance.prompt.compact;
+        let (input_mode, multiline) = agent
+            .as_deref()
+            .map(|a| {
+                (
+                    minimal_api::agent_prompt_input_mode(a),
+                    minimal_api::agent_multiline_mode(a),
+                )
+            })
+            .unwrap_or_default();
+        let style = prompt_style(appearance, input_mode, &theme, multiline);
+        let row_inset = live_left_inset(appearance);
+        let layout_cfg = &appearance.scrollback.layout;
+        let term_h = terminal.last_known_area().height;
+        if let Some(agent) = agent.as_deref_mut() {
+            clear_btw_geometry(agent);
         }
-        Clear.render(area, frame.buffer_mut());
-        let agent = agent_id.and_then(|id| agents.get_mut(&id));
-        let Some(agent) = agent else {
-            crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
-            return (None, None);
-        };
-        agent.active_pane = pager::app::agent_view::AgentPane::Prompt;
-        let status_activity = minimal_advance_phase_timer(agent);
-        let show_todos = crate::todo::todo_panel_visible(agent, force_todos);
-        let queued = agent.session.pending_prompts.len() + agent.shared_queue.len();
-        if let Some(kind) = super::panel::active(agent) {
-            let cursor =
-                super::panel::render(frame.buffer_mut(), area, agent, kind, &theme, frame_stamp);
-            return (cursor, None);
-        }
-        if super::overlay::app_modal_active(agent) {
-            super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact, frame_stamp);
-            return (None, None);
-        }
-        if minimal_api::extensions_modal(agent).is_some() {
-            if let Some(state) = minimal_api::extensions_modal_mut(agent) {
-                pager::views::extensions_modal::render_extensions_modal(
+        pager::render::draw::draw_frame(terminal, cursor, |frame, _link_spans| {
+            let area = frame.area();
+            if area.height == 0 || area.width < 4 {
+                return (None, None);
+            }
+            Clear.render(area, frame.buffer_mut());
+            let Some(agent) = agent.as_deref_mut() else {
+                crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
+                return (None, None);
+            };
+            minimal_api::set_agent_active_pane(agent, pager::app::agent_view::AgentPane::Prompt);
+            let status_activity = minimal_advance_phase_timer(agent);
+            let show_todos = crate::todo::todo_panel_visible(agent, force_todos);
+            let queued = minimal_api::agent_pending_prompt_count(agent)
+                + minimal_api::agent_shared_queue_len(agent);
+            if let Some(kind) = super::panel::active(agent) {
+                let cursor = super::panel::render(
                     frame.buffer_mut(),
                     area,
-                    state,
-                    None,
+                    agent,
+                    kind,
+                    &theme,
+                    frame_stamp,
+                );
+                return (cursor, None);
+            }
+            if super::overlay::app_modal_active(agent) {
+                super::overlay::render_app_modal(
+                    frame.buffer_mut(),
+                    area,
+                    agent,
                     compact,
                     frame_stamp,
                 );
+                return (None, None);
             }
-            return (None, None);
-        }
-        if let Some(modal) = super::overlay::active_modal(agent) {
+            if minimal_api::extensions_modal(agent).is_some() {
+                if let Some(state) = minimal_api::extensions_modal_mut(agent) {
+                    pager::views::extensions_modal::render_extensions_modal(
+                        frame.buffer_mut(),
+                        area,
+                        state,
+                        None,
+                        compact,
+                        frame_stamp,
+                    );
+                }
+                return (None, None);
+            }
+            if let Some(modal) = super::overlay::active_modal(agent) {
+                let status_h = 1u16.min(area.height);
+                let content_w = area.width as usize;
+                let modal_h = super::overlay::modal_height(modal, agent, term_h, content_w)
+                    .min(area.height.saturating_sub(status_h))
+                    .max(1);
+                let tail_h = area.height.saturating_sub(status_h + modal_h);
+                if tail_h > 0 {
+                    let turn_running = minimal_api::agent_state(agent).is_turn_running();
+                    draw_tail(
+                        frame.buffer_mut(),
+                        Rect {
+                            x: area.x,
+                            y: area.y,
+                            width: area.width,
+                            height: tail_h,
+                        },
+                        minimal_api::agent_scrollback(agent),
+                        turn_running,
+                        &theme,
+                        &commit_app,
+                        minimal_api::agent_cwd(agent),
+                        frame_stamp,
+                    );
+                }
+                render_minimal_status(
+                    frame.buffer_mut(),
+                    inset_left(
+                        Rect {
+                            x: area.x,
+                            y: area.y + tail_h,
+                            width: area.width,
+                            height: status_h,
+                        },
+                        row_inset,
+                    ),
+                    agent,
+                    &status_activity,
+                    transcript_progress,
+                    &theme,
+                    frame_stamp,
+                );
+                let modal_area = Rect {
+                    x: area.x,
+                    y: area.y + tail_h + status_h,
+                    width: area.width,
+                    height: modal_h,
+                };
+                let cursor = super::overlay::render_modal(
+                    frame.buffer_mut(),
+                    modal_area,
+                    modal,
+                    agent,
+                    &theme,
+                    term_h,
+                );
+                return (cursor, None);
+            }
             let status_h = 1u16.min(area.height);
-            let content_w = area.width as usize;
-            let modal_h = super::overlay::modal_height(modal, agent, term_h, content_w)
-                .min(area.height.saturating_sub(status_h))
+            let overlay_h =
+                super::overlay::overlay_rows(minimal_api::agent_prompt(agent), area.width)
+                    .min(area.height.saturating_sub(status_h + 1));
+            let info_h = if overlay_h == 0 {
+                1u16.min(area.height.saturating_sub(status_h + 1))
+            } else {
+                0
+            };
+            let below_h = overlay_h + info_h;
+            let avail = area.height.saturating_sub(status_h + below_h);
+            let prompt_h = minimal_api::agent_prompt(agent)
+                .desired_height(area.width, &style, false, avail)
+                .min(avail)
                 .max(1);
-            let tail_h = area.height.saturating_sub(status_h + modal_h);
+            let rest = avail.saturating_sub(prompt_h);
+            let raw_btw = if minimal_api::minimal_btw_surface_available(agent) {
+                pager::views::btw_overlay::btw_panel_height(
+                    minimal_api::agent_btw_state(agent),
+                    area.width,
+                )
+            } else {
+                0
+            };
+            let btw_desired = minimal_api::minimal_btw_visible_height(raw_btw, area.width, rest);
+            let after_btw = rest.saturating_sub(btw_desired);
+            let todos_cap = if force_todos {
+                after_btw
+            } else {
+                after_btw.min(crate::todo::MAX_TODO_ROWS)
+            };
+            let todo_lines = if show_todos {
+                crate::todo::todo_panel_lines(agent, todos_cap, force_todos)
+            } else {
+                Vec::new()
+            };
+            let todos_h = (todo_lines.len() as u16).min(after_btw);
+            let btw_h = btw_desired;
+            let tail_h = rest.saturating_sub(todos_h + btw_h);
             if tail_h > 0 {
-                let turn_running = agent.session.state.is_turn_running();
+                let tail_area = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: tail_h,
+                };
+                let turn_running = minimal_api::agent_state(agent).is_turn_running();
                 draw_tail(
                     frame.buffer_mut(),
-                    Rect {
-                        x: area.x,
-                        y: area.y,
-                        width: area.width,
-                        height: tail_h,
-                    },
-                    &agent.scrollback,
+                    tail_area,
+                    minimal_api::agent_scrollback(agent),
                     turn_running,
                     &theme,
                     &commit_app,
-                    &agent.session.cwd,
+                    minimal_api::agent_cwd(agent),
                     frame_stamp,
                 );
             }
+            if todos_h > 0 {
+                crate::todo::render_todo_panel(
+                    frame.buffer_mut(),
+                    inset_left(
+                        Rect {
+                            x: area.x,
+                            y: area.y + tail_h,
+                            width: area.width,
+                            height: todos_h,
+                        },
+                        row_inset,
+                    ),
+                    &theme,
+                    &todo_lines,
+                );
+            }
+            let btw_area = paintable_btw_area(
+                area,
+                Rect {
+                    x: area.x,
+                    y: area.y.saturating_add(tail_h).saturating_add(todos_h),
+                    width: area.width,
+                    height: btw_h,
+                },
+            );
+            let btw_state = minimal_api::agent_btw_state(agent).cloned();
+            if let (Some(btw), Some(btw_area)) = (btw_state.as_ref(), btw_area) {
+                let focused = minimal_api::btw_focused(agent);
+                pager::views::btw_overlay::render_btw_panel(
+                    frame.buffer_mut(),
+                    btw,
+                    btw_area,
+                    frame_stamp,
+                    focused,
+                    None,
+                    minimal_api::agent_btw_selection_model_mut(agent),
+                    None,
+                    &[],
+                );
+                minimal_api::set_agent_btw_area(agent, btw_area);
+            }
+            let status_area = inset_left(
+                Rect {
+                    x: area.x,
+                    y: area.y + tail_h + todos_h + btw_h,
+                    width: area.width,
+                    height: status_h,
+                },
+                row_inset,
+            );
             render_minimal_status(
                 frame.buffer_mut(),
-                inset_left(
-                    Rect {
-                        x: area.x,
-                        y: area.y + tail_h,
-                        width: area.width,
-                        height: status_h,
-                    },
-                    row_inset,
-                ),
+                status_area,
                 agent,
                 &status_activity,
                 transcript_progress,
                 &theme,
                 frame_stamp,
             );
-            let modal_area = Rect {
+            let prompt_area = Rect {
                 x: area.x,
-                y: area.y + tail_h + status_h,
+                y: area.y + tail_h + todos_h + btw_h + status_h,
                 width: area.width,
-                height: modal_h,
+                height: prompt_h,
             };
-            let cursor = super::overlay::render_modal(
-                frame.buffer_mut(),
-                modal_area,
-                modal,
-                agent,
-                &theme,
-                term_h,
-            );
-            return (cursor, None);
-        }
-        let status_h = 1u16.min(area.height);
-        let overlay_h = super::overlay::overlay_rows(&agent.prompt, area.width)
-            .min(area.height.saturating_sub(status_h + 1));
-        let info_h = if overlay_h == 0 {
-            1u16.min(area.height.saturating_sub(status_h + 1))
-        } else {
-            0
-        };
-        let below_h = overlay_h + info_h;
-        let avail = area.height.saturating_sub(status_h + below_h);
-        let prompt_h = agent
-            .prompt
-            .desired_height(area.width, &style, false, avail)
-            .min(avail)
-            .max(1);
-        let rest = avail.saturating_sub(prompt_h);
-        let raw_btw = if minimal_api::minimal_btw_surface_available(agent) {
-            pager::views::btw_overlay::btw_panel_height(agent.btw_state.as_ref(), area.width)
-        } else {
-            0
-        };
-        let btw_desired = minimal_api::minimal_btw_visible_height(raw_btw, area.width, rest);
-        let after_btw = rest.saturating_sub(btw_desired);
-        let todos_cap = if force_todos {
-            after_btw
-        } else {
-            after_btw.min(crate::todo::MAX_TODO_ROWS)
-        };
-        let todo_lines = if show_todos {
-            crate::todo::todo_panel_lines(agent, todos_cap, force_todos)
-        } else {
-            Vec::new()
-        };
-        let todos_h = (todo_lines.len() as u16).min(after_btw);
-        let btw_h = btw_desired;
-        let tail_h = rest.saturating_sub(todos_h + btw_h);
-        if tail_h > 0 {
-            let tail_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: tail_h,
-            };
-            let turn_running = agent.session.state.is_turn_running();
-            draw_tail(
-                frame.buffer_mut(),
-                tail_area,
-                &agent.scrollback,
-                turn_running,
-                &theme,
-                &commit_app,
-                &agent.session.cwd,
-                frame_stamp,
-            );
-        }
-        if todos_h > 0 {
-            crate::todo::render_todo_panel(
-                frame.buffer_mut(),
-                inset_left(
-                    Rect {
-                        x: area.x,
-                        y: area.y + tail_h,
-                        width: area.width,
-                        height: todos_h,
-                    },
-                    row_inset,
-                ),
-                &theme,
-                &todo_lines,
-            );
-        }
-        let btw_area = paintable_btw_area(
-            area,
-            Rect {
-                x: area.x,
-                y: area.y.saturating_add(tail_h).saturating_add(todos_h),
-                width: area.width,
-                height: btw_h,
-            },
-        );
-        if let (Some(btw), Some(btw_area)) = (agent.btw_state.as_ref(), btw_area) {
-            let focused = minimal_api::btw_focused(agent);
-            pager::views::btw_overlay::render_btw_panel(
-                frame.buffer_mut(),
-                btw,
-                btw_area,
-                frame_stamp,
-                focused,
-                None,
-                &mut agent.last_btw_selection_model,
-                None,
-                &[],
-            );
-            agent.last_btw_area = btw_area;
-        }
-        let status_area = inset_left(
-            Rect {
-                x: area.x,
-                y: area.y + tail_h + todos_h + btw_h,
-                width: area.width,
-                height: status_h,
-            },
-            row_inset,
-        );
-        render_minimal_status(
-            frame.buffer_mut(),
-            status_area,
-            agent,
-            &status_activity,
-            transcript_progress,
-            &theme,
-            frame_stamp,
-        );
-        let prompt_area = Rect {
-            x: area.x,
-            y: area.y + tail_h + todos_h + btw_h + status_h,
-            width: area.width,
-            height: prompt_h,
-        };
-        if overlay_h > 0 {
-            super::overlay::render(
-                frame.buffer_mut(),
-                area,
-                prompt_area,
-                &mut agent.prompt,
-                layout_cfg,
-                compact,
-                &theme,
-            );
-        } else if info_h > 0 {
-            let info_area = inset_left(
-                Rect {
-                    x: area.x,
-                    y: prompt_area.y + prompt_h,
-                    width: area.width,
-                    height: info_h,
-                },
-                row_inset,
-            );
-            if let Some(hint) = &pending_hint {
-                render_exit_hint(frame.buffer_mut(), info_area, &theme, hint);
-            } else {
-                render_prompt_info(
+            if overlay_h > 0 {
+                super::overlay::render(
                     frame.buffer_mut(),
-                    info_area,
-                    agent,
-                    queued,
-                    transcript_hint,
+                    area,
+                    prompt_area,
+                    minimal_api::agent_prompt_mut(agent),
+                    layout_cfg,
+                    compact,
                     &theme,
                 );
+            } else if info_h > 0 {
+                let info_area = inset_left(
+                    Rect {
+                        x: area.x,
+                        y: prompt_area.y + prompt_h,
+                        width: area.width,
+                        height: info_h,
+                    },
+                    row_inset,
+                );
+                if let Some(hint) = &pending_hint {
+                    render_exit_hint(frame.buffer_mut(), info_area, &theme, hint);
+                } else {
+                    render_prompt_info(
+                        frame.buffer_mut(),
+                        info_area,
+                        agent,
+                        queued,
+                        transcript_hint,
+                        &theme,
+                    );
+                }
             }
-        }
-        let result = agent
-            .prompt
-            .draw(frame.buffer_mut(), prompt_area, None, &style, None);
-        (
-            result.cursor_pos,
-            result
-                .post_flush_escapes
-                .map(pager::terminal::overlay::PostFlush::from),
-        )
+            let result = minimal_api::agent_prompt_mut(agent).draw(
+                frame.buffer_mut(),
+                prompt_area,
+                None,
+                &style,
+                None,
+            );
+            (
+                result.cursor_pos,
+                result
+                    .post_flush_escapes
+                    .map(pager::terminal::overlay::PostFlush::from),
+            )
+        });
     });
 }
 fn live_tail_renderer<'a>(
@@ -526,7 +538,7 @@ fn render_minimal_status(
     let drain_blocked = minimal_api::drain_blocked(agent);
     let parked = minimal_api::renders_parked(agent);
     if !turn_status::should_show(
-        &agent.session.state,
+        minimal_api::agent_state(agent),
         drain_blocked,
         minimal_api::mcp_init_progress(agent),
         watchers,
@@ -535,23 +547,23 @@ fn render_minimal_status(
         render_idle_hint(buf, area, theme);
         return;
     }
-    let is_pending_user_input =
-        !agent.permission_queue.is_empty() || minimal_api::question_view(agent).is_some();
+    let is_pending_user_input = !minimal_api::agent_permission_queue(agent).is_empty()
+        || minimal_api::question_view(agent).is_some();
     turn_status::render_turn_status(
         buf,
         area,
         turn_status::TurnStatusArgs {
-            state: &agent.session.state,
+            state: minimal_api::agent_state(agent),
             activity,
-            turn_elapsed: agent.turn_elapsed_at(frame.now()),
-            activity_started_at: agent.activity_started_at,
+            turn_elapsed: minimal_api::agent_turn_elapsed_at(agent, frame.now()),
+            activity_started_at: minimal_api::agent_activity_started_at(agent),
             frame,
             drain_blocked,
             buttons: None,
             has_running_execute: false,
-            total_tokens: agent.context_state.as_ref().map(|c| c.used),
+            total_tokens: minimal_api::agent_context_used(agent),
             mcp_init_progress: minimal_api::mcp_init_progress(agent),
-            is_bash_turn: agent.bash_turn,
+            is_bash_turn: minimal_api::agent_is_bash_turn(agent),
             is_pending_user_input,
             watchers,
             parked,
@@ -606,11 +618,11 @@ fn render_prompt_info(
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
-    if let Some(label) = agent.prompt_input_mode.prompt_info_override() {
+    if let Some(label) = minimal_api::agent_prompt_input_mode(agent).prompt_info_override() {
         segs.push((label.to_string(), base));
     } else {
-        if let Some(model) = agent.session.models.current_model_name() {
-            let label = match agent.session.models.reasoning_effort {
+        if let Some(model) = minimal_api::agent_current_model_name(agent) {
+            let label = match minimal_api::agent_reasoning_effort(agent) {
                 Some(eff) => format!("{model} ({eff})"),
                 None => model,
             };
@@ -636,20 +648,17 @@ fn render_prompt_info(
             theme.accent_system
         };
         segs.push((behavior_label.to_string(), base.fg(behavior_color)));
-        let (permission_label, permission_style) = if agent.session.is_always_approve() {
+        let (permission_label, permission_style) = if minimal_api::agent_is_always_approve(agent) {
             ("always-approve", base.fg(theme.warning))
-        } else if agent.session.is_auto() {
+        } else if minimal_api::agent_is_auto(agent) {
             ("auto", base.fg(theme.accent_system))
         } else {
             ("ask", base)
         };
         segs.push((permission_label.to_string(), permission_style));
-        let used = agent.context_state.as_ref().map(|c| c.used);
-        let total = agent
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or_else(|| agent.session.models.get_context_window());
+        let used = minimal_api::agent_context_used(agent);
+        let total = minimal_api::agent_context_total(agent)
+            .or_else(|| minimal_api::agent_model_context_window(agent));
         if let (Some(used), Some(total)) = (used, total)
             && total > 0
         {
@@ -726,13 +735,13 @@ pub(super) fn tail_height(
     frame: pager::motion::FrameStamp,
 ) -> u16 {
     let theme = Theme::current();
-    let sb = &agent.scrollback;
-    let turn_running = agent.session.state.is_turn_running();
+    let sb = minimal_api::agent_scrollback(agent);
+    let turn_running = minimal_api::agent_state(agent).is_turn_running();
     let gap = super::commit::MINIMAL_BLOCK_GAP;
     let mut i = super::commit::scan_frontier(sb, turn_running).tail_start;
     let mut total = 0u16;
     while let Some(e) = sb.get(i) {
-        let h = live_tail_renderer(e, &theme, appearance, &agent.session.cwd, frame)
+        let h = live_tail_renderer(e, &theme, appearance, minimal_api::agent_cwd(agent), frame)
             .desired_height(width);
         total = total.saturating_add(h).saturating_add(gap);
         i += 1;
@@ -768,18 +777,18 @@ mod tests {
         use pager::scrollback::types::DisplayMode;
         let cwd = std::path::PathBuf::from("/alternate/worktree");
         let mut agent = minimal_api::test_agent_view(Some("s1"), cwd.clone());
-        agent.session.state = AgentState::TurnRunning;
+        minimal_api::set_agent_state_for_test(&mut agent, AgentState::TurnRunning);
         let mut entry = ScrollbackEntry::running(RenderBlock::edit(
             "/alternate/worktree/src/components/really_long_file_name.rs",
             None,
         ));
         entry.set_display_mode(DisplayMode::Expanded);
-        agent.scrollback.push(entry);
+        minimal_api::agent_scrollback_mut(&mut agent).push(entry);
         let appearance = super::super::commit::committed_appearance(
             &pager::appearance::AppearanceConfig::default(),
         );
         let theme = Theme::current();
-        let entry = agent.scrollback.get(0).unwrap();
+        let entry = minimal_api::agent_scrollback(&agent).get(0).unwrap();
         let (width, painted_height, visible_accent_height) = (10..=40)
             .find_map(|width| {
                 let painted = live_tail_renderer(

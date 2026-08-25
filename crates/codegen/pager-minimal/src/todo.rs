@@ -26,7 +26,7 @@ pub(super) const MAX_TODO_ROWS: u16 = 8;
 /// A new turn that creates fresh pending todos re-shows it immediately. `force`
 /// (Ctrl+T) pins it visible regardless, e.g. to review a finished list.
 pub(super) fn todo_panel_visible(agent: &pager::app::agent_view::AgentView, force: bool) -> bool {
-    let todos = agent.todo.todos();
+    let todos = pager::minimal_api::agent_todo(agent).todos();
     if todos.is_empty() {
         return false;
     }
@@ -46,7 +46,7 @@ pub(super) fn todo_panel_height(agent: &pager::app::agent_view::AgentView, force
     if !todo_panel_visible(agent, force) {
         return 0;
     }
-    let len = agent.todo.todos().len() as u16;
+    let len = pager::minimal_api::agent_todo(agent).todos().len() as u16;
     // Ctrl+T (force) expands the full list (clamped to the screen by the caller);
     // otherwise cap at `MAX_TODO_ROWS` with a `+N more` overflow row.
     if force { len } else { len.min(MAX_TODO_ROWS) }
@@ -80,7 +80,7 @@ pub(super) fn todo_panel_lines(
     max_rows: u16,
     force: bool,
 ) -> Vec<Line<'static>> {
-    let todos = agent.todo.todos();
+    let todos = pager::minimal_api::agent_todo(agent).todos();
     if todos.is_empty() || max_rows == 0 {
         return Vec::new();
     }
@@ -216,14 +216,14 @@ mod tests {
         assert!(todo_panel_lines(&agent(), 8, false).is_empty());
         // …and empty when the cap is zero, regardless of todos.
         let mut a = agent();
-        a.todo.update_todos(vec![todo("x", TodoStatus::Pending)]);
+        minimal_api::agent_todo_mut(&mut a).update_todos(vec![todo("x", TodoStatus::Pending)]);
         assert!(todo_panel_lines(&a, 0, false).is_empty());
     }
 
     #[test]
     fn todo_panel_lists_items_with_status_glyphs() {
         let mut agent = agent();
-        agent.todo.update_todos(vec![
+        minimal_api::agent_todo_mut(&mut agent).update_todos(vec![
             todo("done one", TodoStatus::Completed),
             todo("active item", TodoStatus::InProgress),
             todo("later", TodoStatus::Pending),
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn todo_panel_caps_with_overflow_row() {
         let mut agent = agent();
-        agent.todo.update_todos(
+        minimal_api::agent_todo_mut(&mut agent).update_todos(
             (0..10)
                 .map(|i| todo(&format!("item {i}"), TodoStatus::Pending))
                 .collect(),

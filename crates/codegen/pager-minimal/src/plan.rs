@@ -65,14 +65,14 @@ const PLAN_HEADER: &str = "Plan ready for review";
 ///
 /// Call once per frame from [`crate::draw`], before the commit pass.
 pub fn maybe_commit_plan(app: &mut AppView) {
-    let ActiveView::Agent(id) = &app.active_view else {
+    let ActiveView::Agent(id) = minimal_api::app_active_view(app) else {
         return;
     };
     let id = *id;
 
     // Extract the plan (owned) under a short immutable borrow so the mutable
     // scrollback push and the `minimal_state` read/write below don't overlap it.
-    let plan = app.agents.get(&id).and_then(|agent| {
+    let plan = minimal_api::app_agent(app, id).and_then(|agent| {
         minimal_api::plan_approval_view(agent)
             .map(|pav| (pav.tool_call_id.clone(), pav.plan_content.clone()))
     });
@@ -88,16 +88,16 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     // agent borrow can't fail here (the plan was just extracted from it), but
     // if it ever did, stamping the id anyway would treat the plan as committed
     // while nothing ever reaches native scrollback.
-    if let Some(agent) = app.agents.get_mut(&id) {
+    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
         let block = RenderBlock::agent_message(content);
         // No anchor (the tool was reaped): append, and the plan commits at turn
         // end — the pre-fix behavior, still better than dropping it.
         match minimal_api::pending_tool_entry_id(agent, &tool_call_id) {
             Some(anchor) => {
-                agent.scrollback.insert_block_before(anchor, block);
+                minimal_api::agent_scrollback_mut(agent).insert_block_before(anchor, block);
             }
             None => {
-                agent.scrollback.push_block(block);
+                minimal_api::agent_scrollback_mut(agent).push_block(block);
             }
         }
         minimal_api::set_minimal_committed_plan_id(app, Some(tool_call_id));
@@ -158,7 +158,7 @@ pub fn render(
     let has_content = minimal_api::plan_approval_view(agent)
         .map(|p| !p.comments.is_empty())
         .unwrap_or(false)
-        || !agent.prompt.text().trim().is_empty();
+        || !minimal_api::agent_prompt(agent).text().trim().is_empty();
     // Tab reopens the submitted plan preview.
     let hint = match foc {
         PlanApprovalFocus::Prompt if has_content => {
@@ -193,7 +193,9 @@ pub fn render(
         };
         let style = input_style(theme);
         buf.set_style(row, Style::default().bg(theme.bg_visual));
-        return agent.prompt.draw(buf, row, None, &style, None).cursor_pos;
+        return minimal_api::agent_prompt_mut(agent)
+            .draw(buf, row, None, &style, None)
+            .cursor_pos;
     }
     None
 }

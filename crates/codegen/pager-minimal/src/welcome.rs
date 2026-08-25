@@ -56,17 +56,17 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
 
     let theme = Theme::current();
     let version = version::VERSION;
-    let (cwd, model) = match &app.active_view {
+    let (cwd, model) = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => {
-            let agent = app.agents.get(id);
+            let agent = minimal_api::app_agent(app, *id);
             (
                 agent
-                    .map(|a| a.session.cwd.display().to_string())
+                    .map(|a| minimal_api::agent_cwd(a).display().to_string())
                     .unwrap_or_default(),
-                agent.and_then(|a| a.session.models.current_model_name()),
+                agent.and_then(minimal_api::agent_current_model_name),
             )
         }
-        _ => (app.cwd.display().to_string(), None),
+        _ => (minimal_api::app_cwd(app).display().to_string(), None),
     };
 
     // Info lines: title + version, cwd, optional model, hint. No logo — the

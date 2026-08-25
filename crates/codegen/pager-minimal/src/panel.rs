@@ -56,7 +56,10 @@ pub(super) enum ListPanel {
 /// this *before* `overlay::app_modal_active`, since `SessionPicker` is also an
 /// `active_modal`.
 pub(super) fn active(agent: &AgentView) -> Option<ListPanel> {
-    if matches!(agent.active_modal, Some(ActiveModal::SessionPicker { .. })) {
+    if matches!(
+        minimal_api::agent_active_modal(agent),
+        Some(ActiveModal::SessionPicker { .. })
+    ) {
         return Some(ListPanel::Resume);
     }
     if minimal_api::extensions_modal(agent)
@@ -161,7 +164,9 @@ fn render_divider(buf: &mut Buffer, row: Rect, theme: &Theme) {
 
 /// Exact body height (display rows) for the session-picker list.
 fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
-    let Some(ActiveModal::SessionPicker { entries, state, .. }) = &agent.active_modal else {
+    let Some(ActiveModal::SessionPicker { entries, state, .. }) =
+        minimal_api::agent_active_modal(agent)
+    else {
         return 0;
     };
     let entries_data = entries.as_deref().unwrap_or(&[]);
@@ -178,7 +183,8 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
                 .collect()
         })
         .collect();
-    let current_repo = minimal_api::repo_name_from_cwd(&agent.session.cwd.to_string_lossy());
+    let current_repo =
+        minimal_api::repo_name_from_cwd(&minimal_api::agent_cwd(agent).to_string_lossy());
     let (picker_entries, _) = minimal_api::build_grouped_picker_entries(
         entries_data,
         &filtered,
@@ -197,8 +203,10 @@ fn render_resume(
     theme: &Theme,
     frame: pager::motion::FrameStamp,
 ) -> Option<(u16, u16)> {
-    let cwd = agent.session.cwd.to_string_lossy().to_string();
-    let Some(ActiveModal::SessionPicker { entries, state, .. }) = &mut agent.active_modal else {
+    let cwd = minimal_api::agent_cwd(agent).to_string_lossy().to_string();
+    let Some(ActiveModal::SessionPicker { entries, state, .. }) =
+        minimal_api::agent_active_modal_mut(agent)
+    else {
         return None;
     };
     let (title_row, search_row, divider_row, list_area, footer_row) = chrome_layout(area);
@@ -694,7 +702,9 @@ mod tests {
         let grapheme = "👩🏽\u{200d}💻";
         let combining = "e\u{301}";
         let mut agent = with_resume(vec![session_entry("match")]);
-        let Some(ActiveModal::SessionPicker { state, .. }) = &mut agent.active_modal else {
+        let Some(ActiveModal::SessionPicker { state, .. }) =
+            minimal_api::agent_active_modal_mut(&mut agent)
+        else {
             panic!("expected session picker");
         };
         state.set_query(format!("a{grapheme}{combining}"));
@@ -712,7 +722,9 @@ mod tests {
             pager::motion::FrameStamp::default(),
         );
 
-        let Some(ActiveModal::SessionPicker { state, .. }) = &agent.active_modal else {
+        let Some(ActiveModal::SessionPicker { state, .. }) =
+            minimal_api::agent_active_modal(&agent)
+        else {
             panic!("expected session picker");
         };
         let mut expected = Buffer::empty(area);

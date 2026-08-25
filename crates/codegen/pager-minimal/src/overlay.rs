@@ -201,17 +201,17 @@ pub fn sync_viewport(
 /// repositioning itself, so the resize must NOT clear; otherwise
 /// `set_viewport_height`'s clear is needed to wipe stale rows.
 fn will_commit(app: &AppView) -> bool {
-    let ActiveView::Agent(id) = &app.active_view else {
+    let ActiveView::Agent(id) = minimal_api::app_active_view(app) else {
         return false;
     };
-    let Some(agent) = app.agents.get(id) else {
+    let Some(agent) = minimal_api::app_agent(app, *id) else {
         return false;
     };
     if app_modal_active(agent) {
         return false;
     }
-    let turn_running = agent.session.state.is_turn_running();
-    super::commit::scan_frontier(&agent.scrollback, turn_running).will_commit
+    let turn_running = minimal_api::agent_state(agent).is_turn_running();
+    super::commit::scan_frontier(minimal_api::agent_scrollback(agent), turn_running).will_commit
 }
 
 /// Resolve the target viewport height for the active agent's overlay state.
@@ -221,7 +221,7 @@ fn compute_target(
     width: u16,
     frame: pager::motion::FrameStamp,
 ) -> u16 {
-    let minimal_live_rows = app.appearance.minimal_live_rows;
+    let minimal_live_rows = minimal_api::app_appearance(app).minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);
     // Ctrl+T "force-show" pin; effective visibility (auto-hide) is computed per
@@ -229,7 +229,7 @@ fn compute_target(
     let force_todos = minimal_api::minimal_show_todos(app);
     // Committed appearance (timestamps off) so the measured tail height matches
     // exactly what `draw_tail` renders.
-    let commit_app = super::commit::committed_appearance(&app.appearance);
+    let commit_app = super::commit::committed_appearance(minimal_api::app_appearance(app));
     // Theme + prompt style: built after the agent is known so bash/feedback/
     // remember chrome matches `draw_live` (same `prompt_style` inputs).
     // Minimal is flush-left (W-38): prompt-replacing modals span the live
@@ -238,25 +238,33 @@ fn compute_target(
     // `modal_area` or the viewport is sized for a different text wrap.
     let content_w = width as usize;
 
-    let ActiveView::Agent(id) = &app.active_view else {
+    let ActiveView::Agent(id) = minimal_api::app_active_view(app) else {
         // No agent yet: size for the in-region sign-in / folder-trust UI so the
         // trust question isn't clipped to the idle prompt height.
-        let hint = super::startup::minimal_startup_hint(&app.trust_state);
+        let hint = super::startup::minimal_startup_hint(minimal_api::app_trust_state(app));
         let needed = super::startup::startup_hint_rows(&hint, width);
         return needed.max(base).min(ceiling);
     };
     let id = *id;
     // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can
     // still read `app.appearance` (same inputs as `draw_live`).
-    let (input_mode, multiline) = app
-        .agents
-        .get(&id)
-        .map(|a| (a.prompt_input_mode, a.multiline_mode))
+    let (input_mode, multiline) = minimal_api::app_agent(app, id)
+        .map(|a| {
+            (
+                minimal_api::agent_prompt_input_mode(a),
+                minimal_api::agent_multiline_mode(a),
+            )
+        })
         .unwrap_or_default();
     let theme = pager::theme::Theme::current();
-    let style = super::live::prompt_style(&app.appearance, input_mode, &theme, multiline);
+    let style = super::live::prompt_style(
+        minimal_api::app_appearance(app),
+        input_mode,
+        &theme,
+        multiline,
+    );
 
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
         return base;
     };
 
@@ -299,7 +307,7 @@ fn compute_target(
 
     // Otherwise size to fit the prompt (it expands as you type) plus any
     // prompt-anchored dropdown.
-    let overlay_h = overlay_rows(&agent.prompt, width);
+    let overlay_h = overlay_rows(minimal_api::agent_prompt(agent), width);
     let cap = ceiling.saturating_sub(overlay_h + 1).max(1);
     let prompt_h = agent
         .prompt
@@ -325,7 +333,7 @@ fn compute_target(
     // matches `live::draw_live`. Only reserve rows the shared minimal paint
     // policy accepts, otherwise a narrow or short terminal leaves a blank strip.
     let raw_btw = if minimal_api::minimal_btw_surface_available(agent) {
-        pager::views::btw_overlay::btw_panel_height(agent.btw_state.as_ref(), width)
+        pager::views::btw_overlay::btw_panel_height(minimal_api::agent_btw_state(agent), width)
     } else {
         0
     };
@@ -465,7 +473,7 @@ pub fn active_modal(agent: &AgentView) -> Option<Modal> {
     if minimal_api::plan_approval_view(agent).is_some() {
         return Some(Modal::Plan);
     }
-    if !agent.permission_queue.is_empty() {
+    if !minimal_api::agent_permission_queue(agent).is_empty() {
         return Some(Modal::Permission);
     }
     if minimal_api::question_view(agent).is_some() {
@@ -584,7 +592,7 @@ pub fn render_modal(
 /// Whether an `AgentView::active_modal` (command palette / shortcuts help /
 /// settings / pickers / …) is open. Minimal hosts these as centered overlays.
 pub fn app_modal_active(agent: &AgentView) -> bool {
-    agent.active_modal.is_some()
+    minimal_api::agent_active_modal(agent).is_some()
 }
 
 /// Render the active centered app-modal into `area`, reusing the exact full-TUI
@@ -597,7 +605,7 @@ pub fn render_app_modal(
     compact: bool,
     frame: pager::motion::FrameStamp,
 ) -> bool {
-    if agent.active_modal.is_none() {
+    if minimal_api::agent_active_modal(agent).is_none() {
         return false;
     }
     minimal_api::draw_active_modal(agent, area, buf, Theme::current(), compact, frame);
@@ -610,10 +618,10 @@ fn render_permission(
     agent: &mut AgentView,
     theme: &Theme,
 ) -> Option<(u16, u16)> {
-    let perm = agent.permission_queue.front()?;
+    let perm = minimal_api::agent_permission_queue(agent).front()?;
     // Clone so the immutable borrow of `agent.prompt` ends before the mutable
     // `agent.prompt.draw` below.
-    let followup = agent.prompt.text().to_string();
+    let followup = minimal_api::agent_prompt(agent).text().to_string();
     let result = pager::views::permission_view::render_permission_view(
         buf,
         area,
@@ -637,7 +645,9 @@ fn render_permission(
         width: iarea.text_w,
         height,
     };
-    agent.prompt.draw(buf, rect, None, &style, None).cursor_pos
+    minimal_api::agent_prompt_mut(agent)
+        .draw(buf, rect, None, &style, None)
+        .cursor_pos
 }
 
 fn render_question(
@@ -841,7 +851,7 @@ mod tests {
         qv.per_question_cursor[0] = qv.questions[0].options.len();
         let _stashed = qv.activate_freeform_input();
         minimal_api::set_question_view(&mut agent, Some(qv));
-        agent.prompt.set_text(text);
+        minimal_api::agent_prompt_mut(&mut agent).set_text(text);
         agent
     }
 

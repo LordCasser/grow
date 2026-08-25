@@ -61,14 +61,14 @@ pub fn pump_transcript(app: &mut AppView) {
     // owner keeps existing across view switches, so the build also survives
     // the user tabbing away — only a truly-removed agent drops it.
     let id = build.agent;
-    let appearance = super::commit::committed_appearance(&app.appearance);
+    let appearance = super::commit::committed_appearance(minimal_api::app_appearance(app));
     {
-        let Some(agent) = app.agents.get(&id) else {
+        let Some(agent) = minimal_api::app_agent(app, id) else {
             tracing::warn!("minimal: transcript build's agent removed; dropping the build");
             return;
         };
         let theme = Theme::current();
-        let sb = &agent.scrollback;
+        let sb = minimal_api::agent_scrollback(agent);
 
         // Show every thinking entry THAT EXISTS in the session: this view is
         // the advertised full-fidelity "expand everything" surface, and
@@ -96,7 +96,7 @@ pub fn pump_transcript(app: &mut AppView) {
                     entry,
                     &theme,
                     &appearance,
-                    &agent.session.cwd,
+                    minimal_api::agent_cwd(agent),
                     &mut build.out,
                 );
             }
@@ -124,28 +124,27 @@ pub fn pump_transcript(app: &mut AppView) {
 /// tab away while the build runs).
 fn finish_transcript(app: &mut AppView, id: pager::app::agent::AgentId, out: String) {
     if out.is_empty() {
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent
-                .scrollback
-                .push_block(pager::scrollback::block::RenderBlock::system(
+        if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+            minimal_api::agent_scrollback_mut(agent).push_block(
+                pager::scrollback::block::RenderBlock::system(
                     "No conversation transcript to view yet",
-                ));
+                ),
+            );
         }
         return;
     }
     let path = std::env::temp_dir().join(format!("grow-transcript-{}.ansi", uuid::Uuid::new_v4()));
     match std::fs::write(&path, out) {
         Ok(()) => {
-            app.pending_pager_path = Some(path);
-            app.pending_pager_ansi = true;
+            minimal_api::app_set_pending_pager(app, path, true);
         }
         Err(e) => {
-            if let Some(agent) = app.agents.get_mut(&id) {
-                agent
-                    .scrollback
-                    .push_block(pager::scrollback::block::RenderBlock::system(format!(
+            if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+                minimal_api::agent_scrollback_mut(agent).push_block(
+                    pager::scrollback::block::RenderBlock::system(format!(
                         "Failed to write transcript: {e}"
-                    )));
+                    )),
+                );
             }
         }
     }

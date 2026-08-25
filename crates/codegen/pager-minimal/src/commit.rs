@@ -412,13 +412,13 @@ pub fn commit_active(
     terminal: &mut PagerTerminal,
     frame: pager::motion::FrameStamp,
 ) {
-    let id = match &app.active_view {
+    let id = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => *id,
         _ => return, // welcome / dashboard: nothing to commit
     };
     // Snapshot the commit appearance before borrowing `agents` mutably.
-    let appearance = committed_appearance(&app.appearance);
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let appearance = committed_appearance(minimal_api::app_appearance(app));
+    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
         return;
     };
     // Hold commits while a centered fullscreen app-modal (settings) is open: it
@@ -436,9 +436,9 @@ pub fn commit_active(
     // Whether a turn is actively running. When idle, every remaining entry is
     // stable and committable (see `is_committable`); a stale `is_running` flag
     // left by the tracker must not wedge the frontier.
-    let turn_running = agent.session.state.is_turn_running();
-    let cwd = agent.session.cwd.as_path();
-    let sb = &mut agent.scrollback;
+    let turn_running = minimal_api::agent_state(agent).is_turn_running();
+    let cwd = minimal_api::agent_cwd(agent).to_path_buf();
+    let sb = minimal_api::agent_scrollback_mut(agent);
 
     // NB: resume/attach replay (`agent.session.loading_replay`) intentionally
     // falls through to the normal commit pass below, so the loaded transcript is
@@ -478,7 +478,7 @@ pub fn commit_active(
             // place later (`get_by_id_mut` + edit, the `/recap` fill pattern)
             // will NOT reach the screen — append a fresh block instead (see
             // the `SessionRecap` handler in `acp_handler.rs`).
-            let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, frame);
+            let renderer = minimal_renderer(e, &theme, appearance.clone(), &cwd, frame);
             if insert_committed(terminal, renderer, width, max_rows, footer_style).is_err() {
                 return false;
             }
@@ -530,7 +530,7 @@ pub fn expand_pending(
     if minimal_api::minimal_pending_expand(app).is_empty() {
         return;
     }
-    let id = match &app.active_view {
+    let id = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => *id,
         _ => return,
     };
@@ -538,14 +538,14 @@ pub fn expand_pending(
     if width == 0 {
         return;
     }
-    let appearance = committed_appearance(&app.appearance);
+    let appearance = committed_appearance(minimal_api::app_appearance(app));
     // Guards: a missing active agent must leave the IDs queued, so confirm it
     // exists before consuming the queue below (the queue take needs `&mut app`,
     // which can't overlap the agent borrow — hence the check-then-reborrow).
     // Likewise hold the whole queue while a centered app-modal owns the live
     // region — an `insert_before` would scroll the popup and the user wouldn't
     // see the re-print (same hold as `commit_active`; bugbot).
-    match app.agents.get(&id) {
+    match minimal_api::app_agent(app, id) {
         Some(agent) if !super::overlay::app_modal_active(agent) => {}
         _ => return,
     }
@@ -558,15 +558,15 @@ pub fn expand_pending(
     let ids = minimal_api::take_minimal_pending_expand(app);
     let mut requeue: Vec<EntryId> = Vec::new();
     {
-        let Some(agent) = app.agents.get_mut(&id) else {
+        let Some(agent) = minimal_api::app_agent_mut(app, id) else {
             // Can't happen (existence checked just above, nothing in between
             // can remove the agent) — but if it ever does, the drained queue
             // must go back rather than silently vanish.
             minimal_api::requeue_minimal_pending_expand(app, ids);
             return;
         };
-        let cwd = agent.session.cwd.as_path();
-        let sb = &mut agent.scrollback;
+        let cwd = minimal_api::agent_cwd(agent).to_path_buf();
+        let sb = minimal_api::agent_scrollback_mut(agent);
         let mut iter = ids.into_iter();
         while let Some(eid) = iter.next() {
             let Some(idx) = sb.index_of_id(eid) else {
@@ -576,7 +576,7 @@ pub fn expand_pending(
                 e.set_display_mode(DisplayMode::Expanded);
             }
             if let Some(e) = sb.get(idx) {
-                let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, frame);
+                let renderer = minimal_renderer(e, &theme, appearance.clone(), &cwd, frame);
                 if insert_committed(terminal, renderer, width, 0, footer_style).is_err() {
                     // Terminal write failed: keep this id and the rest queued
                     // so the request retries next frame instead of vanishing.
@@ -603,9 +603,11 @@ pub fn expand_pending(
 /// marks — syncing inside the commit pass let a just-arrived permission's tool
 /// look committable to the sizing walk for one frame (bugbot).
 pub fn sync_pending_marks(app: &mut AppView) {
-    if let ActiveView::Agent(id) = &app.active_view
-        && let Some(agent) = app.agents.get_mut(id)
-    {
+    let id = match minimal_api::app_active_view(app) {
+        ActiveView::Agent(id) => *id,
+        _ => return,
+    };
+    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
         minimal_api::sync_pending_user_input_marks(agent);
     }
 }

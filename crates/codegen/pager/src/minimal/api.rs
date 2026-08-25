@@ -36,14 +36,18 @@ use crate::acp::tracker::TurnActivity;
 // Only the test-only setters below reference `AgentSession`.
 #[cfg(any(test, feature = "test-support"))]
 use crate::app::agent::AgentSession;
+use crate::app::agent::{AgentId, AgentState};
 use crate::app::agent_view::{AgentView, McpInitProgress};
-use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry};
+use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry, TrustState};
+use crate::appearance::AppearanceConfig;
 use crate::appearance::LayoutConfig;
+use crate::render::draw::CursorState;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
 use crate::views::extensions_modal::{ExtensionsModalState, StatusFilter};
 use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
+use crate::views::modal::ActiveModal;
 use crate::views::modal::CancelTurnViewState;
 use crate::views::picker::{PickerEntry, PickerField, PickerState};
 use crate::views::plan_approval_view::PlanApprovalViewState;
@@ -56,6 +60,192 @@ use crate::views::suggestion_controller::SuggestionController;
 /// The shared renderer's minimum `/btw` panel dimensions.
 pub const MINIMAL_BTW_MIN_WIDTH: u16 = 12;
 pub const MINIMAL_BTW_MIN_HEIGHT: u16 = 3;
+
+// ── AppView / AgentView ownership seam ─────────────────────────────────────
+//
+// `pager-minimal` is deliberately allowed to receive the view objects, but it
+// must not know how those objects store state. Keep the cross-crate surface in
+// this module: the minimal renderer can ask for a domain component or perform
+// a named operation, while AppView/AgentView remain free to reorganize their
+// fields in the core pager crate.
+
+pub fn app_active_view(app: &AppView) -> &ActiveView {
+    &app.active_view
+}
+
+pub fn app_agent(app: &AppView, id: AgentId) -> Option<&AgentView> {
+    app.agents.get(&id)
+}
+
+pub fn app_agent_mut(app: &mut AppView, id: AgentId) -> Option<&mut AgentView> {
+    app.agents.get_mut(&id)
+}
+
+pub fn app_appearance(app: &AppView) -> &AppearanceConfig {
+    &app.appearance
+}
+
+pub fn app_trust_state(app: &AppView) -> &TrustState {
+    &app.trust_state
+}
+
+pub fn app_pending_action(app: &AppView) -> &Option<crate::app::app_view::PendingAction> {
+    &app.pending_action
+}
+
+pub fn app_cwd(app: &AppView) -> &std::path::Path {
+    app.cwd.as_path()
+}
+
+pub fn app_set_pending_pager(app: &mut AppView, path: std::path::PathBuf, ansi: bool) {
+    app.pending_pager_path = Some(path);
+    app.pending_pager_ansi = ansi;
+}
+
+pub fn with_minimal_live_state<R>(
+    app: &mut AppView,
+    f: impl FnOnce(&mut CursorState, Option<&mut AgentView>, &AppearanceConfig) -> R,
+) -> R {
+    let active_id = match &app.active_view {
+        ActiveView::Agent(id) => Some(*id),
+        _ => None,
+    };
+    let active_agent = active_id.and_then(|id| app.agents.get_mut(&id));
+    f(&mut app.cursor, active_agent, &app.appearance)
+}
+
+pub fn agent_state(agent: &AgentView) -> &AgentState {
+    &agent.session.state
+}
+
+pub fn agent_pending_prompt_count(agent: &AgentView) -> usize {
+    agent.session.pending_prompts.len()
+}
+
+pub fn agent_cwd(agent: &AgentView) -> &std::path::Path {
+    agent.session.cwd.as_path()
+}
+
+pub fn agent_current_model_name(agent: &AgentView) -> Option<String> {
+    agent.session.models.current_model_name()
+}
+
+pub fn agent_reasoning_effort(
+    agent: &AgentView,
+) -> Option<shell::sampling::types::ReasoningEffort> {
+    agent.session.models.reasoning_effort
+}
+
+pub fn agent_model_context_window(agent: &AgentView) -> Option<u64> {
+    agent.session.models.get_context_window()
+}
+
+pub fn agent_is_always_approve(agent: &AgentView) -> bool {
+    agent.session.is_always_approve()
+}
+
+pub fn agent_is_auto(agent: &AgentView) -> bool {
+    agent.session.is_auto()
+}
+
+pub fn agent_scrollback(agent: &AgentView) -> &ScrollbackState {
+    &agent.scrollback
+}
+
+pub fn agent_scrollback_mut(agent: &mut AgentView) -> &mut ScrollbackState {
+    &mut agent.scrollback
+}
+
+pub fn agent_prompt(agent: &AgentView) -> &PromptWidget {
+    &agent.prompt
+}
+
+pub fn agent_prompt_mut(agent: &mut AgentView) -> &mut PromptWidget {
+    &mut agent.prompt
+}
+
+pub fn agent_todo(agent: &AgentView) -> &crate::views::todo_pane::TodoPane {
+    &agent.todo
+}
+
+pub fn agent_todo_mut(agent: &mut AgentView) -> &mut crate::views::todo_pane::TodoPane {
+    &mut agent.todo
+}
+
+pub fn agent_active_modal(agent: &AgentView) -> Option<&ActiveModal> {
+    agent.active_modal.as_ref()
+}
+
+pub fn agent_active_modal_mut(agent: &mut AgentView) -> &mut Option<ActiveModal> {
+    &mut agent.active_modal
+}
+
+pub fn agent_permission_queue(
+    agent: &AgentView,
+) -> &std::collections::VecDeque<crate::views::permission_view::PermissionViewState> {
+    &agent.permission_queue
+}
+
+pub fn agent_prompt_input_mode(agent: &AgentView) -> crate::app::agent_view::PromptInputMode {
+    agent.prompt_input_mode
+}
+
+pub fn agent_multiline_mode(agent: &AgentView) -> bool {
+    agent.multiline_mode
+}
+
+pub fn set_agent_active_pane(agent: &mut AgentView, pane: crate::app::agent_view::AgentPane) {
+    agent.active_pane = pane;
+}
+
+pub fn agent_shared_queue_len(agent: &AgentView) -> usize {
+    agent.shared_queue.len()
+}
+
+pub fn agent_btw_state(agent: &AgentView) -> Option<&crate::views::btw_overlay::BtwOverlayState> {
+    agent.btw_state.as_ref()
+}
+
+pub fn agent_btw_selection_model_mut(
+    agent: &mut AgentView,
+) -> &mut crate::scrollback::text_selection::ResolvedSelectionModel {
+    &mut agent.last_btw_selection_model
+}
+
+pub fn set_agent_btw_area(agent: &mut AgentView, area: Rect) {
+    agent.last_btw_area = area;
+}
+
+pub fn clear_agent_btw_geometry(agent: &mut AgentView) {
+    agent.last_btw_selection_model = Default::default();
+    agent.last_btw_area = Rect::default();
+}
+
+pub fn agent_context_used(agent: &AgentView) -> Option<u64> {
+    agent.context_state.as_ref().map(|state| state.used)
+}
+
+pub fn agent_context_total(agent: &AgentView) -> Option<u64> {
+    agent
+        .context_state
+        .as_ref()
+        .and_then(|state| (state.total > 0).then_some(state.total))
+}
+
+pub fn agent_activity_started_at(agent: &AgentView) -> Option<std::time::Instant> {
+    agent.activity_started_at
+}
+
+pub fn agent_turn_elapsed_at(
+    agent: &AgentView,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    agent.turn_elapsed_at(now)
+}
+
+pub fn agent_is_bash_turn(agent: &AgentView) -> bool {
+    agent.bash_turn
+}
 
 /// Whether minimal can paint and expose input geometry for this panel size.
 pub fn minimal_btw_size_is_paintable(width: u16, height: u16) -> bool {
@@ -851,6 +1041,12 @@ pub fn set_permission_mode_for_test(
     mode: shell::util::config::PermissionMode,
 ) {
     session.set_permission_mode_for_test(mode);
+}
+
+/// Test-only setter for the session foreground state.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_agent_state_for_test(v: &mut AgentView, state: crate::app::agent::AgentState) {
+    v.session.state = state;
 }
 
 /// Test-only setter for the thread-local `show_thinking_blocks` appearance
