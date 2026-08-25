@@ -105,6 +105,20 @@ pub(crate) struct OneShotOccurrence {
     versions: ScheduledOccurrenceVersions,
 }
 
+impl OneShotOccurrence {
+    pub(super) fn occurrence_id(&self) -> &ScheduledOccurrenceId {
+        &self.occurrence_id
+    }
+
+    pub(super) fn task_id(&self) -> &str {
+        &self.task.id
+    }
+
+    pub(super) fn removal_version(&self) -> SchedulerVersion {
+        self.versions.removal()
+    }
+}
+
 impl<'de> Deserialize<'de> for OneShotOccurrence {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -319,68 +333,36 @@ pub(crate) struct SchedulerLoadReconciliation {
 }
 
 impl SchedulerLoadReconciliation {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn requires_resources_persistence(&self) -> bool {
         self.requires_resources_persistence
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn task_ids_to_remove(&self) -> &[String] {
         &self.task_ids_to_remove
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn blocked_task_ids(&self) -> &HashSet<String> {
         &self.blocked_task_ids
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn block_all_one_shots(&self) -> bool {
         self.block_all_one_shots
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn recovery_required(&self) -> bool {
         self.recovery_required
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn conflicts(&self) -> &[OneShotJournalConflict] {
         &self.conflicts
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn overflow_error(&self) -> Option<&OccurrenceJournalError> {
         self.overflow_error.as_ref()
     }
 }
 
 impl SchedulerState {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn prepare_one_shot_occurrence(
         &mut self,
         task_id: &str,
@@ -442,10 +424,6 @@ impl SchedulerState {
     }
 
     #[must_use = "the exact removal receipt must be durably cleared"]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
     pub(super) fn finish_one_shot_removal(
         &mut self,
         occurrence_id: &ScheduledOccurrenceId,
@@ -459,10 +437,37 @@ impl SchedulerState {
         Ok(self.occurrence_journal.entries.remove(index))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by durable one-shot actor layer")
-    )]
+    pub(super) fn rollback_one_shot_occurrence(
+        &mut self,
+        occurrence_id: &ScheduledOccurrenceId,
+        task_index: usize,
+    ) -> Result<(), OccurrenceJournalError> {
+        let occurrence = self.finish_one_shot_removal(occurrence_id)?;
+        self.tasks
+            .insert(task_index.min(self.tasks.len()), occurrence.task);
+        Ok(())
+    }
+
+    pub(super) fn restore_one_shot_receipt(
+        &mut self,
+        occurrence: OneShotOccurrence,
+    ) -> Result<(), OccurrenceJournalError> {
+        if self.occurrence_journal.entries.iter().any(|pending| {
+            pending.occurrence_id == occurrence.occurrence_id
+                || pending.task.id == occurrence.task.id
+                || pending.versions.contains(occurrence.versions.fire())
+                || pending.versions.contains(occurrence.versions.removal())
+        }) {
+            return Err(OccurrenceJournalError::RecoveryRequired);
+        }
+        self.occurrence_journal.entries.push(occurrence);
+        Ok(())
+    }
+
+    pub(super) fn pending_one_shot_occurrences(&self) -> Vec<OneShotOccurrence> {
+        self.occurrence_journal.entries.clone()
+    }
+
     pub(super) fn reconcile_one_shot_occurrences(&self) -> SchedulerLoadReconciliation {
         let occurrence_counts = count_by(self.occurrence_journal.entries.iter(), |entry| {
             entry.occurrence_id.clone()

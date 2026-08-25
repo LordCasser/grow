@@ -436,6 +436,8 @@ struct HookSessionState {
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
+    #[cfg(test)]
+    pub(crate) test_session_dir_guard: Option<tempfile::TempDir>,
     /// Canonical storage location of this Timeline entity. This is explicit
     /// because child entities are nested under their parent and cannot be
     /// reconstructed from `cwd + id`.
@@ -614,7 +616,7 @@ pub(crate) struct SessionActor {
     /// Durable long-lived Goal state. Idle continuation authority is runtime
     /// state and is deliberately not persisted in this value.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
-    /// `task_id`s of background tasks (and monitors) that originated during
+    /// Background tasks (and monitors) that originated during
     /// a Goal turn, including surviving tasks reparented from delegated
     /// children. Their late
     /// auto-wake completions are dropped by [`Self::maybe_drain_notifications`]
@@ -622,7 +624,7 @@ pub(crate) struct SessionActor {
     /// server that completes after the run ended (Blocked / paused / cleared)
     /// cannot wake the idle parent. Reset only when a new Goal starts; clearing
     /// the old Goal must not erase ownership of work that is still running.
-    pub(crate) goal_turn_task_ids: parking_lot::Mutex<std::collections::HashSet<String>>,
+    pub(crate) goal_turn_task_ids: parking_lot::Mutex<std::collections::HashMap<String, String>>,
     pub(crate) goal_command_rx: std::cell::RefCell<
         Option<
             tokio::sync::mpsc::UnboundedReceiver<

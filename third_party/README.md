@@ -66,7 +66,7 @@ unchanged. The audited dependency stack does not currently have such a member:
 |-------|---------------------------|--------------------------|
 | `mermaid-to-svg` | `8d3f789c2eb49335d7bf247a06bb649f59b6d4ed` (current upstream `main`) | Grow carries parser, CJK sizing, wrapping, sequence/XY chart and hermetic-rendering changes. |
 | `dagre_rust` | `mermaid-to-svg`'s copy at the same revision | Grow replaces an unsynchronized `static mut` id counter with `AtomicUsize`. |
-| `nono` | 0.53.0 | This is the newest release compatible with the workspace's Rust 1.92 toolchain; Grow also carries riscv64 and musl portability patches. |
+| `nono` | 0.53.0 | This is the newest release compatible with the workspace's Rust 1.93.1 toolchain; Grow also carries riscv64 and musl portability patches. |
 | `sqlite-vec` | 0.1.10-alpha.4 | The published crate omits four C files included by `sqlite-vec.c`; Grow adds the byte-identical files from the same tag. The repository root is not a Cargo package, so it cannot be consumed unchanged as a submodule. |
 
 `graphlib_rust =0.0.2` and `ordered_hashmap =0.0.3` are exact crates.io

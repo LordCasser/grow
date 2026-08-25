@@ -45,6 +45,15 @@ pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
         .events
         .emit(crate::session::events::Event::LoopStarted { loop_index: 0 });
 }
+/// Establish the Timeline and foreground halves of a live production turn.
+/// Notification-drain tests need both: a Timeline turn without its admission
+/// owner is deliberately treated as non-consumable.
+#[cfg(test)]
+pub(crate) async fn begin_test_active_causal_turn(actor: &SessionActor) {
+    begin_test_causal_turn(actor).await;
+    actor.state.lock().await.foreground =
+        ForegroundState::RegularTurn(running_task_stub("test-active-turn"));
+}
 
 /// Seed a test Surface and its branch-local prompt coordinates through the
 /// same Timeline mechanisms used by production. Snapshots are read models and
@@ -175,7 +184,7 @@ async fn test_agent_from_config(
     let builder = tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
     // Every actor owns an independent persistence path. A shared
-    // A shared resources-state path lets parallel tests rename/remove one another's
+    // resources-state path lets parallel tests rename/remove one another's
     // durable snapshot and turns a real persistence acknowledgement into a
     // nondeterministic ENOENT.
     let state_root =
@@ -336,8 +345,15 @@ pub(crate) async fn create_test_actor_ex(
     chat_state_handle.record_provider_context_anchor(total_tokens);
     let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
-    let session_dir = cwd.as_path().join(".grow-test-session");
-    std::fs::create_dir_all(&session_dir).expect("create test session directory");
+    let test_session_dir_guard = tempfile::Builder::new()
+        .prefix(".grow-test-session-")
+        .tempdir_in(cwd.as_path())
+        .expect("create isolated test session directory");
+    let session_dir = test_session_dir_guard.path().to_owned();
+    let session_dir_name = session_dir
+        .file_name()
+        .expect("test session directory has a basename")
+        .to_owned();
     // macOS exposes `/tmp` as a symlink to `/private/tmp`; production
     // capabilities intentionally reject symlink authorities, so pin the test
     // fixture through the resolved root while preserving `/tmp` as the model
@@ -348,11 +364,12 @@ pub(crate) async fn create_test_actor_ex(
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),
         },
+        test_session_dir_guard: Some(test_session_dir_guard),
         session_dir,
         session_directory: std::sync::Arc::new(
             crate::session::storage::ContainedDirectory::open(
                 &session_root,
-                std::path::Path::new(".grow-test-session"),
+                std::path::Path::new(&session_dir_name),
                 "test session directory",
                 false,
             )
@@ -470,7 +487,7 @@ pub(crate) async fn create_test_actor_ex(
         goal_tracker: Arc::new(parking_lot::Mutex::new(
             crate::session::goal_tracker::GoalTracker::new(),
         )),
-        goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
+        goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
         workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
@@ -615,7 +632,9 @@ pub(crate) async fn build_actor() -> (
 ) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let (persistence_tx, mut persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
     let actor =
         std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
     (actor, gateway_rx)

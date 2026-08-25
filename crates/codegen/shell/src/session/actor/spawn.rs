@@ -1121,6 +1121,7 @@ pub(crate) async fn spawn_session_actor(
     let goal_tracker = Arc::new(parking_lot::Mutex::new(
         restored_goal_tracker.unwrap_or_default(),
     ));
+    let mut persisted_behavior_rejected = false;
     let persisted_behavior = persisted_behavior.and_then(|snapshot| {
         let valid = snapshot.runtime_fields_match_selection()
             && match &snapshot.state {
@@ -1143,6 +1144,7 @@ pub(crate) async fn spawn_session_actor(
         if valid {
             Some(snapshot)
         } else {
+            persisted_behavior_rejected = true;
             ::diagnostics::unified_log::info(
                 "shell.behavior.restore_rejected",
                 Some(session_info.id.0.as_ref()),
@@ -1561,8 +1563,10 @@ pub(crate) async fn spawn_session_actor(
         tool_types::BehaviorId::Goal => false,
         tool_types::BehaviorId::Clarify | tool_types::BehaviorId::Normal => false,
     };
-    let (mut behavior_normalized, reset_unavailable_behavior) =
-        restored_behavior_actions(goal_behavior_normalized, selected_behavior_unavailable);
+    let (mut behavior_normalized, reset_unavailable_behavior) = restored_behavior_actions(
+        goal_behavior_normalized || persisted_behavior_rejected,
+        selected_behavior_unavailable,
+    );
     if reset_unavailable_behavior {
         behavior
             .lock()
@@ -2115,28 +2119,14 @@ pub(crate) async fn spawn_session_actor(
                             }
                             let final_state = match operation {
                                 WorkflowRunControl::Pause => {
-                                    if !workflow_admission.pause(&state.run_id) {
-                                        return Err((
-                                            "workflow_pause_failed",
-                                            format!("Run '{}' is not active", state.name),
-                                        ));
-                                    }
-                                    workflow_admission
-                                        .tracker()
-                                        .lock()
-                                        .get(&state.run_id)
+                                    Some(workflow_admission.pause(&state.run_id).await.map_err(
+                                        |error| ("workflow_pause_failed", error),
+                                    )?)
                                 }
                                 WorkflowRunControl::Stop => {
-                                    if !workflow_admission.cancel(&state.run_id).await {
-                                        return Err((
-                                            "workflow_stop_failed",
-                                            format!("Run '{}' is already terminal", state.name),
-                                        ));
-                                    }
-                                    workflow_admission
-                                        .tracker()
-                                        .lock()
-                                        .get(&state.run_id)
+                                    Some(workflow_admission.cancel(&state.run_id).await.map_err(
+                                        |error| ("workflow_stop_failed", error),
+                                    )?)
                                 }
                                 WorkflowRunControl::Resume => {
                                     let script = workflow_admission.script_copy_for(&state.run_id).ok_or((
@@ -2224,6 +2214,8 @@ pub(crate) async fn spawn_session_actor(
     let doom_loop_recovery = effective_config.resolve_doom_loop_recovery();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
+        #[cfg(test)]
+        test_session_dir_guard: None,
         session_dir: session_dir.clone(),
         session_directory: session_directory.clone(),
         notification_artifact_gate: TokioMutex::new(()),
@@ -2372,7 +2364,7 @@ pub(crate) async fn spawn_session_actor(
         // Fail closed until the live tool bridge proves all Goal tools exist.
         goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
-        goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
+        goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
         workflow_manager: workflow_manager.clone(),
@@ -2471,22 +2463,23 @@ pub(crate) async fn spawn_session_actor(
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_runtime_availability().await;
-    session.finish_restored_deep_research_if_terminal().await;
-    if goal_projection_needs_clear {
-        if goal_state_needs_clear && let Err(error) = session.delete_goal_state_durably().await {
-            tracing::warn!(
-                session_id = %session.session_info.id.0,
-                %error,
-                "failed to delete rejected Goal state during restore"
-            );
-        }
-        // Replay happens before actor spawn, so explicitly retire any stale
-        // GoalUpdated projection the client may just have reconstructed.
-        session
-            .send_grow_notification(crate::session::goal_notification::build_goal_cleared())
-            .await;
-    }
-    if behavior_normalized || goal_was_restored {
+    session
+        .finish_restored_deep_research_if_terminal()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "restored Deep Research terminal state was not reconciled: {error}"
+            )))
+        })?;
+    session
+        .reconcile_restored_public_workflow_notifications()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "restored Workflow terminal notification was not reconciled: {error}"
+            )))
+        })?;
+    if behavior_normalized || goal_was_restored || goal_state_needs_clear {
         let behavior = session.behavior.lock().snapshot();
         let goal = session.goal_tracker.lock().snapshot().cloned();
         let persisted = if behavior_normalized {
@@ -2498,9 +2491,18 @@ pub(crate) async fn spawn_session_actor(
                 .persist_control_snapshot_durably(behavior, goal)
                 .await
         };
-        if let Err(error) = persisted {
-            tracing::warn!(%error, "failed to persist reconciled session control state");
-        }
+        persisted.map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "reconciled session control state was not durably recorded: {error}"
+            )))
+        })?;
+    }
+    if goal_projection_needs_clear {
+        // Replay happens before actor spawn, so explicitly retire any stale
+        // GoalUpdated projection only after its authoritative Control repair.
+        session
+            .send_grow_notification(crate::session::goal_notification::build_goal_cleared())
+            .await;
     }
     if goal_was_restored {
         let tokens_used = session.goal_tokens_used();

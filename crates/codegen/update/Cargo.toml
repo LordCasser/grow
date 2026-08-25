@@ -14,6 +14,7 @@ reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
@@ -41,7 +42,7 @@ ctor = { workspace = true }
 diagnostics = { workspace = true }
 
 [features]
-# Package-manager-managed build (e.g. the Harmonybrew formula): disables
+# Package-manager-managed downstream build: disables
 # self-update entirely — get_installer() returns None and the startup
 # version-range block is skipped. Upgrades are the package manager's job.
 distro-pm = []

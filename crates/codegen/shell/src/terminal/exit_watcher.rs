@@ -196,7 +196,19 @@ async fn complete_and_release(
         })
     };
     if let Some(snapshot) = snapshot {
-        notification_handle.send_task_complete(snapshot);
+        loop {
+            match notification_handle
+                .send_task_complete_acknowledged(snapshot.clone())
+                .wait()
+                .await
+            {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(%task_id, %error, "terminal completion was not durably acknowledged; retrying");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
     }
     release_terminal(gateway, session_id, terminal_id).await;
 }

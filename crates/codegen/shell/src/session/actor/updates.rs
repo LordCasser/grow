@@ -1165,13 +1165,17 @@ mod grow_event_id_stamping_tests {
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 *actor.agent.borrow_mut() =
                     super::super::tests::support::test_agent_with_plan_tools().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Plan);
                 actor.state.lock().await.foreground = ForegroundState::RegularTurn(
                     super::super::tests::support::running_task_stub("active-turn"),
                 );
                 let surface_before = actor.chat_state_handle.get_conversation().await;
 
                 let outcome = actor
-                    .request_behavior_change(acp::SessionModeId::new("plan"))
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 let crate::session::behavior::BehaviorChangeOutcome::Rejected { message } = outcome
                 else {
@@ -1180,8 +1184,9 @@ mod grow_event_id_stamping_tests {
                 assert!(message.contains("Stop the active foreground work"));
                 assert_eq!(
                     actor.behavior.lock().behavior(),
-                    tool_types::BehaviorId::Normal
+                    tool_types::BehaviorId::Plan
                 );
+                assert!(actor.behavior.lock().pending_switch().is_none());
                 assert_eq!(
                     serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
                     serde_json::to_value(surface_before).unwrap(),

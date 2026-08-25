@@ -505,27 +505,10 @@ pub(crate) fn present_child_completion(
         && !completion_data.completion_receipt_admitted
         && (disposition.should_surface || steering_wait_may_own_completion)
     {
-        // A Goal wait can be displaced after the coordinator successfully
-        // sends its result but before the wait future observes it. The actor's
-        // completion tracker resolves that race against this single durable
-        // receipt; ordinary background completions enter the same rail via
-        // `should_surface`.
-        let summary =
-            tools::implementations::grow_build::task::completion_summary(&request, &result);
-        let body = tools::reminders::task_completion::format_subagent_completion(
-            &summary,
-            Some(&completion_data.task_output_tool_name),
+        tracing::error!(
+            subagent_id = %request.id,
+            "subagent terminal reached presentation without its durable completion receipt"
         );
-        if let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() {
-            let _ = cmd_tx.send(SessionCommand::ReceiveNotification {
-                source: chat_state::NotificationSource::SubagentCompleted {
-                    subagent_id: request.id.clone(),
-                },
-                source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
-                body,
-                respond_to: None,
-            });
-        }
     }
     if completion_data.spawned_notification_emitted || request.run_in_background {
         emit_subagent_notification(
@@ -547,20 +530,90 @@ pub(crate) fn present_child_completion(
     }
 }
 
-/// Commit the Goal child receipt before returning its terminal result to the
-/// coordinator. The coordinator may immediately wake a blocking waiter; this
-/// producer barrier ensures the tool-result path can always acknowledge an
-/// already-durable receipt instead of racing a later actor command.
-pub(super) async fn admit_goal_completion_receipt(
+/// The single terminal receipt producer used by Goal, ordinary background,
+/// loop, and recovery paths. A send only transfers ownership to the actor
+/// mailbox; the producer retires after the Timeline write is acknowledged.
+/// Retrying the immutable subagent id/version is idempotent in the Timeline
+/// fold. The durable parent terminal remains the recovery source when the
+/// actor cannot admit a receipt within this bounded handoff.
+async fn admit_notification_receipt(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    subagent_id: &str,
+    owner: chat_state::NotificationOwner,
+    body: String,
+) -> bool {
+    const MAX_ATTEMPTS: usize = 3;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let (respond_to, admitted) = oneshot::channel();
+        if cmd_tx
+            .send(SessionCommand::ReceiveNotification {
+                source: chat_state::NotificationSource::SubagentCompleted {
+                    subagent_id: subagent_id.to_owned(),
+                    owner: owner.clone(),
+                },
+                source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                body: body.clone(),
+                respond_to: Some(respond_to),
+            })
+            .is_err()
+        {
+            tracing::warn!(%subagent_id, "subagent completion delivery stopped because the parent mailbox closed");
+            return false;
+        }
+        let error = match admitted.await {
+            Ok(Ok(_)) => return true,
+            Ok(Err(error)) => error,
+            Err(error) => format!("acknowledgement dropped: {error}"),
+        };
+        if attempt == MAX_ATTEMPTS {
+            tracing::error!(
+                %subagent_id,
+                %error,
+                attempts = MAX_ATTEMPTS,
+                "subagent completion receipt admission exhausted; durable terminal remains recoverable"
+            );
+            return false;
+        }
+        tracing::warn!(
+            %subagent_id,
+            %error,
+            attempt,
+            max_attempts = MAX_ATTEMPTS,
+            "subagent completion receipt admission failed; retrying"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    unreachable!("the bounded receipt admission loop always returns")
+}
+
+async fn admit_subagent_completion_receipt(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    subagent_id: &str,
+    owner: &SubagentOwner,
+    body: String,
+) -> bool {
+    let owner = match owner {
+        SubagentOwner::Goal { goal_id } => chat_state::NotificationOwner::Goal {
+            goal_id: goal_id.clone(),
+        },
+        SubagentOwner::Task | SubagentOwner::Workflow { .. } => {
+            chat_state::NotificationOwner::Session
+        }
+    };
+    admit_notification_receipt(cmd_tx, subagent_id, owner, body).await
+}
+
+/// Commit a child receipt before returning its terminal result to the
+/// coordinator. Foreground/wait tool results consume this already-durable
+/// receipt; background and displaced waits leave it for notification delivery.
+/// This single barrier applies equally to Goal, ordinary, and loop children.
+pub(super) async fn admit_completion_receipt_before_result(
     request: &SubagentRequest,
     result: &SubagentResult,
     completion_data: &mut ShellCompletionData,
 ) {
-    if request.owner.goal_id().is_none()
-        || !request.surface_completion
-        || result.cancelled
-        || !completion_data.terminal_committed
-    {
+    if !request.surface_completion || result.cancelled || !completion_data.terminal_committed {
         return;
     }
     let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() else {
@@ -571,33 +624,8 @@ pub(super) async fn admit_goal_completion_receipt(
         &summary,
         Some(&completion_data.task_output_tool_name),
     );
-    let (respond_to, admitted) = oneshot::channel();
-    if cmd_tx
-        .send(SessionCommand::ReceiveNotification {
-            source: chat_state::NotificationSource::SubagentCompleted {
-                subagent_id: request.id.clone(),
-            },
-            source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
-            body,
-            respond_to: Some(respond_to),
-        })
-        .is_err()
-    {
-        return;
-    }
-    match admitted.await {
-        Ok(Ok(_)) => completion_data.completion_receipt_admitted = true,
-        Ok(Err(error)) => tracing::error!(
-            subagent_id = %request.id,
-            %error,
-            "Goal completion receipt admission failed"
-        ),
-        Err(error) => tracing::error!(
-            subagent_id = %request.id,
-            %error,
-            "Goal completion receipt admission was dropped"
-        ),
-    }
+    completion_data.completion_receipt_admitted =
+        admit_subagent_completion_receipt(cmd_tx, &request.id, &request.owner, body).await;
 }
 /// Resolve the sampling config and model ID for a subagent.
 ///
@@ -2614,6 +2642,102 @@ async fn ensure_recovered_child_result_with_opened(
     ))
 }
 
+fn subagent_notification_owner(
+    spawn: &chat_state::SubagentSpawnEvent,
+) -> chat_state::NotificationOwner {
+    spawn
+        .goal_id
+        .as_ref()
+        .map(|goal_id| chat_state::NotificationOwner::Goal {
+            goal_id: goal_id.clone(),
+        })
+        .unwrap_or(chat_state::NotificationOwner::Session)
+}
+
+fn completion_receipt_body_from_durable_facts(
+    parent_timeline_id: &str,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) -> Result<String, String> {
+    let update = finish_from_durable_facts(parent_timeline_id, spawn_seq, spawn, terminal)?;
+    let SessionUpdate::SubagentFinished { output, .. } = update else {
+        unreachable!("durable subagent facts must produce a finished update");
+    };
+    let summary = tools::implementations::grow_build::task::types::SubagentCompletionSummary {
+        subagent_id: terminal.subagent_id.clone(),
+        subagent_type: spawn.subagent_type.clone(),
+        description: spawn.description.clone(),
+        success: terminal.outcome == chat_state::SubagentOutcome::Completed,
+        duration_ms: terminal.duration_ms,
+        tool_calls: terminal.tool_calls,
+        turns: terminal.turns,
+        output: std::sync::Arc::from(output.unwrap_or_default()),
+    };
+    Ok(
+        tools::reminders::task_completion::format_subagent_completion(
+            &summary,
+            Some(tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL),
+        ),
+    )
+}
+
+/// Repair the crash window between the durable parent terminal and the
+/// durable completion receipt. This deliberately goes through the same
+/// SessionCommand admission used by live child completion; the Timeline's
+/// source/version fold makes the repair idempotent.
+async fn repair_subagent_completion_receipt(
+    parent_session_id: &str,
+    parent_chat_state: &chat_state::ChatStateHandle,
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) {
+    if !spawn.surface_completion || terminal.outcome == chat_state::SubagentOutcome::Cancelled {
+        return;
+    }
+    let Some(cmd_tx) = parent_cmd_tx else {
+        return;
+    };
+    let owner = subagent_notification_owner(spawn);
+    let source = chat_state::NotificationSource::SubagentCompleted {
+        subagent_id: terminal.subagent_id.clone(),
+        owner: owner.clone(),
+    };
+    let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+    match parent_chat_state
+        .received_notification_id(source, source_version)
+        .await
+    {
+        Some(Some(_)) => return,
+        None => return,
+        Some(None) => {}
+    }
+    let body = match completion_receipt_body_from_durable_facts(
+        parent_session_id,
+        spawn_seq,
+        spawn,
+        terminal,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::error!(
+                subagent_id = %terminal.subagent_id,
+                %error,
+                "refusing to repair an unverified subagent completion receipt"
+            );
+            return;
+        }
+    };
+    if !admit_notification_receipt(cmd_tx, &terminal.subagent_id, owner, body).await {
+        tracing::warn!(
+            subagent_id = %terminal.subagent_id,
+            "parent mailbox closed before subagent completion receipt repair"
+        );
+    }
+}
+
 /// Reconcile parent spawn facts that have no terminal. The backend is merely
 /// an observation source: recovery first commits a child result (when the child
 /// entity exists), then closes the parent spawn, and only then emits UI state.
@@ -2686,6 +2810,25 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 }
             }
         }
+    }
+
+    // A process may have committed the parent terminal and died before the
+    // live completion producer received its receipt acknowledgement. Replay
+    // the durable model reminder independently of the UI projection ledger.
+    for (subagent_id, terminal) in &terminals {
+        let Some((spawn_seq, _, spawn)) = spawns.get(subagent_id) else {
+            tracing::error!(%subagent_id, "parent terminal has no spawn fact");
+            continue;
+        };
+        repair_subagent_completion_receipt(
+            parent_session_id,
+            parent_chat_state,
+            parent_cmd_tx,
+            *spawn_seq,
+            spawn,
+            terminal,
+        )
+        .await;
     }
 
     for (subagent_id, (spawn_seq, spawned_at_ms, spawn)) in spawns {
@@ -2770,13 +2913,25 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             ))
             .await
         {
-            Ok(_) if emit_replay_projections => emit_subagent_notification(
-                gateway,
-                parent_session_id,
-                finish_from_terminal(&terminal, output),
-                parent_cmd_tx,
-            ),
-            Ok(_) => {}
+            Ok(_) => {
+                repair_subagent_completion_receipt(
+                    parent_session_id,
+                    parent_chat_state,
+                    parent_cmd_tx,
+                    spawn_seq,
+                    &spawn,
+                    &terminal,
+                )
+                .await;
+                if emit_replay_projections {
+                    emit_subagent_notification(
+                        gateway,
+                        parent_session_id,
+                        finish_from_terminal(&terminal, output),
+                        parent_cmd_tx,
+                    );
+                }
+            }
             Err(error) => tracing::error!(
                 %subagent_id,
                 %error,

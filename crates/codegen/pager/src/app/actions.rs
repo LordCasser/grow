@@ -2124,6 +2124,13 @@ pub enum TaskResult {
         message: String,
         remaining_ms: u64,
     },
+    /// Completion of a standalone Behavior RPC. Deferred first prompts stay
+    /// queued until the authoritative mode update arrives, so a transport
+    /// failure must be visible instead of silently leaving that queue parked.
+    SessionModeSet {
+        session_id: acp::SessionId,
+        result: Result<(), String>,
+    },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer —
     /// the prompt never reached the shell's queue. Carries the payload so
     /// dispatch can requeue it locally (the producer already consumed the
@@ -2428,6 +2435,19 @@ pub enum TaskResult {
     SlashCommandExecuted {
         agent_id: AgentId,
         error: Option<String>,
+    },
+    /// The independent Trajectory server either reached its ready boundary or
+    /// failed before it could accept browser requests.
+    TrajectoryLaunched {
+        agent_id: AgentId,
+        result: Result<String, String>,
+    },
+    /// A Trajectory server that had already advertised readiness later emitted
+    /// a terminal diagnostic or exited. Kept separate from launch completion so
+    /// the long-lived stderr drain remains supervised without delaying the URL.
+    TrajectoryRuntimeEnded {
+        agent_id: AgentId,
+        message: String,
     },
     /// Available commands refreshed from the shell.
     AvailableCommandsRefreshed {

@@ -384,6 +384,38 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        TaskResult::SessionModeSet { session_id, result } => {
+            if let Err(error) = result {
+                tracing::warn!(%error, session_id = %session_id.0, "failed to set Behavior");
+                if let Some(agent) =
+                    find_agent_by_session_id(&mut app.agents, session_id.0.as_ref())
+                {
+                    // The transport request is no longer in flight. Keep the
+                    // deferred first-prompt admission token, but clear the
+                    // optimistic target so selecting it again actually emits a
+                    // retry instead of being mistaken for an idempotent click.
+                    agent.session.behavior_mode_pending = None;
+                    agent.session.plan_mode_pending = None;
+                    let fallback = agent.session.behavior_mode.display_label();
+                    let retry = agent
+                        .session
+                        .deferred_session_mode
+                        .map(|mode| mode.display_label())
+                        .unwrap_or("the requested");
+                    let message = format!(
+                        "Behavior change failed: {}. The prompt is still queued; retry {retry} or choose {fallback} to send it now.",
+                        scrub_error_for_toast(&error)
+                    );
+                    agent.show_toast(&message);
+                } else {
+                    app.show_toast(&format!(
+                        "Behavior change failed; the prompt remains queued: {}",
+                        scrub_error_for_toast(&error)
+                    ));
+                }
+            }
+            vec![]
+        }
         TaskResult::PromptStatusResolved {
             agent_id,
             prompt_id,
@@ -1189,6 +1221,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && let Some(agent) = app.agents.get_mut(&agent_id)
             {
                 agent.show_toast(&error);
+            }
+            vec![]
+        }
+        TaskResult::TrajectoryLaunched { agent_id, result } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                match result {
+                    Ok(url) => agent.open_url_or_show(&url),
+                    Err(error) => agent.show_toast(&error),
+                }
+            }
+            vec![]
+        }
+        TaskResult::TrajectoryRuntimeEnded { agent_id, message } => {
+            tracing::warn!(agent = ?agent_id, %message, "Trajectory debugger stopped after launch");
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.show_toast(&message);
+            } else {
+                app.show_toast(&message);
             }
             vec![]
         }

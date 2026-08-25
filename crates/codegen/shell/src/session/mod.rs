@@ -147,7 +147,7 @@ impl PromptOrigin {
     pub fn completion_id(&self) -> Option<&str> {
         match self {
             Self::TaskCompleted { task_id } => Some(task_id),
-            Self::SubagentCompleted { subagent_id } => Some(subagent_id),
+            Self::SubagentCompleted { subagent_id, .. } => Some(subagent_id),
             Self::WorkflowCompleted { completion_id } => Some(completion_id),
             Self::User
             | Self::NotificationDrain

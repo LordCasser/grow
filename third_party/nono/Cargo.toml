@@ -2,7 +2,7 @@
 # Upstream: https://github.com/always-further/nono v0.53.0 (Apache-2.0),
 # vendored because release targets need local portability patches.
 # Version ceiling: v0.54.0 through the current v0.71.0 require Rust 1.95;
-# this workspace is pinned to Rust 1.92.0, so v0.53.0 is the newest compatible
+# this workspace is pinned to Rust 1.93.1, so v0.53.0 is the newest compatible
 # release. Do not lower a newer release's declared rust-version to force it in.
 # Local patches:
 #   src/sandbox/linux.rs: add SYS_OPENAT/SYS_OPENAT2 constants for

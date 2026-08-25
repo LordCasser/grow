@@ -1,6 +1,6 @@
 //! Read-only Trajectory projection built exclusively from Timeline events.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -91,26 +91,35 @@ impl Timeline {
 ///
 /// Surface replacements update the visibility of earlier message rows through
 /// their stable `SurfaceId`s, so appending one event never requires replaying
-/// the full ledger.
+/// the full ledger. Rows retained by the projector are deliberately payload-free;
+/// canonical details are hydrated from the Timeline only when a snapshot is
+/// requested.
 #[derive(Debug, Clone, Default)]
 pub struct TrajectoryProjector {
     rows: Vec<TrajectoryRow>,
+    dirty_rows: BTreeSet<usize>,
     request_scopes: BTreeMap<String, (String, u32)>,
     tool_scopes: BTreeMap<String, (String, u32)>,
     surface_rows: BTreeMap<SurfaceId, usize>,
     current_items_per_row: Vec<usize>,
     control_snapshot: Option<serde_json::Value>,
-    active_turn: bool,
+    active_turn: Option<String>,
+    active_step: Option<u32>,
     pending_control_row: Option<(SurfaceId, usize)>,
 }
 
 impl TrajectoryProjector {
     pub fn accept(&mut self, event: &TimelineEvent) {
-        if matches!(
-            &event.kind,
-            TimelineEventKind::Turn(TurnEvent::Started { .. })
-        ) {
-            self.active_turn = true;
+        match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Started { id, .. }) => {
+                self.active_turn = Some(id.0.to_string());
+                self.active_step = None;
+            }
+            TimelineEventKind::Step(StepEvent::Started { id }) => {
+                self.active_turn = Some(id.turn.0.to_string());
+                self.active_step = Some(id.index);
+            }
+            _ => {}
         }
         match &event.kind {
             TimelineEventKind::Request(RequestEvent::Started { id, turn, step, .. }) => {
@@ -140,6 +149,7 @@ impl TrajectoryProjector {
                     *remaining = remaining.saturating_sub(1);
                     if *remaining == 0 {
                         self.rows[row_index].visibility = SurfaceVisibility::Shadowed;
+                        self.dirty_rows.insert(row_index);
                     }
                 }
             }
@@ -176,11 +186,10 @@ impl TrajectoryProjector {
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => 0,
-            TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(_),
                 ..
-            }) if !self.active_turn => {
+            }) if self.active_turn.is_none() => {
                 self.surface_rows.insert(
                     SurfaceId {
                         event: event.seq,
@@ -208,12 +217,19 @@ impl TrajectoryProjector {
                 describe_control_transition(self.control_snapshot.as_ref(), &control.snapshot);
             self.control_snapshot = Some(control.snapshot.clone());
         }
+        if projected.turn_id.is_none() {
+            projected.turn_id.clone_from(&self.active_turn);
+        }
+        if projected.step_index.is_none() {
+            projected.step_index = self.active_step;
+        }
         self.rows.push(projected);
+        self.dirty_rows.insert(row_index);
         match &event.kind {
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(_),
                 ..
-            }) if self.active_turn => {
+            }) if self.active_turn.is_some() => {
                 self.pending_control_row = Some((
                     SurfaceId {
                         event: event.seq,
@@ -223,13 +239,16 @@ impl TrajectoryProjector {
                 ));
             }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                self.active_turn = false;
                 if let Some((id, pending_row)) = self.pending_control_row.take() {
                     self.surface_rows.insert(id, pending_row);
                     self.current_items_per_row[pending_row] = 1;
                     self.rows[pending_row].visibility = SurfaceVisibility::Current;
+                    self.dirty_rows.insert(pending_row);
                 }
+                self.active_turn = None;
+                self.active_step = None;
             }
+            TimelineEventKind::Step(StepEvent::Ended { .. }) => self.active_step = None,
             _ => {}
         }
     }
@@ -238,7 +257,22 @@ impl TrajectoryProjector {
         &self.rows
     }
 
+    /// Projector rows changed since the last materialized Trajectory refresh.
+    /// New rows and the small set of earlier rows affected by Surface/control
+    /// transitions share this one delta channel.
+    pub fn dirty_row_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.dirty_rows.iter().copied()
+    }
+
+    pub fn clear_dirty_rows(&mut self) {
+        self.dirty_rows.clear();
+    }
+
     pub fn snapshot(&self, timeline: &Timeline) -> TrajectorySnapshot {
+        let mut rows = self.rows.clone();
+        for (row, event) in rows.iter_mut().zip(timeline.events()) {
+            row.details = serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null);
+        }
         TrajectorySnapshot {
             schema_version: TRAJECTORY_SCHEMA_VERSION,
             event_count: timeline.events().len(),
@@ -251,7 +285,7 @@ impl TrajectoryProjector {
                 .open_workflow_run_ids()
                 .map(str::to_owned)
                 .collect(),
-            rows: self.rows.clone(),
+            rows,
         }
     }
 }
@@ -283,7 +317,7 @@ fn row(
         correlation_id,
         duration_ms,
         summary,
-        details: serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null),
+        details: serde_json::Value::Null,
     }
 }
 
@@ -814,19 +848,6 @@ fn describe(
             None,
             format!("{} notification(s)", notification_ids.len()),
         ),
-        TimelineEventKind::Notification(NotificationEvent::Dismissed {
-            notification_ids,
-            reason,
-        }) => tuple(
-            "notification",
-            "dismissed",
-            "resolved",
-            None,
-            None,
-            notification_ids.first().cloned(),
-            None,
-            format!("{} notification(s) · {reason:?}", notification_ids.len()),
-        ),
     }
 }
 
@@ -1326,6 +1347,55 @@ mod tests {
         assert!(snapshot.rows[0].parent_entry_id.is_none());
         assert_eq!(snapshot.rows[0].visibility, SurfaceVisibility::Shadowed);
         assert_eq!(snapshot.rows[1].visibility, SurfaceVisibility::Current);
+    }
+
+    #[test]
+    fn incremental_projector_retains_only_summary_rows() {
+        let timeline = Timeline::from_seed(vec![ConversationItem::user("payload")]).unwrap();
+        let mut projector = TrajectoryProjector::default();
+        projector.accept(&timeline.events()[0]);
+
+        assert!(projector.rows()[0].details.is_null());
+        assert!(!projector.snapshot(&timeline).rows[0].details.is_null());
+    }
+
+    #[test]
+    fn projector_stamps_every_in_turn_row_with_stable_scope() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("task")]).unwrap();
+        let turn = crate::TurnId(42);
+        let step = crate::StepId { turn, index: 3 };
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 1,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: crate::MessageCause::Assistant,
+                items: vec![ConversationItem::assistant("answer")],
+                surface: SurfaceOp::Append,
+            }))
+            .unwrap();
+
+        let row = timeline.trajectory().rows.pop().unwrap();
+        assert_eq!(row.kind, "assistant.message");
+        assert_eq!(row.turn_id.as_deref(), Some("42"));
+        assert_eq!(row.step_index, Some(3));
     }
 
     #[test]

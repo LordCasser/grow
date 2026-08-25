@@ -353,6 +353,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: Some("session".into()),
+            goal_id: None,
             description: None,
             is_backgrounded: true,
         }

@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn durable_terminal_finalizes_the_exact_viewer_turn_once() {
     let mut app = make_app_with_agent("sess-view");
-    app.agents.get_mut(&AgentId(0)).unwrap().session.attached_as_viewer = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .attached_as_viewer = true;
     let _ = handle(
         make_agent_chunk_message_with_prompt("sess-view", "chunk", "turn-1", false),
         &mut app,

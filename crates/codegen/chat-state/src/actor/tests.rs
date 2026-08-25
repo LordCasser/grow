@@ -5342,12 +5342,21 @@ async fn durable_notification_receive_is_idempotent_and_rejects_payload_conflict
     let source = crate::NotificationSource::TaskCompleted {
         task_id: "task-1".into(),
         task_kind: crate::NotificationTaskKind::Task,
+        owner: crate::NotificationOwner::Goal {
+            goal_id: "goal-1".into(),
+        },
     };
     let version = crate::NotificationSourceVersion::Ordinal { value: 1 };
     let payload = crate::NotificationPayloadRef {
         blake3: blake3::hash(b"done").to_hex().to_string(),
         bytes: 4,
     };
+    assert_eq!(
+        h.handle
+            .received_notification_id(source.clone(), version.clone())
+            .await,
+        Some(None)
+    );
     let first = h
         .handle
         .receive_notification_durably(
@@ -5358,12 +5367,42 @@ async fn durable_notification_receive_is_idempotent_and_rejects_payload_conflict
         )
         .await
         .expect("first receipt commits");
+    let first_id = match &first.kind {
+        crate::TimelineEventKind::Notification(crate::NotificationEvent::Received {
+            id, ..
+        }) => id.clone(),
+        _ => panic!("expected notification receipt"),
+    };
+    assert_eq!(
+        h.handle
+            .received_notification_id(source.clone(), version.clone())
+            .await,
+        Some(Some(first_id))
+    );
     let duplicate = h
         .handle
         .receive_notification_durably("session-1".into(), source.clone(), version.clone(), payload)
         .await
         .expect("exact retry is idempotent");
     assert_eq!(duplicate.seq, first.seq);
+    let ownerless_retry = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            crate::NotificationSource::TaskCompleted {
+                task_id: "task-1".into(),
+                task_kind: crate::NotificationTaskKind::Task,
+                owner: crate::NotificationOwner::Session,
+            },
+            version.clone(),
+            crate::NotificationPayloadRef {
+                blake3: blake3::hash(b"done").to_hex().to_string(),
+                bytes: 4,
+            },
+        )
+        .await
+        .expect("retry after owner memory loss resolves to the original receipt");
+    assert_eq!(ownerless_retry.seq, first.seq);
     assert_eq!(
         h.handle.pending_notifications().await.unwrap().len(),
         1,

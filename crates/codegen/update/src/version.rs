@@ -209,26 +209,35 @@ pub fn installed_on_disk_version() -> Option<String> {
 
 /// Extract the `<version>` portion of a versioned binary file name.
 ///
-/// Handles the GitHub Release layout (`grow-0.1.150-macos-aarch64`, including
+/// Handles the managed release layout (`grow-0.1.150-macos-aarch64`, including
 /// pre-releases: `grow-0.1.150-alpha.1-linux-x86_64` → `0.1.150-alpha.1`):
 /// everything between the `{bin_prefix}-` prefix
-/// and the first platform-OS component is the version, validated as semver
+/// and a recognized complete platform suffix is the version, validated as semver
 /// so unknown layouts (`grow-latest`, `grow-pager-*` when `bin_prefix` is
 /// `grow`) return `None` instead of garbage.
 ///
 /// Shared by the disk-version probe above and `cleanup_old_downloads` in
 /// `auto_update` — keep it the single place that understands this naming.
 pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
-    const PLATFORM_OS: &[&str] = &["macos", "linux", "windows"];
+    const PLATFORM_SUFFIXES: &[&str] = &[
+        "-macos-aarch64",
+        "-macos-x86_64",
+        "-linux-x86_64",
+        "-linux-aarch64",
+        "-linux-riscv64",
+        "-linux-x86_64-musl",
+        "-linux-aarch64-musl",
+        "-windows-x86_64",
+        "-windows-aarch64",
+        "-ohos-aarch64",
+    ];
     let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
-    let parts: Vec<&str> = suffix.split('-').collect();
-    let platform_start = parts
+    let suffix = suffix.strip_suffix(".exe").unwrap_or(suffix);
+    let ver_str = PLATFORM_SUFFIXES
         .iter()
-        .position(|p| PLATFORM_OS.contains(p))
-        .unwrap_or(parts.len());
-    let ver_str = parts[..platform_start].join("-");
+        .find_map(|platform| suffix.strip_suffix(platform))?;
     semver::Version::parse(&ver_str).ok()?;
-    Some(ver_str)
+    Some(ver_str.to_owned())
 }
 
 /// Fetch the stable channel pointer for caching alongside the version.
@@ -336,17 +345,22 @@ mod tests {
             ("grow-0.1.220-linux-x86_64", Some("0.1.220")),
             ("grow-0.1.220-linux-aarch64-musl", Some("0.1.220")),
             ("grow-0.1.220-windows-x86_64.exe", Some("0.1.220")),
+            ("grow-2.0.0-ohos-aarch64", Some("2.0.0")),
+            ("grow-2.0.1-alpha.2-ohos-aarch64", Some("2.0.1-alpha.2")),
+            ("grow-2.0.1-linux.1-ohos-aarch64", Some("2.0.1-linux.1")),
+            ("grow-2.0.1-ohos.1-linux-x86_64", Some("2.0.1-ohos.1")),
             // Pre-releases must round-trip whole — truncating to "0.1.220"
             // would make an alpha install masquerade as the release and
             // mask alpha → stable updates.
             ("grow-0.1.220-alpha.4-linux-x86_64", Some("0.1.220-alpha.4")),
-            ("grow-0.1.220-alpha.4", Some("0.1.220-alpha.4")), // GitHub Release layout
-            ("grow-pager-0.1.5-macos-aarch64", None),          // "grow-pager" is not a version
-            ("grow-garbage-macos-aarch64", None),              // unparseable version
-            ("grow-0.2.46", Some("0.2.46")),                   // no platform suffix
-            ("other-0.2.46-macos-aarch64", None),              // wrong prefix
-            ("grow-latest", None),                             // symlink alias, not a version
-            ("grow", None),                                    // bare name
+            ("grow-0.1.220-alpha.4", None), // missing managed platform suffix
+            ("grow-0.1.220-linux-x64", None), // unknown platform suffix
+            ("grow-pager-0.1.5-macos-aarch64", None), // "grow-pager" is not a version
+            ("grow-garbage-macos-aarch64", None), // unparseable version
+            ("grow-0.2.46", None),          // no platform suffix
+            ("other-0.2.46-macos-aarch64", None), // wrong prefix
+            ("grow-latest", None),          // symlink alias, not a version
+            ("grow", None),                 // bare name
             ("", None),
         ];
         for (name, expected) in cases {

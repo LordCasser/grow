@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `1.1.9`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `2.0.0`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -29,21 +29,18 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
 
-### 1.1.9 重点
+### 2.0.0 重点
 
-- Deep Research 私有 run 恢复独立运行状态显示通道：transcript 实时进度块、tasks pane 的
-  `Deep Research` 状态行与统一 activity projection；私有 run 不进 `/workflows`、
-  `/workflow-run` 或任何公共管理入口。
-- Deep Research 的 workflow subagents（planner / researcher / verifier / synthesizer）以
-  `capability_mode: "all"` 起跑，获得完整 native 工具与父会话全部 MCP server；统一
-  PermissionManager 安全底线（managed deny/ask、protected edit、Bash request floor）照常生效。
-- 后台 subagent 的 `ask_user_question` 提问在主界面立即可见（父视图 turn-status ◆ 与
-  dashboard NeedsInput），单入口作答——进入该 subagent 全屏视图回答。
-- `grow update` 安装落点改为用户实际运行的 grow 二进制（优先 `PATH`），按落点类型选择替换
-  机制，同名非 grow 程序不会被覆盖。
-- 多成员 subagent 权限块折叠行按结果聚合为动词优先摘要。
+- Session runtime 重构为 Timeline 单一事实源；Control、Surface、Sideband、回忆与压缩共享稳定因果坐标，
+  旧 Timeline schema 和请求拷贝修剪机制已移除，不保留兼容投影。
+- Goal 收敛为用户可编辑、暂停、重启和清理的长期目标。每次 continuation 先审计目标是否完成，
+  再使用普通 task/todo 拆分当前小步；旧 planner/verifier board 体系已删除。
+- Behavior、Agent Role 和 Permission 继续是三条独立轴，切换以原子 Timeline Control 事实持久化。
+- Trajectory 面向长会话重建了 turn/step 分层、因果导航、过滤和按需展开；流式 phase 噪声不再持久化。
+- Shell actor 与 Pager 的 session/effect/terminal 所有权边界重新分层，保留原有任务、loop、monitor 和 Workflow
+  的运行效果，并修复了已保存 Workflow 在 async runtime 中执行同步预检的 panic。
 
-版本级变更见 [1.1.9 release notes](crates/codegen/shell/changelogs/1.1.9.md)。
+版本级变更见 [2.0.0 release notes](crates/codegen/shell/changelogs/2.0.0.md)。
 
 ## 安装
 
@@ -54,24 +51,37 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-1.1.9-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-1.1.9-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-1.1.9-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-1.1.9-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-1.1.9-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-1.1.9-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-1.1.9-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-1.1.9-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-1.1.9-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-1.1.9-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-2.0.0-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-2.0.0-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-2.0.0-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-2.0.0-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-2.0.0-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-2.0.0-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-2.0.0-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-2.0.0-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-2.0.0-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-2.0.0-ohos-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=1.1.9
+GROW_VERSION=2.0.0
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
+curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/SHA256SUMS"
+GROW_CHECKSUM_LINE="$(
+  awk -v asset="$GROW_ASSET" 'length($1) == 64 && NF == 2 && $2 == asset { print }' SHA256SUMS
+)"
+if [ "$(printf '%s\n' "$GROW_CHECKSUM_LINE" | awk 'NF { count++ } END { print count + 0 }')" -ne 1 ]; then
+  echo "SHA256SUMS must contain exactly one entry for $GROW_ASSET" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  printf '%s\n' "$GROW_CHECKSUM_LINE" | sha256sum --check -
+else
+  printf '%s\n' "$GROW_CHECKSUM_LINE" | shasum -a 256 --check -
+fi
 tar -xzf "$GROW_ASSET"
 mkdir -p "$HOME/.local/bin"
 install -m 0755 grow "$HOME/.local/bin/grow"
@@ -81,12 +91,20 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "1.1.9"
+$GrowVersion = "2.0.0"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
   "https://github.com/LordCasser/grow/releases/download/v$GrowVersion/$GrowAsset" `
   -OutFile $GrowAsset
+Invoke-WebRequest `
+  "https://github.com/LordCasser/grow/releases/download/v$GrowVersion/SHA256SUMS" `
+  -OutFile SHA256SUMS
+$ChecksumMatches = @(Select-String -Path SHA256SUMS -Pattern "^[0-9a-f]{64}  $([regex]::Escape($GrowAsset))$")
+if ($ChecksumMatches.Count -ne 1) { throw "SHA256SUMS must contain exactly one entry for $GrowAsset" }
+$ExpectedHash = (($ChecksumMatches[0].Line -split '\s+')[0])
+$ActualHash = (Get-FileHash -Algorithm SHA256 $GrowAsset).Hash.ToLowerInvariant()
+if (-not $ExpectedHash -or $ActualHash -ne $ExpectedHash) { throw "SHA-256 verification failed" }
 tar -xzf $GrowAsset
 New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
 Move-Item -Force grow.exe "$HOME\bin\grow.exe"
@@ -98,6 +116,13 @@ Grow 当前不发布 npm、Homebrew 或其他包管理器版本。若所选安�
 
 `grow update` 会更新 `PATH` 中（或当前进程的）grow 二进制本身，而不是固定的受管目录；若
 该位置存在同名但非 grow 的程序，更新会中止且不替换它。
+
+`SHA256SUMS` 与归档来自同一 GitHub Release，用于检测传输损坏、截断或单独归档被替换，不是
+独立的发布者签名。每个正式 `.tar.gz` 还由官方 GitHub Actions workflow 通过 OIDC 生成 GitHub
+Artifact Attestation；下载后可以用
+`gh attestation verify "$GROW_ASSET" --repo LordCasser/grow --signer-workflow LordCasser/grow/.github/workflows/build-one.yml`
+验证 publisher provenance。内置 updater 当前强制校验 checksum，其发布者信任边界仍是 GitHub HTTPS、
+`LordCasser/grow` 仓库权限与 Release 服务。
 
 ### 从源码安装
 
@@ -343,7 +368,7 @@ cargo build --locked --release -p cli --bin grow
 
 ```sh
 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
-  cargo build --locked --profile release-dist -p cli --bin grow
+  cargo build --locked --profile release-dist --features release-dist -p cli --bin grow
 
 ./target/release-dist/grow --version
 ```
@@ -367,7 +392,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 1.1.9 发布准备
+## 2.0.0 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -385,27 +410,32 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=1.1.9 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
-  cargo build --locked --profile release-dist -p cli --bin grow
+GROW_VERSION=2.0.0 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+  cargo build --locked --profile release-dist --features release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
-release commit 完成且工作区干净后，可以用 `scripts/act-release.sh validate` 在本地校验 tag/version
-契约；脚本会在缺少 `v1.1.9` 时只创建本地 tag，不会推送。
+release commit 完成且工作区干净后，先创建本地 annotated tag，再用
+`scripts/validate-release.sh v2.0.0` 静态校验 tag/version、不可变 commit、平台矩阵、资产集合、
+attestation 和 updater 契约。该门禁不模拟 GitHub Actions，也不进行跨平台编译；正式 workflow
+是唯一的发布执行机制。
 
 正式发布流程：
 
-1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.9`，不要提前创建公开 Release；然后从默认分支手动运行
+1. 提交版本、lockfile、release notes 和文档，创建本地 annotated tag `v2.0.0`，运行
+   `scripts/validate-release.sh v2.0.0`。
+2. 推送已验证的 tag，不要提前创建公开 Release；然后从默认分支手动运行
    [release workflow](.github/workflows/release.yml)，传入这个已有 tag。workflow checkout 精确 tag，
    但让 Cargo 缓存保留在默认分支作用域以供后续版本复用。
 3. workflow 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
    固定版本 `rg`。OHOS 产物按 build → strip → smoke → self-sign 顺序处理，并对 stripped
    状态、`.codesign` 段和最终资产大小执行两阶段门禁。
-4. workflow 先创建隐藏 draft Release，验证 10 个 updater 约定资产均已上传后再一次性公开。
+4. workflow 先创建隐藏 draft Release，验证全部平台资产和 `SHA256SUMS` 均已上传后再一次性公开。
 
-Release 页面只包含 10 个最终 `.tar.gz`，不会公开构建中间物或单独 checksum 资产。稳定版与带
-SemVer 预发布段的版本分别进入 stable / prerelease 更新通道。
+Release 页面发布 10 个最终 `.tar.gz` 与一份 `SHA256SUMS`。内置 updater 在解压和执行前强制
+校验目标资产的 SHA-256；校验文件缺失、重复或不匹配都会中止安装。稳定版与带 SemVer 预发布段的
+版本分别进入 stable / prerelease 更新通道。每个平台归档同时生成 GitHub Artifact Attestation，该 provenance 与
+同源 checksum 的完整性检查是两个不同边界。
 
 ## 文档与源码边界
 

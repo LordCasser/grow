@@ -171,12 +171,9 @@ impl AgentView {
 
     /// First-wins prompt transition shared by both terminal rails. State alone
     /// is insufficient: an old terminal may arrive after a new turn has started,
-    /// so an exact prompt identity is required whenever the signal carries one
-    /// (the durable rail always does). A pid-less `PromptResponse` (older shell
-    /// without promptId meta) is attributed to the running turn, matching the
-    /// legacy behavior — but only while a turn is actually running: after any
-    /// finalize (state Idle) it is ignored, so a stale response can never push a
-    /// second marker or re-run the teardown.
+    /// so every terminal signal must carry the exact prompt identity. The shell
+    /// owns that protocol invariant; a pid-less response is never attributed by
+    /// Pager state heuristics.
     ///
     /// The winning signal runs the ENTIRE turn-end teardown (permission queue
     /// drain, plan approval dismissal, cancel-panel cleanup, bash wrap-up,
@@ -194,18 +191,8 @@ impl AgentView {
             (Some(current), Some(pid)) if current != pid => return TerminalOutcome::ignored(),
             // A pid-bearing signal with no running turn can never match.
             (None, Some(_)) => return TerminalOutcome::ignored(),
-            // Pid-less signal with no tracked turn: attribute to a genuinely
-            // running turn (legacy old-shell behavior); after any finalize
-            // (state Idle, current cleared) it is ignored.
-            (None, None) => {
-                if !meta.accepts_submitting
-                    || !(self.session.state.is_turn_running() || self.session.state.is_cancelling())
-                {
-                    return TerminalOutcome::ignored();
-                }
-            }
-            // Pid-less signal with a tracked turn: attributed to it below.
-            (Some(_), None) => {}
+            // Prompt identity is mandatory on every terminal rail.
+            (_, None) => return TerminalOutcome::ignored(),
             // Exact identity match: this signal is the running turn's terminal.
             (Some(_), Some(_)) => {}
         }
@@ -268,9 +255,7 @@ impl AgentView {
         self.prompt.prompt_suggestion.clear();
 
         // First-wins winner: a late PromptResponse for this pid merges metadata
-        // only. Cleared when the next turn starts (`start_turn_boundary`). A
-        // pid-less finalize (legacy shell, no tracked pid) records nothing —
-        // there is no id a late response could be matched against.
+        // only. Cleared when the next turn starts (`start_turn_boundary`).
         if let Some(pid) = &ending_prompt_id {
             self.session.finalized_prompt = Some(pid.clone());
         }

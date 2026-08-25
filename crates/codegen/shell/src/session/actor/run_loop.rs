@@ -355,14 +355,14 @@ pub(super) async fn run_session(
                         .filter(|task| task.prompt_id == prompt_id)
                         .map(|task| task.origin.clone())
                 };
-                let (_turn_succeeded, suppress_goal_continuation, infra_pause_message) =
+                let (_turn_succeeded, suppress_goal_continuation, goal_pause_message) =
                     SessionActor::post_turn_goal_degradation_plan(
                         &result,
                         completed_origin.as_ref(),
                     );
                 session.handle_completion(prompt_id, result).await;
-                if let Some(message) = infra_pause_message {
-                    session.apply_infra_pause_after_turn_err(message).await;
+                if let Some(message) = goal_pause_message {
+                    session.apply_goal_pause_after_turn_err(message).await;
                 }
                 if !maybe_start_pending_manual_compaction(
                     session.clone(),
@@ -520,23 +520,19 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
-                    SessionCommand::RestorePlanApproval => {
-                        // Resume re-park: spawn the approval
-                        // round-trip so the command loop is not blocked on
-                        // the (open-ended) user decision.
-                        //
-                        // Detaching the handle is safe: the task is spawned on
-                        // this session's `LocalSet`, so it is dropped (its
-                        // `request_plan_approval` future cancelled, clearing
-                        // `awaiting` via the guard) when the session ends — it
-                        // cannot outlive the actor. `resume_plan_approval`
-                        // also self-guards against a concurrent/duplicate
-                        // re-park via the `pending_interactions` registry.
-                        let s = session.clone();
-                        let completion_tx = completion_tx.clone();
-                        tokio::task::spawn_local(async move {
-                            s.resume_plan_approval(completion_tx).await;
-                        });
+                    SessionCommand::RestorePlanApproval { respond_to } => {
+                        // Reconcile missing/corrupt artifacts synchronously so
+                        // load-session cannot acknowledge a wedged Plan. Only
+                        // the open-ended user approval round-trip is detached.
+                        let result = session.reconcile_restored_plan_approval().await;
+                        if matches!(&result, Ok(true)) {
+                            let s = session.clone();
+                            let completion_tx = completion_tx.clone();
+                            tokio::task::spawn_local(async move {
+                                s.resume_plan_approval(completion_tx).await;
+                            });
+                        }
+                        let _ = respond_to.send(result.map(|_| ()));
                     }
                     SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, respond_to, persist_ack } => {
                         if let Err(error) = session.ensure_prefix_ready().await {
@@ -690,7 +686,7 @@ pub(super) async fn run_session(
                             chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
                                 Some(task_id.clone())
                             }
-                            chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                            chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
                                 Some(subagent_id.clone())
                             }
                             chat_state::NotificationSource::MonitorProgress { .. }
@@ -727,8 +723,7 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::BehaviorChange { session_mode, responds_to } => {
                         let outcome = session.request_behavior_change(session_mode).await;
-                        let _ = outcome;
-                        SessionActor::maybe_start_running_task(
+                        super::idle_arbitration::arbitrate_idle_wake(
                             session.clone(),
                             completion_tx.clone(),
                         )
@@ -904,8 +899,8 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
-                    SessionCommand::RecordGoalTurnTaskIds { task_ids } => {
-                        session.record_reparented_goal_turn_task_ids(task_ids);
+                    SessionCommand::RecordGoalOwnedTaskIds { goal_id, task_ids } => {
+                        session.record_goal_owned_task_ids(&goal_id, task_ids);
                     }
                     SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
                         session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;
@@ -1705,35 +1700,45 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(Ok(()));
                         tracing::info!(expected_turn_id, "Queued same-turn steering input");
                     }
-                    SessionCommand::WorkflowCompleted { state, outcome } => {
+                    SessionCommand::WorkflowCompleted {
+                        state,
+                        outcome,
+                        respond_to,
+                    } => {
                         let run_id = state.run_id.clone();
-                        if session.behavior.lock().deep_research_run_id() == Some(&run_id) {
-                            session.finish_deep_research_run(&run_id, outcome).await;
-                            continue;
-                        }
-                        session.send_available_commands_update().await;
-                        let revision = state.revision;
-                        let prompt_text = session
-                            .workflow_completion_notification(&state)
-                            .await;
-                        if let Err(error) = session
-                            .receive_notification(
-                                chat_state::NotificationSource::WorkflowCompleted {
-                                    run_id: run_id.clone(),
-                                },
-                                chat_state::NotificationSourceVersion::Ordinal { value: revision },
-                                prompt_text.to_owned(),
+                        let admission = if state.private {
+                            let admission = session
+                                .finish_deep_research_run(&state, outcome)
+                                .await;
+                            // `finish_deep_research_run` admits the terminal
+                            // report before repairing Behavior. Surface that
+                            // durable receipt even if the later Control write
+                            // failed, otherwise the user sees only a log line
+                            // and the report can remain parked indefinitely.
+                            SessionActor::maybe_drain_notifications(
+                                session.clone(),
+                                completion_tx.clone(),
                             )
-                            .await
-                        {
-                            tracing::error!(run_id, revision, %error, "workflow notification admission failed");
-                            continue;
+                            .await;
+                            admission
+                        } else {
+                            let admission = session
+                                .admit_public_workflow_completion(&state)
+                                .await;
+                            if admission.is_ok() {
+                                session.send_available_commands_update().await;
+                                SessionActor::maybe_drain_notifications(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
+                            admission
+                        };
+                        if let Err(error) = &admission {
+                            tracing::error!(run_id, %error, "workflow terminal reconciliation failed");
                         }
-                        SessionActor::maybe_drain_notifications(
-                            session.clone(),
-                            completion_tx.clone(),
-                        )
-                        .await;
+                        let _ = respond_to.send(admission);
                     }
                     SessionCommand::TakeTurnMessages { respond_to } => {
                         let result = session.chat_state_handle.take_turn_messages().await;

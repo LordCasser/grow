@@ -139,9 +139,9 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     Ok(())
 }
 
-/// Mark the persisted session as having a parked plan approval: write `plan.md`
-/// and append a Control event to `timeline.jsonl` for every session directory
-/// under the sandbox home.
+/// Mark the persisted session as having a parked plan approval: write the
+/// immutable content-addressed Plan artifact and append a Control event to
+/// `timeline.jsonl` for every session directory under the sandbox home.
 fn seed_parked_approval(home: &Path) -> Result<usize> {
     let sessions_root = home.join(".grow").join("sessions");
     if !sessions_root.is_dir() {
@@ -162,7 +162,11 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
                 continue;
             }
             let dir = sess_ent.path();
-            std::fs::write(dir.join("plan.md"), PLAN_BODY).context("write plan.md")?;
+            let plan_hash = blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string();
+            let artifact_dir = dir.join("artifacts").join("plan");
+            std::fs::create_dir_all(&artifact_dir).context("create Plan artifact directory")?;
+            std::fs::write(artifact_dir.join(format!("{plan_hash}.md")), PLAN_BODY)
+                .context("write immutable Plan artifact")?;
             append_awaiting_plan_control(&dir.join("timeline.jsonl"))?;
             seeded += 1;
         }
@@ -224,23 +228,12 @@ fn append_awaiting_plan_control(path: &Path) -> Result<()> {
         }
     }
     let revision = latest_revision.saturating_add(1).max(1);
-    let mut snapshot = latest_control.unwrap_or_else(|| {
-        serde_json::json!({
-            "architecture_version": 1,
-            "control_revision": revision,
-            "behavior": {
-                "state": { "Plan": "AwaitingApproval" },
-                "approval_pending": true,
-                "reminder_count": 0,
-                "plan_artifact_revision": 1,
-                "plan_artifact_hash": blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string(),
-            },
-        })
-    });
+    let mut snapshot = latest_control.context(
+        "new sessions must durably seed their current Control snapshot before the harness mutates it",
+    )?;
     let obj = snapshot
         .as_object_mut()
         .context("Timeline control snapshot must be a JSON object")?;
-    obj.insert("architecture_version".into(), serde_json::json!(1));
     obj.insert("control_revision".into(), serde_json::json!(revision));
     let behavior = obj
         .entry("behavior")

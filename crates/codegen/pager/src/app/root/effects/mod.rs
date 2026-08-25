@@ -20,6 +20,7 @@ use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
 use tokio::task::JoinSet;
+use tokio::io::AsyncBufReadExt as _;
 use acp_transport::{AcpAgentTx, acp_send};
 use actions::{ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome, TaskResult};
 #[cfg(test)]
@@ -67,29 +68,133 @@ pub(crate) fn execute(
             session_id,
         } => {
             let cwd = cwd.to_path_buf();
+            let (runtime_tx, runtime_rx) = tokio::sync::oneshot::channel::<String>();
+            let runtime_agent_id = agent_id;
             tasks.spawn(async move {
-                let error = match std::env::current_exe() {
-                    Ok(executable) => {
-                        let mut command = tokio::process::Command::new(executable);
-                        command
-                            .arg("trajectory")
-                            .arg(session_id.0.as_ref())
-                            .current_dir(cwd)
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null());
-                        tty_utils::detach_command(&mut command);
-                        command.spawn().err().map(|error| {
-                            sanitize_user_error(&format!(
-                                "couldn't open Trajectory debugger: {error}"
-                            ))
-                        })
+                match runtime_rx.await {
+                    Ok(message) => TaskResult::TrajectoryRuntimeEnded {
+                        agent_id: runtime_agent_id,
+                        message: sanitize_user_error(&message),
+                    },
+                    Err(_) => TaskResult::CancelComplete,
+                }
+            });
+            tasks.spawn(async move {
+                let result = async {
+                    let executable = std::env::current_exe().map_err(|error| {
+                        format!("couldn't locate the Grow executable: {error}")
+                    })?;
+                    let mut command = tokio::process::Command::new(executable);
+                    command
+                        .arg("trajectory")
+                        .arg(session_id.0.as_ref())
+                        .arg("--no-open")
+                        .current_dir(cwd)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped());
+                    command.kill_on_drop(true);
+                    tty_utils::detach_command(&mut command);
+                    let mut child = command.spawn().map_err(|error| {
+                        format!("couldn't start Trajectory debugger: {error}")
+                    })?;
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .ok_or_else(|| "Trajectory debugger has no readiness channel".to_string())?;
+                    let mut lines = tokio::io::BufReader::new(stderr).lines();
+                    let (readiness_tx, readiness_rx) = tokio::sync::oneshot::channel();
+                    let supervisor = tokio::spawn(async move {
+                        let mut readiness_tx = Some(readiness_tx);
+                        let mut runtime_tx = Some(runtime_tx);
+                        let mut diagnostics = Vec::new();
+                        loop {
+                            match lines.next_line().await {
+                                Ok(Some(line)) => {
+                                    if let Some(url) = trajectory_ready_url(&line)
+                                        && let Some(tx) = readiness_tx.take()
+                                    {
+                                        diagnostics.clear();
+                                        let _ = tx.send(Ok(url.to_owned()));
+                                    } else {
+                                        if readiness_tx.is_none() {
+                                            tracing::warn!(diagnostic = %line, "Trajectory runtime diagnostic");
+                                        }
+                                        if diagnostics.len() < 8 {
+                                            diagnostics.push(line);
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    let status = child.wait().await.map_err(|error| {
+                                        format!("couldn't inspect Trajectory process: {error}")
+                                    });
+                                    if let Some(tx) = readiness_tx.take() {
+                                        let detail = if diagnostics.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(": {}", diagnostics.join(" | "))
+                                        };
+                                        let message = match status {
+                                            Ok(status) => format!(
+                                                "Trajectory debugger exited before it was ready ({status}){detail}"
+                                            ),
+                                            Err(error) => error,
+                                        };
+                                        let _ = tx.send(Err(message));
+                                    } else if let Some(tx) = runtime_tx.take() {
+                                        let detail = if diagnostics.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(": {}", diagnostics.join(" | "))
+                                        };
+                                        let message = match status {
+                                            Ok(status) => format!(
+                                                "Trajectory debugger stopped ({status}){detail}"
+                                            ),
+                                            Err(error) => error,
+                                        };
+                                        let _ = tx.send(message);
+                                    }
+                                    break;
+                                }
+                                Err(error) => {
+                                    if let Some(tx) = readiness_tx.take() {
+                                        let _ = tx.send(Err(format!(
+                                            "couldn't read Trajectory startup output: {error}"
+                                        )));
+                                    } else if let Some(tx) = runtime_tx.take() {
+                                        let _ = tx.send(format!(
+                                            "Trajectory debugger output failed after launch: {error}"
+                                        ));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Ok::<(), String>(())
+                    });
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        readiness_rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) => {
+                            let _ = supervisor.await;
+                            Err("Trajectory debugger readiness channel closed unexpectedly".into())
+                        }
+                        Err(_) => {
+                            supervisor.abort();
+                            let _ = supervisor.await;
+                            Err("Trajectory debugger did not become ready within 10 seconds".into())
+                        }
                     }
-                    Err(error) => Some(sanitize_user_error(&format!(
-                        "couldn't locate the Grow executable: {error}"
-                    ))),
-                };
-                TaskResult::SlashCommandExecuted { agent_id, error }
+                }
+                .await
+                .map_err(|error| sanitize_user_error(&error));
+                TaskResult::TrajectoryLaunched { agent_id, result }
             });
         }
         Effect::CreateSession {
@@ -1103,11 +1208,12 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let req = acp::SetSessionModeRequest::new(session_id, mode_id);
-                    if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!("Failed to set session mode: {e}");
-                    }
-                    TaskResult::CancelComplete
+                    let req = acp::SetSessionModeRequest::new(session_id.clone(), mode_id);
+                    let result = acp_send(req, &tx)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                    TaskResult::SessionModeSet { session_id, result }
                 });
         }
         Effect::SetModeThenPrompt {
@@ -3924,6 +4030,10 @@ fn prompt_request_meta(
         map.insert("screenMode".into(), serde_json::Value::String(mode.into()));
     }
     serde_json::Value::Object(map)
+}
+fn trajectory_ready_url(line: &str) -> Option<&str> {
+    let (_, url) = line.strip_prefix("Trajectory for ")?.rsplit_once(": ")?;
+    url.starts_with("http://").then_some(url)
 }
 /// Build the one current `grow/steer` shape. Text-only steering is represented
 /// by a text content block, never a second top-level text channel.

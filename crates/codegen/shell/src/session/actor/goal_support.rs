@@ -201,13 +201,15 @@ impl SessionActor {
     /// by a committed compaction. The Control snapshot remains the fact source;
     /// this appends a new typed projection rather than reviving an older item.
     pub(super) async fn repair_missing_control_contexts_durably(&self) -> std::io::Result<()> {
-        let Some(materialized) = self
+        let materialized = self
             .chat_state_handle
             .materialize_timeline(self.session_id_string())
             .await
-        else {
-            return Ok(());
-        };
+            .ok_or_else(|| {
+                std::io::Error::other(
+                    "Timeline materialization is unavailable during Control context reconciliation",
+                )
+            })?;
         let current = materialized
             .surface_ids
             .into_iter()
@@ -256,11 +258,6 @@ impl SessionActor {
             .map_err(std::io::Error::other)
     }
 
-    pub(super) async fn delete_goal_state_durably(&self) -> std::io::Result<()> {
-        let behavior = self.behavior.lock().snapshot();
-        self.persist_control_snapshot_durably(behavior, None).await
-    }
-
     pub(super) async fn commit_goal_mutation_or_restore(
         &self,
         previous: crate::session::goal_tracker::GoalState,
@@ -299,19 +296,17 @@ impl SessionActor {
                 == Some(crate::session::goal_tracker::GoalStatus::Active)
     }
 
-    pub(super) fn record_goal_turn_task_ids(&self, ids: impl IntoIterator<Item = String>) {
-        if self.goal_loop_active() {
-            self.goal_turn_task_ids.lock().extend(ids);
-        }
-    }
-
-    pub(super) fn record_reparented_goal_turn_task_ids(
+    /// Bind task ids to the immutable Goal owner captured when their producing
+    /// tool batch was admitted. Delayed results must never re-sample whichever
+    /// Goal happens to be active when they arrive.
+    pub(super) fn record_goal_owned_task_ids(
         &self,
+        goal_id: &str,
         ids: impl IntoIterator<Item = String>,
     ) {
-        if self.goal_runtime_available() {
-            self.goal_turn_task_ids.lock().extend(ids);
-        }
+        self.goal_turn_task_ids
+            .lock()
+            .extend(ids.into_iter().map(|task_id| (task_id, goal_id.to_owned())));
     }
 
     fn set_goal_runtime_availability_from_tools(&self, tool_names: &[String]) -> bool {
@@ -393,5 +388,34 @@ impl SessionActor {
         self.tool_context
             .goal_loop_active_gate
             .store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::actor::tests::support::build_actor;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_reconciliation_fails_when_timeline_cannot_be_materialized() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway_rx) = build_actor().await;
+                std::sync::Arc::get_mut(&mut actor)
+                    .expect("test fixture must have unique actor ownership")
+                    .chat_state_handle = chat_state::ChatStateHandle::noop();
+
+                let error = actor
+                    .repair_missing_control_contexts_durably()
+                    .await
+                    .expect_err("missing Timeline materialization must fail closed");
+
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Timeline materialization is unavailable")
+                );
+            })
+            .await;
     }
 }

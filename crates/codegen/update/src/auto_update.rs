@@ -612,7 +612,7 @@ async fn verify_target_replaceable(target: &InstallTarget) -> Result<()> {
 pub async fn get_installer() -> Option<&'static str> {
     #[cfg(feature = "distro-pm")]
     {
-        // Package-manager-managed build (e.g. the Harmonybrew formula): the
+        // Package-manager-managed downstream build: the
         // package manager owns upgrades. Returning None short-circuits every
         // updater entry point (run_update_if_available, check_update_background,
         // check_update_status, ensure_latest_on_disk, run_update) through their
@@ -1047,7 +1047,11 @@ pub(crate) fn detect_platform() -> Result<&'static str> {
     )) {
         return Ok("linux-x86_64");
     }
-    if cfg!(all(target_os = "linux", target_arch = "riscv64")) {
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "riscv64"
+    )) {
         return Ok("linux-riscv64");
     }
     if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
@@ -1106,7 +1110,7 @@ fn unique_temp_sibling(base: &std::path::Path, ext: &str) -> std::path::PathBuf 
     base.with_file_name(name)
 }
 
-/// Set `+x` on the temp file before renaming onto `dest`, so a concurrent
+/// Set `+x` on the temp file before publishing it at `dest`, so a concurrent
 /// same-version installer never execs `dest` while it is still 0644.
 async fn publish_downloaded_artifact(tmp: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
@@ -1114,12 +1118,48 @@ async fn publish_downloaded_artifact(tmp: &std::path::Path, dest: &std::path::Pa
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o755)).await?;
     }
-    tokio::fs::rename(tmp, dest).await?;
-    Ok(())
+    match tokio::fs::rename(tmp, dest).await {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(rename_error) => {
+            // Windows rename cannot replace an existing versioned binary.
+            // Keep the atomic rename fast path for a first publication, then
+            // reuse the updater's rollback-aware executable replacement for
+            // pinned/forced same-version installs and concurrent publishers.
+            let replacement = windows_replace_exe(tmp, dest).await.with_context(|| {
+                format!(
+                    "failed to publish {} after atomic rename failed: {rename_error}",
+                    dest.display()
+                )
+            });
+            let cleanup = tokio::fs::remove_file(tmp).await;
+            match replacement {
+                Ok(()) => {
+                    if let Err(error) = cleanup
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(
+                            "published {} but failed to remove temp file {}: {error}",
+                            dest.display(),
+                            tmp.display(),
+                        );
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(windows))]
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Files smaller than this are not worth fragmenting across parallel chunks.
 const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 16 * 1024 * 1024;
+/// Compressed official release assets must remain well below the executable
+/// extraction ceiling. Enforce the same hard bound while bytes are in flight
+/// so a missing or dishonest Content-Length cannot exhaust local disk.
+const RELEASE_ARCHIVE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Pick chunk count from file size: 1 chunk per 16 MiB, capped at 8.
 fn parallel_chunk_count(size: u64) -> u64 {
@@ -1135,6 +1175,7 @@ async fn try_parallel_download(
     url: &str,
     dest: &std::path::Path,
     with_progress: bool,
+    max_bytes: Option<u64>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(DOWNLOAD_REQUEST_TIMEOUT)
@@ -1147,6 +1188,9 @@ async fn try_parallel_download(
     let size = head
         .content_length()
         .ok_or_else(|| anyhow::anyhow!("response missing Content-Length"))?;
+    if max_bytes.is_some_and(|limit| size == 0 || size > limit) {
+        anyhow::bail!("download size {size} is outside the allowed range");
+    }
     if size < PARALLEL_DOWNLOAD_MIN_BYTES {
         anyhow::bail!("file too small for parallel download ({} bytes)", size);
     }
@@ -1177,13 +1221,18 @@ async fn try_parallel_download(
     // Pre-allocate so each task can seek+write to its own range concurrently.
     // One blocking-pool hop instead of two per tokio::fs call.
     let tmp_for_alloc = tmp.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+    let allocation = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let f = std::fs::File::create(&tmp_for_alloc)?;
         f.set_len(size)?;
         Ok(())
     })
     .await
-    .map_err(|e| anyhow::anyhow!("blocking pre-allocate task panicked: {e}"))??;
+    .map_err(|error| anyhow::anyhow!("blocking pre-allocate task panicked: {error}"))
+    .and_then(|result| result.map_err(Into::into));
+    if let Err(error) = allocation {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(error);
+    }
 
     let tasks = (0..n_chunks).map(|i| {
         let start = i * chunk_size;
@@ -1201,10 +1250,13 @@ async fn try_parallel_download(
     }
 
     match result {
-        Ok(_) => {
-            publish_downloaded_artifact(&tmp, dest).await?;
-            Ok(())
-        }
+        Ok(_) => match publish_downloaded_artifact(&tmp, dest).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                Err(error)
+            }
+        },
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(e)
@@ -1240,10 +1292,16 @@ async fn download_range(
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        if buf.len().saturating_add(chunk.len()) > (end - start + 1) as usize {
+            anyhow::bail!("range response exceeded the requested byte count");
+        }
         if let Some(pb) = progress {
             pb.inc(chunk.len() as u64);
         }
         buf.extend_from_slice(&chunk);
+    }
+    if buf.len() != (end - start + 1) as usize {
+        anyhow::bail!("range response was shorter than the requested byte count");
     }
     let dest = dest.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -1267,7 +1325,7 @@ async fn download_range(
 pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result<()> {
     // Try parallel byte-range first. Falls through to single-connection on any
     // failure (HEAD missing Content-Length, ranges rejected, partial-fetch error).
-    match try_parallel_download(url, dest, true).await {
+    match try_parallel_download(url, dest, true, Some(RELEASE_ARCHIVE_MAX_BYTES)).await {
         Ok(()) => return Ok(()),
         Err(e) => {
             tracing::debug!("parallel download failed, falling back to single connection: {e}")
@@ -1284,6 +1342,9 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
     }
 
     let total_size = resp.content_length();
+    if total_size.is_some_and(|size| size == 0 || size > RELEASE_ARCHIVE_MAX_BYTES) {
+        anyhow::bail!("download size is outside the allowed range");
+    }
 
     let pb = if let Some(size) = total_size {
         let pb = ProgressBar::new(size);
@@ -1309,25 +1370,36 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
     let tmp = tmp_download_path(dest);
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut stream = resp.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-        pb.inc(chunk.len() as u64);
+    let transfer = async {
+        let mut downloaded = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if downloaded > RELEASE_ARCHIVE_MAX_BYTES {
+                anyhow::bail!("download exceeds the {RELEASE_ARCHIVE_MAX_BYTES}-byte limit");
+            }
+            file.write_all(&chunk).await?;
+            pb.inc(chunk.len() as u64);
+        }
+        if downloaded == 0 {
+            anyhow::bail!("download is empty");
+        }
+        file.flush().await?;
+        drop(file);
+        publish_downloaded_artifact(&tmp, dest).await
     }
-    file.flush().await?;
-    drop(file);
-
+    .await;
     pb.finish_and_clear();
-
-    publish_downloaded_artifact(&tmp, dest).await?;
-    Ok(())
+    if transfer.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    transfer
 }
 
 /// Download a file silently (no progress bar).
 #[doc(hidden)]
 pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
-    match try_parallel_download(url, dest, false).await {
+    match try_parallel_download(url, dest, false, None).await {
         Ok(()) => return Ok(()),
         Err(e) => {
             tracing::debug!("parallel download failed, falling back to single connection: {e}")
@@ -1346,16 +1418,19 @@ pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
     let tmp = tmp_download_path(dest);
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut stream = resp.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
+    let transfer = async {
+        while let Some(chunk) = stream.next().await {
+            file.write_all(&chunk?).await?;
+        }
+        file.flush().await?;
+        drop(file);
+        publish_downloaded_artifact(&tmp, dest).await
     }
-    file.flush().await?;
-    drop(file);
-
-    publish_downloaded_artifact(&tmp, dest).await?;
-    Ok(())
+    .await;
+    if transfer.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    transfer
 }
 
 /// Delete `~/.grow/models_cache.json` after a successful update.
@@ -2090,9 +2165,9 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
             continue;
         }
-        // Extract the version portion via the shared parser (handles the
-        // GitHub Release `grow-0.1.150-macos-aarch64`, pre-release, and GitHub Release
-        // `grow-0.1.150` layouts — see `version_from_versioned_binary_name`).
+        // Extract the version portion via the shared parser. Only canonical
+        // managed names with a recognized platform suffix are eligible for
+        // deletion; unknown layouts remain untouched.
         let Some(ver_str) = crate::version::version_from_versioned_binary_name(&name, bin_prefix)
         else {
             continue;
@@ -2233,6 +2308,120 @@ async fn agent_exe_differs(
 
 /// Upper bound for the one decompressed executable in a release archive.
 const RELEASE_BINARY_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const RELEASE_CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const RELEASE_CHECKSUMS_MAX_BYTES: u64 = 128 * 1024;
+
+/// Return the unique SHA-256 declared for `asset_name` by the release
+/// manifest. The manifest is generated by GNU `sha256sum`, so its wire format
+/// is deliberately strict: lowercase digest, two spaces, exact asset name.
+/// Rejecting duplicate or malformed entries keeps the updater from choosing
+/// between conflicting interpretations.
+fn release_asset_sha256(manifest: &str, asset_name: &str) -> Result<String> {
+    let mut expected = None;
+
+    for (index, line) in manifest.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((digest, name)) = line.split_once("  ") else {
+            anyhow::bail!("invalid {RELEASE_CHECKSUMS_ASSET} line {}", index + 1);
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            anyhow::bail!("invalid {RELEASE_CHECKSUMS_ASSET} line {}", index + 1);
+        }
+        if name == asset_name && expected.replace(digest.to_owned()).is_some() {
+            anyhow::bail!("{RELEASE_CHECKSUMS_ASSET} contains duplicate entries for {asset_name}");
+        }
+    }
+
+    expected
+        .ok_or_else(|| anyhow::anyhow!("{RELEASE_CHECKSUMS_ASSET} does not contain {asset_name}"))
+}
+
+async fn verify_release_archive_sha256(
+    archive_path: &std::path::Path,
+    expected: &str,
+) -> Result<()> {
+    let archive_path = archive_path.to_owned();
+    let expected = expected.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use sha2::Digest as _;
+        use std::io::Read as _;
+
+        let mut archive =
+            std::io::BufReader::new(std::fs::File::open(&archive_path).with_context(|| {
+                format!(
+                    "failed to open downloaded release archive {}",
+                    archive_path.display()
+                )
+            })?);
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = archive.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            anyhow::bail!("release archive SHA-256 mismatch: expected {expected}, got {actual}");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("release checksum task panicked: {error}"))?
+}
+
+async fn fetch_release_asset_sha256(base_url: &str, tag: &str, asset_name: &str) -> Result<String> {
+    let checksum_url = format!("{base_url}/releases/download/{tag}/{RELEASE_CHECKSUMS_ASSET}");
+    let response = reqwest::Client::builder()
+        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
+        .build()?
+        .get(&checksum_url)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("Download failed: HTTP {}", response.status());
+    }
+    if let Some(length) = response.content_length()
+        && (length == 0 || length > RELEASE_CHECKSUMS_MAX_BYTES)
+    {
+        anyhow::bail!(
+            "{RELEASE_CHECKSUMS_ASSET} size {length} is outside the allowed range (1..={RELEASE_CHECKSUMS_MAX_BYTES})"
+        );
+    }
+
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or(0)
+            .min(RELEASE_CHECKSUMS_MAX_BYTES) as usize,
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len().saturating_add(chunk.len()) > RELEASE_CHECKSUMS_MAX_BYTES as usize {
+            anyhow::bail!(
+                "{RELEASE_CHECKSUMS_ASSET} exceeds the {RELEASE_CHECKSUMS_MAX_BYTES}-byte limit"
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        anyhow::bail!("{RELEASE_CHECKSUMS_ASSET} is empty");
+    }
+    let manifest = String::from_utf8(bytes).context("release checksum manifest is not UTF-8")?;
+    release_asset_sha256(&manifest, asset_name)
+}
 
 /// Extract the single platform-native executable from an official `.tar.gz` asset.
 ///
@@ -2374,8 +2563,13 @@ pub async fn install_gh_release_from(
         version, platform
     );
 
+    let expected_sha256 = fetch_release_asset_sha256(base_url, &tag, &asset_name).await?;
     let asset_url = format!("{base_url}/releases/download/{tag}/{asset_name}");
     download_with_progress(&asset_url, &archive_path).await?;
+    if let Err(error) = verify_release_archive_sha256(&archive_path, &expected_sha256).await {
+        let _ = tokio::fs::remove_file(&archive_path).await;
+        return Err(error);
+    }
     let extraction = extract_release_archive(&archive_path, &binary_path).await;
     let _ = tokio::fs::remove_file(&archive_path).await;
     extraction?;
@@ -3101,6 +3295,24 @@ mod tests {
         archive.append_data(&mut header, entry_name, body).unwrap();
         let encoder = archive.into_inner().unwrap();
         encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn release_checksum_manifest_requires_one_exact_asset_entry() {
+        let digest = "a".repeat(64);
+        let asset = "grow-2.0.0-linux-x86_64.tar.gz";
+        let other = "grow-2.0.0-linux-aarch64.tar.gz";
+        let manifest = format!("{}  {}\n{}  {}\n", "b".repeat(64), other, digest, asset);
+        assert_eq!(release_asset_sha256(&manifest, asset).unwrap(), digest);
+
+        let missing = format!("{}  {}\n", "b".repeat(64), other);
+        assert!(release_asset_sha256(&missing, asset).is_err());
+
+        let duplicate = format!("{digest}  {asset}\n{digest}  {asset}\n");
+        assert!(release_asset_sha256(&duplicate, asset).is_err());
+
+        let malformed = format!("{} *{}\n", "a".repeat(64), asset);
+        assert!(release_asset_sha256(&malformed, asset).is_err());
     }
 
     #[test]
@@ -4002,22 +4214,28 @@ mod tests {
         let d = dir.path();
 
         for v in ["0.1.148", "0.1.149", "0.1.150"] {
-            std::fs::write(d.join(format!("grow-pager-{}-linux-x64", v)), v).unwrap();
+            std::fs::write(d.join(format!("grow-pager-{}-linux-x86_64", v)), v).unwrap();
         }
-        std::fs::write(d.join("grow-pager-0.1.151-linux-x64"), "current").unwrap();
+        std::fs::write(d.join("grow-pager-0.1.151-linux-x86_64"), "current").unwrap();
 
         make_all_stale(d);
 
         cleanup_old_downloads(d, "grow-pager", "0.1.151").await;
 
-        assert!(d.join("grow-pager-0.1.151-linux-x64").exists(), "current");
-        assert!(d.join("grow-pager-0.1.150-linux-x64").exists(), "N-1 kept");
         assert!(
-            !d.join("grow-pager-0.1.149-linux-x64").exists(),
+            d.join("grow-pager-0.1.151-linux-x86_64").exists(),
+            "current"
+        );
+        assert!(
+            d.join("grow-pager-0.1.150-linux-x86_64").exists(),
+            "N-1 kept"
+        );
+        assert!(
+            !d.join("grow-pager-0.1.149-linux-x86_64").exists(),
             "0.1.149 deleted"
         );
         assert!(
-            !d.join("grow-pager-0.1.148-linux-x64").exists(),
+            !d.join("grow-pager-0.1.148-linux-x86_64").exists(),
             "0.1.148 deleted"
         );
     }
@@ -4544,7 +4762,7 @@ mod tests {
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "riscv64"),
+        all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
         all(target_os = "windows", target_arch = "aarch64"),
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "linux", target_env = "ohos", target_arch = "aarch64")
@@ -4565,6 +4783,7 @@ mod tests {
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
         all(target_os = "windows", target_arch = "aarch64"),
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "linux", target_env = "ohos", target_arch = "aarch64")
@@ -4592,6 +4811,9 @@ mod tests {
         }
         if cfg!(target_arch = "aarch64") {
             assert!(platform.contains("aarch64"));
+        }
+        if cfg!(target_arch = "riscv64") {
+            assert!(platform.contains("riscv64"));
         }
     }
 
@@ -4809,8 +5031,23 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // windows_replace_exe — runs only on Windows CI
+    // Windows publication/replacement — runs only on Windows CI
     // ──────────────────────────────────────────────────────────────────────
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_publish_downloaded_artifact_replaces_existing_and_consumes_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("grow-2.0.0-windows-x86_64.exe");
+        std::fs::write(&dest, "old content").unwrap();
+        let tmp = tmp_download_path(&dest);
+        std::fs::write(&tmp, "new content").unwrap();
+
+        publish_downloaded_artifact(&tmp, &dest).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new content");
+        assert!(!tmp.exists(), "published temp source must be consumed");
+    }
 
     #[cfg(windows)]
     #[tokio::test]

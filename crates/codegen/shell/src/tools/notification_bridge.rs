@@ -74,19 +74,19 @@ fn stamp_scheduler_meta(
     meta.insert("grow/schedulerGeneration".to_owned(), generation.into());
     meta.insert("grow/schedulerRevision".to_owned(), revision.into());
 }
-fn durable_append_landed(result: Result<(), DurableAppendError>) -> Result<(), String> {
+fn durable_append_landed(result: Result<(), DurableAppendError>, fact: &str) -> Result<(), String> {
     match result {
         Ok(()) => Ok(()),
         Err(DurableAppendError::Committed(error)) => {
-            tracing::warn!(%error, "Scheduler tombstone committed with bookkeeping failure");
+            tracing::warn!(%error, %fact, "durable projection committed with bookkeeping failure");
             Ok(())
         }
         Err(DurableAppendError::NotCommitted(error)) => {
-            Err(format!("scheduler tombstone was not committed: {error}"))
+            Err(format!("{fact} was not committed: {error}"))
         }
-        Err(DurableAppendError::AcknowledgementLost(error)) => Err(format!(
-            "scheduler tombstone commit status is unknown: {error}"
-        )),
+        Err(DurableAppendError::AcknowledgementLost(error)) => {
+            Err(format!("{fact} commit status is unknown: {error}"))
+        }
     }
 }
 async fn handle_scheduled_task_removed(
@@ -110,7 +110,10 @@ async fn handle_scheduled_task_removed(
             .map_err(|error| format!("failed to serialize scheduled task deletion: {error}"))?;
         let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification));
         if acknowledgement.is_some() {
-            durable_append_landed(config.persistence.append_update_durably(update).await)?;
+            durable_append_landed(
+                config.persistence.append_update_durably(update).await,
+                "scheduler tombstone",
+            )?;
         } else {
             config
                 .persistence
@@ -159,9 +162,17 @@ pub fn spawn_notification_bridge(config: NotificationBridgeConfig) -> ToolNotifi
                     }
                 }
                 notification => {
-                    handle_notification(&config, notification, &mut offsets).await;
+                    let result = handle_notification_with_ack(
+                        &config,
+                        notification,
+                        &mut offsets,
+                        acknowledgement.is_some(),
+                    )
+                    .await;
                     if let Some(acknowledgement) = acknowledgement {
-                        let _ = acknowledgement.send(Ok(()));
+                        let _ = acknowledgement.send(result);
+                    } else if let Err(error) = result {
+                        tracing::warn!(%error, "Failed to handle tool notification");
                     }
                 }
             }
@@ -204,11 +215,12 @@ async fn emit_current_mode_update(
     config.gateway.forward_fire_and_forget(notification);
 }
 /// Handle a single notification by forwarding it to the appropriate shell system.
-async fn handle_notification(
+async fn handle_notification_with_ack(
     config: &NotificationBridgeConfig,
     notification: ToolNotification,
     offsets: &mut HashMap<String, usize>,
-) {
+    require_durable_ack: bool,
+) -> Result<(), String> {
     match notification {
         ToolNotification::BashOutputChunk(chunk) => {
             let (output, output_delta) = if config.incremental_bash_output {
@@ -287,6 +299,20 @@ async fn handle_notification(
             );
         }
         ToolNotification::BashExecutionBackgrounded(bg) => {
+            if let Some(goal_id) = bg.goal_id.as_deref() {
+                // The backgrounded event is ordered before terminal receipts
+                // on this bridge channel. Register admission ownership now,
+                // rather than waiting for the tool result path.
+                config
+                    .session_cmd_tx
+                    .send(SessionCommand::RecordGoalOwnedTaskIds {
+                        goal_id: goal_id.to_owned(),
+                        task_ids: vec![bg.task_id.clone()],
+                    })
+                    .map_err(|_| {
+                        "session stopped before Goal task ownership admission".to_owned()
+                    })?;
+            }
             tracing::debug!(
                 tool_call_id = %bg.base.tool_call_id,
                 task_id = %bg.task_id,
@@ -352,6 +378,11 @@ async fn handle_notification(
         ToolNotification::TaskCompleted(task_snapshot) => {
             let is_monitor = task_snapshot.kind == tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
+            let owner = task_snapshot
+                .goal_id
+                .clone()
+                .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
+                .unwrap_or(chat_state::NotificationOwner::Session);
             if !task_snapshot.block_waited && !task_snapshot.explicitly_killed {
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
                 let read_name = resolved_tool_name(&config.read_tool_name);
@@ -367,7 +398,13 @@ async fn handle_notification(
                         read_name,
                     )
                 };
-                let _ = config
+                let (respond_to, receipt) = if require_durable_ack {
+                    let (respond_to, receipt) = tokio::sync::oneshot::channel();
+                    (Some(respond_to), Some(receipt))
+                } else {
+                    (None, None)
+                };
+                config
                     .session_cmd_tx
                     .send(SessionCommand::ReceiveNotification {
                         source: chat_state::NotificationSource::TaskCompleted {
@@ -377,11 +414,21 @@ async fn handle_notification(
                             } else {
                                 chat_state::NotificationTaskKind::Task
                             },
+                            owner,
                         },
                         source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                         body,
-                        respond_to: None,
-                    });
+                        respond_to,
+                    })
+                    .map_err(|_| "session stopped before task completion admission".to_owned())?;
+                if let Some(receipt) = receipt {
+                    receipt
+                        .await
+                        .map_err(|_| {
+                            "task completion admission acknowledgement was dropped".to_owned()
+                        })?
+                        .map(|_| ())?;
+                }
             }
             let mut notification = crate::extensions::notification::SessionNotification {
                 session_id: config.session_id.clone(),
@@ -395,9 +442,20 @@ async fn handle_notification(
                 stamp_event_id(config, &mut meta_map);
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            ));
+            let update =
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
+            if require_durable_ack {
+                durable_append_landed(
+                    config.persistence.append_update_durably(update).await,
+                    "task completion UI projection",
+                )?;
+            } else {
+                config
+                    .persistence
+                    .tx
+                    .send(PersistenceMsg::Update(update))
+                    .map_err(|_| "session persistence stopped".to_owned())?;
+            }
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
                 .ok();
@@ -483,7 +541,7 @@ async fn handle_notification(
                     bridge_session = %my_session,
                     "Dropped monitor event without this bridge's exact session owner"
                 );
-                return;
+                return Ok(());
             }
             tracing::debug!(
                 task_id = %event.task_id,
@@ -515,6 +573,7 @@ async fn handle_notification(
                 .send(SessionCommand::ReceiveNotification {
                     source: chat_state::NotificationSource::MonitorProgress {
                         task_id: event.task_id.clone(),
+                        owner: chat_state::NotificationOwner::Session,
                     },
                     source_version: chat_state::NotificationSourceVersion::Opaque {
                         value: uuid::Uuid::now_v7().to_string(),
@@ -557,6 +616,18 @@ async fn handle_notification(
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn handle_notification(
+    config: &NotificationBridgeConfig,
+    notification: ToolNotification,
+    offsets: &mut HashMap<String, usize>,
+) {
+    handle_notification_with_ack(config, notification, offsets, false)
+        .await
+        .expect("unacknowledged test notification should be handled");
 }
 #[cfg(test)]
 mod tests {
@@ -567,7 +638,8 @@ mod tests {
         NotificationBridgeConfig,
         mpsc::UnboundedReceiver<SessionCommand>,
     ) {
-        let (config, _gateway_rx, _persistence_rx, session_cmd_rx) = make_test_config_full();
+        let (config, _gateway_rx, mut persistence_rx, session_cmd_rx) = make_test_config_full();
+        tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
         (config, session_cmd_rx)
     }
     #[allow(clippy::type_complexity)]
@@ -627,6 +699,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            goal_id: None,
             description: None,
             is_backgrounded: false,
         }
@@ -700,6 +773,68 @@ mod tests {
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
     }
+
+    /// The terminal snapshot carries Goal ownership even when the process
+    /// exits before the tool can emit its Backgrounded notification.
+    #[tokio::test]
+    async fn instantaneous_goal_task_completion_uses_snapshot_owner() {
+        let (config, mut cmd_rx) = make_test_config();
+        config
+            .task_output_tool_name
+            .set(Some("get_command_or_subagent_output".to_string()))
+            .expect("slot is fresh in this test fixture");
+        let mut snapshot = make_task_snapshot("instant-goal", TaskKind::Bash);
+        snapshot.goal_id = Some("goal-fast".into());
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut offsets,
+        )
+        .await;
+        let SessionCommand::ReceiveNotification { source, .. } = cmd_rx
+            .try_recv()
+            .expect("instant completion must emit a receipt")
+        else {
+            panic!("expected ReceiveNotification");
+        };
+        assert_eq!(
+            source.owner(),
+            chat_state::NotificationOwner::Goal {
+                goal_id: "goal-fast".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledged_task_completion_waits_for_timeline_admission() {
+        let (config, _gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+        let mut offsets = HashMap::new();
+        let handle = handle_notification_with_ack(
+            &config,
+            ToolNotification::TaskCompleted(make_task_snapshot("bg-ack", TaskKind::Bash)),
+            &mut offsets,
+            true,
+        );
+        let acknowledge = async {
+            let SessionCommand::ReceiveNotification {
+                respond_to: Some(respond_to),
+                ..
+            } = cmd_rx.recv().await.expect("completion admission command")
+            else {
+                panic!("expected acknowledged completion admission");
+            };
+            respond_to.send(Ok("notification-1".into())).unwrap();
+            let PersistenceMsg::AppendUpdateDurablyAndAck { respond_to, .. } =
+                persistence_rx.recv().await.expect("durable UI projection")
+            else {
+                panic!("expected durable task completion projection");
+            };
+            respond_to.send(Ok(())).unwrap();
+        };
+        let (handled, ()) = tokio::join!(handle, acknowledge);
+        handled.expect("producer acknowledgement follows durable Timeline admission");
+    }
     fn take_task_completed_notification(
         gateway_rx: &mut mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     ) -> Option<serde_json::Value> {
@@ -771,21 +906,30 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn task_completed_still_emits_when_session_channel_is_closed() {
-        let (config, mut gateway_rx, _persistence_rx, cmd_rx) = make_test_config_full_raw();
+    async fn task_completed_rejects_without_uncommitted_projection_when_session_is_closed() {
+        let (config, mut gateway_rx, mut persistence_rx, cmd_rx) = make_test_config_full_raw();
         config
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
         drop(cmd_rx);
         let mut offsets = HashMap::new();
-        handle_notification(
+        let result = handle_notification_with_ack(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-dead", TaskKind::Bash)),
             &mut offsets,
+            true,
         )
         .await;
-        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
+        assert!(matches!(result, Err(error) if error.contains("session stopped")));
+        assert!(
+            take_task_completed_notification(&mut gateway_rx).is_none(),
+            "a completion rejected before Timeline admission must not be presented as delivered"
+        );
+        assert!(
+            persistence_rx.try_recv().is_err(),
+            "a completion rejected before Timeline admission must not be persisted as delivered"
+        );
     }
     /// Natural monitor exit (including exit code 0) must immediate-auto-wake
     /// the same way bash does — not only via the idle-gated MonitorEvent path.
@@ -898,7 +1042,7 @@ mod tests {
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(SessionCommand::ReceiveNotification {
-                source: chat_state::NotificationSource::MonitorProgress { task_id },
+                source: chat_state::NotificationSource::MonitorProgress { task_id, .. },
                 ..
             }) if task_id == "mon-done"
         ));
@@ -1100,7 +1244,7 @@ mod tests {
     /// incremental reconnect for the session).
     #[tokio::test]
     async fn task_backgrounded_persisted_line_is_stamped() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let (config, _gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let notification = ToolNotification::BashExecutionBackgrounded(
             tools::notification::types::BashExecutionBackgrounded {
                 base: tools::notification::types::BashNotificationBase {
@@ -1113,12 +1257,18 @@ mod tests {
                 },
                 output_file: PathBuf::from("/tmp/out.log"),
                 task_id: "task-bg".into(),
+                goal_id: Some("goal-1".into()),
                 monitor_description: None,
                 description: None,
             },
         );
         let mut offsets = HashMap::new();
         handle_notification(&config, notification, &mut offsets).await;
+        assert!(matches!(
+            cmd_rx.try_recv().expect("Goal ownership must be admitted first"),
+            SessionCommand::RecordGoalOwnedTaskIds { goal_id, task_ids }
+                if goal_id == "goal-1" && task_ids == vec!["task-bg"]
+        ));
         match persistence_rx.try_recv().expect("must persist") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
                 assert!(grow_persisted_event_id(&notif).is_some());
@@ -1170,16 +1320,19 @@ mod tests {
     #[test]
     fn durable_append_mapping_respects_commit_disposition() {
         assert!(
-            durable_append_landed(Err(DurableAppendError::Committed(std::io::Error::other(
-                "summary failed"
-            ),)))
+            durable_append_landed(
+                Err(DurableAppendError::Committed(std::io::Error::other(
+                    "summary failed"
+                ),)),
+                "test fact"
+            )
             .is_ok()
         );
         for failure in [
             DurableAppendError::NotCommitted(std::io::Error::other("append failed")),
             DurableAppendError::AcknowledgementLost(std::io::Error::other("lost")),
         ] {
-            assert!(durable_append_landed(Err(failure)).is_err());
+            assert!(durable_append_landed(Err(failure), "test fact").is_err());
         }
     }
     #[tokio::test]
@@ -1257,7 +1410,7 @@ mod tests {
             SessionCommand::ReceiveNotification { source, body, .. } => {
                 assert!(matches!(
                     source,
-                    chat_state::NotificationSource::MonitorProgress { task_id }
+                    chat_state::NotificationSource::MonitorProgress { task_id, .. }
                         if task_id == "mon-own"
                 ));
                 assert!(body.contains("boom"));
@@ -1384,6 +1537,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            goal_id: None,
             description: None,
             is_backgrounded: false,
         }

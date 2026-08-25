@@ -722,9 +722,36 @@ impl SessionActor {
             self.enqueue_current_mode_update(acp::SessionModeId::new(
                 tools::types::BehaviorId::Normal.as_id(),
             ));
+            self.send_available_commands_update().await;
         }
         Ok(())
     }
+
+    /// Validate the parked approval before load-session is acknowledged. A
+    /// submitted Plan without its immutable artifact cannot remain in
+    /// AwaitingApproval; normalize it to Normal through a durable Control
+    /// barrier so the restored actor is always able to accept another turn.
+    pub(super) async fn reconcile_restored_plan_approval(&self) -> Result<bool, String> {
+        if !self.behavior.lock().approval_pending() {
+            return Ok(false);
+        }
+        let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
+        let artifact_valid = match artifact_hash {
+            Some(hash) => read_plan_artifact_async(self.session_directory.clone(), hash)
+                .await
+                .is_ok_and(|content| !content.trim().is_empty()),
+            None => false,
+        };
+        if artifact_valid {
+            return Ok(true);
+        }
+        tracing::warn!(
+            "plan_control restore: submitted artifact is unavailable; normalizing Plan to Normal"
+        );
+        self.finish_plan_to_default().await?;
+        Ok(false)
+    }
+
     /// Resume hook: re-issue the parked Plan approval
     /// after a session restored with `approval_pending == true`, so the
     /// client re-shows approval chrome over a real live waiter. Handles the
@@ -743,6 +770,14 @@ impl SessionActor {
             tracing::debug!("plan_control resume: approval already pending; skip re-park");
             return;
         }
+        match self.reconcile_restored_plan_approval().await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::error!(%error, "plan_control resume normalization was not durable");
+                return;
+            }
+        }
         let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
         let plan_content = match artifact_hash {
             Some(hash) => {
@@ -750,18 +785,22 @@ impl SessionActor {
                     Ok(content) if !content.trim().is_empty() => content,
                     _ => {
                         tracing::info!(
-                            "plan_control resume: candidate artifact is unavailable; clearing approval state"
+                            "plan_control resume: candidate artifact disappeared after reconciliation"
                         );
-                        self.behavior.lock().set_approval_pending(false);
-                        self.record_control_snapshot();
+                        if let Err(error) = self.finish_plan_to_default().await {
+                            tracing::error!(%error, "failed to durably normalize missing Plan artifact");
+                        }
                         return;
                     }
                 }
             }
             _ => {
-                tracing::info!("plan_control resume: no candidate plan; clearing approval state");
-                self.behavior.lock().set_approval_pending(false);
-                self.record_control_snapshot();
+                tracing::info!(
+                    "plan_control resume: candidate Plan disappeared after reconciliation"
+                );
+                if let Err(error) = self.finish_plan_to_default().await {
+                    tracing::error!(%error, "failed to durably normalize missing Plan artifact");
+                }
                 return;
             }
         };
@@ -1549,6 +1588,107 @@ mod plan_approval_helper_tests {
             ResumeAction::StayAndRevise(text) => assert!(text.contains("tweak it")),
             other => panic!("expected StayAndRevise, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_finish_projection_tests {
+    use agent_client_protocol as acp;
+
+    #[tokio::test]
+    async fn finishing_plan_refreshes_available_commands_with_normal_behavior() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, mut event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                *actor.agent.borrow_mut() =
+                    crate::session::actor::tests::support::test_agent_with_plan_tools().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Plan);
+                while event_rx.try_recv().is_ok() {}
+
+                actor.finish_plan_to_default().await.unwrap();
+
+                let mut available_commands = None;
+                while let Ok(event) = event_rx.try_recv() {
+                    let crate::session::replay_events::SessionEvent::Notification(notification) =
+                        event
+                    else {
+                        continue;
+                    };
+                    let crate::session::replay_events::SessionNotification::Acp(notification) =
+                        notification
+                    else {
+                        continue;
+                    };
+                    if let acp::SessionUpdate::AvailableCommandsUpdate(update) = notification.update
+                    {
+                        available_commands = Some(update);
+                    }
+                }
+                let update = available_commands.expect("AvailableCommandsUpdate after Plan exit");
+                let meta = update.meta.expect("command metadata");
+                assert_eq!(
+                    meta.get("grow/behaviorAvailability")
+                        .and_then(|value| value.get("current"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("normal")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn missing_restored_plan_artifact_normalizes_to_durable_normal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# artifact that is not on disk");
+                    assert!(behavior.submit_initial_plan());
+                }
+
+                assert!(!actor.reconcile_restored_plan_approval().await.unwrap());
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("Timeline events");
+                assert!(matches!(
+                    events.last().map(|event| &event.kind),
+                    Some(chat_state::TimelineEventKind::Control(_))
+                ));
+            })
+            .await;
     }
 }
 #[cfg(test)]

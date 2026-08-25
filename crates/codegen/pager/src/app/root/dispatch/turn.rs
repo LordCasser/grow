@@ -83,7 +83,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 session_id,
                 // Replay the exact original intent (pause_goal AND
                 // cancel_subagents); without a stashed intent fall back to the
-                // resolved preference (Legacy semantics).
+                // resolved non-Goal cancel preference.
                 cancel_subagents: agent
                     .last_interrupt
                     .map_or(resolved_pref.unwrap_or(true), |i| i.cancel_subagents),
@@ -96,7 +96,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             }];
         }
         // Goal interrupt: while the Goal is Active, an interrupt gesture ALWAYS
-        // opens the Goal panel — never a silent default, and the legacy
+        // opens the Goal panel — never a silent default, and the non-Goal
         // `cancel_subagents_on_turn_cancel` preference is ignored (product
         // decision: Goal interrupts always ask). The panel covers both "a turn
         // is running" (Full: pause / stop turn / stop turn+subagents) and "no
@@ -128,7 +128,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                     crate::views::modal::GoalInterruptChoice::pause_only()
                 },
             });
-            // Default focus to the picker (mirrors the Legacy panel).
+            // Default focus to the picker (mirrors the non-Goal panel).
             if agent.active_pane == ActivePane::Scrollback {
                 agent.active_pane = ActivePane::Prompt;
             }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 13;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 15;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
@@ -528,6 +528,10 @@ pub struct SubagentSpawnEvent {
     pub workflow_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_id: Option<String>,
+    /// Whether this child owns a model-facing completion receipt. Internal
+    /// harness children set this to false, and crash recovery must preserve
+    /// that decision instead of manufacturing a reminder.
+    pub surface_completion: bool,
     pub child_cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
@@ -612,10 +616,40 @@ pub struct SubagentResultEvent {
 pub enum NotificationSource {
     MonitorProgress {
         task_id: String,
+        owner: NotificationOwner,
     },
     /// A background task that was still running at a graceful session
     /// checkpoint. Unlike terminal notifications, this receipt is context for
     /// the next real turn and must never start a turn by itself.
+    TaskStillRunning {
+        task_id: String,
+        task_kind: NotificationTaskKind,
+        owner: NotificationOwner,
+    },
+    TaskCompleted {
+        task_id: String,
+        task_kind: NotificationTaskKind,
+        owner: NotificationOwner,
+    },
+    SubagentCompleted {
+        subagent_id: String,
+        owner: NotificationOwner,
+    },
+    WorkflowCompleted {
+        run_id: String,
+    },
+}
+
+/// Stable producer identity for at-least-once delivery. Ownership is durable
+/// receipt metadata captured on the first admission, not part of the producer
+/// key: a retry after actor restart must resolve to that original evidence even
+/// when the bridge can no longer reconstruct the owner in memory.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NotificationSourceIdentity {
+    MonitorProgress {
+        task_id: String,
+    },
     TaskStillRunning {
         task_id: String,
         task_kind: NotificationTaskKind,
@@ -635,13 +669,72 @@ pub enum NotificationSource {
 impl NotificationSource {
     fn subject_id(&self) -> &str {
         match self {
-            Self::MonitorProgress { task_id }
+            Self::MonitorProgress { task_id, .. }
             | Self::TaskStillRunning { task_id, .. }
             | Self::TaskCompleted { task_id, .. } => task_id,
-            Self::SubagentCompleted { subagent_id } => subagent_id,
+            Self::SubagentCompleted { subagent_id, .. } => subagent_id,
             Self::WorkflowCompleted { run_id } => run_id,
         }
     }
+
+    pub fn owner(&self) -> NotificationOwner {
+        match self {
+            Self::MonitorProgress { owner, .. }
+            | Self::TaskStillRunning { owner, .. }
+            | Self::TaskCompleted { owner, .. } => owner.clone(),
+            Self::SubagentCompleted { owner, .. } => owner.clone(),
+            Self::WorkflowCompleted { .. } => NotificationOwner::Session,
+        }
+    }
+
+    pub fn with_owner(mut self, notification_owner: NotificationOwner) -> Self {
+        match &mut self {
+            Self::MonitorProgress { owner, .. }
+            | Self::TaskStillRunning { owner, .. }
+            | Self::TaskCompleted { owner, .. } => *owner = notification_owner,
+            Self::SubagentCompleted { owner, .. } => *owner = notification_owner,
+            Self::WorkflowCompleted { .. } => {}
+        }
+        self
+    }
+
+    fn identity(&self) -> NotificationSourceIdentity {
+        match self {
+            Self::MonitorProgress { task_id, .. } => NotificationSourceIdentity::MonitorProgress {
+                task_id: task_id.clone(),
+            },
+            Self::TaskStillRunning {
+                task_id, task_kind, ..
+            } => NotificationSourceIdentity::TaskStillRunning {
+                task_id: task_id.clone(),
+                task_kind: *task_kind,
+            },
+            Self::TaskCompleted {
+                task_id, task_kind, ..
+            } => NotificationSourceIdentity::TaskCompleted {
+                task_id: task_id.clone(),
+                task_kind: *task_kind,
+            },
+            Self::SubagentCompleted { subagent_id, .. } => {
+                NotificationSourceIdentity::SubagentCompleted {
+                    subagent_id: subagent_id.clone(),
+                }
+            }
+            Self::WorkflowCompleted { run_id } => NotificationSourceIdentity::WorkflowCompleted {
+                run_id: run_id.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NotificationOwner {
+    #[default]
+    Session,
+    Goal {
+        goal_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -689,23 +782,6 @@ pub enum NotificationEvent {
         /// surfaced by a tool result in this turn.
         input: Option<ConversationItem>,
     },
-    /// Resolve receipts without starting or mutating a model turn. This is a
-    /// durable policy decision, not a lossy queue drop: replay can explain why
-    /// the source did not wake the Agent and will not offer it for delivery
-    /// again.
-    Dismissed {
-        notification_ids: Vec<String>,
-        reason: NotificationDismissReason,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotificationDismissReason {
-    /// Background shell/monitor work launched by a Goal is observed by that
-    /// Goal's normal continuation loop; its terminal receipt must not create a
-    /// second autonomous turn while the session is idle.
-    GoalOwnedAutostart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -729,7 +805,7 @@ pub fn notification_id(
     {
         return Err(TimelineError::InvalidNotification);
     }
-    let identity = serde_json::to_vec(&(owner_session_id, source, source_version))
+    let identity = serde_json::to_vec(&(owner_session_id, source.identity(), source_version))
         .map_err(|_| TimelineError::InvalidNotification)?;
     Ok(format!("notification-{}", blake3::hash(&identity).to_hex()))
 }
@@ -884,9 +960,11 @@ pub struct Timeline {
     pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     pending_notifications: BTreeMap<String, PendingNotification>,
     received_notification_ids: BTreeSet<String>,
-    received_notifications: BTreeMap<(NotificationSource, NotificationSourceVersion), EventSeq>,
+    received_notifications:
+        BTreeMap<(NotificationSourceIdentity, NotificationSourceVersion), EventSeq>,
     pending_monitor_notifications: BTreeMap<String, VecDeque<String>>,
     terminal_monitors: BTreeSet<String>,
+    terminal_tasks: BTreeSet<String>,
     subagent_result_recorded: bool,
     lifecycle: LifecycleFold,
 }
@@ -1116,7 +1194,7 @@ impl Timeline {
     ) -> Option<&TimelineEvent> {
         let seq = self
             .received_notifications
-            .get(&(source.clone(), source_version.clone()))?;
+            .get(&(source.identity(), source_version.clone()))?;
         usize::try_from(seq.get())
             .ok()
             .and_then(|index| self.events.get(index))
@@ -2124,7 +2202,6 @@ impl Timeline {
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => {}
-            TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => {}
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(context),
                 ..
@@ -2169,7 +2246,7 @@ impl Timeline {
             } => {
                 self.received_notification_ids.insert(id.clone());
                 self.received_notifications
-                    .insert((source.clone(), source_version.clone()), seq);
+                    .insert((source.identity(), source_version.clone()), seq);
                 let notification = PendingNotification {
                     received_seq: seq,
                     id: id.clone(),
@@ -2180,18 +2257,39 @@ impl Timeline {
                 };
                 match source {
                     NotificationSource::TaskCompleted {
-                        task_id,
-                        task_kind: NotificationTaskKind::Monitor,
+                        task_id, task_kind, ..
                     } => {
-                        self.terminal_monitors.insert(task_id.clone());
-                        if let Some(progress) = self.pending_monitor_notifications.remove(task_id) {
-                            for progress_id in progress {
-                                self.pending_notifications.remove(&progress_id);
+                        self.terminal_tasks.insert(task_id.clone());
+                        let checkpoints = self
+                            .pending_notifications
+                            .iter()
+                            .filter_map(|(pending_id, pending)| {
+                                matches!(
+                                    &pending.source,
+                                    NotificationSource::TaskStillRunning {
+                                        task_id: pending_task_id,
+                                        ..
+                                    } if pending_task_id == task_id
+                                )
+                                .then(|| pending_id.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        for checkpoint_id in checkpoints {
+                            self.pending_notifications.remove(&checkpoint_id);
+                        }
+                        if *task_kind == NotificationTaskKind::Monitor {
+                            self.terminal_monitors.insert(task_id.clone());
+                            if let Some(progress) =
+                                self.pending_monitor_notifications.remove(task_id)
+                            {
+                                for progress_id in progress {
+                                    self.pending_notifications.remove(&progress_id);
+                                }
                             }
                         }
                         self.pending_notifications.insert(id.clone(), notification);
                     }
-                    NotificationSource::MonitorProgress { task_id } => {
+                    NotificationSource::MonitorProgress { task_id, .. } => {
                         if self.terminal_monitors.contains(task_id) {
                             return;
                         }
@@ -2207,9 +2305,13 @@ impl Timeline {
                             }
                         }
                     }
-                    NotificationSource::TaskStillRunning { .. }
-                    | NotificationSource::TaskCompleted { .. }
-                    | NotificationSource::SubagentCompleted { .. }
+                    NotificationSource::TaskStillRunning { task_id, .. } => {
+                        if self.terminal_tasks.contains(task_id) {
+                            return;
+                        }
+                        self.pending_notifications.insert(id.clone(), notification);
+                    }
+                    NotificationSource::SubagentCompleted { .. }
                     | NotificationSource::WorkflowCompleted { .. } => {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
@@ -2217,14 +2319,11 @@ impl Timeline {
             }
             NotificationEvent::Consumed {
                 notification_ids, ..
-            }
-            | NotificationEvent::Dismissed {
-                notification_ids, ..
             } => {
                 for id in notification_ids {
                     let removed = self.pending_notifications.remove(id);
                     if let Some(PendingNotification {
-                        source: NotificationSource::MonitorProgress { task_id },
+                        source: NotificationSource::MonitorProgress { task_id, .. },
                         ..
                     }) = removed
                         && let Some(progress) = self.pending_monitor_notifications.get_mut(&task_id)
@@ -2666,9 +2765,6 @@ impl Timeline {
                 if self.lifecycle.active_turn != Some(*turn)
                     || notification_ids.is_empty()
                     || notification_ids.len() > u32::MAX as usize
-                    || input
-                        .as_ref()
-                        .is_some_and(|input| !valid_notification_input(input))
                 {
                     return Err(TimelineError::InvalidNotification);
                 }
@@ -2684,26 +2780,34 @@ impl Timeline {
                         return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
                     }
                 }
-            }
-            NotificationEvent::Dismissed {
-                notification_ids, ..
-            } => {
-                if self.lifecycle.active_turn.is_some()
-                    || notification_ids.is_empty()
-                    || notification_ids.len() > u32::MAX as usize
+                if let Some(input) = input
+                    && !valid_notification_input(input)
                 {
-                    return Err(TimelineError::InvalidNotification);
-                }
-                let mut unique = BTreeSet::new();
-                for id in notification_ids {
-                    if !unique.insert(id) {
+                    let Some(goal_id) = valid_goal_notification_input(input) else {
                         return Err(TimelineError::InvalidNotification);
-                    }
-                    if !self.received_notification_ids.contains(id) {
-                        return Err(TimelineError::NotificationNotFound(id.clone()));
-                    }
-                    if !self.pending_notifications.contains_key(id) {
-                        return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
+                    };
+                    let goal_turn_matches = self.events.iter().rev().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. })
+                                if id == turn
+                                    && identity.origin == "goal_continuation"
+                                    && identity.goal_id.as_deref() == Some(goal_id)
+                        )
+                    });
+                    let receipts_match = notification_ids.iter().all(|id| {
+                        self.pending_notifications
+                            .get(id)
+                            .is_some_and(|notification| {
+                                matches!(
+                                    notification.source.owner(),
+                                    NotificationOwner::Goal { goal_id: owner_goal_id }
+                                        if owner_goal_id == goal_id
+                                )
+                            })
+                    });
+                    if !goal_turn_matches || !receipts_match {
+                        return Err(TimelineError::InvalidNotification);
                     }
                 }
             }
@@ -3329,13 +3433,12 @@ fn valid_notification_source_version(
     match (source, version) {
         (
             NotificationSource::MonitorProgress { .. }
-            | NotificationSource::TaskStillRunning { .. },
+            | NotificationSource::TaskStillRunning { .. }
+            | NotificationSource::WorkflowCompleted { .. },
             NotificationSourceVersion::Opaque { value },
         ) => valid_notification_identifier(value),
         (
-            NotificationSource::TaskCompleted { .. }
-            | NotificationSource::SubagentCompleted { .. }
-            | NotificationSource::WorkflowCompleted { .. },
+            NotificationSource::TaskCompleted { .. } | NotificationSource::SubagentCompleted { .. },
             NotificationSourceVersion::Ordinal { value },
         ) => *value > 0,
         _ => false,
@@ -3364,6 +3467,27 @@ fn valid_notification_input(item: &ConversationItem) -> bool {
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
         && !item.text_content().trim().is_empty()
+}
+
+fn valid_goal_notification_input(item: &ConversationItem) -> Option<&str> {
+    let ConversationItem::User(user) = item else {
+        return None;
+    };
+    let tag = user.goal_directive.as_ref()?;
+    (user.synthetic_reason == Some(SyntheticReason::SystemReminder)
+        && user.permission_evidence.is_none()
+        && user.cwd_generation.is_none()
+        && user.prior_turn_interrupt.is_none()
+        && user.prompt_index.is_some()
+        && tag.definition_revision > 0
+        && valid_notification_identifier(&tag.goal_id)
+        && !user.content.is_empty()
+        && user
+            .content
+            .iter()
+            .all(|part| matches!(part, ContentPart::Text { .. }))
+        && !item.text_content().trim().is_empty())
+    .then_some(tag.goal_id.as_str())
 }
 
 fn message_entries(
@@ -5487,6 +5611,7 @@ mod tests {
             effective_permission_mode: None,
             workflow_run_id: None,
             goal_id: None,
+            surface_completion: true,
             child_cwd: "/workspace".into(),
             worktree_path: None,
             effective_model_id: "grow-3".into(),
@@ -5805,6 +5930,7 @@ mod tests {
         let source = NotificationSource::TaskCompleted {
             task_id: "task-1".into(),
             task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Session,
         };
         let version = NotificationSourceVersion::Ordinal { value: 1 };
         let id = receive_notification(&mut timeline, source.clone(), version.clone(), "done");
@@ -5813,8 +5939,8 @@ mod tests {
         let duplicate = TimelineEventKind::Notification(NotificationEvent::Received {
             id: notification_id("session-1", &source, &version).unwrap(),
             owner_session_id: "session-1".into(),
-            source,
-            source_version: version,
+            source: source.clone(),
+            source_version: version.clone(),
             payload_ref: notification_payload("done"),
         });
         assert!(matches!(
@@ -5839,10 +5965,19 @@ mod tests {
             ))
             .unwrap();
         assert!(timeline.pending_notifications().is_empty());
+        assert_eq!(
+            timeline.received_notification_id(&source, &version),
+            Some(id.as_str()),
+            "consumption must not erase producer idempotence evidence"
+        );
         assert_eq!(timeline.surface().len(), 1);
 
         let mut replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
         assert!(replayed.pending_notifications().is_empty());
+        assert_eq!(
+            replayed.received_notification_id(&source, &version),
+            Some(id.as_str()),
+        );
         assert_eq!(
             replayed.surface()[0].text_content(),
             timeline.surface()[0].text_content()
@@ -5860,11 +5995,97 @@ mod tests {
     }
 
     #[test]
+    fn goal_notification_input_requires_matching_goal_turn_and_receipt_owner() {
+        fn start_goal_turn(timeline: &mut Timeline, id: TurnId, goal_id: &str) {
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Started {
+                    id,
+                    identity: TurnIdentity {
+                        origin: "goal_continuation".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: Some(goal_id.into()),
+                        stage_id: None,
+                    },
+                    model_id: "test-model".into(),
+                    input_message_count: timeline.surface_len(),
+                    prompt_index: 0,
+                    prompt_text: "continue goal".into(),
+                    input_kind: TurnInputKind::Prompt,
+                    redirect_kind: None,
+                }))
+                .unwrap();
+        }
+
+        fn goal_input(goal_id: &str) -> ConversationItem {
+            let mut input = ConversationItem::goal_directive(
+                "continue with durable evidence",
+                SyntheticReason::SystemReminder,
+                sampling_types::GoalDirectiveTag {
+                    goal_id: goal_id.into(),
+                    definition_revision: 1,
+                },
+            );
+            let ConversationItem::User(user) = &mut input else {
+                unreachable!()
+            };
+            user.prompt_index = Some(0);
+            input
+        }
+
+        let source = NotificationSource::TaskCompleted {
+            task_id: "goal-task".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Goal {
+                goal_id: "goal-1".into(),
+            },
+        };
+        let mut accepted = Timeline::default();
+        let accepted_id = receive_notification(
+            &mut accepted,
+            source.clone(),
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "done",
+        );
+        let accepted_turn = TurnId(17);
+        start_goal_turn(&mut accepted, accepted_turn, "goal-1");
+        accepted
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![accepted_id],
+                    turn: accepted_turn,
+                    input: Some(goal_input("goal-1")),
+                },
+            ))
+            .unwrap();
+
+        let mut rejected = Timeline::default();
+        let rejected_id = receive_notification(
+            &mut rejected,
+            source,
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "done",
+        );
+        let rejected_turn = TurnId(18);
+        start_goal_turn(&mut rejected, rejected_turn, "goal-2");
+        assert!(matches!(
+            rejected.record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![rejected_id],
+                    turn: rejected_turn,
+                    input: Some(goal_input("goal-2")),
+                },
+            )),
+            Err(TimelineError::InvalidNotification)
+        ));
+    }
+
+    #[test]
     fn running_task_checkpoints_use_opaque_epochs_and_can_repeat() {
         let mut timeline = Timeline::default();
         let source = NotificationSource::TaskStillRunning {
             task_id: "task-1".into(),
             task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Session,
         };
         assert!(matches!(
             notification_id(
@@ -5899,55 +6120,39 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_notification_is_durably_resolved_without_a_turn() {
+    fn workflow_terminal_boundaries_use_opaque_epoch_and_status_identity() {
         let mut timeline = Timeline::default();
-        let id = receive_notification(
-            &mut timeline,
-            NotificationSource::TaskCompleted {
-                task_id: "goal-task".into(),
-                task_kind: NotificationTaskKind::Task,
-            },
-            NotificationSourceVersion::Ordinal { value: 1 },
-            "done",
-        );
-        timeline
-            .record(TimelineEventKind::Notification(
-                NotificationEvent::Dismissed {
-                    notification_ids: vec![id],
-                    reason: NotificationDismissReason::GoalOwnedAutostart,
-                },
-            ))
-            .unwrap();
-        assert!(timeline.pending_notifications().is_empty());
-        assert!(timeline.surface().is_empty());
-
-        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
-        assert!(replayed.pending_notifications().is_empty());
-        assert!(replayed.surface().is_empty());
-    }
-
-    #[test]
-    fn notification_cannot_be_dismissed_during_an_active_turn() {
-        let mut timeline = Timeline::default();
-        let id = receive_notification(
-            &mut timeline,
-            NotificationSource::TaskCompleted {
-                task_id: "goal-task".into(),
-                task_kind: NotificationTaskKind::Task,
-            },
-            NotificationSourceVersion::Ordinal { value: 1 },
-            "done",
-        );
-        start_notification_turn(&mut timeline, TurnId(9));
+        let source = NotificationSource::WorkflowCompleted {
+            run_id: "workflow-1".into(),
+        };
         assert!(matches!(
-            timeline.record(TimelineEventKind::Notification(
-                NotificationEvent::Dismissed {
-                    notification_ids: vec![id],
-                    reason: NotificationDismissReason::GoalOwnedAutostart,
-                },
-            )),
+            notification_id(
+                "session-1",
+                &source,
+                &NotificationSourceVersion::Ordinal { value: 1 }
+            ),
             Err(TimelineError::InvalidNotification)
         ));
+
+        let paused = receive_notification(
+            &mut timeline,
+            source.clone(),
+            NotificationSourceVersion::Opaque {
+                value: "workflow-terminal-v1:1:user_paused".into(),
+            },
+            "paused",
+        );
+        let cancelled = receive_notification(
+            &mut timeline,
+            source,
+            NotificationSourceVersion::Opaque {
+                value: "workflow-terminal-v1:1:cancelled".into(),
+            },
+            "cancelled",
+        );
+
+        assert_ne!(paused, cancelled);
+        assert_eq!(timeline.pending_notifications().len(), 2);
     }
 
     #[test]
@@ -5957,6 +6162,7 @@ mod tests {
             &mut timeline,
             NotificationSource::MonitorProgress {
                 task_id: "monitor-1".into(),
+                owner: NotificationOwner::Session,
             },
             NotificationSourceVersion::Opaque {
                 value: "event-1".into(),
@@ -5968,11 +6174,62 @@ mod tests {
             NotificationSource::TaskCompleted {
                 task_id: "monitor-1".into(),
                 task_kind: NotificationTaskKind::Monitor,
+                owner: NotificationOwner::Session,
             },
             NotificationSourceVersion::Ordinal { value: 1 },
             "completed",
         );
         let pending = timeline.pending_notifications();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, terminal);
+    }
+
+    #[test]
+    fn task_terminal_supersedes_checkpoints_and_replay_rejects_late_checkpoints() {
+        let mut timeline = Timeline::default();
+        receive_notification(
+            &mut timeline,
+            NotificationSource::TaskStillRunning {
+                task_id: "task-1".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Goal {
+                    goal_id: "goal-1".into(),
+                },
+            },
+            NotificationSourceVersion::Opaque {
+                value: "checkpoint-1".into(),
+            },
+            "still running",
+        );
+        let terminal = receive_notification(
+            &mut timeline,
+            NotificationSource::TaskCompleted {
+                task_id: "task-1".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Goal {
+                    goal_id: "goal-1".into(),
+                },
+            },
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "completed",
+        );
+        assert_eq!(timeline.pending_notifications()[0].id, terminal);
+        assert_eq!(timeline.pending_notifications().len(), 1);
+
+        let mut replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        receive_notification(
+            &mut replayed,
+            NotificationSource::TaskStillRunning {
+                task_id: "task-1".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Session,
+            },
+            NotificationSourceVersion::Opaque {
+                value: "checkpoint-after-terminal".into(),
+            },
+            "stale checkpoint",
+        );
+        let pending = replayed.pending_notifications();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, terminal);
     }
@@ -5985,6 +6242,7 @@ mod tests {
                 &mut timeline,
                 NotificationSource::MonitorProgress {
                     task_id: "monitor-1".into(),
+                    owner: NotificationOwner::Session,
                 },
                 NotificationSourceVersion::Opaque {
                     value: format!("event-{index}"),
@@ -6013,6 +6271,7 @@ mod tests {
             NotificationSource::TaskCompleted {
                 task_id: "monitor-1".into(),
                 task_kind: NotificationTaskKind::Monitor,
+                owner: NotificationOwner::Session,
             },
             NotificationSourceVersion::Ordinal { value: 1 },
             "completed",
@@ -6032,6 +6291,7 @@ mod tests {
             &mut timeline,
             NotificationSource::MonitorProgress {
                 task_id: "monitor-1".into(),
+                owner: NotificationOwner::Session,
             },
             NotificationSourceVersion::Opaque {
                 value: "late-event".into(),
@@ -6050,6 +6310,7 @@ mod tests {
                 NotificationSource::TaskCompleted {
                     task_id: format!("task-{index}"),
                     task_kind: NotificationTaskKind::Task,
+                    owner: NotificationOwner::Session,
                 },
                 NotificationSourceVersion::Ordinal { value: 1 },
                 "completed",

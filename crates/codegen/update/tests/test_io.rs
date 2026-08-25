@@ -399,6 +399,7 @@ mod install_pipeline {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use sha2::Digest as _;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -492,19 +493,37 @@ mod install_pipeline {
         }
     }
 
-    /// Mount a mock serving the `version` release asset, expecting exactly
-    /// `expect` GETs (any extra request trips verification on drop).
-    async fn mount_release(server: &MockServer, version: &str, expect: u64) {
-        let asset = format!(
-            "/releases/download/v{version}/grow-{version}-{}.tar.gz",
-            test_platform()
-        );
+    async fn mount_release_with_checksum(
+        server: &MockServer,
+        version: &str,
+        checksum: Option<&str>,
+        expect: u64,
+    ) {
+        let asset_name = format!("grow-{version}-{}.tar.gz", test_platform());
+        let asset = format!("/releases/download/v{version}/{asset_name}");
+        let archive = release_fixture(version);
+        let checksum = checksum
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("{:x}", sha2::Sha256::digest(&archive)));
         Mock::given(method("GET"))
             .and(path(asset))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(release_fixture(version)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive))
             .expect(expect)
             .mount(server)
             .await;
+        let manifest = format!("{checksum}  {asset_name}\n");
+        Mock::given(method("GET"))
+            .and(path(format!("/releases/download/v{version}/SHA256SUMS")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(manifest))
+            .expect(expect)
+            .mount(server)
+            .await;
+    }
+
+    /// Mount a mock serving the checksum manifest and release archive. Each
+    /// endpoint is expected `expect` times; any re-download fails verification.
+    async fn mount_release(server: &MockServer, version: &str, expect: u64) {
+        mount_release_with_checksum(server, version, None, expect).await;
     }
 
     /// Script for a pre-existing (old) target that echoes a grow version.
@@ -727,6 +746,37 @@ mod install_pipeline {
         assert!(msg.contains("refusing to replace"), "msg: {msg}");
         assert!(msg.contains("--version check failed"), "msg: {msg}");
         // Byte-for-byte untouched.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_rejects_checksum_mismatch_before_replacing_target() {
+        let _ = test_home();
+        reset();
+
+        let bin = tempfile::tempdir().unwrap();
+        let target = bin.path().join("grow");
+        let original = old_grow_script("0.1.180");
+        std::fs::write(&target, &original).unwrap();
+        make_executable(&target);
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(bin.path());
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        let incorrect_checksum = "0".repeat(64);
+        mount_release_with_checksum(&server, "0.1.181", Some(&incorrect_checksum), 1).await;
+
+        let error = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("SHA-256 mismatch"),
+            "unexpected error: {error:#}"
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
     }
 

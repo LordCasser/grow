@@ -1047,7 +1047,7 @@ pub struct AgentView {
     /// Goal interrupt panel — shown whenever an interrupt gesture (Esc /
     /// Ctrl+C) arrives while the Goal is Active. Always asks, never a silent
     /// default; its choices cover {pause goal, cancel turn, stop subagents}
-    /// explicitly. Distinct from `cancel_turn_view` (Legacy panel): different
+    /// explicitly. Distinct from the non-Goal `cancel_turn_view`: different
     /// choices, labels, and Esc semantics (dismiss-only).
     pub(crate) goal_interrupt_view: Option<modal::GoalInterruptViewState>,
     /// Clickable rects for Goal interrupt option rows, populated by the Goal

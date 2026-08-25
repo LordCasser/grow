@@ -303,6 +303,7 @@ struct ProcessState {
     /// Session that owns this process. Used to scope kill operations so
     /// subagent teardown only kills the subagent's own tasks.
     owner_session_id: Option<String>,
+    goal_id: Option<String>,
     description: Option<String>,
 }
 
@@ -443,6 +444,7 @@ impl ProcessState {
             explicitly_killed: self.explicitly_killed,
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
+            goal_id: self.goal_id.clone(),
             description: self.description.clone(),
             is_backgrounded: self.bg_status.is_backgrounded(),
         }
@@ -1107,6 +1109,7 @@ impl LocalTerminalActor {
             explicitly_killed: false,
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
+            goal_id: request.goal_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
@@ -1251,6 +1254,7 @@ impl LocalTerminalActor {
                 None
             },
             owner_session_id: request.owner_session_id.clone(),
+            goal_id: request.goal_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
@@ -1579,9 +1583,28 @@ impl LocalTerminalActor {
         // blocking tool result; UI and persistence projections remain
         // unconditional.
         for task_id in newly_completed {
-            if let Some(process) = self.processes.get(&task_id) {
-                let snapshot = process.to_task_snapshot(&task_id).await;
-                process.notification_handle.send_task_complete(snapshot);
+            let delivery = if let Some(process) = self.processes.get(&task_id) {
+                Some((
+                    process.to_task_snapshot(&task_id).await,
+                    process.notification_handle.clone(),
+                ))
+            } else {
+                None
+            };
+            if let Some((snapshot, notification_handle)) = delivery
+                && let Err(error) = notification_handle
+                    .send_task_complete_acknowledged(snapshot)
+                    .wait()
+                    .await
+            {
+                tracing::warn!(%task_id, %error, "task completion was not durably acknowledged; scheduling retry");
+                if let Some(process) = self.processes.get_mut(&task_id) {
+                    // `completed_at == None` is already the canonical producer
+                    // retry marker used by the reap loop. Keep the completed
+                    // process resident and republish the same versioned snapshot
+                    // on the next pass; Timeline admission is idempotent.
+                    process.completed_at = None;
+                }
             }
         }
 
@@ -1628,6 +1651,7 @@ impl LocalTerminalActor {
                     block_waited: p.block_waited,
                     explicitly_killed: p.explicitly_killed,
                     owner_session_id: p.owner_session_id.clone(),
+                    goal_id: p.goal_id.clone(),
                     description: p.description.clone(),
                     is_backgrounded: true,
                 };
@@ -2094,6 +2118,7 @@ impl LocalTerminalActor {
                     },
                     output_file: process.output_file.clone(),
                     task_id: task_id.clone(),
+                    goal_id: None,
                     monitor_description: recovered_monitor_description,
                     description: effective_description.clone(),
                 });
@@ -3259,6 +3284,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         }
     }
@@ -3443,6 +3469,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3475,6 +3502,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3539,6 +3567,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3611,6 +3640,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3658,6 +3688,7 @@ mod tests {
             foreground_block_budget: Some(Duration::from_millis(300)),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3710,6 +3741,7 @@ mod tests {
             foreground_block_budget: Some(Duration::MAX),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3762,6 +3794,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3821,6 +3854,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3858,6 +3892,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3899,6 +3934,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -3940,6 +3976,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4016,6 +4053,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4083,6 +4121,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4119,6 +4158,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4154,6 +4194,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4185,6 +4226,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4225,6 +4267,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4274,6 +4317,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4308,6 +4352,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4353,6 +4398,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -4386,6 +4432,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         };
 
@@ -5418,6 +5465,7 @@ mod tests {
 
         let mut req = make_owned_request("echo owned", "test-owner");
         req.tool_call_id = "owned-test".to_string();
+        req.goal_id = Some("goal-owned".to_string());
         let bg = backend.run_background(req).await.unwrap();
 
         // Wait for completion
@@ -5432,5 +5480,6 @@ mod tests {
             Some("test-owner"),
             "owner_session_id should propagate from request to snapshot"
         );
+        assert_eq!(snap.goal_id.as_deref(), Some("goal-owned"));
     }
 }

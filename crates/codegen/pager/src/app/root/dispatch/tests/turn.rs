@@ -428,7 +428,7 @@ fn cancel_turn_choice_after_turn_finished_is_noop() {
 // ── Goal interrupt panel ────────────────────────────────────────────────
 
 /// Goal Active + running turn: an interrupt gesture ALWAYS opens the Goal
-/// panel — even when a legacy "always stop" preference is set — and sends no
+/// panel — even when a non-Goal "always stop" preference is set — and sends no
 /// effect. This is the core product decision (Goal interrupts always ask).
 #[test]
 fn goal_active_cancel_opens_panel_ignoring_pref() {
@@ -1383,18 +1383,23 @@ fn always_continue_choice_sets_preference() {
 fn prompt_response_clears_cancel_turn_panel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-    app.agents.get_mut(&id).unwrap().session.turn_started_at = Some(std::time::Instant::now());
-    app.agents.get_mut(&id).unwrap().cancel_turn_view =
-        Some(crate::views::modal::CancelTurnViewState {
-            active_idx: 0,
-            running_count: 2,
-        });
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.session.current_prompt_id = Some("prompt-1".into());
+    agent.session.turn_started_at = Some(std::time::Instant::now());
+    agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
+        active_idx: 0,
+        running_count: 2,
+    });
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                serde_json::json!({ "promptId": "prompt-1" })
+                    .as_object()
+                    .cloned(),
+            )),
             http_status: None,
             prompt_id: None,
         }),
@@ -1415,6 +1420,11 @@ fn cancel_after_first_activity_does_not_restore() {
     // Simulate that the server emitted activity (the acp_handler
     // clear-on-first-activity hook would have cleared this).
     app.agents.get_mut(&id).unwrap().session.in_flight_prompt = None;
+    let prompt_id = app.agents[&id]
+        .session
+        .current_prompt_id
+        .clone()
+        .expect("prompt identity");
 
     let effects = dispatch(Action::CancelTurn, &mut app);
     assert_eq!(effects.len(), 1);
@@ -1430,7 +1440,11 @@ fn cancel_after_first_activity_does_not_restore() {
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
+            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+                serde_json::json!({ "promptId": prompt_id })
+                    .as_object()
+                    .cloned(),
+            )),
             http_status: None,
             prompt_id: None,
         }),

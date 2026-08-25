@@ -110,6 +110,8 @@ pub struct TerminalRunRequest {
     /// `kill_all_background_tasks_by_owner` only targets the requesting
     /// session's processes — not the parent's or sibling's.
     pub owner_session_id: Option<String>,
+    /// Immutable Goal owner captured when this process is created.
+    pub goal_id: Option<String>,
     /// Model-supplied label for task UI / snapshots.
     pub description: Option<String>,
 }
@@ -216,6 +218,9 @@ pub struct TaskSnapshot {
     /// the parent's or sibling's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Immutable Goal owner captured when this task is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
     /// Model-supplied label for task UI / snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

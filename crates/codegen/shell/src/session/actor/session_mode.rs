@@ -164,6 +164,22 @@ impl SessionActor {
             let message = format!("{} behavior is unavailable.", mode.display_label());
             return BehaviorChangeOutcome::Rejected { message };
         };
+
+        // Confirmation is durable control-plane intent, not a side effect of
+        // an inadmissible request. Reject a busy foreground before touching
+        // the coordinator's confirmation latch.
+        let foreground_admission = self.state.lock().await;
+        if !matches!(&foreground_admission.foreground, ForegroundState::Idle) {
+            let message = format!(
+                "Stop the active foreground work before selecting {} Behavior.",
+                mode.display_label()
+            );
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(previous_behavior.as_id()),
+                serde_json::json!({ "status": "rejected", "message": message }),
+            );
+            return BehaviorChangeOutcome::Rejected { message };
+        }
         let owned_deep_research_run = self
             .behavior
             .lock()
@@ -210,22 +226,50 @@ impl SessionActor {
             return decision.outcome;
         }
 
-        // A Behavior transition is also a model-visible Surface append. Hold
-        // the foreground admission mutex from the idle check through the
-        // durable Control commit and in-memory selection: otherwise an old
-        // turn could append output after the new protocol, or a new turn could
-        // capture the target before its context is durable.
-        let foreground_admission = self.state.lock().await;
-        if !matches!(&foreground_admission.foreground, ForegroundState::Idle) {
-            let message = format!(
-                "Stop the active foreground work before selecting {} Behavior.",
-                mode.display_label()
-            );
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(previous_behavior.as_id()),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
+        // A confirmed Deep Research switch first turns the owned run into a
+        // terminal receipt while the source Behavior still owns it. Only
+        // after that durable model context exists may Control transfer to the
+        // target Behavior.
+        if decision
+            .effects
+            .contains(&BehaviorEffect::CancelDeepResearchRun)
+            && let Some(run_id) = owned_deep_research_run.as_deref()
+        {
+            let state = match workflow_admission.cancel(run_id).await {
+                Ok(state) => state,
+                Err(error) => {
+                    let message = format!(
+                        "Deep Research cancellation did not commit its terminal boundary: {error}. Behavior was not changed."
+                    );
+                    self.enqueue_current_mode_update_with_behavior_change(
+                        acp::SessionModeId::new(previous_behavior.as_id()),
+                        serde_json::json!({ "status": "rejected", "message": message }),
+                    );
+                    return BehaviorChangeOutcome::Rejected { message };
+                }
+            };
+            let Some(outcome) = super::workflow_run::deep_research_outcome_from_state(&state)
+            else {
+                let message = format!(
+                    "Deep Research settled as {}, which is not a terminal report; Behavior was not changed.",
+                    state.status.as_str()
+                );
+                self.enqueue_current_mode_update_with_behavior_change(
+                    acp::SessionModeId::new(previous_behavior.as_id()),
+                    serde_json::json!({ "status": "rejected", "message": message }),
+                );
+                return BehaviorChangeOutcome::Rejected { message };
+            };
+            if let Err(error) = self.admit_deep_research_report(&state, outcome).await {
+                let message = format!(
+                    "Deep Research was cancelled, but its terminal report was not durable: {error}. Behavior was not changed."
+                );
+                self.enqueue_current_mode_update_with_behavior_change(
+                    acp::SessionModeId::new(previous_behavior.as_id()),
+                    serde_json::json!({ "status": "rejected", "message": message }),
+                );
+                return BehaviorChangeOutcome::Rejected { message };
+            }
         }
 
         if !decision.effects.is_empty() {
@@ -239,7 +283,7 @@ impl SessionActor {
                 .is_err()
             {
                 let message = format!(
-                    "Could not durably select {} Behavior; no runtime was interrupted.",
+                    "Could not durably select {} Behavior.",
                     mode.display_label()
                 );
                 self.enqueue_current_mode_update_with_behavior_change(
@@ -249,33 +293,6 @@ impl SessionActor {
                 return BehaviorChangeOutcome::Rejected { message };
             }
         }
-
-        // Deep Research cancellation is part of the same ownership transfer:
-        // remove the owned run before releasing Workflow admission so it
-        // cannot briefly become an unowned public run or race a new launch.
-        let cancelled_deep_research_report = if decision
-            .effects
-            .contains(&BehaviorEffect::CancelDeepResearchRun)
-        {
-            if let Some(run_id) = owned_deep_research_run.as_deref() {
-                let tracker = workflow_admission.tracker();
-                let query = tracker
-                    .lock()
-                    .get(run_id)
-                    .map(|run| run.objective.clone())
-                    .unwrap_or_default();
-                workflow_admission.cancel(run_id).await;
-                Some(super::workflow_run::deep_research_terminal_report(
-                    &query,
-                    &workflow::WorkflowOutcome::Cancelled,
-                    None,
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
 
         // Publish the new ownership identity before either admission lock is
         // released. The next foreground therefore captures exactly the
@@ -305,11 +322,7 @@ impl SessionActor {
                         .await;
                     }
                 }
-                BehaviorEffect::CancelDeepResearchRun => {
-                    if let Some(report) = cancelled_deep_research_report.as_deref() {
-                        self.send_host_turn_slash_command_output(report).await;
-                    }
-                }
+                BehaviorEffect::CancelDeepResearchRun => {}
                 BehaviorEffect::Select(_) => {}
             }
         }

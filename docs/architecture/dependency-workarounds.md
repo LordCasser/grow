@@ -54,7 +54,7 @@ the patch and vendored copy can be deleted.
 ## 3. `[patch.crates-io] nono` → `third_party/nono` (=0.53.0)
 
 **Why**: nono 0.54.0 through 0.71.0 require Rust 1.95; the workspace is pinned
-to 1.92.0 (`rust-toolchain.toml`). v0.53.0 is the newest compatible release.
+to 1.93.1 (`rust-toolchain.toml`). v0.53.0 is the newest compatible release.
 
 **Blocking evidence**: nono 0.54.0's declared `rust-version = "1.95"` (see
 `third_party/nono/Cargo.toml` VENDORING NOTES).

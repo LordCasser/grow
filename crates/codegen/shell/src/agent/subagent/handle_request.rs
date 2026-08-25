@@ -532,6 +532,7 @@ pub(crate) async fn run_shell_child(
                 effective_permission_mode: effective_permission_mode.clone(),
                 workflow_run_id: workflow_run_id.clone(),
                 goal_id: goal_id.clone(),
+                surface_completion: request.surface_completion,
                 child_cwd: child_session_info.cwd.clone(),
                 worktree_path: worktree_path
                     .as_ref()
@@ -646,6 +647,7 @@ pub(crate) async fn run_shell_child(
             .is_ok()
         {
             completion_data.mark_terminal_committed();
+            admit_completion_receipt_before_result(&request, &result, &mut completion_data).await;
         }
         return child_run_output(result, completion_data);
     }
@@ -703,6 +705,8 @@ pub(crate) async fn run_shell_child(
                     .is_ok()
                 {
                     completion_data.mark_terminal_committed();
+                    admit_completion_receipt_before_result(&request, &result, &mut completion_data)
+                        .await;
                 }
                 return child_run_output(result, completion_data);
             }
@@ -1081,7 +1085,8 @@ pub(crate) async fn run_shell_child(
                 .is_ok()
             {
                 completion_data.mark_terminal_committed();
-                admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
+                admit_completion_receipt_before_result(&request, &result, &mut completion_data)
+                    .await;
             }
             return child_run_output(result, completion_data);
         }
@@ -1120,7 +1125,7 @@ pub(crate) async fn run_shell_child(
             .is_ok()
         {
             completion_data.mark_terminal_committed();
-            admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
+            admit_completion_receipt_before_result(&request, &result, &mut completion_data).await;
         }
         return child_run_output(result, completion_data);
     }
@@ -1502,8 +1507,10 @@ pub(crate) async fn run_shell_child(
                     .collect();
                 if !reparented_task_ids.is_empty()
                     && let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref()
+                    && let Some(goal_id) = request.owner.goal_id()
                 {
-                    let _ = cmd_tx.send(SessionCommand::RecordGoalTurnTaskIds {
+                    let _ = cmd_tx.send(SessionCommand::RecordGoalOwnedTaskIds {
+                        goal_id: goal_id.to_owned(),
                         task_ids: reparented_task_ids,
                     });
                 }
@@ -1659,6 +1666,6 @@ pub(crate) async fn run_shell_child(
             "error": &result.error,
         })),
     );
-    admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
+    admit_completion_receipt_before_result(&request, &result, &mut completion_data).await;
     child_run_output(result, completion_data)
 }

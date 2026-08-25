@@ -456,10 +456,7 @@ fn session_rules_are_separate_from_the_system_head() {
         Some("<human_rules>\nsession rule <\\/human_rules>\n</human_rules>")
     );
     assert_eq!(
-        session_rules_from_meta(
-            serde_json::json!({ "rules": "  " }).as_object(),
-            None,
-        ),
+        session_rules_from_meta(serde_json::json!({ "rules": "  " }).as_object(), None,),
         None
     );
 }
@@ -1919,7 +1916,9 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         assert!(
             matches!(
                 observed.try_recv(),
-                Ok(FakeActorEvent::Command(TestSessionCommand::ResetPermissionState))
+                Ok(FakeActorEvent::Command(
+                    TestSessionCommand::ResetPermissionState
+                ))
             ),
             "the resident session's receiver must observe the delivered command"
         );
@@ -2395,5 +2394,3 @@ mod soft_default_settings_emit {
             .await;
     }
 }
-#[cfg(feature = "dhat-heap")]
-mod dhat_soak;

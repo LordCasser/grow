@@ -1555,8 +1555,8 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     );
     assert_eq!(agent.session.plan_mode_pending, Some(true));
 }
-/// The deferred plan `BehaviorId` is emitted (and cleared) once the
-/// session exists, mirroring the deferred model switch.
+/// The deferred plan `BehaviorId` is emitted once the session exists and stays
+/// as the first-prompt admission token until the authoritative mode update.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_deferred_plan_mode_applied_on_session_created() {
@@ -1577,9 +1577,10 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
         }),
         &mut app,
     );
-    assert!(
-        app.agents[&id].session.deferred_session_mode.is_none(),
-        "deferred mode must be consumed"
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan),
+        "deferred mode must remain until CurrentModeUpdate applies it"
     );
     assert!(
         effects
@@ -1587,6 +1588,48 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
             .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. } if *s == session_id)),
         "SessionCreated must emit SetSessionMode for the deferred plan mode"
     );
+}
+
+/// A Dashboard dispatch carries both a staged Behavior and its first prompt.
+/// The prompt must stay queued until the authoritative CurrentModeUpdate
+/// releases it; sibling SendPrompt/SetSessionMode tasks race at the ACP seam.
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_deferred_behavior_parks_first_prompt_until_mode_applies() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id: acp::SessionId = "new-session".into();
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.session_id = None;
+    agent.session.enqueue_prompt("plan this first".into());
+    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: id,
+            session_id,
+            models: None,
+        }),
+        &mut app,
+    );
+
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SetSessionMode { mode_id, .. } if mode_id.0.as_ref() == "plan"
+    )));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SendPrompt { .. }
+            | Effect::SendPromptBlocks { .. }
+            | Effect::SetModeThenPrompt { .. }
+    )));
+    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan),
+        "the parked prompt and its admission target must remain coupled"
+    );
+    assert!(app.agents[&id].session.current_prompt_id.is_none());
 }
 /// Any non-empty prompt — even a single character — dispatches a
 /// new session (the old 4-char floor was relaxed to 1 char).

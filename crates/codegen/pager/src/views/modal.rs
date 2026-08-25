@@ -194,7 +194,7 @@ impl GoalInterruptChoice {
     }
 }
 
-/// State of the Goal interrupt panel (distinct from the Legacy
+/// State of the Goal interrupt panel (distinct from the non-Goal
 /// [`CancelTurnViewState`] — the two panels have different choices, labels,
 /// and Esc semantics and must never share a submission path).
 pub struct GoalInterruptViewState {
@@ -1002,7 +1002,7 @@ pub fn render_cancel_turn_panel(
         crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
     }
 }
-/// Render the Goal interrupt panel. Unlike the Legacy cancel-turn panel this
+/// Render the Goal interrupt panel. Unlike the non-Goal cancel-turn panel this
 /// one always ASKS (no silent default), its choices cover
 /// {pause goal, stop turn, stop subagents} explicitly, and Esc dismisses
 /// without any effect.
@@ -1646,10 +1646,10 @@ mod doc_picker_tip_tests {
             7,
             "choices are capped at 3 rows"
         );
-        // Tiny screens: cap at 33%..80% like the legacy cancel panel.
+        // Tiny screens: cap at 33%..80% like the non-Goal cancel panel.
         assert_eq!(goal_interrupt_panel_height(3, 10), 6);
         assert_eq!(goal_interrupt_panel_height(3, 6), 4);
-        // The legacy panel keeps its fixed 4-option height.
+        // The non-Goal panel keeps its fixed 4-option height.
         assert_eq!(cancel_turn_panel_height(40), 9);
     }
 }

@@ -353,10 +353,7 @@ impl BehaviorCoordinator {
             Some("Goal behavior is exclusive until the Goal completes or is cleared.".to_string())
         } else if let Some(reason) = facts.unavailable_reason.clone() {
             Some(reason)
-        } else if source != BehaviorId::Workflow
-            && target.owns_special_runtime()
-            && facts.public_workflow_active
-        {
+        } else if target.owns_special_runtime() && facts.public_workflow_active {
             Some(format!(
                 "{} behavior is unavailable while a public Workflow run is active; wait for it or stop it explicitly.",
                 target.display_label()
@@ -947,6 +944,30 @@ mod tests {
                 std::time::Duration::from_secs(8),
             );
             assert!(matches!(decision.outcome, BehaviorChangeOutcome::Applied));
+        }
+    }
+
+    #[test]
+    fn active_public_workflow_cannot_enter_another_special_runtime() {
+        for target in [BehaviorId::Plan, BehaviorId::Goal, BehaviorId::DeepResearch] {
+            let mut controller = controller();
+            controller.select_behavior(BehaviorId::Workflow);
+            let decision = controller.decide_switch(
+                target,
+                BehaviorSwitchFacts {
+                    public_workflow_active: true,
+                    source_owned_work_active: true,
+                    ..BehaviorSwitchFacts::default()
+                },
+                std::time::Duration::from_secs(8),
+            );
+
+            assert!(matches!(
+                decision.outcome,
+                BehaviorChangeOutcome::Rejected { .. }
+            ));
+            assert_eq!(controller.behavior(), BehaviorId::Workflow);
+            assert!(controller.pending_switch().is_none());
         }
     }
 

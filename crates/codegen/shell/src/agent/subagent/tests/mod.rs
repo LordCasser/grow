@@ -322,8 +322,44 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         cancel_token: CancellationToken::new(),
     }
 }
-#[test]
-fn background_subagent_completion_emits_one_durable_receipt() {
+async fn admit_test_completion_receipt(
+    request: &SubagentRequest,
+    result: &SubagentResult,
+    completion_data: &mut ShellCompletionData,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    expected_id: &str,
+) -> String {
+    let body = {
+        let admission = admit_completion_receipt_before_result(request, result, completion_data);
+        tokio::pin!(admission);
+        let command = tokio::select! {
+            command = cmd_rx.recv() => command.expect("completion producer command"),
+            () = &mut admission => panic!("terminal result outran receipt admission"),
+        };
+        let SessionCommand::ReceiveNotification {
+            source,
+            body,
+            respond_to: Some(respond_to),
+            ..
+        } = command
+        else {
+            panic!("expected acknowledged completion receipt");
+        };
+        assert!(matches!(
+            source,
+            chat_state::NotificationSource::SubagentCompleted { subagent_id, .. }
+                if subagent_id == expected_id
+        ));
+        respond_to.send(Ok("receipt-1".into())).unwrap();
+        admission.await;
+        body
+    };
+    assert!(completion_data.completion_receipt_admitted);
+    body
+}
+
+#[tokio::test]
+async fn background_subagent_completion_emits_one_acknowledged_durable_receipt() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     ctx.parent_cmd_tx = Some(cmd_tx);
@@ -336,6 +372,15 @@ fn background_subagent_completion_emits_one_durable_receipt() {
     };
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.mark_terminal_committed();
+    let body = admit_test_completion_receipt(
+        &request,
+        &result,
+        &mut completion_data,
+        &mut cmd_rx,
+        "sa-1",
+    )
+    .await;
+    assert!(body.contains("sa-1"));
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     present_child_completion(
         ChildCompletion {
@@ -352,17 +397,6 @@ fn background_subagent_completion_emits_one_durable_receipt() {
         },
         &gateway,
     );
-    match cmd_rx.try_recv().expect("expected durable receipt") {
-        SessionCommand::ReceiveNotification { source, body, .. } => {
-            assert!(matches!(
-                source,
-                chat_state::NotificationSource::SubagentCompleted { subagent_id }
-                    if subagent_id == "sa-1"
-            ));
-            assert!(body.contains("sa-1"));
-        }
-        _ => panic!("expected SessionCommand::ReceiveNotification"),
-    }
     assert!(matches!(
         cmd_rx.try_recv(),
         Ok(SessionCommand::GrowSessionNotification { .. })
@@ -370,27 +404,38 @@ fn background_subagent_completion_emits_one_durable_receipt() {
     assert!(cmd_rx.try_recv().is_err());
 }
 
-#[test]
-fn loop_completion_uses_the_same_single_durable_receipt() {
+#[tokio::test]
+async fn loop_completion_uses_the_same_acknowledged_durable_receipt() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     ctx.parent_cmd_tx = Some(cmd_tx);
     let mut request = auto_wake_test_request("loop-child");
     request.description = "loop: check deploy (every 5 minutes)".into();
     request.runtime_overrides.loop_task_id = Some("loop-1".into());
+    let result = SubagentResult {
+        success: true,
+        output: Arc::from("deploy is healthy"),
+        subagent_id: "loop-child".into(),
+        child_session_id: "loop-child".into(),
+        ..Default::default()
+    };
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.mark_terminal_committed();
+    let body = admit_test_completion_receipt(
+        &request,
+        &result,
+        &mut completion_data,
+        &mut cmd_rx,
+        "loop-child",
+    )
+    .await;
+    assert!(body.contains("loop: check deploy"));
+    assert!(body.contains("loop-child"));
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     present_child_completion(
         ChildCompletion {
             request,
-            result: SubagentResult {
-                success: true,
-                output: Arc::from("deploy is healthy"),
-                subagent_id: "loop-child".into(),
-                child_session_id: "loop-child".into(),
-                ..Default::default()
-            },
+            result,
             completion_data,
             disposition: CompletionDisposition {
                 foreground_delivered: false,
@@ -402,18 +447,6 @@ fn loop_completion_uses_the_same_single_durable_receipt() {
         },
         &gateway,
     );
-    match cmd_rx.try_recv().expect("expected loop completion receipt") {
-        SessionCommand::ReceiveNotification { source, body, .. } => {
-            assert!(matches!(
-                source,
-                chat_state::NotificationSource::SubagentCompleted { subagent_id }
-                    if subagent_id == "loop-child"
-            ));
-            assert!(body.contains("loop: check deploy"));
-            assert!(body.contains("loop-child"));
-        }
-        _ => panic!("expected SessionCommand::ReceiveNotification"),
-    }
     assert!(matches!(
         cmd_rx.try_recv(),
         Ok(SessionCommand::GrowSessionNotification { .. })
@@ -421,25 +454,35 @@ fn loop_completion_uses_the_same_single_durable_receipt() {
     assert!(cmd_rx.try_recv().is_err());
 }
 
-#[test]
-fn goal_steering_race_still_emits_the_single_receipt() {
+#[tokio::test]
+async fn goal_steering_race_still_emits_the_single_acknowledged_receipt() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     ctx.parent_cmd_tx = Some(cmd_tx);
     ctx.goal_loop_active
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    let request = auto_wake_test_request("sa-race");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "sa-race".into(),
+        child_session_id: "sa-race".into(),
+        ..Default::default()
+    };
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.mark_terminal_committed();
+    admit_test_completion_receipt(
+        &request,
+        &result,
+        &mut completion_data,
+        &mut cmd_rx,
+        "sa-race",
+    )
+    .await;
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     present_child_completion(
         ChildCompletion {
-            request: auto_wake_test_request("sa-race"),
-            result: SubagentResult {
-            success: true,
-                subagent_id: "sa-race".into(),
-                child_session_id: "sa-race".into(),
-                ..Default::default()
-            },
+            request,
+            result,
             completion_data,
             disposition: CompletionDisposition {
                 foreground_delivered: false,
@@ -451,13 +494,6 @@ fn goal_steering_race_still_emits_the_single_receipt() {
         },
         &gateway,
     );
-    assert!(matches!(
-        cmd_rx.try_recv(),
-        Ok(SessionCommand::ReceiveNotification {
-            source: chat_state::NotificationSource::SubagentCompleted { subagent_id },
-            ..
-        }) if subagent_id == "sa-race"
-    ));
     assert!(matches!(
         cmd_rx.try_recv(),
         Ok(SessionCommand::GrowSessionNotification { .. })
@@ -481,7 +517,8 @@ async fn goal_waiter_cannot_outrun_receipt_admission_or_emit_it_twice() {
     completion_data.mark_terminal_committed();
 
     {
-        let admission = admit_goal_completion_receipt(&request, &result, &mut completion_data);
+        let admission =
+            admit_completion_receipt_before_result(&request, &result, &mut completion_data);
         tokio::pin!(admission);
         let command = tokio::select! {
             command = cmd_rx.recv() => command.expect("receipt command"),
@@ -515,6 +552,87 @@ async fn goal_waiter_cannot_outrun_receipt_admission_or_emit_it_twice() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::GrowSessionNotification { .. })
     ));
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn completion_receipt_retries_a_dropped_ack_with_the_same_identity() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let delivery = tokio::spawn(async move {
+        admit_subagent_completion_receipt(
+            &cmd_tx,
+            "retry-child",
+            &SubagentOwner::Goal {
+                goal_id: "goal-1".into(),
+            },
+            "done".into(),
+        )
+        .await
+    });
+
+    let SessionCommand::ReceiveNotification {
+        source: first_source,
+        source_version: first_version,
+        respond_to: Some(first_ack),
+        ..
+    } = cmd_rx.recv().await.expect("first receipt attempt")
+    else {
+        panic!("expected acknowledged receipt");
+    };
+    drop(first_ack);
+
+    let SessionCommand::ReceiveNotification {
+        source: retry_source,
+        source_version: retry_version,
+        respond_to: Some(retry_ack),
+        ..
+    } = cmd_rx.recv().await.expect("retried receipt")
+    else {
+        panic!("expected acknowledged receipt retry");
+    };
+    assert!(matches!(
+        &first_source,
+        chat_state::NotificationSource::SubagentCompleted {
+            owner: chat_state::NotificationOwner::Goal { goal_id },
+            ..
+        } if goal_id == "goal-1"
+    ));
+    assert_eq!(retry_source, first_source);
+    assert_eq!(retry_version, first_version);
+    retry_ack.send(Ok("receipt-1".into())).unwrap();
+    assert!(delivery.await.unwrap());
+}
+
+#[tokio::test]
+async fn completion_receipt_exhaustion_releases_the_terminal_result() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let delivery = tokio::spawn(async move {
+        admit_subagent_completion_receipt(
+            &cmd_tx,
+            "failed-child",
+            &SubagentOwner::Task,
+            "done".into(),
+        )
+        .await
+    });
+
+    for _ in 0..3 {
+        let SessionCommand::ReceiveNotification {
+            respond_to: Some(respond_to),
+            ..
+        } = cmd_rx.recv().await.expect("bounded receipt attempt")
+        else {
+            panic!("expected acknowledged receipt");
+        };
+        respond_to.send(Err("disk unavailable".into())).unwrap();
+    }
+
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(1), delivery)
+            .await
+            .expect("terminal result must be released after bounded retries")
+            .unwrap()
+    );
     assert!(cmd_rx.try_recv().is_err());
 }
 #[test]
@@ -612,6 +730,7 @@ fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::Suba
         effective_permission_mode: None,
         workflow_run_id: None,
         goal_id: None,
+        surface_completion: true,
         child_cwd: "/workspace".into(),
         worktree_path: None,
         effective_model_id: "model".into(),
@@ -847,6 +966,138 @@ async fn recovery_parent(
     .await
     .unwrap();
     (handle, receiver)
+}
+
+#[tokio::test]
+async fn recovery_repairs_receipt_after_durable_parent_terminal() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-receipt-{}", uuid::Uuid::now_v7());
+    let mut spawn = recovery_spawn(
+        "sa-receipt",
+        &format!("child-receipt-{}", uuid::Uuid::now_v7()),
+    );
+    spawn.goal_id = Some("goal-receipt".into());
+    let (parent, _persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
+    let terminal = chat_state::SubagentTerminalEvent {
+        subagent_id: spawn.subagent_id.clone(),
+        child_session_id: spawn.child_session_id.clone(),
+        outcome: chat_state::SubagentOutcome::Failed,
+        duration_ms: 42,
+        tool_calls: 3,
+        turns: 2,
+        tokens_used: 100,
+        error: Some("child failed".into()),
+        result_ref: None,
+        snapshot_ref: None,
+    };
+    parent
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(terminal),
+        ))
+        .await
+        .unwrap();
+
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let (backend_tx, _backend_rx) = mpsc::unbounded_channel();
+    let backend =
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+            backend_tx,
+            parent_id.clone(),
+        );
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    let task = tokio::spawn({
+        let parent = parent.clone();
+        let parent_id = parent_id.clone();
+        async move {
+            reconcile_orphaned_subagents_with_backend(
+                &crate::session::storage::SubagentProjectionState::default(),
+                false,
+                &backend,
+                &parent_id,
+                &parent,
+                &gateway,
+                Some(&cmd_tx),
+            )
+            .await;
+        }
+    });
+
+    let SessionCommand::ReceiveNotification {
+        source,
+        source_version,
+        body,
+        respond_to: Some(respond_to),
+        ..
+    } = cmd_rx.recv().await.expect("recovery receipt command")
+    else {
+        panic!("expected acknowledged recovery receipt");
+    };
+    assert!(matches!(
+        &source,
+        chat_state::NotificationSource::SubagentCompleted {
+            subagent_id,
+            owner: chat_state::NotificationOwner::Goal { goal_id },
+        } if subagent_id == "sa-receipt" && goal_id == "goal-receipt"
+    ));
+    let receipt = parent
+        .receive_notification_durably(
+            parent_id.clone(),
+            source.clone(),
+            source_version.clone(),
+            chat_state::NotificationPayloadRef {
+                blake3: "a".repeat(64),
+                bytes: body.len() as u64,
+            },
+        )
+        .await
+        .unwrap();
+    let receipt_id = match receipt.kind {
+        chat_state::TimelineEventKind::Notification(
+            chat_state::NotificationEvent::Received { id, .. },
+        ) => id,
+        other => panic!("expected notification receipt, got {other:?}"),
+    };
+    respond_to.send(Ok(receipt_id.clone())).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        parent
+            .received_notification_id(source, source_version)
+            .await
+            .flatten()
+            .as_deref(),
+        Some(receipt_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn recovery_preserves_internal_child_no_surface_decision() {
+    let mut spawn = recovery_spawn("internal-child", "internal-session");
+    spawn.surface_completion = false;
+    let terminal = chat_state::SubagentTerminalEvent {
+        subagent_id: spawn.subagent_id.clone(),
+        child_session_id: spawn.child_session_id.clone(),
+        outcome: chat_state::SubagentOutcome::Completed,
+        duration_ms: 1,
+        tool_calls: 0,
+        turns: 1,
+        tokens_used: 1,
+        error: None,
+        result_ref: None,
+        snapshot_ref: None,
+    };
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+    repair_subagent_completion_receipt(
+        "parent",
+        &chat_state::ChatStateHandle::noop(),
+        Some(&cmd_tx),
+        chat_state::EventSeq::new(1),
+        &spawn,
+        &terminal,
+    )
+    .await;
+
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 #[tokio::test]

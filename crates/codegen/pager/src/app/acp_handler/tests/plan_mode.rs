@@ -424,6 +424,7 @@
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
         agent.session.plan_mode_active = true;
         agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("held until selection repeats".into());
 
         let changed = handle(
@@ -438,6 +439,10 @@
         let agent = &app.agents[&AgentId(0)];
         assert!(agent.session.state.is_idle());
         assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert_eq!(
+            agent.session.deferred_session_mode,
+            Some(tools::types::BehaviorId::Normal)
+        );
         assert!(app.pending_effects.is_empty());
     }
 
@@ -448,6 +453,7 @@
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
         agent.session.plan_mode_active = true;
         agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("run after selection applies".into());
 
         let changed = handle(
@@ -461,6 +467,7 @@
         assert!(changed);
         let agent = &app.agents[&AgentId(0)];
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(agent.session.deferred_session_mode.is_none());
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(
             agent.session.state,
@@ -469,6 +476,41 @@
         assert!(matches!(
             app.pending_effects.as_slice(),
             [Effect::SendPrompt { text, .. }] if text == "run after selection applies"
+        ));
+    }
+
+    /// Session creation can report its initial Normal identity before the
+    /// staged Dashboard Behavior RPC applies. That update must not race the
+    /// first prompt out of the admission queue.
+    #[test]
+    fn initial_mode_update_does_not_release_a_different_deferred_behavior() {
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+        agent.session.enqueue_prompt("must run as plan".into());
+
+        assert!(handle(
+            mode_update_message("s1", make_current_mode_update("normal")),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert_eq!(
+            agent.session.deferred_session_mode,
+            Some(tools::types::BehaviorId::Plan)
+        );
+        assert!(app.pending_effects.is_empty());
+
+        assert!(handle(
+            mode_update_message("s1", make_current_mode_update("plan")),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(agent.session.deferred_session_mode.is_none());
+        assert!(matches!(
+            app.pending_effects.as_slice(),
+            [Effect::SendPrompt { text, .. }] if text == "must run as plan"
         ));
     }
 

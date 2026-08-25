@@ -127,6 +127,14 @@ pub struct BashExecutionBackgrounded {
     /// while tool_call_id was assigned when the tool was invoked.
     pub task_id: String,
 
+    /// Immutable Goal owner captured at admission. The shell bridge binds
+    /// this before a fast terminal completion can be delivered.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub goal_id: Option<String>,
+
     /// When `Some`, this backgrounded task is a **monitor** (not an ordinary
     /// bash command), and the string is the monitor's human-readable
     /// description (e.g. "errors in deploy.log"). Consumers (the pager) use

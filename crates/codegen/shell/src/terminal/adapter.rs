@@ -40,6 +40,7 @@ pub(super) struct TrackedTask {
     explicitly_killed: bool,
     kind: TaskKind,
     owner_session_id: Option<String>,
+    goal_id: Option<String>,
     description: Option<String>,
     output_byte_limit: usize,
 }
@@ -63,6 +64,7 @@ impl Default for TrackedTask {
             explicitly_killed: false,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
             output_byte_limit: crate::terminal::DEFAULT_OUTPUT_BYTE_LIMIT,
         }
@@ -100,6 +102,7 @@ impl TrackedTask {
             explicitly_killed: self.explicitly_killed,
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
+            goal_id: self.goal_id.clone(),
             description: self.description.clone(),
             // ACP tracked tasks are only registered via run_background.
             is_backgrounded: true,
@@ -274,6 +277,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                     output_file: output_file.clone(),
                     kind: request.kind,
                     owner_session_id: request.owner_session_id.clone(),
+                    goal_id: request.goal_id.clone(),
                     description,
                     output_byte_limit: request.output_byte_limit,
                     ..Default::default()

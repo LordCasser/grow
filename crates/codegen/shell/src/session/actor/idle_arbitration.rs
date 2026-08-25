@@ -142,6 +142,7 @@ mod idle_admission_tests {
                         chat_state::NotificationSource::TaskCompleted {
                             task_id: "outside-goal".into(),
                             task_kind: chat_state::NotificationTaskKind::Task,
+                            owner: chat_state::NotificationOwner::Session,
                         },
                         chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                         "independent task completed".into(),

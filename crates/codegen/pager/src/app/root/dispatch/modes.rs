@@ -110,6 +110,21 @@ pub(super) fn dispatch_set_behavior_mode(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    if agent.session.deferred_session_mode.is_some() && mode == agent.session.behavior_mode {
+        // A failed deferred admission left the first prompt parked. Picking
+        // the already-current Behavior is an explicit fallback decision,
+        // not an idempotent no-op: consume the admission token and send the
+        // queue under the identity the Shell already owns. Compare against
+        // the authoritative mode, never the optimistic pending target.
+        agent.session.deferred_session_mode = None;
+        agent.show_toast(&format!(
+            "Queued prompt will use {} Behavior",
+            mode.display_label()
+        ));
+        let drain = maybe_drain_queue(agent);
+        note_peek_page_flip(app, id, drain.page_flip_entry);
+        return drain.effects;
+    }
     if let Some(reason) = agent.behavior_unavailable_reason(mode) {
         agent.show_toast(&reason);
         return vec![];
@@ -134,6 +149,11 @@ pub(super) fn dispatch_set_behavior_mode(
             .clear(crate::tips::plan_nudge::PLAN_NUDGE_KEY);
     }
     agent.session.behavior_mode_pending = Some(mode);
+    if agent.session.deferred_session_mode.is_some() {
+        // Retrying or replacing a failed first-prompt admission keeps one
+        // authoritative target instead of creating a second queue mechanism.
+        agent.session.deferred_session_mode = Some(mode);
+    }
     agent.session.plan_mode_pending = Some(mode.is_plan());
     agent.show_mode_switch_banner(mode.display_label());
 

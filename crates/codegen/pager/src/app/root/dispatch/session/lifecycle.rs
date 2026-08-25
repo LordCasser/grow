@@ -718,12 +718,20 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
             agent.session.models = app.models.clone();
         }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
-        let deferred_mode = agent.session.deferred_session_mode.take();
+        // Keep the staged mode as the admission token until either an
+        // authoritative applied update consumes it or the user explicitly
+        // chooses the current Behavior as the fallback for the parked prompt.
+        let deferred_mode = agent.session.deferred_session_mode;
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
         }
-        let mut drain = if app.reconnect_pending {
+        // A staged Behavior owns the first-turn admission boundary. Keep the
+        // queued prompt parked until the Shell's authoritative
+        // CurrentModeUpdate reports that the transition applied; that update
+        // re-enters `maybe_drain_queue`. Sending the prompt and mode as sibling
+        // effects races the prompt into Normal Behavior.
+        let mut drain = if app.reconnect_pending || deferred_mode.is_some() {
             QueueDrain {
                 effects: vec![],
                 page_flip_entry: None,
@@ -815,12 +823,14 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
             worktree_path.display()
         )));
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
-        let deferred_mode = agent.session.deferred_session_mode.take();
+        let deferred_mode = agent.session.deferred_session_mode;
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
         }
-        let mut drain = if app.reconnect_pending {
+        // Mirror the ordinary SessionCreated barrier above. Worktree creation
+        // must not make its first prompt race the deferred Behavior RPC.
+        let mut drain = if app.reconnect_pending || deferred_mode.is_some() {
             QueueDrain {
                 effects: vec![],
                 page_flip_entry: None,

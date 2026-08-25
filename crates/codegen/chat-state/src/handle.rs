@@ -482,6 +482,24 @@ impl ChatStateHandle {
         .await
     }
 
+    /// Query the immutable receipt fold rather than the pending projection.
+    /// The outer `Option` reports actor availability; the inner value remains
+    /// present after the receipt is consumed.
+    pub async fn received_notification_id(
+        &self,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+    ) -> Option<Option<String>> {
+        self.query("GetReceivedNotificationId", |reply| {
+            ChatStateCommand::GetReceivedNotificationId {
+                source,
+                source_version,
+                reply,
+            }
+        })
+        .await
+    }
+
     /// Freeze the reference and materialize exactly that committed Surface in
     /// one actor command, so auxiliary assembly cannot race a parent append.
     pub async fn materialize_timeline(

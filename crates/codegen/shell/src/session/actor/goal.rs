@@ -83,7 +83,9 @@ impl SessionActor {
             created_at,
         )?;
         self.commit_goal_activation_or_restore(previous).await?;
-        self.goal_turn_task_ids.lock().clear();
+        // Task ownership lives from tool admission until its terminal receipt.
+        // A new Goal epoch must not steal or erase still-running work admitted
+        // by the previous Goal.
         self.subagent_token_records.lock().clear();
         self.goal_notify_sender()
             .emit_goal_updated(&self.goal_tracker.lock(), 0);
@@ -243,13 +245,26 @@ impl SessionActor {
         let Some(directive) = self.render_goal_continuation(tokens_used) else {
             return;
         };
-        self.start_goal_internal_turn(directive, completion_tx)
+        let Some(goal_id) = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .map(|goal| goal.goal_id.clone())
+        else {
+            return;
+        };
+        let (notification_ids, mut evidence) = self.goal_notification_evidence(&goal_id).await;
+        let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(directive))];
+        prompt_blocks.append(&mut evidence);
+        self.start_goal_internal_turn(goal_id, notification_ids, prompt_blocks, completion_tx)
             .await;
     }
 
     async fn start_goal_internal_turn(
         self: &std::sync::Arc<Self>,
-        directive: String,
+        expected_goal_id: String,
+        notification_ids: Vec<String>,
+        prompt_blocks: Vec<acp::ContentBlock>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         let mut state = self.state.lock().await;
@@ -262,6 +277,9 @@ impl SessionActor {
         }) else {
             return;
         };
+        if goal_id != expected_goal_id {
+            return;
+        }
         let prompt_id = uuid::Uuid::now_v7().to_string();
         let origin = crate::session::PromptOrigin::GoalContinuation { goal_id };
         self.broadcast_queue_changed_promoting(
@@ -280,9 +298,9 @@ impl SessionActor {
             self.clone(),
             prompt_id.clone(),
             origin.clone(),
-            Vec::new(),
+            notification_ids,
             crate::session::TurnKind::Internal,
-            vec![acp::ContentBlock::Text(acp::TextContent::new(directive))],
+            prompt_blocks,
             tool_types::BehaviorId::Goal,
             None,
             None,

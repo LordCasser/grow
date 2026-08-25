@@ -169,8 +169,15 @@ impl SessionActor {
             }
             let was_budget_limited =
                 tracker.status() == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
-            let updated = tracker.set_token_budget(Some(budget));
-            debug_assert!(updated);
+            if tracker
+                .snapshot()
+                .is_some_and(|goal| goal.token_budget == Some(budget))
+            {
+                return format!("Goal token budget is already {budget} tokens.");
+            }
+            if !tracker.set_token_budget(Some(budget)) {
+                return "Goal token budget must be a positive integer.".to_string();
+            }
             was_budget_limited
         };
         if let Some(previous) = previous
@@ -178,6 +185,9 @@ impl SessionActor {
         {
             return format!("Goal budget was not changed: {error}");
         }
+        let tokens_used = self.goal_tokens_used();
+        self.goal_notify_sender()
+            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
         if was_budget_limited {
             format!("User set current Goal budget to {budget} tokens. Restart it to continue.")
         } else {
@@ -1272,5 +1282,74 @@ mod out_of_band_goal_control_tests {
             None,
             "resume does not invalidate the running user turn"
         );
+    }
+
+    #[tokio::test]
+    async fn goal_budget_noop_is_explicit_and_success_projects_goal_updated() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the release".into(),
+                        Some(100),
+                        "2026-08-25T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                while gateway_rx.try_recv().is_ok() {}
+
+                let revision = actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .definition_revision;
+                assert_eq!(
+                    actor.update_goal_token_budget(Some(100)).await,
+                    "Goal token budget is already 100 tokens."
+                );
+                assert_eq!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .unwrap()
+                        .definition_revision,
+                    revision
+                );
+                assert_eq!(
+                    actor.update_goal_token_budget(Some(0)).await,
+                    "Goal token budget must be a positive integer."
+                );
+
+                assert_eq!(
+                    actor.update_goal_token_budget(Some(200)).await,
+                    "User set current goal budget to 200 tokens."
+                );
+                let mut projected = false;
+                while let Ok(message) = gateway_rx.try_recv() {
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        continue;
+                    };
+                    if args.request.method.as_ref() != "grow/session_notification" {
+                        continue;
+                    }
+                    let notification: crate::extensions::notification::SessionNotification =
+                        serde_json::from_str(args.request.params.get()).unwrap();
+                    projected |= matches!(
+                        notification.update,
+                        crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
+                    );
+                }
+                assert!(
+                    projected,
+                    "a durable budget mutation must refresh GoalUpdated"
+                );
+            })
+            .await;
     }
 }

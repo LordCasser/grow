@@ -5,9 +5,6 @@
     unreachable_code,
     dead_code
 )]
-#[cfg(all(test, feature = "dhat-heap"))]
-#[global_allocator]
-static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 pub(crate) use ::diagnostics::unified_log;
 pub use tracing_macros::{teprintln, timed, tprintln};
 pub mod active_sessions;

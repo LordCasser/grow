@@ -323,6 +323,14 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Vec<crate::PendingNotification>>,
     },
 
+    /// Resolve an immutable at-least-once receipt by producer identity,
+    /// including receipts that have already been consumed.
+    GetReceivedNotificationId {
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        reply: oneshot::Sender<Option<String>>,
+    },
+
     /// Atomically freeze a Timeline range and materialize its current Surface.
     MaterializeTimeline {
         timeline_id: String,
@@ -573,6 +581,16 @@ mod tests {
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetNotificationMeta { reply: tx };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::GetReceivedNotificationId {
+            source: crate::NotificationSource::WorkflowCompleted {
+                run_id: "workflow-1".into(),
+            },
+            source_version: crate::NotificationSourceVersion::Opaque {
+                value: "workflow-terminal-v1:0:complete".into(),
+            },
+            reply: tx,
+        };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::MaterializeTimeline {

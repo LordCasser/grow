@@ -324,6 +324,29 @@ async fn download_with_progress_fails_on_http_error() {
 }
 
 #[tokio::test]
+async fn download_with_progress_rejects_oversized_release_before_creating_a_temp_file() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/grow"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-length", (512_u64 * 1024 * 1024 + 1).to_string()),
+        )
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("grow");
+    let error = download_with_progress(&format!("{}/grow", server.uri()), &dest)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("outside the allowed range"));
+    assert!(!dest.exists());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn download_with_progress_atomic_rename() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

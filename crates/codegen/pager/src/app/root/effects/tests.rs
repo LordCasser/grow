@@ -2,6 +2,17 @@
 use super::*;
 
 #[test]
+fn trajectory_ready_line_yields_the_exact_url() {
+    assert_eq!(
+        trajectory_ready_url(
+            "Trajectory for 01a03699-7b1b-7bf0-9fb2-8e0ae69c2c39: http://127.0.0.1:52525/token/"
+        ),
+        Some("http://127.0.0.1:52525/token/")
+    );
+    assert_eq!(trajectory_ready_url("startup failed: session missing"), None);
+}
+
+#[test]
 fn set_mode_then_prompt_only_accepts_an_applied_behavior_change() {
     let applied = serde_json::json!({
         "grow/behaviorChange": { "status": "applied" }

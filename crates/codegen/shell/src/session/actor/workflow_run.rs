@@ -3,61 +3,78 @@ use std::sync::Arc;
 
 use super::SessionActor;
 
+fn workflow_completion_source_version(
+    state: &crate::session::workflow::tracker::WorkflowRunState,
+) -> chat_state::NotificationSourceVersion {
+    chat_state::NotificationSourceVersion::Opaque {
+        value: format!(
+            "workflow-terminal-v1:{}:{}",
+            state.execution_epoch,
+            state.status.as_str()
+        ),
+    }
+}
+
 impl SessionActor {
-    pub(super) async fn finish_restored_deep_research_if_terminal(&self) {
-        use crate::session::workflow::tracker::WorkflowRunStatus;
+    /// Resolve Workflow delivery against the full immutable receipt fold, not
+    /// the pending inbox. Returning `None` means this exact terminal boundary
+    /// was already admitted (and may already be consumed), so callers must not
+    /// regenerate configuration-sensitive payload text.
+    async fn unresolved_workflow_completion_identity(
+        &self,
+        state: &crate::session::workflow::tracker::WorkflowRunState,
+    ) -> Result<
+        Option<(
+            chat_state::NotificationSource,
+            chat_state::NotificationSourceVersion,
+        )>,
+        String,
+    > {
+        let source = chat_state::NotificationSource::WorkflowCompleted {
+            run_id: state.run_id.clone(),
+        };
+        let source_version = workflow_completion_source_version(state);
+        match self
+            .chat_state_handle
+            .received_notification_id(source.clone(), source_version.clone())
+            .await
+        {
+            Some(Some(_)) => Ok(None),
+            Some(None) => Ok(Some((source, source_version))),
+            None => Err("Workflow notification receipt fold is unavailable".into()),
+        }
+    }
+
+    pub(super) async fn reconcile_restored_public_workflow_notifications(
+        &self,
+    ) -> Result<(), String> {
+        let states = self.workflow_tracker().await.lock().list();
+        for state in states
+            .iter()
+            .filter(|state| !state.private && state.status.is_completion_reportable())
+        {
+            self.admit_public_workflow_completion(state).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn finish_restored_deep_research_if_terminal(&self) -> Result<(), String> {
         let Some(run_id) = self
             .behavior
             .lock()
             .deep_research_run_id()
             .map(str::to_owned)
         else {
-            return;
+            return Ok(());
         };
         let state = self.workflow_tracker().await.lock().get(&run_id);
         let Some(state) = state.filter(|state| state.status.is_completion_reportable()) else {
-            return;
+            return Ok(());
         };
-        let outcome = match state.status {
-            WorkflowRunStatus::Complete => {
-                let summary = state.result_summary.unwrap_or_else(|| {
-                    "The process ended after completion, but no persisted report body was available."
-                        .to_string()
-                });
-                let report = summary
-                    .split_once("\n\n_Full report: ")
-                    .map_or(summary.as_str(), |(report, _)| report)
-                    .to_string();
-                let status = if report.contains("**Status: Partial**") {
-                    "partial"
-                } else {
-                    "verified"
-                };
-                workflow::WorkflowOutcome::Completed {
-                    result: serde_json::json!({
-                        "report": report,
-                        "status": status,
-                        "path": "scratch/report.md",
-                    }),
-                }
-            }
-            WorkflowRunStatus::Cancelled => workflow::WorkflowOutcome::Cancelled,
-            WorkflowRunStatus::BudgetLimited => workflow::WorkflowOutcome::BudgetExceeded {
-                message: state
-                    .pause_message
-                    .unwrap_or_else(|| "The research agent budget was exhausted.".to_string()),
-            },
-            WorkflowRunStatus::Interrupted | WorkflowRunStatus::Failed => {
-                workflow::WorkflowOutcome::Failed {
-                    error: state.pause_message.unwrap_or_else(|| {
-                        "The process restarted before the research run reached a durable terminal report."
-                            .to_string()
-                    }),
-                }
-            }
-            _ => return,
+        let Some(outcome) = deep_research_outcome_from_state(&state) else {
+            return Ok(());
         };
-        self.finish_deep_research_run(&run_id, outcome).await;
+        self.finish_deep_research_run(&state, outcome).await
     }
 
     pub(crate) async fn launch_deep_research(
@@ -94,14 +111,14 @@ impl SessionActor {
             .lock()
             .attach_deep_research_run(run_id.clone())
         {
-            self.workflow_manager.lock().await.cancel(&run_id).await;
+            let _ = self.workflow_manager.lock().await.cancel(&run_id).await;
             return Err("Deep Research behavior changed before the run could start.".to_string());
         }
         let behavior = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
             self.behavior.lock().clear_deep_research_run();
-            self.workflow_manager.lock().await.cancel(&run_id).await;
+            let _ = self.workflow_manager.lock().await.cancel(&run_id).await;
             return Err(format!(
                 "Deep Research was cancelled because its ownership could not be persisted: {error}"
             ));
@@ -128,43 +145,73 @@ impl SessionActor {
         std::fs::canonicalize(path).ok()
     }
 
+    pub(super) async fn admit_deep_research_report(
+        &self,
+        state: &crate::session::workflow::tracker::WorkflowRunState,
+        outcome: workflow::WorkflowOutcome,
+    ) -> Result<(), String> {
+        if matches!(outcome, workflow::WorkflowOutcome::Paused { .. }) {
+            return Ok(());
+        }
+        let Some((source, source_version)) =
+            self.unresolved_workflow_completion_identity(state).await?
+        else {
+            return Ok(());
+        };
+        let artifact_path = self.deep_research_report_artifact_path(&state.run_id);
+        let report =
+            deep_research_terminal_report(&state.objective, &outcome, artifact_path.as_deref());
+        self.receive_notification(source, source_version, report)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn admit_public_workflow_completion(
+        &self,
+        state: &crate::session::workflow::tracker::WorkflowRunState,
+    ) -> Result<(), String> {
+        if state.private || !state.status.is_completion_reportable() {
+            return Ok(());
+        }
+        let Some((source, source_version)) =
+            self.unresolved_workflow_completion_identity(state).await?
+        else {
+            return Ok(());
+        };
+        let prompt_text = self.workflow_completion_notification(state).await;
+        self.receive_notification(
+            source,
+            // Execution epoch plus terminal status is the stable identity of
+            // this boundary. A resumable Ended boundary may be followed by a
+            // Closed boundary in the same epoch; manifest revision cannot be
+            // used because non-lifecycle projections also advance it.
+            source_version,
+            prompt_text,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub(super) async fn finish_deep_research_run(
         &self,
-        run_id: &str,
+        state: &crate::session::workflow::tracker::WorkflowRunState,
         outcome: workflow::WorkflowOutcome,
-    ) {
+    ) -> Result<(), String> {
         if matches!(outcome, workflow::WorkflowOutcome::Paused { .. }) {
-            return;
+            return Ok(());
         }
-        let owned = self.behavior.lock().deep_research_run_id() == Some(run_id);
+        self.admit_deep_research_report(state, outcome).await?;
+        let owned = self.behavior.lock().deep_research_run_id() == Some(state.run_id.as_str());
         if !owned {
-            return;
+            return Ok(());
         }
-        let query = self
-            .workflow_tracker()
-            .await
-            .lock()
-            .get(run_id)
-            .map(|run| run.objective.clone())
-            .unwrap_or_default();
-        let artifact_path = self.deep_research_report_artifact_path(run_id);
-        let report = deep_research_terminal_report(&query, &outcome, artifact_path.as_deref());
         let goal = self.goal_tracker.lock().snapshot().cloned();
-        if self
-            .persist_behavior_transition_durably(
-                crate::session::behavior::BehaviorSnapshot::normal(),
-                goal,
-            )
-            .await
-            .is_err()
-        {
-            self.send_host_turn_slash_command_output(&format!(
-                "{report}\n\nThe terminal report is available, but the Behavior transition could not be persisted. Select another Behavior to retry."
-            ))
-            .await;
-            return;
-        }
-        self.send_host_turn_slash_command_output(&report).await;
+        self.persist_behavior_transition_durably(
+            crate::session::behavior::BehaviorSnapshot::normal(),
+            goal,
+        )
+        .await
+        .map_err(|error| format!("Deep Research Behavior transition was not durable: {error}"))?;
         {
             let mut behavior = self.behavior.lock();
             behavior.clear_deep_research_run();
@@ -174,21 +221,7 @@ impl SessionActor {
             tools::types::BehaviorId::Normal.as_id(),
         ));
         self.send_available_commands_update().await;
-    }
-
-    pub(crate) async fn cancel_deep_research_with_report(&self, run_id: &str) {
-        let query = self
-            .workflow_tracker()
-            .await
-            .lock()
-            .get(run_id)
-            .map(|run| run.objective.clone())
-            .unwrap_or_default();
-        self.workflow_manager.lock().await.cancel(run_id).await;
-        self.behavior.lock().clear_deep_research_run();
-        let report =
-            deep_research_terminal_report(&query, &workflow::WorkflowOutcome::Cancelled, None);
-        self.send_host_turn_slash_command_output(&report).await;
+        Ok(())
     }
     pub(crate) fn named_workflow_snapshot(
         &self,
@@ -420,8 +453,8 @@ impl SessionActor {
                 if status != WorkflowRunStatus::Active {
                     return format!("Run '{name}' is not active (status: {}).", status.as_str());
                 }
-                if !manager.pause(&full_id) {
-                    return format!("Run '{name}' is no longer active.");
+                if let Err(error) = manager.pause(&full_id).await {
+                    return format!("Could not pause '{name}': {error}");
                 }
                 format!("Paused {name}. /workflow-run resume{id_suffix} to continue.")
             }
@@ -434,8 +467,8 @@ impl SessionActor {
                 }
                 // Private Deep Research runs were filtered out above and are
                 // controlled only by the Deep Research Behavior owner.
-                if !manager.cancel(&full_id).await {
-                    return format!("Run '{name}' is already finished.");
+                if let Err(error) = manager.cancel(&full_id).await {
+                    return format!("Could not stop '{name}': {error}");
                 }
                 format!("Stopped {name}.")
             }
@@ -618,6 +651,57 @@ impl SessionActor {
     }
 }
 
+pub(super) fn deep_research_outcome_from_state(
+    state: &crate::session::workflow::tracker::WorkflowRunState,
+) -> Option<workflow::WorkflowOutcome> {
+    use crate::session::workflow::tracker::WorkflowRunStatus;
+    Some(match state.status {
+        WorkflowRunStatus::Complete => {
+            let summary = state.result_summary.clone().unwrap_or_else(|| {
+                "The process ended after completion, but no persisted report body was available."
+                    .to_string()
+            });
+            let report = summary
+                .split_once("\n\n_Full report: ")
+                .map_or(summary.as_str(), |(report, _)| report)
+                .to_string();
+            let status = if report.contains("**Status: Partial**") {
+                "partial"
+            } else {
+                "verified"
+            };
+            workflow::WorkflowOutcome::Completed {
+                result: serde_json::json!({
+                    "report": report,
+                    "status": status,
+                    "path": "scratch/report.md",
+                }),
+            }
+        }
+        WorkflowRunStatus::Cancelled => workflow::WorkflowOutcome::Cancelled,
+        WorkflowRunStatus::BudgetLimited => workflow::WorkflowOutcome::BudgetExceeded {
+            message: state
+                .pause_message
+                .clone()
+                .unwrap_or_else(|| "The research agent budget was exhausted.".to_string()),
+        },
+        WorkflowRunStatus::Interrupted | WorkflowRunStatus::Failed => {
+            workflow::WorkflowOutcome::Failed {
+                error: state.pause_message.clone().unwrap_or_else(|| {
+                    "The process restarted before the research run reached a durable terminal report."
+                        .to_string()
+                }),
+            }
+        }
+        WorkflowRunStatus::Active
+        | WorkflowRunStatus::UserPaused
+        | WorkflowRunStatus::BackOffPaused
+        | WorkflowRunStatus::NoProgressPaused
+        | WorkflowRunStatus::InfraPaused
+        | WorkflowRunStatus::Blocked => return None,
+    })
+}
+
 pub(super) fn deep_research_terminal_report(
     query: &str,
     outcome: &workflow::WorkflowOutcome,
@@ -746,8 +830,10 @@ fn narrow_run_matches(mut all: Vec<RunMatch>, selector: &str, op: &str) -> Vec<R
 
 #[cfg(test)]
 mod run_match_tests {
-    use super::{deep_research_terminal_report, narrow_run_matches};
-    use crate::session::workflow::tracker::WorkflowRunStatus;
+    use super::{
+        deep_research_terminal_report, narrow_run_matches, workflow_completion_source_version,
+    };
+    use crate::session::workflow::tracker::{WorkflowRunStatus, WorkflowTracker};
 
     fn run(id: &str, name: &str, status: WorkflowRunStatus) -> super::RunMatch {
         (id.to_string(), status, name.to_string())
@@ -762,6 +848,81 @@ mod run_match_tests {
         let picked = narrow_run_matches(all, "deep-research", "stop");
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].2, "deep-research");
+    }
+
+    #[test]
+    fn workflow_completion_retry_identity_ignores_manifest_projection_revisions() {
+        let mut tracker = WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "wf-replay".into(),
+            "replay".into(),
+            "verify restore".into(),
+            Vec::new(),
+            None,
+            None,
+        );
+        let first = workflow_completion_source_version(&state);
+        state.revision = state.revision.saturating_add(7);
+        assert_eq!(workflow_completion_source_version(&state), first);
+    }
+
+    #[tokio::test]
+    async fn restored_consumed_workflow_receipt_does_not_regenerate_payload() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let mut tracker = WorkflowTracker::default();
+                let mut state = tracker.start_run(
+                    "wf-consumed".into(),
+                    "historical".into(),
+                    "verify restore idempotence".into(),
+                    Vec::new(),
+                    None,
+                    None,
+                );
+                state.status = WorkflowRunStatus::Complete;
+                let source = chat_state::NotificationSource::WorkflowCompleted {
+                    run_id: state.run_id.clone(),
+                };
+                let version = workflow_completion_source_version(&state);
+                let receipt = actor
+                    .receive_notification(
+                        source.clone(),
+                        version.clone(),
+                        "historical payload rendered with an old tool alias".into(),
+                    )
+                    .await
+                    .expect("historical receipt");
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+                let turn = actor.events.current_turn().expect("causal turn");
+                actor
+                    .consume_notifications_durably(vec![receipt.clone()], turn, None)
+                    .await
+                    .expect("consume historical receipt");
+
+                actor
+                    .admit_public_workflow_completion(&state)
+                    .await
+                    .expect("restore must accept the existing receipt without rebuilding body");
+
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending projection")
+                        .is_empty()
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .received_notification_id(source, version)
+                        .await,
+                    Some(Some(receipt))
+                );
+            })
+            .await;
     }
 
     #[test]

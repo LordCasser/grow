@@ -1765,6 +1765,7 @@ pub(crate) mod tests {
             foreground_block_budget: None,
             kind: tools::computer::types::TaskKind::Bash,
             owner_session_id: None,
+            goal_id: None,
             description: None,
         }
     }

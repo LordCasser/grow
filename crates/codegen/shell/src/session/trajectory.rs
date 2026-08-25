@@ -1,7 +1,7 @@
 //! Local-only Trajectory query server.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::{BufRead, Read, Seek};
+use std::io::{BufRead, Read, Seek, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,7 @@ const TRAJECTORY_DETAIL_PREVIEW_CHARS: usize = 200_000;
 const TRAJECTORY_DETAIL_PREVIEW_NODES: usize = 4_000;
 const TRAJECTORY_DETAIL_PREVIEW_DEPTH: usize = 10;
 const TRAJECTORY_DETAIL_PREVIEW_ITEMS: usize = 80;
+const MAX_TRAJECTORY_FULL_DETAIL_BYTES: usize = 4 * 1024 * 1024;
 const LEDGER_TAIL_CHECK_BYTES: u64 = 64 * 1024;
 
 #[derive(Default)]
@@ -116,6 +117,9 @@ struct SessionTrajectoryCache {
     last_query: Option<(TrajectoryQuery, TrajectoryResponse)>,
     arrival_order: BTreeMap<String, u64>,
     next_arrival: u64,
+    materialization_reset: bool,
+    #[cfg(test)]
+    full_materialization_count: usize,
 }
 
 #[derive(Default)]
@@ -125,6 +129,8 @@ struct SidebandCache {
     tail_hash: Option<[u8; 32]>,
     source_stamp: Option<LedgerStamp>,
     timeline: Option<chat_state::SidebandTimeline>,
+    dirty_seqs: BTreeSet<u64>,
+    materialization_reset: bool,
 }
 
 #[derive(Default)]
@@ -134,6 +140,8 @@ struct WorkflowJournalCache {
     prefix_hasher: Option<blake3::Hasher>,
     tail_hash: Option<[u8; 32]>,
     source_stamp: Option<LedgerStamp>,
+    dirty_seqs: BTreeSet<u64>,
+    materialization_reset: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,6 +210,16 @@ fn ledger_change_marker(_metadata: &std::fs::Metadata) -> [u64; 4] {
 struct MaterializedTrajectory {
     revision: [u8; 32],
     rows: Vec<chat_state::TrajectoryRow>,
+    positions: HashMap<String, usize>,
+    source_ids: BTreeSet<String>,
+    source_contexts: BTreeMap<String, TrajectorySourceContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectorySourceContext {
+    actor_ref: String,
+    parent_entry_id: Option<String>,
+    path_prefix: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -235,6 +253,20 @@ impl std::fmt::Display for TrajectoryEntryNotFound {
 }
 
 impl std::error::Error for TrajectoryEntryNotFound {}
+
+#[derive(Debug)]
+struct TrajectoryEventTooLarge;
+
+impl std::fmt::Display for TrajectoryEventTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Canonical event exceeds the 4 MiB in-browser detail limit. Export the matching entry from timeline.jsonl with an offline tool instead."
+        )
+    }
+}
+
+impl std::error::Error for TrajectoryEventTooLarge {}
 
 /// Compact wire row for list and overview navigation.
 ///
@@ -639,6 +671,70 @@ fn ensure_materialized(state: &AppState, cache: &mut SessionTrajectoryCache) -> 
     {
         return Ok(());
     }
+    let source_ids = cache.source_ids(&state.session_id);
+    let requires_rebuild = cache.materialized.as_ref().is_none_or(|materialized| {
+        materialized.source_ids != source_ids
+            || cache.has_materialization_reset()
+            || cache.workflow_topology_changed()
+    });
+    if requires_rebuild {
+        rebuild_materialized(state, cache, revision, source_ids)?;
+        cache.last_query = None;
+        return Ok(());
+    }
+
+    let updates = {
+        let contexts = &cache
+            .materialized
+            .as_ref()
+            .expect("Trajectory materialization was initialized")
+            .source_contexts;
+        cache.collect_dirty_rows(&state.session_id, contexts)?
+    };
+    let mut materialized = cache
+        .materialized
+        .take()
+        .expect("Trajectory materialization was initialized");
+    let mut additions = Vec::new();
+    let mut update_ids = HashSet::new();
+    for row in updates {
+        if !update_ids.insert(row.entry_id.clone()) {
+            cache.materialized = Some(materialized);
+            anyhow::bail!(
+                "Trajectory incremental projection repeated '{}'",
+                row.entry_id
+            );
+        }
+        if let Some(index) = materialized.positions.get(&row.entry_id).copied() {
+            materialized.rows[index] = row;
+        } else {
+            additions.push(row);
+        }
+    }
+    sort_rows_chronologically(&mut additions);
+    cache.assign_arrival_order(&additions);
+    for row in additions {
+        let index = materialized.rows.len();
+        materialized.positions.insert(row.entry_id.clone(), index);
+        materialized.rows.push(row);
+    }
+    materialized.revision = revision;
+    cache.materialized = Some(materialized);
+    cache.clear_materialization_changes();
+    cache.last_query = None;
+    Ok(())
+}
+
+fn rebuild_materialized(
+    state: &AppState,
+    cache: &mut SessionTrajectoryCache,
+    revision: [u8; 32],
+    source_ids: BTreeSet<String>,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        cache.full_materialization_count = cache.full_materialization_count.saturating_add(1);
+    }
     let previous = cache.materialized.take();
     let fresh = match collect_cached_rows(state, cache) {
         Ok(rows) => rows,
@@ -688,8 +784,27 @@ fn ensure_materialized(state: &AppState, cache: &mut SessionTrajectoryCache) -> 
     cache
         .arrival_order
         .retain(|entry_id, _| live_entries.contains(entry_id.as_str()));
-    cache.materialized = Some(MaterializedTrajectory { revision, rows });
-    cache.last_query = None;
+    let positions = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.entry_id.clone(), index))
+        .collect();
+    let mut source_contexts = BTreeMap::new();
+    cache.collect_source_contexts(
+        &state.session_id,
+        &state.actor_ref,
+        None,
+        &[],
+        &mut source_contexts,
+    )?;
+    cache.materialized = Some(MaterializedTrajectory {
+        revision,
+        rows,
+        positions,
+        source_ids,
+        source_contexts,
+    });
+    cache.clear_materialization_changes();
     Ok(())
 }
 
@@ -788,12 +903,15 @@ fn query_event_cached_with_mode(
     let materialized = cache
         .materialized
         .as_ref()
-        .expect("Trajectory materialization was initialized")
-        .rows
-        .iter()
-        .find(|row| row.entry_id == entry_id)
-        .cloned()
+        .expect("Trajectory materialization was initialized");
+    let index = materialized
+        .positions
+        .get(entry_id)
+        .copied()
         .ok_or_else(|| anyhow::Error::new(TrajectoryEntryNotFound(entry_id.to_owned())))?;
+    let materialized = materialized.rows.get(index).cloned().ok_or_else(|| {
+        anyhow::anyhow!("Trajectory entry index for '{entry_id}' is outside the materialization")
+    })?;
     let (mut row, details_truncated) = cache
         .canonical_row(&state.session_id, &state.actor_ref, entry_id, !full)?
         .ok_or_else(|| anyhow::anyhow!("Trajectory source row '{entry_id}' disappeared"))?;
@@ -1090,6 +1208,114 @@ impl SessionTrajectoryCache {
         }
     }
 
+    fn source_ids(&self, timeline_id: &str) -> BTreeSet<String> {
+        let mut ids = BTreeSet::from([timeline_id.to_owned()]);
+        ids.extend(self.sidebands.keys().cloned());
+        ids.extend(self.workflows.keys().cloned());
+        for (child_id, child) in &self.children {
+            ids.extend(child.source_ids(child_id));
+        }
+        ids
+    }
+
+    fn has_materialization_reset(&self) -> bool {
+        self.materialization_reset
+            || self
+                .sidebands
+                .values()
+                .any(|cache| cache.materialization_reset)
+            || self
+                .workflows
+                .values()
+                .any(|cache| cache.materialization_reset)
+            || self.children.values().any(Self::has_materialization_reset)
+    }
+
+    fn workflow_topology_changed(&self) -> bool {
+        self.workflows.values().any(|journal| {
+            journal
+                .dirty_seqs
+                .iter()
+                .filter_map(|seq| usize::try_from(*seq).ok())
+                .any(|index| {
+                    journal
+                        .projection
+                        .entries()
+                        .get(index)
+                        .is_some_and(|entry| entry.kind == "spawn_agent")
+                })
+        }) || self.children.values().any(Self::workflow_topology_changed)
+    }
+
+    fn clear_materialization_changes(&mut self) {
+        self.materialization_reset = false;
+        self.projector.clear_dirty_rows();
+        for sideband in self.sidebands.values_mut() {
+            sideband.dirty_seqs.clear();
+            sideband.materialization_reset = false;
+        }
+        for workflow in self.workflows.values_mut() {
+            workflow.dirty_seqs.clear();
+            workflow.materialization_reset = false;
+        }
+        for child in self.children.values_mut() {
+            child.clear_materialization_changes();
+        }
+    }
+
+    fn timeline_row(
+        &self,
+        timeline_id: &str,
+        actor_ref: &str,
+        parent_entry_id: Option<&str>,
+        path_prefix: &[u64],
+        projected: &chat_state::TrajectoryRow,
+        subagent_workflows: &BTreeMap<String, String>,
+    ) -> anyhow::Result<chat_state::TrajectoryRow> {
+        let entry_id = format!("t:{timeline_id}/{}", projected.seq);
+        let mut row = TrajectoryRowSummary::from(projected).into_row(serde_json::Value::Null);
+        row.entry_id = entry_id;
+        row.parent_entry_id = parent_entry_id.map(str::to_owned);
+        row.nesting_path = path_prefix
+            .iter()
+            .copied()
+            .chain(std::iter::once(row.seq))
+            .collect();
+        let event_index = usize::try_from(row.seq)
+            .map_err(|_| anyhow::anyhow!("Timeline {timeline_id} seq exceeds usize"))?;
+        let event =
+            self.timeline.events().get(event_index).ok_or_else(|| {
+                anyhow::anyhow!("Trajectory projector outran Timeline {timeline_id}")
+            })?;
+        row.actor = match &event.kind {
+            chat_state::TimelineEventKind::Workflow(event) => {
+                format!("workflow:{}", workflow_run_id(event))
+            }
+            _ => actor_ref.to_owned(),
+        };
+        let workflow_parent = match &event.kind {
+            chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => {
+                spawn.workflow_run_id.as_deref().and_then(|run_id| {
+                    self.workflow_agent_parent(timeline_id, run_id, &spawn.subagent_id, path_prefix)
+                })
+            }
+            chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end)) => {
+                subagent_workflows.get(&end.subagent_id).and_then(|run_id| {
+                    self.workflow_agent_parent(timeline_id, run_id, &end.subagent_id, path_prefix)
+                })
+            }
+            _ => None,
+        };
+        if let Some((journal_entry, journal_path)) = workflow_parent {
+            row.parent_entry_id = Some(journal_entry);
+            row.nesting_path = journal_path
+                .into_iter()
+                .chain(std::iter::once(row.seq))
+                .collect();
+        }
+        Ok(row)
+    }
+
     fn canonical_row(
         &self,
         timeline_id: &str,
@@ -1101,39 +1327,39 @@ impl SessionTrajectoryCache {
             return Ok(None);
         };
         if source_id == timeline_id {
-            let Some(projected) = self.projector.rows().iter().find(|row| row.seq == seq) else {
+            let index = usize::try_from(seq)?;
+            let Some(projected) = self.projector.rows().get(index) else {
                 return Ok(None);
             };
-            let (mut row, truncated) = preview_trajectory_row(projected, preview);
+            let mut row = projected.clone();
             row.entry_id = entry_id.to_owned();
-            let index = usize::try_from(seq)?;
             let event = self
                 .timeline
                 .events()
                 .get(index)
                 .ok_or_else(|| anyhow::anyhow!("Trajectory projector outran Timeline"))?;
+            row.details = trajectory_event_details(&event.kind)?;
             row.actor = match &event.kind {
                 chat_state::TimelineEventKind::Workflow(event) => {
                     format!("workflow:{}", workflow_run_id(event))
                 }
                 _ => actor_ref.to_owned(),
             };
-            return Ok(Some((row, truncated)));
+            return Ok(Some(preview_trajectory_row(&row, preview)));
         }
         if let Some(sideband) = self.sidebands.get(source_id)
             && let Some(timeline) = &sideband.timeline
-            && let Some(event) = timeline.events().iter().find(|event| event.seq == seq)
+            && let Some(event) = timeline.events().get(usize::try_from(seq)?)
         {
-            let attempt_times = timeline
-                .events()
-                .iter()
-                .filter_map(|event| {
-                    matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
-                        .then_some((event.seq, event.at_ms))
-                })
-                .collect::<BTreeMap<_, _>>();
+            let mut attempt_times = BTreeMap::new();
+            if let chat_state::SidebandEventKind::Result(result) = &event.kind {
+                let attempt = result.source_event_seqs[1];
+                if let Some(started) = timeline.events().get(usize::try_from(attempt)?) {
+                    attempt_times.insert(attempt, started.at_ms);
+                }
+            }
             let mut row = sideband_row(event, "", &[], &attempt_times);
-            row.details = serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null);
+            row.details = trajectory_event_details(&event.kind)?;
             return Ok(Some(preview_trajectory_row(&row, preview)));
         }
         if let Some(journal) = self.workflows.get(source_id)
@@ -1146,7 +1372,7 @@ impl SessionTrajectoryCache {
                 Some(workflow::journal::OperationReplay::Pending { .. })
             );
             let mut row = workflow_row(entry, source_id, "", &[], pending);
-            row.details = serde_json::to_value(entry).unwrap_or(serde_json::Value::Null);
+            row.details = trajectory_event_details(entry)?;
             return Ok(Some(preview_trajectory_row(&row, preview)));
         }
         for (child_id, child) in &self.children {
@@ -1463,6 +1689,7 @@ impl SessionTrajectoryCache {
             self.session_dir = session_dir;
             self.arrival_order = arrival_order;
             self.next_arrival = next_arrival;
+            self.materialization_reset = replacing;
         }
         self.timeline = timeline;
         self.projector = projector;
@@ -1709,51 +1936,19 @@ impl SessionTrajectoryCache {
             })
             .collect::<BTreeMap<_, _>>();
         for projected in self.projector.rows() {
-            let entry_id = format!("t:{timeline_id}/{}", projected.seq);
-            let mut row = TrajectoryRowSummary::from(projected).into_row(serde_json::Value::Null);
-            row.entry_id = entry_id;
-            row.parent_entry_id = parent_entry_id.map(str::to_owned);
-            row.nesting_path = path_prefix
-                .iter()
-                .copied()
-                .chain(std::iter::once(row.seq))
-                .collect();
-            let event_index = usize::try_from(row.seq)
-                .map_err(|_| anyhow::anyhow!("Timeline {timeline_id} seq exceeds usize"))?;
-            let event = self.timeline.events().get(event_index).ok_or_else(|| {
-                anyhow::anyhow!("Trajectory projector outran Timeline {timeline_id}")
-            })?;
-            row.actor = match &event.kind {
-                chat_state::TimelineEventKind::Workflow(event) => {
-                    format!("workflow:{}", workflow_run_id(event))
-                }
-                _ => actor_ref.to_owned(),
-            };
-            let workflow_parent = match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    spawn,
-                )) => spawn.workflow_run_id.as_deref().and_then(|run_id| {
-                    self.workflow_agent_parent(timeline_id, run_id, &spawn.subagent_id, path_prefix)
-                }),
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end)) => {
-                    subagent_workflows.get(&end.subagent_id).and_then(|run_id| {
-                        self.workflow_agent_parent(
-                            timeline_id,
-                            run_id,
-                            &end.subagent_id,
-                            path_prefix,
-                        )
-                    })
-                }
-                _ => None,
-            };
-            if let Some((journal_entry, journal_path)) = workflow_parent {
-                row.parent_entry_id = Some(journal_entry);
-                row.nesting_path = journal_path
-                    .into_iter()
-                    .chain(std::iter::once(row.seq))
-                    .collect();
-            }
+            let row = self.timeline_row(
+                timeline_id,
+                actor_ref,
+                parent_entry_id,
+                path_prefix,
+                projected,
+                &subagent_workflows,
+            )?;
+            let event = self
+                .timeline
+                .events()
+                .get(usize::try_from(row.seq)?)
+                .ok_or_else(|| anyhow::anyhow!("Trajectory projector outran Timeline"))?;
             rows.push(row.clone());
             match &event.kind {
                 chat_state::TimelineEventKind::Sideband(spawn) => {
@@ -1785,6 +1980,212 @@ impl SessionTrajectoryCache {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn collect_source_contexts(
+        &self,
+        timeline_id: &str,
+        actor_ref: &str,
+        parent_entry_id: Option<&str>,
+        path_prefix: &[u64],
+        contexts: &mut BTreeMap<String, TrajectorySourceContext>,
+    ) -> anyhow::Result<()> {
+        let context = TrajectorySourceContext {
+            actor_ref: actor_ref.to_owned(),
+            parent_entry_id: parent_entry_id.map(str::to_owned),
+            path_prefix: path_prefix.to_vec(),
+        };
+        if contexts.insert(timeline_id.to_owned(), context).is_some() {
+            anyhow::bail!("Trajectory source context repeated '{timeline_id}'");
+        }
+        let subagent_workflows = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => spawn
+                    .workflow_run_id
+                    .as_ref()
+                    .map(|run_id| (spawn.subagent_id.clone(), run_id.clone())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        for projected in self.projector.rows() {
+            let row = self.timeline_row(
+                timeline_id,
+                actor_ref,
+                parent_entry_id,
+                path_prefix,
+                projected,
+                &subagent_workflows,
+            )?;
+            let event = self
+                .timeline
+                .events()
+                .get(usize::try_from(row.seq)?)
+                .ok_or_else(|| anyhow::anyhow!("Trajectory projector outran Timeline"))?;
+            let nested_context = TrajectorySourceContext {
+                actor_ref: String::new(),
+                parent_entry_id: Some(row.entry_id.clone()),
+                path_prefix: row.nesting_path.clone(),
+            };
+            match &event.kind {
+                chat_state::TimelineEventKind::Sideband(spawn) => {
+                    if contexts
+                        .insert(spawn.sideband_id.clone(), nested_context)
+                        .is_some()
+                    {
+                        anyhow::bail!("Trajectory source context repeated '{}'", spawn.sideband_id);
+                    }
+                }
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id,
+                    ..
+                }) => {
+                    if contexts.insert(run_id.clone(), nested_context).is_some() {
+                        anyhow::bail!("Trajectory source context repeated '{run_id}'");
+                    }
+                }
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => {
+                    if let Some(child) = self.children.get(&spawn.child_session_id) {
+                        child.collect_source_contexts(
+                            &spawn.child_session_id,
+                            &format!("subagent:{}", spawn.child_session_id),
+                            Some(&row.entry_id),
+                            &row.nesting_path,
+                            contexts,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_dirty_rows(
+        &self,
+        timeline_id: &str,
+        contexts: &BTreeMap<String, TrajectorySourceContext>,
+    ) -> anyhow::Result<Vec<chat_state::TrajectoryRow>> {
+        let mut rows = Vec::new();
+        self.append_dirty_rows(timeline_id, contexts, &mut rows)?;
+        Ok(rows)
+    }
+
+    fn append_dirty_rows(
+        &self,
+        timeline_id: &str,
+        contexts: &BTreeMap<String, TrajectorySourceContext>,
+        rows: &mut Vec<chat_state::TrajectoryRow>,
+    ) -> anyhow::Result<()> {
+        let context = contexts.get(timeline_id).ok_or_else(|| {
+            anyhow::anyhow!("Trajectory source '{timeline_id}' has no materialized context")
+        })?;
+        for index in self.projector.dirty_row_indices() {
+            let projected = self.projector.rows().get(index).ok_or_else(|| {
+                anyhow::anyhow!("Trajectory dirty row {index} is outside the projector")
+            })?;
+            let subagent_workflows = match self
+                .timeline
+                .events()
+                .get(usize::try_from(projected.seq)?)
+                .map(|event| &event.kind)
+            {
+                Some(chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(end),
+                )) => self
+                    .timeline
+                    .events()
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Subagent(
+                            chat_state::SubagentEvent::Spawned(spawn),
+                        ) if spawn.subagent_id == end.subagent_id => spawn
+                            .workflow_run_id
+                            .as_ref()
+                            .map(|run| (end.subagent_id.clone(), run.clone())),
+                        _ => None,
+                    })
+                    .into_iter()
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
+            rows.push(self.timeline_row(
+                timeline_id,
+                &context.actor_ref,
+                context.parent_entry_id.as_deref(),
+                &context.path_prefix,
+                projected,
+                &subagent_workflows,
+            )?);
+        }
+        for (sideband_id, sideband) in &self.sidebands {
+            let context = contexts.get(sideband_id).ok_or_else(|| {
+                anyhow::anyhow!("Trajectory sideband '{sideband_id}' has no materialized context")
+            })?;
+            let timeline = sideband.timeline.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Trajectory sideband '{sideband_id}' has no Timeline")
+            })?;
+            for seq in &sideband.dirty_seqs {
+                let event = timeline
+                    .events()
+                    .get(usize::try_from(*seq)?)
+                    .ok_or_else(|| anyhow::anyhow!("Trajectory sideband lost seq {seq}"))?;
+                let mut attempt_times = BTreeMap::new();
+                if let chat_state::SidebandEventKind::Result(result) = &event.kind {
+                    let attempt = result.source_event_seqs[1];
+                    if let Some(started) = timeline.events().get(usize::try_from(attempt)?) {
+                        attempt_times.insert(attempt, started.at_ms);
+                    }
+                }
+                rows.push(sideband_row(
+                    event,
+                    context
+                        .parent_entry_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("sideband context has no parent"))?,
+                    &context.path_prefix,
+                    &attempt_times,
+                ));
+            }
+        }
+        for (run_id, journal) in &self.workflows {
+            let context = contexts.get(run_id).ok_or_else(|| {
+                anyhow::anyhow!("Trajectory Workflow '{run_id}' has no materialized context")
+            })?;
+            for seq in &journal.dirty_seqs {
+                let entry = journal
+                    .projection
+                    .entries()
+                    .get(usize::try_from(*seq)?)
+                    .ok_or_else(|| anyhow::anyhow!("Trajectory Workflow lost seq {seq}"))?;
+                let pending = matches!(
+                    journal
+                        .projection
+                        .replay_operation(entry.seq, &entry.kind, &entry.req_hash)?,
+                    Some(workflow::journal::OperationReplay::Pending { .. })
+                );
+                rows.push(workflow_row(
+                    entry,
+                    run_id,
+                    context
+                        .parent_entry_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("Workflow context has no parent"))?,
+                    &context.path_prefix,
+                    pending,
+                ));
+            }
+        }
+        for (child_id, child) in &self.children {
+            child.append_dirty_rows(child_id, contexts, rows)?;
         }
         Ok(())
     }
@@ -1913,6 +2314,46 @@ impl SessionTrajectoryCache {
 fn trajectory_entry_parts(entry_id: &str) -> Option<(&str, u64)> {
     let (source, seq) = entry_id.strip_prefix("t:")?.rsplit_once('/')?;
     Some((source, seq.parse().ok()?))
+}
+
+struct TrajectorySizeWriter {
+    bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for TrajectorySizeWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(total) = self.bytes.checked_add(buffer.len()) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("Trajectory event size overflowed"));
+        };
+        if total > MAX_TRAJECTORY_FULL_DETAIL_BYTES {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "Trajectory event exceeds browser limit",
+            ));
+        }
+        self.bytes = total;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn trajectory_event_details<T: Serialize>(value: &T) -> anyhow::Result<serde_json::Value> {
+    let mut writer = TrajectorySizeWriter {
+        bytes: 0,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(anyhow::Error::new(TrajectoryEventTooLarge));
+        }
+        return Err(error.into());
+    }
+    serde_json::to_value(value).map_err(Into::into)
 }
 
 fn preview_trajectory_row(
@@ -2139,6 +2580,11 @@ impl SidebandCache {
         } else {
             self.prefix_hasher.clone()
         };
+        let mut dirty_seqs = if rebuilding {
+            BTreeSet::new()
+        } else {
+            std::mem::take(&mut self.dirty_seqs)
+        };
         let mut observed_stamp = opened_stamp;
         let ingestion = (|| -> anyhow::Result<()> {
             loop {
@@ -2174,7 +2620,9 @@ impl SidebandCache {
                             event.sideband_id.clone(),
                         )?),
                     };
+                    let seq = event.seq;
                     current.accept(event)?;
+                    dirty_seqs.insert(seq);
                 }
                 prefix_hasher
                     .get_or_insert_with(blake3::Hasher::new)
@@ -2187,6 +2635,13 @@ impl SidebandCache {
         if let Err(error) = ingestion {
             if !rebuilding {
                 self.timeline = replay_sideband_prefix(&mut file, old_offset, &path, event_limit)?;
+                self.dirty_seqs = self
+                    .timeline
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|timeline| timeline.events().iter().map(|event| event.seq))
+                    .collect();
+                self.materialization_reset = true;
             }
             return Err(error);
         }
@@ -2196,14 +2651,23 @@ impl SidebandCache {
                 if !rebuilding {
                     self.timeline =
                         replay_sideband_prefix(&mut file, old_offset, &path, event_limit)?;
+                    self.dirty_seqs = self
+                        .timeline
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|timeline| timeline.events().iter().map(|event| event.seq))
+                        .collect();
+                    self.materialization_reset = true;
                 }
                 return Err(error);
             }
         };
         if rebuilding {
             *self = Self::default();
+            self.materialization_reset = replacing;
         }
         self.timeline = timeline;
+        self.dirty_seqs = dirty_seqs;
         self.offset = offset;
         self.prefix_hasher = prefix_hasher;
         self.tail_hash = tail_hash;
@@ -2260,6 +2724,11 @@ impl WorkflowJournalCache {
         } else {
             std::mem::take(&mut self.projection)
         };
+        let mut dirty_seqs = if rebuilding {
+            BTreeSet::new()
+        } else {
+            std::mem::take(&mut self.dirty_seqs)
+        };
         let mut offset = if rebuilding { 0 } else { self.offset };
         let mut prefix_hasher = if rebuilding {
             None
@@ -2290,6 +2759,7 @@ impl WorkflowJournalCache {
                         continue;
                     }
                     let entry = serde_json::from_slice::<workflow::JournalEntry>(line)?;
+                    dirty_seqs.insert(entry.seq);
                     project_workflow_entry(&mut projection, entry, event_limit)?;
                 }
                 prefix_hasher
@@ -2308,6 +2778,13 @@ impl WorkflowJournalCache {
             if !rebuilding {
                 self.projection =
                     replay_workflow_prefix(&mut file, old_offset, &path, event_limit)?;
+                self.dirty_seqs = self
+                    .projection
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.seq)
+                    .collect();
+                self.materialization_reset = true;
             }
             return Err(error);
         }
@@ -2317,14 +2794,23 @@ impl WorkflowJournalCache {
                 if !rebuilding {
                     self.projection =
                         replay_workflow_prefix(&mut file, old_offset, &path, event_limit)?;
+                    self.dirty_seqs = self
+                        .projection
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.seq)
+                        .collect();
+                    self.materialization_reset = true;
                 }
                 return Err(error);
             }
         };
         if rebuilding {
             *self = Self::default();
+            self.materialization_reset = replacing;
         }
         self.projection = projection;
+        self.dirty_seqs = dirty_seqs;
         self.offset = offset;
         self.prefix_hasher = prefix_hasher;
         self.tail_hash = tail_hash;
@@ -2481,6 +2967,8 @@ fn internal_error(error: impl std::fmt::Display) -> HttpError {
 fn query_error_response(error: anyhow::Error) -> HttpError {
     if error.downcast_ref::<TrajectoryEntryNotFound>().is_some() {
         http_error(StatusCode::NOT_FOUND, error.to_string())
+    } else if error.downcast_ref::<TrajectoryEventTooLarge>().is_some() {
+        http_error(StatusCode::PAYLOAD_TOO_LARGE, error.to_string())
     } else {
         internal_error(error)
     }
@@ -3015,6 +3503,7 @@ mod tests {
             effective_permission_mode: None,
             workflow_run_id: None,
             goal_id: None,
+            surface_completion: true,
             child_cwd: child_cwd.into(),
             worktree_path: None,
             effective_model_id: "model".into(),
@@ -3717,6 +4206,25 @@ mod tests {
 
         let summary =
             serde_json::to_vec(&query_cached(&state, TrajectoryQuery::default()).unwrap()).unwrap();
+        {
+            let cache = state.cache.lock().unwrap();
+            assert!(
+                cache
+                    .projector
+                    .rows()
+                    .iter()
+                    .all(|row| row.details.is_null())
+            );
+            assert!(
+                cache
+                    .materialized
+                    .as_ref()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .all(|row| row.details.is_null())
+            );
+        }
         let detail = query_event_cached(&state, "t:session/0").unwrap();
         let detail_wire = serde_json::to_vec(&detail).unwrap();
         let full =
@@ -3730,6 +4238,70 @@ mod tests {
         assert!(detail.details_truncated);
         assert!(detail_wire.len() < 256 * 1024);
         assert!(full.len() > payload.len());
+    }
+
+    #[test]
+    fn appended_root_event_updates_materialization_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let timeline = chat_state::Timeline::from_seed(vec![
+            sampling_types::ConversationItem::user("first"),
+            sampling_types::ConversationItem::assistant("second"),
+        ])
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&timeline.events()[0]).unwrap()
+            ),
+        )
+        .unwrap();
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+
+        assert_eq!(
+            query_cached(&state, TrajectoryQuery::default())
+                .unwrap()
+                .event_count,
+            1
+        );
+        {
+            let cache = state.cache.lock().unwrap();
+            assert_eq!(cache.full_materialization_count, 1);
+        }
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&timeline.events()[1]).unwrap()
+        )
+        .unwrap();
+
+        let response = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(response.event_count, 2);
+        assert_eq!(response.rows.len(), 2);
+        let cache = state.cache.lock().unwrap();
+        assert_eq!(cache.full_materialization_count, 1);
+        assert_eq!(cache.materialized.as_ref().unwrap().positions.len(), 2);
+    }
+
+    #[test]
+    fn canonical_browser_detail_limit_is_explicit() {
+        let value = "x".repeat(MAX_TRAJECTORY_FULL_DETAIL_BYTES + 1);
+        let error = trajectory_event_details(&value).unwrap_err();
+        assert!(error.downcast_ref::<TrajectoryEventTooLarge>().is_some());
+        let response = query_error_response(error);
+        assert_eq!(response.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.2.contains("timeline.jsonl"));
     }
 
     #[test]
@@ -3933,6 +4505,9 @@ mod tests {
         assert!(PAGE.contains("api/trajectory/event"));
         assert!(PAGE.contains("MAX_WINDOW_ROWS=1800"));
         assert!(PAGE.contains("params.set('before',displayRows[0].entry_id)"));
+        assert!(PAGE.contains("params.set('after',displayRows.at(-1).entry_id)"));
+        assert!(PAGE.contains("id=\"later\""));
+        assert!(PAGE.contains("hasLater=data.hasLater"));
         assert!(PAGE.contains("boundary-label"));
         assert!(PAGE.contains("active · step"));
     }

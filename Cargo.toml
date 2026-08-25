@@ -282,7 +282,7 @@ incremental = true
 panic = "abort"
 
 # Hardened release profile for shipping to end users (alpha + stable).
-# Use `cargo build --profile release-dist` for distribution builds.
+# Use `cargo build --profile release-dist --features release-dist` for distribution builds.
 # Not used by default `--release` to avoid slowing down local dev builds (~2.2x).
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,

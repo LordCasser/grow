@@ -674,6 +674,7 @@ impl SessionActor {
             let source = chat_state::NotificationSource::TaskStillRunning {
                 task_id: task.task_id.clone(),
                 task_kind,
+                owner: chat_state::NotificationOwner::Session,
             };
             let body = format_running_task_checkpoint_notification(&task, checkpoint_time);
             match self
@@ -858,6 +859,7 @@ mod workflow_reminder_tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: Some("session-1".into()),
+            goal_id: None,
             description: None,
             is_backgrounded: true,
         };

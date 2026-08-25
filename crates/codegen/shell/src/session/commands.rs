@@ -98,7 +98,9 @@ pub enum SessionCommand {
     /// `approval_pending == true`, re-issue the `grow/plan_approval`
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
-    RestorePlanApproval,
+    RestorePlanApproval {
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
     QueuePrompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -151,9 +153,9 @@ pub enum SessionCommand {
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
         body: String,
-        /// Optional producer barrier. Goal child completion uses it so a
-        /// waiter cannot observe the terminal result before the durable inbox
-        /// owns the corresponding exactly-once receipt.
+        /// Optional producer barrier. Terminal producers use it so their
+        /// lifecycle cannot advance past notification delivery until the
+        /// durable inbox owns the corresponding exactly-once receipt.
         respond_to: Option<oneshot::Sender<Result<String, String>>>,
     },
     BehaviorChange {
@@ -440,11 +442,11 @@ pub enum SessionCommand {
         title: Option<String>,
         level: Option<String>,
     },
-    /// Record background-task ids that survive a delegated child spawned by a
-    /// Goal turn. The handler keeps them in `goal_turn_task_ids` whenever the
-    /// Goal runtime is available, so a late completion cannot wake the parent
-    /// after the Goal has paused, blocked, completed, or been cleared.
-    RecordGoalTurnTaskIds {
+    /// Record background-task ids that survive a delegated Goal child. The
+    /// producer carries the immutable owner captured at child admission; the
+    /// parent must not re-sample its current Goal when the child exits.
+    RecordGoalOwnedTaskIds {
+        goal_id: String,
         task_ids: Vec<String>,
     },
     /// Remove a queued (not-yet-running) prompt from the authoritative prompt
@@ -624,6 +626,7 @@ pub enum SessionCommand {
     WorkflowCompleted {
         state: crate::session::workflow::tracker::WorkflowRunState,
         outcome: workflow::WorkflowOutcome,
+        respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).
     TakeTurnMessages {

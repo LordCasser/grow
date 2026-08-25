@@ -191,7 +191,7 @@ impl SessionActor {
                 chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
                     consumed_ids.contains(&task_id.as_str())
                 }
-                chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
                     consumed_ids.contains(&subagent_id.as_str())
                 }
                 chat_state::NotificationSource::MonitorProgress { .. }
@@ -204,11 +204,7 @@ impl SessionActor {
             return;
         }
         if let Err(error) = self
-            .record_notification_resolution_durably(chat_state::NotificationEvent::Consumed {
-                notification_ids,
-                turn,
-                input: None,
-            })
+            .consume_notifications_durably(notification_ids, turn, None)
             .await
         {
             tracing::error!(%error, "failed to acknowledge tool-consumed notifications");
@@ -306,9 +302,6 @@ impl SessionActor {
             self.completion_delivery.consume(&consumed_ids);
             self.drop_pending_items_for_consumed_completions(&consumed_ids)
                 .await;
-        }
-        if let ToolsToolOutput::BackgroundTaskStarted(ref bg) = result.output {
-            self.record_goal_turn_task_ids([bg.task_id.clone()]);
         }
         if matches!(
             &result.output,

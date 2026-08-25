@@ -57,11 +57,13 @@ const PLAN_HEADER: &str = "Plan ready for review";
 ///
 /// NOTE (draw-path state mutation + replay durability): this pushes into
 /// `ScrollbackState` from the render path — a deliberate exception, since the
-/// plan block must enter the normal commit pipeline. The pushed block is
-/// client-render state, not a server event: a resumed session will not replay
-/// it, so post-reload `/transcript` shows the plan only through whatever the
-/// agent itself messaged. Accepted for v1 (the live session — the mode's whole
-/// surface — is consistent).
+/// plan block must enter the normal commit pipeline. A pending approval is
+/// durable: Shell reloads the content-addressed plan artifact and reissues the
+/// approval request, so Minimal commits it again. Once approval has settled,
+/// the block remains client render state and is not reconstructed in a fresh
+/// `/transcript`; the durable artifact/control snapshot and Todo replay are the
+/// authoritative execution state. Do not turn the ACP Plan projection into a
+/// second transcript persistence mechanism.
 ///
 /// Call once per frame from [`crate::draw`], before the commit pass.
 pub fn maybe_commit_plan(app: &mut AppView) {

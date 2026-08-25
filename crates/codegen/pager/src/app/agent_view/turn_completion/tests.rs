@@ -61,6 +61,26 @@ fn stale_durable_terminal_cannot_finish_new_driver_turn() {
 }
 
 #[test]
+fn pidless_prompt_response_cannot_finish_running_turn() {
+    let mut agent = running_driver("p1");
+    let outcome = agent.finalize_prompt_terminal(
+        None,
+        TerminalMeta {
+            pr_ok: true,
+            failed_error: None,
+            was_cancelling: false,
+            bash_turn: false,
+            skip_error_marker: false,
+            accepts_submitting: true,
+        },
+    );
+
+    assert!(matches!(outcome.apply, TerminalApply::Ignored));
+    assert!(agent.session.state.is_turn_running());
+    assert_eq!(agent.session.current_prompt_id.as_deref(), Some("p1"));
+}
+
+#[test]
 fn viewer_finalize_idles_and_pushes_completed_marker() {
     let mut agent = running_viewer("p1");
     let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);

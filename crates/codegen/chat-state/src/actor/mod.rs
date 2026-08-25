@@ -321,17 +321,14 @@ impl ChatStateActor {
                     .and_then(|event| match &event.kind {
                         TimelineEventKind::Notification(crate::NotificationEvent::Received {
                             owner_session_id: existing_owner,
-                            source: existing_source,
+                            source: _,
                             source_version: existing_version,
                             payload_ref: existing_payload,
                             ..
-                        }) if existing_source == &source && existing_version == &source_version => {
-                            Some((
-                                event.clone(),
-                                existing_owner == &owner_session_id
-                                    && existing_payload == &payload_ref,
-                            ))
-                        }
+                        }) if existing_version == &source_version => Some((
+                            event.clone(),
+                            existing_owner == &owner_session_id && existing_payload == &payload_ref,
+                        )),
                         _ => None,
                     });
                 let result = match existing {
@@ -596,6 +593,18 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());
+            }
+            ChatStateCommand::GetReceivedNotificationId {
+                source,
+                source_version,
+                reply,
+            } => {
+                let id = self
+                    .state
+                    .timeline
+                    .received_notification_id(&source, &source_version)
+                    .map(str::to_owned);
+                let _ = reply.send(id);
             }
             ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
                 let materialized = self.state.timeline.events().last().map(|event| {

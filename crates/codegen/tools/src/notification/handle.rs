@@ -306,12 +306,10 @@ impl ToolNotificationHandle {
         }
     }
 
-    /// Send a removal to every target and collect all durable acknowledgements.
-    pub fn send_scheduled_task_removed_acknowledged(
+    fn send_acknowledged(
         &self,
-        removed: ScheduledTaskRemoved,
+        notification: ToolNotification,
     ) -> NotificationAcknowledgementBatch {
-        let notification = ToolNotification::ScheduledTaskRemoved(removed);
         let mut batch = NotificationAcknowledgementBatch {
             receipts: Vec::new(),
             dispatch_closed: 0,
@@ -344,6 +342,23 @@ impl ToolNotificationHandle {
             }
         }
         batch
+    }
+
+    /// Send a removal to every target and collect all durable acknowledgements.
+    pub fn send_scheduled_task_removed_acknowledged(
+        &self,
+        removed: ScheduledTaskRemoved,
+    ) -> NotificationAcknowledgementBatch {
+        self.send_acknowledged(ToolNotification::ScheduledTaskRemoved(removed))
+    }
+
+    /// Publish a terminal task snapshot and waitable receipts for every durable
+    /// consumer. Producers retain retry ownership until this batch succeeds.
+    pub fn send_task_complete_acknowledged(
+        &self,
+        snapshot: TaskSnapshot,
+    ) -> NotificationAcknowledgementBatch {
+        self.send_acknowledged(ToolNotification::TaskCompleted(snapshot))
     }
 
     convenience_sends! {

@@ -15,7 +15,7 @@ use super::host_service::{
 use super::notify::WorkflowNotifySender;
 use super::registry::{ResolvedWorkflow, WorkflowSource};
 use super::store::WorkflowRunStore;
-use super::tracker::WorkflowTracker;
+use super::tracker::{WorkflowRunState, WorkflowRunStatus, WorkflowTracker};
 
 pub(crate) const WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION: usize = 4;
 pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = workflow::DEFAULT_AGENT_BUDGET;
@@ -23,7 +23,11 @@ pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = workflow::DEFAULT_AGENT_BU
 struct ActiveRun {
     cancel: CancellationToken,
     pause_intent: Arc<AtomicBool>,
-    done: oneshot::Receiver<()>,
+    /// Resolves only after the watcher has settled the terminal state and
+    /// committed the matching authoritative Timeline boundary. Control callers
+    /// await this receiver instead of sampling the tracker while the watcher is
+    /// settling.
+    done: oneshot::Receiver<Result<WorkflowRunState, String>>,
 }
 
 struct SessionJournalStorage {
@@ -130,7 +134,6 @@ pub(crate) struct WorkflowManager {
     timeline: chat_state::ChatStateHandle,
     templates: HashMap<String, String>,
     active: HashMap<String, ActiveRun>,
-    retiring: Vec<(String, oneshot::Receiver<()>)>,
 }
 
 impl WorkflowManager {
@@ -182,7 +185,6 @@ impl WorkflowManager {
             timeline,
             templates,
             active: HashMap::new(),
-            retiring: Vec::new(),
         }
     }
 
@@ -196,9 +198,7 @@ impl WorkflowManager {
         spec: LaunchSpec,
     ) -> Result<(String, oneshot::Receiver<WorkflowOutcome>), LaunchError> {
         self.reap_terminal_runs();
-        if self.active.len().saturating_add(self.retiring.len())
-            >= WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION
-        {
+        if self.active.len() >= WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
             return Err(LaunchError::TooManyActiveRuns);
         }
 
@@ -616,25 +616,27 @@ impl WorkflowManager {
                     .await
                 {
                     tracing::error!(run_id = %watcher_run_id, %error, manifest_persisted, "workflow terminal Timeline boundary was rejected");
-                    let _ = done_tx.send(());
-                    let _ = outcome_tx.send(WorkflowOutcome::Failed {
-                        error: format!(
-                            "workflow Timeline terminal could not be committed: {error}"
-                        ),
-                    });
+                    let message =
+                        format!("workflow Timeline terminal could not be committed: {error}");
+                    let _ = done_tx.send(Err(message.clone()));
+                    let _ = outcome_tx.send(WorkflowOutcome::Failed { error: message });
                     return;
                 }
                 notify.broadcast(&state, elapsed, 0, true);
                 if state.status.is_completion_reportable() {
-                    let _ = session_cmd_tx.send(
-                        crate::session::commands::SessionCommand::WorkflowCompleted {
-                            state,
-                            outcome: outcome.clone(),
-                        },
-                    );
+                    tokio::spawn(deliver_workflow_completion_acknowledged(
+                        session_cmd_tx.clone(),
+                        state.clone(),
+                        outcome.clone(),
+                    ));
                 }
+                let _ = done_tx.send(Ok(state));
+            } else {
+                let message = format!(
+                    "workflow {watcher_run_id} execution epoch {execution_epoch} was superseded before its terminal boundary"
+                );
+                let _ = done_tx.send(Err(message));
             }
-            let _ = done_tx.send(());
             let _ = outcome_tx.send(outcome);
         });
 
@@ -684,39 +686,17 @@ impl WorkflowManager {
     }
 
     fn reap_terminal_runs(&mut self) {
-        let terminal: Vec<String> = self
+        let settled = self
             .active
-            .keys()
-            .filter(|run_id| {
-                self.tracker
-                    .lock()
-                    .get(run_id)
-                    .is_some_and(|state| state.status.is_terminal())
+            .iter_mut()
+            .filter_map(|(run_id, run)| match run.done.try_recv() {
+                Ok(_) | Err(oneshot::error::TryRecvError::Closed) => Some(run_id.clone()),
+                Err(oneshot::error::TryRecvError::Empty) => None,
             })
-            .cloned()
-            .collect();
-        for run_id in terminal {
-            if let Some(run) = self.active.remove(&run_id) {
-                self.retiring.push((run_id.to_owned(), run.done));
-            }
+            .collect::<Vec<_>>();
+        for run_id in settled {
+            self.active.remove(&run_id);
         }
-
-        self.retiring.retain_mut(|(_, done)| match done.try_recv() {
-            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => false,
-            Err(oneshot::error::TryRecvError::Empty) => true,
-        });
-    }
-
-    fn reap_if_terminal(&mut self, run_id: &str) -> bool {
-        let terminal = self
-            .tracker
-            .lock()
-            .get(run_id)
-            .is_some_and(|s| s.status.is_terminal());
-        if terminal && let Some(run) = self.active.remove(run_id) {
-            self.retiring.push((run_id.to_owned(), run.done));
-        }
-        terminal
     }
 
     fn cancel_children_for_run(&self, run_id: &str) -> bool {
@@ -736,70 +716,55 @@ impl WorkflowManager {
             .is_ok()
     }
 
-    pub(crate) fn pause(&mut self, run_id: &str) -> bool {
-        if self.reap_if_terminal(run_id) {
-            return false;
-        }
+    async fn await_terminal_barrier(
+        run_id: &str,
+        done: oneshot::Receiver<Result<WorkflowRunState, String>>,
+    ) -> Result<WorkflowRunState, String> {
+        done.await.map_err(|_| {
+            format!("workflow {run_id} terminal watcher stopped before acknowledgement")
+        })?
+    }
+
+    pub(crate) async fn pause(&mut self, run_id: &str) -> Result<WorkflowRunState, String> {
         let Some(run) = self.active.remove(run_id) else {
-            return false;
+            return Err(format!("workflow {run_id} is not active"));
         };
         run.pause_intent.store(true, Ordering::Relaxed);
         run.cancel.cancel();
         let _ = self.cancel_children_for_run(run_id);
-        self.retiring.push((run_id.to_owned(), run.done));
-        let paused = {
-            let mut tracker = self.tracker.lock();
-            let active = tracker
-                .get(run_id)
-                .is_some_and(|state| !state.status.is_terminal());
-            if active {
-                let state = tracker.pause_user(run_id, None);
-                state.map(|state| (state, tracker.elapsed_ms(run_id)))
-            } else {
-                None
-            }
-        };
-        if let Some((state, elapsed)) = paused {
-            self.notify.emit(&state, elapsed, 0);
+        let state = Self::await_terminal_barrier(run_id, run.done).await?;
+        if state.status != WorkflowRunStatus::UserPaused {
+            return Err(format!(
+                "workflow {run_id} settled as {} instead of user_paused",
+                state.status.as_str()
+            ));
         }
-        true
+        Ok(state)
     }
 
-    pub(crate) async fn cancel(&mut self, run_id: &str) -> bool {
-        self.reap_terminal_runs();
+    pub(crate) async fn cancel(&mut self, run_id: &str) -> Result<WorkflowRunState, String> {
         if let Some(run) = self.active.remove(run_id) {
             run.cancel.cancel();
             let _ = self.cancel_children_for_run(run_id);
-            self.retiring.push((run_id.to_owned(), run.done));
-            let state = {
-                let mut tracker = self.tracker.lock();
-                match tracker.get(run_id) {
-                    Some(state) if !state.status.is_terminal() => {
-                        tracker.apply_outcome(run_id, &WorkflowOutcome::Cancelled)
-                    }
-                    _ => None,
-                }
-            };
-            if state.is_some() {
-                let (state, elapsed) = {
-                    let tracker = self.tracker.lock();
-                    (
-                        tracker.get(run_id).expect("run still tracked"),
-                        tracker.elapsed_ms(run_id),
-                    )
-                };
-                self.notify.emit(&state, elapsed, 0);
+            let state = Self::await_terminal_barrier(run_id, run.done).await?;
+            if !state.status.is_resumable() {
+                return Ok(state);
             }
-            return true;
+            // A natural pause may have won the race with the cancel request.
+            // Its Ended boundary is now acknowledged, so close that resumable
+            // execution through the normal inactive cancellation transaction.
         }
         let _ = self.cancel_children_for_run(run_id);
         let (execution_epoch, elapsed) = {
             let tracker = self.tracker.lock();
             let Some(state) = tracker.get(run_id) else {
-                return false;
+                return Err(format!("workflow {run_id} was not found"));
             };
             if !state.status.is_resumable() {
-                return false;
+                return Err(format!(
+                    "workflow {run_id} is not cancellable (status: {})",
+                    state.status.as_str()
+                ));
             }
             (
                 tracker.execution_epoch(run_id).unwrap_or(0),
@@ -820,7 +785,9 @@ impl WorkflowManager {
             .await
         {
             tracing::error!(%run_id, %error, "refusing to cancel inactive Workflow without a durable Timeline close");
-            return false;
+            return Err(format!(
+                "workflow {run_id} Timeline close was not durable: {error}"
+            ));
         }
         let state = {
             let mut tracker = self.tracker.lock();
@@ -839,9 +806,14 @@ impl WorkflowManager {
                     )
                 };
                 self.notify.emit(&state, elapsed, 0);
-                true
+                tokio::spawn(deliver_workflow_completion_acknowledged(
+                    self.session_cmd_tx.clone(),
+                    state.clone(),
+                    WorkflowOutcome::Cancelled,
+                ));
+                Ok(state)
             }
-            None => false,
+            None => Err(format!("workflow {run_id} could not be closed")),
         }
     }
 
@@ -854,15 +826,13 @@ impl WorkflowManager {
             run.cancel.cancel();
             let _ = self.cancel_children_for_run(run_id);
         }
-        let mut pending: Vec<(Option<String>, oneshot::Receiver<()>)> = active
+        let mut pending: Vec<(
+            Option<String>,
+            oneshot::Receiver<Result<WorkflowRunState, String>>,
+        )> = active
             .into_iter()
             .map(|(run_id, run)| (Some(run_id), run.done))
             .collect();
-        pending.extend(
-            self.retiring
-                .drain(..)
-                .map(|(run_id, done)| (Some(run_id), done)),
-        );
 
         let mut timed_out = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
@@ -912,7 +882,11 @@ impl WorkflowManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_insert_active_run(&mut self, run_id: String, done: oneshot::Receiver<()>) {
+    pub(crate) fn test_insert_active_run(
+        &mut self,
+        run_id: String,
+        done: oneshot::Receiver<Result<WorkflowRunState, String>>,
+    ) {
         self.active.insert(
             run_id,
             ActiveRun {
@@ -931,6 +905,58 @@ impl WorkflowManager {
         self.store
             .args_for(run_id)
             .unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Give SessionActor a bounded opportunity to durably admit the model-visible
+/// receipt. The Workflow lifecycle barrier is deliberately independent:
+/// waiting for the actor here would deadlock a pause/cancel command that is
+/// itself awaiting the manager's terminal barrier. A restored session replays
+/// the same immutable run/epoch identity when this handoff cannot complete.
+async fn deliver_workflow_completion_acknowledged(
+    session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+    state: WorkflowRunState,
+    outcome: WorkflowOutcome,
+) {
+    const MAX_ATTEMPTS: usize = 3;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let (respond_to, admitted) = oneshot::channel();
+        if session_cmd_tx
+            .send(
+                crate::session::commands::SessionCommand::WorkflowCompleted {
+                    state: state.clone(),
+                    outcome: outcome.clone(),
+                    respond_to,
+                },
+            )
+            .is_err()
+        {
+            tracing::warn!(run_id = %state.run_id, "workflow completion delivery stopped because the session mailbox closed");
+            return;
+        }
+        let error = match admitted.await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error,
+            Err(error) => format!("acknowledgement dropped: {error}"),
+        };
+        if attempt == MAX_ATTEMPTS {
+            tracing::error!(
+                run_id = %state.run_id,
+                %error,
+                attempts = MAX_ATTEMPTS,
+                "workflow completion receipt admission exhausted; durable run remains recoverable"
+            );
+            return;
+        }
+        tracing::warn!(
+            run_id = %state.run_id,
+            %error,
+            attempt,
+            max_attempts = MAX_ATTEMPTS,
+            "workflow completion receipt admission failed; retrying"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -1081,6 +1107,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_completion_retries_until_actor_admission_ack() {
+        let mut tracker = WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "workflow-retry".into(),
+            "retry".into(),
+            "verify delivery".into(),
+            Vec::new(),
+            None,
+            None,
+        );
+        state.status = WorkflowRunStatus::Complete;
+        let outcome = WorkflowOutcome::Completed {
+            result: serde_json::json!({"ok": true}),
+        };
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(
+            cmd_tx,
+            state.clone(),
+            outcome,
+        ));
+
+        let crate::session::commands::SessionCommand::WorkflowCompleted {
+            state: first,
+            respond_to: first_ack,
+            ..
+        } = cmd_rx.recv().await.expect("first delivery")
+        else {
+            panic!("expected WorkflowCompleted");
+        };
+        first_ack.send(Err("disk unavailable".into())).unwrap();
+
+        let crate::session::commands::SessionCommand::WorkflowCompleted {
+            state: retry,
+            respond_to: retry_ack,
+            ..
+        } = cmd_rx.recv().await.expect("retry delivery")
+        else {
+            panic!("expected WorkflowCompleted retry");
+        };
+        assert_eq!(retry.run_id, first.run_id);
+        assert_eq!(retry.execution_epoch, first.execution_epoch);
+        retry_ack.send(Ok(())).unwrap();
+        delivery.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn workflow_completion_exhaustion_releases_the_delivery_task() {
+        let mut tracker = WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "workflow-failed".into(),
+            "failed".into(),
+            "verify bounded delivery".into(),
+            Vec::new(),
+            None,
+            None,
+        );
+        state.status = WorkflowRunStatus::Complete;
+        let outcome = WorkflowOutcome::Completed {
+            result: serde_json::json!({"ok": true}),
+        };
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(
+            cmd_tx, state, outcome,
+        ));
+
+        for _ in 0..3 {
+            let crate::session::commands::SessionCommand::WorkflowCompleted { respond_to, .. } =
+                cmd_rx.recv().await.expect("bounded workflow delivery")
+            else {
+                panic!("expected WorkflowCompleted");
+            };
+            respond_to.send(Err("disk unavailable".into())).unwrap();
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), delivery)
+            .await
+            .expect("workflow delivery task must retire after bounded retries")
+            .unwrap();
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn launch_completes_and_updates_tracker() {
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
@@ -1216,7 +1324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pause_eagerly_marks_user_paused() {
+    async fn pause_waits_for_the_watcher_terminal_barrier() {
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
         let run_id = "wf_pause_eager".to_string();
@@ -1236,19 +1344,19 @@ mod tests {
             None,
             None,
         );
-        let (_done_tx, done_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
         manager.test_insert_active_run(run_id.clone(), done_rx);
+        let mut terminal = manager.tracker.lock().get(&run_id).unwrap();
+        terminal.status = crate::session::workflow::tracker::WorkflowRunStatus::UserPaused;
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            done_tx.send(Ok(terminal)).unwrap();
+        });
 
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Active,
-        );
-        assert!(manager.pause(&run_id));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
+        let state = manager.pause(&run_id).await.unwrap();
         assert_eq!(
             state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
-            "pause() must eagerly mark UserPaused so status is not still Active"
+            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused
         );
         assert!(!manager.active.contains_key(&run_id));
     }
@@ -1266,12 +1374,7 @@ mod tests {
         let SubagentEvent::Spawn(_spawn) = spawn_req else {
             panic!("expected spawn request");
         };
-        assert!(manager.pause(&run_id));
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
-            "pause() must mark UserPaused immediately"
-        );
+        assert!(manager.pause(&run_id).await.is_ok());
         let outcome = outcome_rx.await.unwrap();
         assert!(matches!(outcome, WorkflowOutcome::Cancelled));
         let state = manager.tracker.lock().get(&run_id).unwrap();
@@ -1335,7 +1438,7 @@ mod tests {
             "the live agent reserves one slot before it spawns"
         );
 
-        assert!(manager.pause(&run_id));
+        assert!(manager.pause(&run_id).await.is_ok());
         assert!(matches!(
             outcome_rx.await.unwrap(),
             WorkflowOutcome::Cancelled
@@ -1467,7 +1570,7 @@ mod tests {
             crate::session::workflow::tracker::WorkflowRunStatus::Failed
         );
 
-        assert!(manager.cancel(&run_id).await);
+        assert!(manager.cancel(&run_id).await.is_ok());
         assert_eq!(
             manager.tracker.lock().get(&run_id).unwrap().status,
             crate::session::workflow::tracker::WorkflowRunStatus::Cancelled
@@ -1647,42 +1750,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retiring_runs_still_consume_session_admission() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let mut done_senders = Vec::new();
-        for index in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
-            let (done_tx, done_rx) = oneshot::channel();
-            manager
-                .retiring
-                .push((format!("retiring-{index}"), done_rx));
-            done_senders.push(done_tx);
-            assert_eq!(manager.retiring.len(), index + 1);
-        }
-
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
-        )
-        .unwrap();
-        assert!(matches!(
-            manager.launch(resolved, spec()).await.unwrap_err(),
-            LaunchError::TooManyActiveRuns
-        ));
-
-        done_senders.pop().unwrap().send(()).unwrap();
-        manager.reap_terminal_runs();
-        assert_eq!(
-            manager.retiring.len(),
-            WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION - 1
-        );
-        assert!(
-            manager.active.len().saturating_add(manager.retiring.len())
-                < WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION
-        );
-        drop(done_senders);
-    }
-
-    #[tokio::test]
     async fn untrusted_workflow_cannot_fork_parent_context() {
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
@@ -1856,7 +1923,7 @@ mod tests {
             panic!("expected spawn");
         };
         assert!(req.owner.is_workflow());
-        assert!(manager.cancel(&run_id).await);
+        assert!(manager.cancel(&run_id).await.is_ok());
         let _ = outcome_rx.await;
         assert!(
             req.cancel_token.is_cancelled(),

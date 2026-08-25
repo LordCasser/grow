@@ -139,6 +139,7 @@ fn background_request(output_file: PathBuf) -> TerminalRunRequest {
         foreground_block_budget: None,
         kind: TaskKind::Monitor,
         owner_session_id: Some("owner-1".into()),
+        goal_id: Some("goal-1".into()),
         description: None,
     }
 }
@@ -168,6 +169,7 @@ async fn run_background_records_snapshots_and_threads_task_kind() {
     let snapshot = adapter.get_task(&bg.task_id).await.unwrap();
     assert_eq!(snapshot.kind, TaskKind::Monitor);
     assert_eq!(snapshot.owner_session_id.as_deref(), Some("owner-1"));
+    assert_eq!(snapshot.goal_id.as_deref(), Some("goal-1"));
 
     let completed = loop {
         match notifications.recv().await.expect("completion notification") {
@@ -177,6 +179,7 @@ async fn run_background_records_snapshots_and_threads_task_kind() {
     };
     assert_eq!(completed.kind, TaskKind::Monitor);
     assert_eq!(completed.owner_session_id.as_deref(), Some("owner-1"));
+    assert_eq!(completed.goal_id.as_deref(), Some("goal-1"));
     assert_eq!(completed.exit_code, Some(0));
 
     assert_eq!(

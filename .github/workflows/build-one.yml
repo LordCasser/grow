@@ -56,8 +56,8 @@ on:
         description: Whether the bundled rg can be executed on this runner
         required: true
         type: boolean
-      release_tag:
-        description: Release tag being built (checkout ref)
+      release_commit:
+        description: Immutable release commit resolved by the entry workflow
         required: true
         type: string
       grow_version:
@@ -67,6 +67,9 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   build:
@@ -77,36 +80,17 @@ jobs:
       ASSET_PLATFORM: ${{ inputs.asset_platform }}
       TARGET_TRIPLE: ${{ inputs.target }}
       GROW_VERSION: ${{ inputs.grow_version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_COMMIT: ${{ inputs.release_commit }}
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DIST_INCREMENTAL: "false"
     steps:
       - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
         with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT && runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree" >&2
-            git status --short >&2
-            exit 1
-          fi
-          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=$branch" >> "$GITHUB_ENV"
-          else
-            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
-          git checkout --detach "${RELEASE_TAG}"
+          ref: ${{ env.RELEASE_COMMIT }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.93.1"
           targets: ${{ inputs.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -210,7 +194,7 @@ jobs:
               dnf install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
               setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups \
                 cargo build --locked --profile release-dist \
-                -p cli --bin grow --target "${TARGET_TRIPLE}"
+                --features release-dist -p cli --bin grow --target "${TARGET_TRIPLE}"
             '
 
       - name: Build Grow (cross)
@@ -220,7 +204,7 @@ jobs:
           set -euo pipefail
           export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
           cross build --locked --profile release-dist \
-            -p cli --bin grow --target "${TARGET_TRIPLE}"
+            --features release-dist -p cli --bin grow --target "${TARGET_TRIPLE}"
 
       - name: Build Grow (macOS)
         if: ${{ inputs.builder == 'macos' }}
@@ -228,12 +212,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --profile release-dist \
-            -p cli --bin grow --target "${TARGET_TRIPLE}"
+            --features release-dist -p cli --bin grow --target "${TARGET_TRIPLE}"
 
       - name: Build Grow (Windows)
         if: ${{ inputs.builder == 'windows' }}
         shell: pwsh
-        run: cargo build --locked --profile release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
+        run: cargo build --locked --profile release-dist --features release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
 
       # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
       # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
@@ -264,6 +248,8 @@ jobs:
             -e "GROW_VERSION=${GROW_VERSION}" \
             -e "CARGO_PROFILE=release-dist" \
             -e "CARGO_TARGET_DIR=/workspace/grow/target-ohos" \
+            -e "CARGO_INCREMENTAL=0" \
+            -e "CARGO_PROFILE_RELEASE_DIST_INCREMENTAL=false" \
             "${CI_RUNNER}" sh -euo pipefail -c '
               scripts/build-ohos.sh
               BIN="${CARGO_TARGET_DIR}/${CARGO_PROFILE}/grow"
@@ -341,6 +327,39 @@ jobs:
           '
           sha256sum "$bin"
 
+      - name: Finalize Unix release binary
+        if: ${{ inputs.builder != 'windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.builder }}" == "ohos" ]]; then
+            bin="target-ohos/release-dist/grow"
+          else
+            bin="target/${TARGET_TRIPLE}/release-dist/grow"
+          fi
+          case "${{ inputs.builder }}" in
+            alma)
+              strip --strip-all "$bin"
+              ;;
+            cross)
+              strip_bin="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
+              test -n "$strip_bin" || { echo "llvm-strip not found" >&2; exit 1; }
+              "$strip_bin" --strip-all "$bin"
+              ;;
+            macos)
+              strip "$bin"
+              # Editing a Mach-O invalidates the linker-created ad-hoc seal.
+              # Re-sign the exact bytes that are smoked and archived.
+              codesign --force --sign - "$bin"
+              codesign --verify --strict --verbose=2 "$bin"
+              ;;
+            ohos)
+              : # already stripped and signed by the preceding OHOS gate
+              ;;
+          esac
+          test -x "$bin"
+          test -s "$bin"
+
       - name: Smoke-test native binary
         if: ${{ inputs.smoke && inputs.builder != 'windows' }}
         shell: bash
@@ -376,23 +395,9 @@ jobs:
             bin_path="target/${TARGET_TRIPLE}/release-dist/grow"
           fi
           cp "$bin_path" "$stage_dir/grow"
-
-          case "${{ inputs.builder }}" in
-            alma)
-              strip --strip-all "$stage_dir/grow"
-              ;;
-            cross)
-              strip_bin="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
-              test -n "$strip_bin" || { echo "llvm-strip not found" >&2; exit 1; }
-              "$strip_bin" --strip-all "$stage_dir/grow"
-              ;;
-            macos)
-              strip "$stage_dir/grow"
-              ;;
-            ohos)
-              : # already stripped in-container by the build step
-              ;;
-          esac
+          if [[ "${{ inputs.builder }}" == "macos" ]]; then
+            codesign --verify --strict --verbose=2 "$stage_dir/grow"
+          fi
 
           asset="dist/grow-${GROW_VERSION}-${ASSET_PLATFORM}.tar.gz"
           COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$asset" grow
@@ -421,18 +426,14 @@ jobs:
           if ($entries -ne "grow.exe") { throw "invalid archive entry: $entries" }
           Get-Item $asset
 
+      - name: Attest Grow release asset
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/grow-${{ inputs.grow_version }}-${{ inputs.asset_platform }}.tar.gz
+
       - uses: actions/upload-artifact@v7
         with:
           name: grow-${{ inputs.asset_platform }}
           path: dist/grow-*
           if-no-files-found: error
           retention-days: 3
-
-      - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT && runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
-            git checkout -f "${ACT_RESTORE_REF}"
-          fi

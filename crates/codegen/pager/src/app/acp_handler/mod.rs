@@ -494,8 +494,20 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         advance_reconnect_cursor(agent, &mut meta);
 
                         if release_behavior_fifo {
-                            behavior_drain =
-                                Some(crate::app::root::dispatch::maybe_drain_queue(agent));
+                            let admission_applied = agent
+                                .session
+                                .deferred_session_mode
+                                .is_none_or(|target| target == agent.session.behavior_mode);
+                            if admission_applied {
+                                // The matching applied CurrentModeUpdate is the
+                                // completion boundary for a Dashboard/Worktree
+                                // first-prompt admission. An initial Normal update
+                                // may arrive before the staged mode RPC; it must not
+                                // release a Plan/Clarify/etc. prompt under Normal.
+                                agent.session.deferred_session_mode = None;
+                                behavior_drain =
+                                    Some(crate::app::root::dispatch::maybe_drain_queue(agent));
+                            }
                         }
 
                         !meta.is_replay && !agent.session.loading_replay

@@ -171,7 +171,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::TaskStillRunning { .. }
                     | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
                     chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
-                    chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                    chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
                         Some(subagent_id)
                     }
                 })
@@ -649,12 +649,10 @@ impl SessionActor {
                 });
                 match turn {
                     Ok(turn) => self
-                        .record_notification_resolution_durably(
-                            chat_state::NotificationEvent::Consumed {
-                                notification_ids: notification_ids.clone(),
-                                turn,
-                                input: Some(user_chat),
-                            },
+                        .consume_notifications_durably(
+                            notification_ids.clone(),
+                            turn,
+                            Some(user_chat),
                         )
                         .await
                         .map(|_| ()),

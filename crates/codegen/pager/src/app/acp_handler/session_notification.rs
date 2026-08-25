@@ -1309,7 +1309,18 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         } else if status == Some("rejected")
             && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
         {
-            agent.show_toast_for(message, std::time::Duration::from_millis(990));
+            if let Some(target) = agent.session.deferred_session_mode {
+                agent.show_toast_for(
+                    &format!(
+                        "{message} The prompt is still queued: retry {} or choose {} to send it now.",
+                        target.display_label(),
+                        mode.display_label()
+                    ),
+                    std::time::Duration::from_secs(6),
+                );
+            } else {
+                agent.show_toast_for(message, std::time::Duration::from_millis(990));
+            }
         }
     }
     let was_active = agent.session.plan_mode_active;

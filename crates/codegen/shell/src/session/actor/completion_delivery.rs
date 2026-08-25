@@ -244,7 +244,7 @@ impl SessionActor {
                 chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
                     ids.contains(&task_id)
                 }
-                chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
+                chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
                     ids.contains(&subagent_id)
                 }
                 chat_state::NotificationSource::MonitorProgress { .. }
@@ -272,9 +272,9 @@ impl SessionActor {
                         chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
                             task_id == id
                         }
-                        chat_state::NotificationSource::SubagentCompleted { subagent_id } => {
-                            subagent_id == id
-                        }
+                        chat_state::NotificationSource::SubagentCompleted {
+                            subagent_id, ..
+                        } => subagent_id == id,
                         _ => false,
                     })
                     .map(|notification| notification.payload_ref.clone())
@@ -308,11 +308,7 @@ impl SessionActor {
         let mut input = sampling_types::ConversationItem::notification_drain(body);
         input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
         if let Err(error) = self
-            .record_notification_resolution_durably(chat_state::NotificationEvent::Consumed {
-                notification_ids,
-                turn,
-                input: Some(input),
-            })
+            .consume_notifications_durably(notification_ids, turn, Some(input))
             .await
         {
             tracing::error!(task_ids = ?ids, %error, "failed to consume deferred completion receipts");

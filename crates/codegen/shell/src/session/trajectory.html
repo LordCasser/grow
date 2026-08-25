@@ -297,7 +297,7 @@ main.inspecting .inspector{display:block}
   <select id="visibility" aria-label="Surface visibility"><option value="">All surfaces</option><option value="current">Current</option><option value="shadowed">Shadowed</option><option value="log_only">Log only</option></select>
   <span class="spacer"></span>
   <div class="controls-actions" role="group" aria-label="Timeline navigation">
-    <button id="older">Earlier</button><button class="follow on" id="follow" aria-pressed="true">Following live</button><button id="refresh">Refresh</button>
+    <button id="older">Earlier</button><button id="later" disabled>Later</button><button class="follow on" id="follow" aria-pressed="true">Following live</button><button id="refresh">Refresh</button>
   </div>
 </div>
 <section class="overview" aria-label="Trajectory activity density overview">
@@ -345,8 +345,8 @@ const drawerMedia=matchMedia('(max-width:1350px)');
 const ROW_HEIGHT=Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-height'))||48;
 const OVERSCAN=20,PAGE_ROWS=240,MAX_WINDOW_ROWS=1800;
 let follow=true,selected=hashEntry(),timer=null,latestData=null,windowRows=[],displayRows=[];
-let hasEarlier=false,renderQueued=false,loadingEarlier=false,detailController=null,copyController=null,detailRow=null,detailEntry=null;
-let pollController=null,focusController=null,earlierController=null,pollRevision=0,viewRevision=0,focusRevision=0,earlierRevision=0;
+let hasEarlier=false,hasLater=false,renderQueued=false,loadingEarlier=false,loadingLater=false,detailController=null,copyController=null,detailRow=null,detailEntry=null;
+let pollController=null,focusController=null,earlierController=null,laterController=null,pollRevision=0,viewRevision=0,focusRevision=0,earlierRevision=0,laterRevision=0;
 let ledgerMessage='Loading trajectory…',inspectorOpen=false,inspectorTriggerEntry=null;
 let explicitTheme=false,drawnOverview=null,drawnRows=null;
 explicitTheme=document.cookie.split('; ').some(value=>value.startsWith('grow_trajectory_theme='));
@@ -394,33 +394,21 @@ function annotateGroups(items){
   const actorTurns=new Map(),actorSteps=new Map();
   for(const row of items){
     const actor=row.actor;
-    const turnEnd=row.layer==='meta'&&row.class==='lifecycle'&&String(row.kind).startsWith('turn.')&&row.state!=='started';
     row._turnBoundary=false;row._stepBoundary=false;
     if(row.turn_id!=null){
       const previous=actorTurns.get(actor);
       if(previous!=null&&previous!==row.turn_id){row._turnBoundary=true;row._stepBoundary=true;actorSteps.delete(actor)}
       actorTurns.set(actor,row.turn_id)
-    }
-    if(row.kind==='turn.started')actorTurns.set(actor,row.turn_id);
+    }else{actorTurns.delete(actor);actorSteps.delete(actor)}
     if(row.step_index!=null){
       const step=(row.turn_id??actor)+':'+row.step_index,previous=actorSteps.get(actor);
       if(previous!=null&&previous!==step)row._stepBoundary=true;
       actorSteps.set(actor,step)
+    }else{
+      actorSteps.delete(actor)
     }
-    row._turnGroup=actorTurns.has(actor);
-    row._stepGroup=actorSteps.has(actor)||row.step_index!=null;
-    if(row.kind==='step.ended')actorSteps.delete(actor);
-    if(turnEnd){actorSteps.delete(actor);actorTurns.delete(actor)}
-  }
-  const futureTurns=new Set(),futureSteps=new Set();
-  for(let index=items.length-1;index>=0;index--){
-    const row=items[index],actor=row.actor;
-    if(row.turn_id!=null)futureTurns.add(actor);
-    if(row.step_index!=null)futureSteps.add(actor);
-    row._turnGroup=row._turnGroup||futureTurns.has(actor);
-    row._stepGroup=row._stepGroup||futureSteps.has(actor);
-    if(row.kind==='step.started')futureSteps.delete(actor);
-    if(row.kind==='turn.started'){futureSteps.delete(actor);futureTurns.delete(actor)}
+    row._turnGroup=row.turn_id!=null;
+    row._stepGroup=row.turn_id!=null&&row.step_index!=null
   }
   return items
 }
@@ -557,6 +545,7 @@ function renderData(data,scrollTail,renderRows=true){
     $('position').title='internal turn id: '+data.activeTurn
   }
   $('older').disabled=!hasEarlier||loadingEarlier;
+  $('later').disabled=!hasLater||loadingLater;
   if(rowsChanged)renderLedger();
   drawOverview(data.overview);
   if(scrollTail&&rowsChanged){
@@ -606,8 +595,14 @@ function invalidateEarlier(){
     loadingEarlier=false;$('older').textContent='Earlier';$('older').disabled=!hasEarlier
   }
 }
+function invalidateLater(){
+  laterRevision++;laterController?.abort();laterController=null;
+  if(loadingLater){
+    loadingLater=false;$('later').textContent='Later';$('later').disabled=!hasLater
+  }
+}
 function invalidateView(){
-  viewRevision++;invalidateFocus();invalidateEarlier()
+  viewRevision++;invalidateFocus();invalidateEarlier();invalidateLater()
 }
 function setBackgroundInert(value){
   for(const element of document.querySelectorAll('header,.controls,.overview,#ledger'))element.inert=value
@@ -654,7 +649,7 @@ async function loadDetail(entry,preserveContent=false){
 function selectEntry(entry,scroll,fromFocus=false){
   const index=displayRows.findIndex(row=>row.entry_id===entry);
   if(index<0){focusOrLoad(entry);return}
-  if(!fromFocus){invalidateFocus();invalidateEarlier()}
+  if(!fromFocus){invalidateFocus();invalidateEarlier();invalidateLater()}
   const previousRow=rows.querySelector('.selected');
   const selectionChanged=selected!==entry;
   if(selectionChanged){
@@ -679,7 +674,7 @@ function selectEntry(entry,scroll,fromFocus=false){
 async function focusOrLoad(entry){
   const local=displayRows.find(row=>row.entry_id===entry);
   if(local){selectEntry(entry,true);return}
-  invalidateFocus();invalidateEarlier();
+  invalidateFocus();invalidateEarlier();invalidateLater();
   const fallback=inspectorOpen?selected:null;
   const request=focusRevision,view=viewRevision,controller=focusController=new AbortController();
   const params=queryParams();params.set('entry',entry);
@@ -688,7 +683,7 @@ async function focusOrLoad(entry){
     const data=await fetchPage(params,controller.signal);
     if(request!==focusRevision||view!==viewRevision||focusController!==controller)return;
     focusController=null;
-    latestData=data;windowRows=trimRows(data.rows,'start');hasEarlier=data.hasEarlier;pauseFollow();
+    latestData=data;windowRows=trimRows(data.rows,'start');hasEarlier=data.hasEarlier;hasLater=data.hasLater;pauseFollow();
     renderData(data,false);selectEntry(entry,true,true);setHealth('Live','--green')
   }catch(error){
     if(error.name==='AbortError'||request!==focusRevision||view!==viewRevision||focusController!==controller)return;
@@ -714,7 +709,7 @@ async function poll(){
     const updateRows=follow||windowRows.length===0;
     let renderRows=updateRows;
     if(updateRows){
-      windowRows=trimRows(data.rows,'end');hasEarlier=data.hasEarlier
+      windowRows=trimRows(data.rows,'end');hasEarlier=data.hasEarlier;hasLater=data.hasLater
     }else if(selected){
       const fresh=data.rows.find(row=>row.entry_id===selected);
       const index=windowRows.findIndex(row=>row.entry_id===selected);
@@ -725,25 +720,29 @@ async function poll(){
         showSummary(fresh);
         if(refreshDetail)loadDetail(selected,true)
       }
+      const firstOrdinal=windowRows[0]?.ordinal,lastOrdinal=windowRows.at(-1)?.ordinal;
+      if(Number.isInteger(firstOrdinal))hasEarlier=firstOrdinal>0;
+      if(Number.isInteger(lastOrdinal))hasLater=lastOrdinal+1<data.matchingCount
     }
     renderData(data,follow,renderRows);setHealth('Live','--green')
   }catch(error){if(error.name!=='AbortError')setHealth('Connection failed','--red')}
   if(revision===pollRevision)timer=setTimeout(poll,1500)
 }
 async function loadEarlier(){
-  if(loadingEarlier||!hasEarlier||!displayRows.length)return;
+  if(loadingEarlier||loadingLater||!hasEarlier||!displayRows.length)return;
   const view=viewRevision,request=++earlierRevision,controller=earlierController=new AbortController();
   loadingEarlier=true;$('older').disabled=true;$('older').textContent='Loading…';setHealth('Loading earlier events','--tools');
   const oldTop=ledger.scrollTop,anchorIndex=Math.floor(oldTop/ROW_HEIGHT);
   const anchorEntry=displayRows[anchorIndex]?.entry_id,anchorOffset=oldTop-anchorIndex*ROW_HEIGHT;
+  const oldLast=displayRows.at(-1)?.entry_id,oldHasLater=hasLater;
   const params=queryParams();params.set('before',displayRows[0].entry_id);
   try{
     const page=await fetchPage(params,controller.signal);
     if(request!==earlierRevision||view!==viewRevision||earlierController!==controller)return;
     earlierController=null;
-    windowRows=trimRows(mergeRows(page.rows,windowRows),'start');hasEarlier=page.hasEarlier;
+    windowRows=trimRows(mergeRows(page.rows,windowRows),'start');hasEarlier=page.hasEarlier;hasLater=oldLast!=null&&windowRows.some(row=>row.entry_id===oldLast)?oldHasLater:true;latestData=page;
     if(latestData){
-      renderData(latestData,false);
+      renderData(page,false);
       const nextAnchor=displayRows.findIndex(row=>row.entry_id===anchorEntry);
       if(Math.abs(ledger.scrollTop-oldTop)<2)ledger.scrollTop=nextAnchor<0?oldTop:nextAnchor*ROW_HEIGHT+anchorOffset
     }
@@ -757,9 +756,35 @@ async function loadEarlier(){
     }
   }
 }
+async function loadLater(){
+  if(loadingLater||loadingEarlier||!hasLater||!displayRows.length)return;
+  const view=viewRevision,request=++laterRevision,controller=laterController=new AbortController();
+  loadingLater=true;$('later').disabled=true;$('later').textContent='Loading…';setHealth('Loading later events','--tools');
+  const oldTop=ledger.scrollTop,anchorIndex=Math.floor(oldTop/ROW_HEIGHT);
+  const anchorEntry=displayRows[anchorIndex]?.entry_id,anchorOffset=oldTop-anchorIndex*ROW_HEIGHT;
+  const oldFirst=displayRows[0]?.entry_id,oldHasEarlier=hasEarlier;
+  const params=queryParams();params.set('after',displayRows.at(-1).entry_id);
+  try{
+    const page=await fetchPage(params,controller.signal);
+    if(request!==laterRevision||view!==viewRevision||laterController!==controller)return;
+    laterController=null;
+    windowRows=trimRows(mergeRows(windowRows,page.rows),'end');hasEarlier=oldFirst!=null&&windowRows.some(row=>row.entry_id===oldFirst)?oldHasEarlier:true;hasLater=page.hasLater;latestData=page;
+    renderData(page,false);
+    const nextAnchor=displayRows.findIndex(row=>row.entry_id===anchorEntry);
+    if(Math.abs(ledger.scrollTop-oldTop)<2)ledger.scrollTop=nextAnchor<0?oldTop:nextAnchor*ROW_HEIGHT+anchorOffset;
+    setHealth('Live','--green')
+  }catch(error){
+    if(error.name==='AbortError'||request!==laterRevision||view!==viewRevision||laterController!==controller)return;
+    laterController=null;setHealth('Unable to load later events','--red')
+  }finally{
+    if(request===laterRevision&&view===viewRevision&&laterController===null){
+      loadingLater=false;$('later').textContent='Later';$('later').disabled=!hasLater
+    }
+  }
+}
 function resetWindow(){
   invalidateView();
-  windowRows=[];displayRows=[];hasEarlier=false;latestData=null;selected=null;drawnRows=null;
+  windowRows=[];displayRows=[];hasEarlier=false;hasLater=false;latestData=null;selected=null;drawnRows=null;
   closeInspector(null);
   history.replaceState(null,'',location.pathname+location.search);
   $('hint').hidden=false;$('meta').hidden=true;$('payload').hidden=true;
@@ -775,7 +800,7 @@ function closeInspector(focusEntry=inspectorTriggerEntry){
 }
 function clearSelection(){
   const previous=selected;
-  invalidateFocus();invalidateEarlier();
+  invalidateFocus();invalidateEarlier();invalidateLater();
   selected=null;history.replaceState(null,'',location.pathname+location.search);
   const selectedRow=rows.querySelector('.selected');selectedRow?.classList.remove('selected');selectedRow?.setAttribute('aria-selected','false');
   closeInspector(previous);drawOverview(latestData?.overview)
@@ -798,10 +823,11 @@ matchMedia('(prefers-color-scheme:dark)').addEventListener('change',event=>{
   document.documentElement.dataset.theme=event.matches?'dark':'light';syncThemeToggle()
 });
 $('older').onclick=loadEarlier;
+$('later').onclick=loadLater;
 $('follow').onclick=()=>{
   if(follow){pauseFollow()}else{
     if(selected)clearSelection();
-    invalidateView();follow=true;windowRows=[];hasEarlier=false;syncFollowControl();setHealth('Loading live tail','--tools');poll()
+    invalidateView();follow=true;windowRows=[];hasEarlier=false;hasLater=false;syncFollowControl();setHealth('Loading live tail','--tools');poll()
   }
 };
 $('refresh').onclick=()=>{setHealth('Refreshing','--tools');poll()};
@@ -817,7 +843,7 @@ $('copy').onclick=async()=>{
     await navigator.clipboard.writeText(JSON.stringify(response.row,null,2));
     if(selected!==entry||copyController!==controller)return;
     $('payloadStatus').textContent='Copied'
-  }catch(error){if(error.name!=='AbortError'&&copyController===controller)$('payloadStatus').textContent='Copy failed'}
+  }catch(error){if(error.name!=='AbortError'&&copyController===controller)$('payloadStatus').textContent=error.message||'Copy failed'}
   finally{if(selected===entry&&copyController===controller){$('copy').disabled=false;copyController=null}}
 };
 for(const id of ['layer','actor','class','producer','visibility'])$(id).onchange=resetWindow;
@@ -826,6 +852,7 @@ $('search').oninput=()=>{clearTimeout(debounce);debounce=setTimeout(resetWindow,
 ledger.onscroll=()=>{
   queueRender();
   if(ledger.scrollTop<120&&hasEarlier)loadEarlier();
+  if(!follow&&ledger.scrollHeight-ledger.scrollTop-ledger.clientHeight<120&&hasLater)loadLater();
   if(ledger.scrollHeight-ledger.scrollTop-ledger.clientHeight>90)pauseFollow()
 };
 window.onhashchange=()=>{const entry=hashEntry();if(entry&&entry!==selected)focusOrLoad(entry);else if(!entry)clearSelection()};

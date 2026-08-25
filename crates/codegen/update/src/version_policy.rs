@@ -101,7 +101,7 @@ fn required_range_message(decision: &RequiredRangeDecision) -> Option<String> {
 pub fn enforce_version_policy_or_exit() {
     #[cfg(feature = "distro-pm")]
     {
-        // Package-manager-managed build (e.g. the Harmonybrew formula): the
+        // Package-manager-managed downstream build: the
         // package manager owns versioning, so the startup range block is
         // skipped.
         return;

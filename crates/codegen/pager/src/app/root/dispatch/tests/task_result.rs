@@ -85,6 +85,137 @@ fn behavior_confirmation_unwinds_submission_and_returns_prompt_to_fifo() {
 }
 
 #[test]
+fn standalone_behavior_failure_is_visible_and_does_not_drain_the_queue() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id]
+        .session
+        .session_id
+        .clone()
+        .expect("test agent has a session");
+    app.agents[&id]
+        .session
+        .pending_prompts
+        .push_back(crate::app::session::QueuedPrompt::plain(
+            1,
+            "queued prompt",
+            crate::app::session::QueueEntryKind::Prompt,
+        ));
+    app.agents[&id].session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionModeSet {
+            session_id,
+            result: Err("transport unavailable".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
+    let toast = agent_toast(&app).expect("Behavior failure toast");
+    assert!(toast.contains("prompt is still queued"));
+    assert!(toast.contains("transport unavailable"));
+
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Normal),
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert!(app.agents[&id].session.deferred_session_mode.is_none());
+}
+
+#[test]
+fn standalone_behavior_failure_allows_retrying_the_deferred_target() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id]
+        .session
+        .session_id
+        .clone()
+        .expect("test agent has a session");
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.behavior_mode = tools::types::BehaviorId::Normal;
+    agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Plan);
+    agent.session.plan_mode_pending = Some(true);
+    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+    agent.session.enqueue_prompt("must remain parked".into());
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionModeSet {
+            session_id,
+            result: Err("transport unavailable".into()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(app.agents[&id].session.behavior_mode_pending.is_none());
+    assert!(app.agents[&id].session.plan_mode_pending.is_none());
+
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SetSessionMode { mode_id, .. } if mode_id.0.as_ref() == "plan"
+    )));
+    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
+}
+
+#[test]
+fn trajectory_post_ready_failure_is_visible() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::TrajectoryRuntimeEnded {
+            agent_id: id,
+            message: "Trajectory debugger stopped (exit status: 1)".into(),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        agent_toast(&app).as_deref(),
+        Some("Trajectory debugger stopped (exit status: 1)")
+    );
+}
+
+#[test]
+fn selecting_in_flight_deferred_target_never_releases_under_current_behavior() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.behavior_mode = tools::types::BehaviorId::Normal;
+    agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Plan);
+    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+    agent.session.enqueue_prompt("must stay parked".into());
+
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent.session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
+}
+
+#[test]
 fn doctor_planning_promotes_initial_session_binding() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = test_app_with_agent();

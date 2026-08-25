@@ -64,7 +64,7 @@ pub use timeline::{
     ControlContextLayer, ControlEvent, EventSeq, ImageProjectionEvent, ImageShadow,
     ImageShadowSource, MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
     MAX_PENDING_MONITOR_PROGRESS_PER_TASK, MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent,
-    NotificationDismissReason, NotificationEvent, NotificationPayloadRef, NotificationSource,
+    NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
     NotificationSourceVersion, NotificationTaskKind, ObservationEvent, PendingNotification,
     PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
     StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,

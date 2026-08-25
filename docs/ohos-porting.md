@@ -9,7 +9,7 @@ Grow 适配 `aarch64-unknown-linux-ohos` **理论可行**（Rust 官方已将其
 
 1. **持久化 Shell 依赖 Bash/Zsh** —— 基础 OpenHarmony 只有 mksh（`/bin/sh`），grow 的终端会话、shell 状态快照、bash 工具全部以 bash/zsh 为前提。这是**首要源码阻塞**。
 2. **工具链与签名必须进入构建链** —— OHOS SDK clang/sysroot、ohos 宿主 Rust（≥1.93）、链接器签名（`lld --code-sign`）或二进制签名工具，缺一不可。
-3. **内嵌 `rg` 必须在嵌入前独立签名** —— 运行时解包到 `~/.grow/vendor` 的 rg 是独立 ELF，只签 grow 不够。
+3. **发布边界不能越过签名链** —— 当前 OHOS 资产不内嵌 `rg`，运行时从 `PATH` 解析，避免产生未签名的独立 ELF。
 4. **HMDFS、PTY、SQLite、沙箱只能在真机确认** —— DockerHarmony/ci-runner 能验证编译与基础运行，不能替代 HarmonyOS PC 真机验收（对应 Harmonybrew 的 Tier 1 / Tier 2 分层）。
 
 ## 1. 已核实的关键事实
@@ -127,7 +127,7 @@ OAuth/浏览器打开（xdg-open 类）与 callback 在鸿蒙 PC 的可用性需
 ```text
 GitHub Actions / ubuntu-24.04-arm
     ├── docker run --rm -v workspace Harmonybrew ci-runner
-    │     ├── cargo build --profile release-dist -p cli --bin grow   # 恰好一次
+    │     ├── cargo build --profile release-dist --features release-dist -p cli --bin grow   # 恰好一次
     │     ├── llvm-strip + DWARF/大小门禁
     │     └── OHOS 容器冒烟（只运行已有产物，绝不触发重构建）
     ├── 宿主下载并校验固定版本 ohos-bst-light
@@ -137,7 +137,9 @@ GitHub Actions / ubuntu-24.04-arm
 
 - release.yml：新增 `asset_platform: ohos-aarch64` / `target: aarch64-unknown-linux-ohos` / `runner: ubuntu-24.04-arm` / `smoke: false`；**3 处** 9→10 资产清单（`Verify staged binaries`、`Verify and publish` 的 `required` 数组 + 资产校验段）。
 - `.cargo/config.toml` 只加 `[target.aarch64-unknown-linux-ohos]` 的 **rustflags**（`force-unwind-tables` + `-Wl,-z,relro,-z,now,-z,noexecstack`，与 linux 段一致）；**不硬编码 SDK 路径** —— linker/sysroot/SDK 根由 CI 环境注入：`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER`、`CC_/CXX_`、`OHOS_NDK_HOME`、PATH 追加 SDK `llvm/bin` 与 `build-tools/cmake/bin`。
-- rust 版本：OHOS 宿主工具链 ≥1.93（跟随 Harmonybrew rust formula，当前 1.97.1）；CI 内 `RUSTUP_TOOLCHAIN=system` 覆盖 `rust-toolchain.toml` 的 1.92.0 pin。
+- rust 版本：OHOS 宿主工具链从 1.93 起才发布。当前固定 ci-runner 镜像使用 Harmonybrew 官方 OHOS
+  host Rust 1.97.1，`scripts/build-ohos.sh` 会拒绝其他版本；CI 内 `RUSTUP_TOOLCHAIN=system`。
+  其他正式目标与仓库 `rust-toolchain.toml` 的 1.93.1 保持一致。
 - `scripts/build-ohos.sh --smoke` 的语义是“只冒烟现有产物”，不会调用 Cargo。发布链不得在 strip 后再次构建，否则会把带 DWARF 的 ELF 写回并使最终包从约 36 MB 膨胀到约 159 MB。
 - 已实测的容器网络坑（重要）：
   1. cargo（libcurl+brew openssl）连 crates.io 索引间歇性 TLS `unexpected eof`；
@@ -146,44 +148,29 @@ GitHub Actions / ubuntu-24.04-arm
   4. `CARGO_HTTP_MULTIPLEXING=false` + `CARGO_NET_RETRY=8` + 构建重试循环兜底。
   真实流水线（arm 服务器）网络可能不同，但镜像配置与重试机制建议保留。
 
-### 4.2 `rg` 双渠道（各自独立处理）
+### 4.2 `rg` 分发边界
 
-| 渠道 | `rg` 处理 |
-|---|---|
-| 官方 standalone tar.gz | **从源码构建 → strip → 签名 → 嵌入** grow（tools/build.rs 的 `GROW_TOOLS_BUNDLE_RG_PATH` + `GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1`；rg 15.0.0 可在同一容器内 `cargo build` 产出） |
-| Harmonybrew Formula | `depends_on "ripgrep"`，运行时 PATH 查找，**不嵌入**（brew 的 ripgrep 由流水线签名；内嵌 rg 解包后无签名，鸿蒙 PC 无法执行） |
-
-> 修正：上一版草稿把"Formula 不应嵌入"错误扩大成所有渠道都不能嵌入。standalone 渠道只要**签名顺序正确**（先签 rg 再嵌入）即可。
+Grow 2.0.0 只维护 GitHub Release 二进制渠道。OHOS 资产不嵌入 `rg`：运行时从 `PATH` 解析，
+缺失时搜索工具返回安装指引。这避免在没有独立 OHOS `rg` 签名链的情况下发布不可执行的内嵌 ELF。
+其他官方目标继续嵌入并校验固定版本 `rg`。
 
 ### 4.3 签名与压缩（严格顺序）
 
 ```text
-build rg → llvm-strip rg → binary-sign rg → embed rg
-→ build grow（一次）→ llvm-strip grow → smoke grow
+build grow（一次）→ llvm-strip grow → smoke grow
 → ohos-bst-light self-sign grow → verify .codesign → tar.gz
 ```
 
 - 不使用 UPX 或其他可执行文件压缩；压缩只发生在传输层 `tar.gz`。
 - **签名后绝不再次 strip / 修改 / 压缩 ELF**；外层 `tar.gz` 在签名后生成，不影响签名。
-- 只签 grow 不够：运行时解出的 `rg` 是独立 ELF，必须单独签。
 - standalone 发布固定使用 [`hqzing/ohos-bst-light`](https://github.com/hqzing/ohos-bst-light) 的自签名算法：workflow 固定 commit 和源码 SHA-256，并要求 C/Python 两份独立实现输出完全一致。自签名无私钥、证书或身份保证，只提供系统策略需要的完整性标记；目标设备仍必须允许 self-sign。
 - 签名后执行第二阶段门禁：ELF 必须是 stripped、`.codesign` 必须为 4 KiB 且 4 KiB 对齐、最终 tar.gz 必须小于 80 MB。签名后绝不再运行 Cargo、strip 或修改 ELF。
 
-### 4.4 Harmonybrew formula（草稿）
+### 4.4 包管理器渠道
 
-```ruby
-class Grow < Formula
-  depends_on "rust" => :build
-  depends_on "zsh"          # 持久 shell 后端（HiShell 本身是 zsh；Posix backend 落地后可改 optional）
-  depends_on "ripgrep"      # PATH rg，不嵌入
-  def install
-    # --features distro-pm：编译期关闭自更新（/upgrade 引导 brew upgrade）
-    system "cargo", "install", *std_cargo_args(path: "crates/cli"), "--bin", "grow",
-           "--no-default-features", "--features", "release-dist,sandbox-enforce,distro-pm"
-  end
-end
-```
-（具体 feature 名与关闭自更新的机制由实现阶段定稿；`distro-pm` 参照 atomcode。）
+Grow 2.0.0 不维护 Harmonybrew、Homebrew 或其他包管理器 formula。仓库内旧 formula 已删除，避免与
+GitHub Release 形成两套版本、签名和更新契约。`distro-pm` feature 仅保留为未来受包管理器控制的
+下游构建边界，不是当前官方发布入口。
 
 ## 5. 验证分层
 
@@ -220,12 +207,12 @@ end
 
 1. **Shell**：Posix backend 是独立功能开发（新 backend + 降级语义 + 测试），不能当"适配补丁"塞进 OHOS 移植。容器实测确认：**TUI 启动/非交互命令不依赖 bash/zsh**，只有终端会话与 agent bash 工具依赖 —— 首版可声明 zsh 依赖（HiShell 自带）。
 2. **nix 多版本**：cli 图中 nix 0.26.4（pprof 链）需 "ohos≈musl" 补丁、nix 0.28.0（portable-pty）原生支持、nix 0.30.1（grow 自家）原生支持。**libc 0.2.186 的 ohos 支持不完整**（缺 4 个常量）。建议向 libc/nix 上游贡献补丁，或仓库内 vendor（先例：`third_party/nono`）。
-3. **jemalloc**：configure 不认 ohos 三元组 —— **第一版必须关**（`--no-default-features --features sandbox-enforce`），与文档建议一致；后续需 patch jemalloc 的 config.sub 或在真机验证。
+3. **jemalloc**：configure 不认 ohos 三元组 —— **第一版必须关**（`--no-default-features --features release-dist,sandbox-enforce`），与文档建议一致；后续需 patch jemalloc 的 config.sub 或在真机验证。
 4. **动态链接**：SDK clang wrapper 链接的二进制带 `libtime_service_ndk.so`（真机系统自带，最小 rootfs 无）；libz-sys 动态链 `libz.so`（真机是改名 `.z.so`）—— **发布前需确认动态链接策略**（静态链 zlib 或依赖 Harmonybrew 的 zlib 提供 soname）。
 5. **真机不可替代项**：HMDFS/SQLite、PTY/终端（容器 PTY 已过，HiShell 行为未验）、沙箱、签名执行、登录跳转。
 6. **签名链**：standalone 渠道已采用无密钥的 ohos-bst-light 自签名；它不提供发布者身份认证，且正式设备是否放行仍需真机验证。需要 CA 身份保证的渠道仍应另行设计证书签名。
 7. **性能**：arm runner 容器内全量 release 构建约 40-50 分钟；旧流程因一次脚本内重复构建、strip 后又为 smoke 重构建，实际约 71 分钟。当前脚本成功路径只执行一次 Cargo build，非网络错误立即失败。
-8. **依赖版本**：OHOS 工具链 ≥1.93 vs 仓库 pin 1.92.0 —— CI 显式处理。
+8. **依赖版本**：OHOS 工具链由容器提供；其他官方构建固定为仓库的 Rust 1.93.1。
 9. **并发工作区**：本仓库存在并行改动（Cargo.toml、third_party/nono 等），移植工作需在其后 rebase/合并。
 10. **镜像/网络**：USTC 下载端点在本网络全挂，rsproxy 稳定 —— 流水线需配置可用的镜像源 + 重试。
 
@@ -236,7 +223,7 @@ end
 - **冒烟**：`--version`、`inspect --json`、`doctor`（优雅降级）、`sessions list`（SQLite 初始化）、vendor rg 解包执行、zsh backend、PTY/TUI 启动 ✅。
 - **必须的改动（测试中实证，2026-08-02 复核后最小集）**：
   1. **nix 0.26.4 补丁**（唯一源码层补丁）：`target_env = "musl"` → `any(target_env = "musl", target_env = "ohos")`（0.28/0.30 原生支持 ohos，勿动）；
-  2. **关 jemalloc**（`--no-default-features --features sandbox-enforce`）；
+  2. **关 jemalloc**（`--no-default-features --features release-dist,sandbox-enforce`）；
   3. 运行时需 `libz.so`（libz-sys 动态链）—— 发布时静态链或走包管理器依赖。
 - **已随用户提交消化的补丁**（复核构建不再需要）：
   - `libc` 补丁（4 个缺失常量）：nix 补丁把 glibc 分支门掉后 libc 常量不再被引用 —— **无需 vendor libc**；
@@ -247,7 +234,8 @@ end
 ## 9. 路线图：下一步（第一阶段完成后）
 
 > 阶段定义：**第一阶段 = 仓库本体在 docker 编译通过**（已完成并验证）。
-> **进展（2026-08-02）**：Step 0/1 已完成（nix vendor、aws-lc 移除、build 脚本、distro-pm 已合入 main）；**v1.1.1 已打 tag 并推送**（release workflow 九平台全绿）；Step 3 的 Harmonybrew formula 已用**真实 v1.1.1 tag tarball 端到端验证**并通过门禁（PR #15676 → 替代 PR #15677 评审中）；**上游 homebrew-core 提交（PR #296588）因"仓库知名度"机械门槛（<225 stars/90 forks/90 watchers，grow 仓库刚公开为 0/0/0）主动关闭**，formula 变体保留在 `packaging/homebrew-core/grow.rb`，待项目知名度达标后重新提交。以下按依赖排序。
+> **进展（2026-08-25）**：OHOS 已进入 10 平台 GitHub Release 矩阵。早期 Harmonybrew/Homebrew
+> formula 实验不再是官方发布面，相关仓库文件已删除。
 
 ### Step 0 — 提交第一阶段改动（立即）
 `third_party/nix-ohos/`（vendor）+ `Cargo.toml`（patch 条目）+ `Cargo.lock`（nix 0.26.4 → path）+ 本文档更新。没有这一步，后续全部为空谈。
@@ -256,45 +244,34 @@ end
 | # | 改动 | 参照 |
 |---|---|---|
 | 1a | `update` 的 `detect_platform()` 增加 `ohos-aarch64` 分支（`cfg!(all(target_os="linux", target_env="ohos", target_arch="aarch64"))`，置于 linux 分支之前）+ 测试 cfg 门 | atomcode updater 的 `cfg(target_env="ohos")` 编译期判定 |
-| 1b | 新增 `distro-pm` cargo feature：编译期关闭自更新（`/upgrade` 引导 `brew upgrade grow`）—— **Harmonybrew formula 的前置条件** | atomcode `--features distro-pm` |
-| 1c | tools crate 的 rg 内嵌策略落定：standalone 渠道内嵌（构建时注入 + 先签后嵌）；formula 渠道不内嵌走 PATH | 本文 §4.2 双渠道表 |
+| 1b | 新增 `distro-pm` cargo feature：编译期关闭自更新，供未来受包管理器控制的下游构建使用 | atomcode `--features distro-pm` |
+| 1c | tools crate 的 rg 内嵌策略落定：OHOS 资产走 PATH，其他官方资产内嵌并校验固定版本 | 本文 §4.2 |
 
 ### Step 2 — 发布链（standalone 渠道，参照 dockerharmony + atomcode）
 - release.yml 新增 `asset_platform: ohos-aarch64`（`target: aarch64-unknown-linux-ohos`，`runner: ubuntu-24.04-arm`，`builder: ohos`：`docker run` ci-runner 容器内构建 —— dockerharmony README 的 GitHub workflow 模式；不要整 job 进容器，Node actions 需要 OHOS Node）；
-- rg 产物：容器内 `cargo build` rg 15.0.0（或 ohos-ripgrep 15.1.0 产物）+ `GROW_TOOLS_BUNDLE_RG_PATH` + `GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1`；
 - 2 处 required 资产清单 9→10：`grow-${version}-ohos-aarch64.tar.gz`；
 - standalone 产物在 strip/smoke 后使用固定版本 ohos-bst-light 自签，C/Python 双实现差分校验并检查 `.codesign`；该路径不需要密钥或 GitHub Secrets。
-
-### Step 3 — Harmonybrew formula（主分发路径，per contribute-formula.md）
-- 上游 homebrew-core **无 grow**（已核实 404）→ 手写 formula（B 路径，无命名冲突）；
-- `depends_on "rust" => :build`、`depends_on "ripgrep"`（PATH rg，已签名）、`depends_on "zsh"`（持久 shell 后端，HiShell 自带；Posix backend 落地后可改 optional）；
-- `cargo install`（或 build+拷贝），flags 与第一阶段验证一致：`--no-default-features --features sandbox-enforce`（+ Step 1b 的 `distro-pm`）；
-- 构建必须在 ci-runner 容器内复现（环境对齐是硬性要求）；PR 遵循"一个 PR → 一个 commit → 一个 formula"；
-- 备选策略：先录入上游 homebrew-core 再从上游搬运（贡献指南推荐路径；grow 可移植性满足，属可选加分项）。
 
 ### Step 4 — 真机验证（Tier 2 门槛，需鸿蒙 PC/开发板）
 清单：HiShell 中 TUI/键盘/信号；HMDFS 文件语义（SQLite WAL/锁/mmap、原子 rename、`~/.grow/vendor` exec）；下载后签名执行；剪贴板降级提示；沙箱 capability；登录与浏览器跳转；时区。产出 device checklist + 冒烟脚本（复用容器冒烟脚本改造）。
 
 ### Step 5（可选）— lycium++ / HNP 打包（开发板渠道，per ohos-ripgrep）
-HPKBUILD（`buildtools=cargo`、`source`=grow 仓库 tag tarball、`cargo build -p cli --bin grow --release --locked`、`package()` 装 bin + `hnp.json`、`hnpcli` 打包）；设备侧需自行签名。与 formula 渠道互补，非必须。
+HPKBUILD（`buildtools=cargo`、`source`=grow 仓库 tag tarball、`cargo build -p cli --bin grow --release --locked`、`package()` 装 bin + `hnp.json`、`hnpcli` 打包）；设备侧需自行签名，非官方分发面。
 
 ### 依赖与并行
 ```text
-Step 0 ──▶ Step 1 ──▶ Step 2 ═╗（可并行）
-                  └────▶ Step 3 ╝
-Step 4 依赖 Step 2/3 的产物；Step 5 独立
+Step 0 ──▶ Step 1 ──▶ Step 2 ──▶ Step 4
+Step 5 独立
 ```
 
 ### 需要用户决策
-1. 主分发渠道：Harmonybrew formula / standalone release / 两者并行；standalone 自签链已闭环。
-2. 若目标正式设备不允许 self-sign，是否新增 CA 证书签名渠道；
-3. 是否先上游化 homebrew-core（可选加分项）；
-4. 真机资源（鸿蒙 PC / 开发板）何时可用 —— 决定 Step 4 排期。
+1. 若目标正式设备不允许 self-sign，是否新增 CA 证书签名链；
+2. 真机资源（鸿蒙 PC / 开发板）何时可用 —— 决定 Step 4 排期。
 
 ## 8. 对上一版草稿的修正记录
 
 - [ ] 低估 Bash/Zsh 依赖 → 升级为阻塞 #1，给出三步走方案（§3.1）。
-- [ ] "Formula 不嵌入 rg" 扩大化 → 修正为双渠道各自处理（§4.2）。
+- [ ] `rg` 签名与分发渠道混杂 → 收敛为当前 GitHub Release 契约（§4.2）。
 - [ ] `ohos-arm64` / `ohos-aarch64` 混用 → 统一 `ohos-aarch64`（§2）。
 - [ ] 假设 4KiB 页大小 → 删除假设，第一版关 jemalloc（§3.7）。
 - [ ] sandbox / HMDFS 结论过乐观 → 改为"编译≠可用，真机验证 + 降级路径"（§3.3/§3.8）。

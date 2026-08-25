@@ -907,6 +907,7 @@ mod tests {
                     effective_permission_mode: None,
                     workflow_run_id: None,
                     goal_id: None,
+                    surface_completion: true,
                     child_cwd: child_cwd.into(),
                     worktree_path: worktree_path.map(str::to_owned),
                     effective_model_id: "grow-3".into(),

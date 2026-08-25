@@ -81,7 +81,7 @@ impl tool_runtime::Tool for MonitorTool {
         let resolved_timeout = input.resolved_timeout_ms();
         let description = input.description;
 
-        let (terminal, notification_handle, cwd, session_folder, owner_session_id) = {
+        let (terminal, notification_handle, cwd, session_folder, owner_session_id, goal_id) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let notif = res
@@ -99,7 +99,10 @@ impl tool_runtime::Tool for MonitorTool {
             let owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            (terminal, notif, cwd, session_folder, owner)
+            let goal_id = res
+                .get::<crate::implementations::grow_build::task::types::CurrentSubagentOwnerResource>()
+                .and_then(|owner| owner.0.goal_id().map(str::to_owned));
+            (terminal, notif, cwd, session_folder, owner, goal_id)
         };
 
         // Output file lives in the session folder alongside bash terminal logs.
@@ -128,6 +131,7 @@ impl tool_runtime::Tool for MonitorTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Monitor,
                 owner_session_id,
+                goal_id: goal_id.clone(),
                 description: Some(description.clone()).filter(|d| !d.trim().is_empty()),
             })
             .await
@@ -153,6 +157,7 @@ impl tool_runtime::Tool for MonitorTool {
             },
             output_file: bg_handle.output_file.clone(),
             task_id: task_id.clone(),
+            goal_id,
             monitor_description: tray_description.clone(),
             description: tray_description,
         });
@@ -447,6 +452,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                goal_id: None,
                 description: None,
             })
             .await
@@ -524,6 +530,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                goal_id: None,
                 description: None,
             })
             .await
@@ -594,6 +601,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("child-session".to_string()),
+                goal_id: None,
                 description: None,
             })
             .await

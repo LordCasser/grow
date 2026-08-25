@@ -1037,6 +1037,34 @@ impl acp::Agent for MvpAgent {
                 mode: session_permission_mode,
             });
         }
+        if restored_approval_pending {
+            let command_tx = self
+                .sessions
+                .borrow()
+                .get(&session_id)
+                .map(|handle| handle.cmd_tx.clone())
+                .ok_or_else(|| {
+                    acp::Error::internal_error()
+                        .data("Session ended before Plan approval could be reconciled.")
+                })?;
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            command_tx
+                .send(SessionCommand::RestorePlanApproval { respond_to })
+                .map_err(|_| {
+                    acp::Error::internal_error()
+                        .data("Session ended before Plan approval could be reconciled.")
+                })?;
+            response
+                .await
+                .map_err(|_| {
+                    acp::Error::internal_error()
+                        .data("Plan approval reconciliation acknowledgement was lost.")
+                })?
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("Plan approval reconciliation failed: {error}"))
+                })?;
+        }
         let orphan_parent = {
             let sessions = self.sessions.borrow();
             sessions
@@ -1189,9 +1217,6 @@ impl acp::Agent for MvpAgent {
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-            if restored_approval_pending {
-                let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
-            }
         }
         {
             log_event(::diagnostics::events::SessionLoad {
@@ -1232,6 +1257,30 @@ impl acp::Agent for MvpAgent {
             .session_handle_waiting_for_load(&arguments.session_id)
             .await
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        let prompt_id = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("promptId"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let blocked_prompt_response = || {
+            acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                build_prompt_response_meta(PromptResponseMetaArgs {
+                    session_id: &arguments.session_id.to_string(),
+                    prompt_id: &prompt_id,
+                    total_tokens: 0,
+                    model_id: handle.model_id.0.as_ref(),
+                    last_turn_usage: None,
+                    prompt_usage: None,
+                    cancellation_category: None,
+                    cancel_trigger: None,
+                    structured_output: None,
+                })
+                .as_object()
+                .cloned(),
+            )
+        };
         if self.models_manager.allowlist_excludes_all() {
             self.send_model_auto_switched(
                     &arguments.session_id,
@@ -1241,7 +1290,7 @@ impl acp::Agent for MvpAgent {
                  Broaden it or remove it from your config, then restart.",
                 )
                 .await;
-            return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+            return Ok(blocked_prompt_response());
         }
         let latched_model = self
             .model_unavailable_sessions
@@ -1317,18 +1366,11 @@ impl acp::Agent for MvpAgent {
                      be switched to a compatible model. Please start a new session.",
                     )
                     .await;
-                return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+                return Ok(blocked_prompt_response());
             }
         }
         let dispatch_lock = self.dispatch_lock(&arguments.session_id);
         let dispatch_guard = dispatch_lock.lock().await;
-        let prompt_id = arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("promptId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let turn_number = self.allocate_turn_number(&arguments.session_id);
         tracing::Span::current().record("turn_number", turn_number);
         let (model_tx, model_rx) = oneshot::channel();

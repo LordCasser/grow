@@ -1,5 +1,41 @@
 # Changelog
 
+# 2.0.0 — 2026-08-25
+
+## Timeline runtime
+
+- Timeline 成为 session 的单一事实源；Control、Surface、Sideband、压缩、回忆和图像 shadow 使用同一套
+  稳定因果坐标。Timeline schema v15 直接拒绝旧日志，不保留兼容投影。
+- Auto-compaction pre-prune 是唯一的 ToolResult 减载机制；请求拷贝修剪、turn-age 清理与系统头改写路径已删除。
+- Context recall 使用有界当前需求和历史证据；Sideband 请求在持久化前固化路由、预算、尝试次数与
+  输出 schema，并且协议级禁用工具。
+
+## Behavior, Goal and tasks
+
+- Agent Role、Behavior 和 Permission 保持独立；Behavior 变更通过原子 Timeline Control 事实持久化。
+- Goal 收敛为一个长期目标及其生命周期。每次 continuation 先检查目标是否完成，再使用普通
+  task/todo 执行下一个小步；旧 planner/verifier、board、Goal task type 和 finalization 阶段已删除。
+- 子 Agent 权限由请求模式与直接父级不可变授权上限取交集；权限交互只保留 `ask`、`auto` 和
+  `always-approve`。
+
+## Runtime and observability
+
+- Shell actor 与 Pager 重新划分 session facts、effect、activity、queue、terminal settlement 和渲染边界，命令面只读取
+  权威 runtime 状态。
+- Trajectory 面向长会话重建 turn/step 聚合、因果导航、过滤和按需展开；流式 phase 噪声不持久化。
+- 已保存 Workflow 的动态命令在 Tokio blocking domain 执行同步 Rhai 预检，保留 Behavior admission 和
+  Definition 快照契约，不再因 `blocking_recv()` 在 async worker 中 panic。
+
+## Distribution
+
+- 官方分发收敛为 GitHub Release 的 10 个平台资产。所有正式构建显式启用 `release-dist` feature，
+  常规目标固定 Rust 1.93.1；OHOS 使用容器内固定的官方 OHOS host Rust 1.97.1。riscv64 与 OHOS
+  获得与其他 Linux 资产一致的链接硬化。
+- Release 同时发布 `SHA256SUMS`；内置 updater 在解压与执行前强制校验下载归档。每个平台归档还具有
+  由官方 workflow OIDC 生成的 GitHub Artifact Attestation，用于独立验证 publisher provenance。
+
+完整发布说明见 [changelogs/2.0.0.md](changelogs/2.0.0.md)。
+
 # 1.1.11 — 2026-08-24
 
 ## Long-term Goal Behavior

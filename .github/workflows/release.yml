@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build (for example v1.1.0)
+        description: Existing release tag to build (for example v2.0.0)
         required: true
         type: string
       build_linux:
@@ -44,6 +44,9 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: release-${{ inputs.tag }}
@@ -60,9 +63,9 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -70,7 +73,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${ACT:-}" != "true" && "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+          if [[ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
             echo "official releases must be dispatched from the default branch (${DEFAULT_BRANCH}); current ref: ${GITHUB_REF}" >&2
             exit 1
           fi
@@ -82,57 +85,39 @@ jobs:
             echo "release tag does not exist: $RELEASE_TAG" >&2
             exit 1
           }
-          if [[ "${ACT:-}" == "true" ]]; then
-            updater_repo="$(
-              git show "${RELEASE_TAG}:crates/codegen/update/src/version.rs" \
-                | sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p'
-            )"
-          else
-            updater_repo="$(
-              sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p' \
-                crates/codegen/update/src/version.rs
-            )"
+          if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != "tag" ]]; then
+            echo "release tag must be annotated: $RELEASE_TAG" >&2
+            exit 1
           fi
+          if [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "checked-out release commit does not match $RELEASE_TAG" >&2
+            exit 1
+          fi
+          updater_repo="$(
+            sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p' \
+              crates/codegen/update/src/version.rs
+          )"
           test -n "$updater_repo"
           if [[ "$updater_repo" != "$RELEASE_REPO" ]]; then
             echo "release workflow repo $RELEASE_REPO does not match updater repo $updater_repo" >&2
             exit 1
           fi
-          if [[ "${ACT:-}" != "true" && "$GITHUB_REPOSITORY" != "$RELEASE_REPO" ]]; then
+          if [[ "$GITHUB_REPOSITORY" != "$RELEASE_REPO" ]]; then
             echo "official release workflow only runs in $RELEASE_REPO (current: $GITHUB_REPOSITORY)" >&2
             exit 1
           fi
 
-      - name: Act — verify bind-mounted workspace
-        if: ${{ env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          echo "ACT workspace HEAD=$(git rev-parse --short HEAD) tag=${RELEASE_TAG}→$(git rev-parse --short "${RELEASE_TAG}^{commit}")"
-
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92.0"
+          toolchain: "1.93.1"
 
       - id: version
         name: Match tag to Cargo version
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${ACT:-}" == "true" ]]; then
-            version="$(git show "${RELEASE_TAG}:Cargo.toml" \
-              | awk '
-                  $0 == "[workspace.package]" { in_pkg=1; next }
-                  in_pkg && /^\[/ { exit }
-                  in_pkg && $1 == "version" {
-                    gsub(/"/, "", $3); print $3; exit
-                  }
-                ')"
-          else
-            version="$(cargo metadata --locked --no-deps --format-version 1 \
-              | jq -r '.packages[] | select(.name == "cli") | .version')"
-          fi
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "cli") | .version')"
           tag_version="${RELEASE_TAG#v}"
           test -n "$version"
           if [[ "$tag_version" != "$version" ]]; then
@@ -140,6 +125,8 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          release_commit="$(git rev-parse HEAD)"
+          echo "commit=$release_commit" >> "$GITHUB_OUTPUT"
 
   # Platform catalog: single source of truth for every release asset.
   # Boolean inputs filter by group. The resulting JSON array drives the build
@@ -378,7 +365,7 @@ jobs:
       rg_sha256: ${{ matrix.rg_sha256 }}
       rg_strip_components: ${{ matrix.rg_strip_components }}
       rg_runnable: ${{ matrix.rg_runnable }}
-      release_tag: ${{ inputs.tag }}
+      release_commit: ${{ needs.validate.outputs.commit }}
       grow_version: ${{ needs.validate.outputs.version }}
 
   publish:
@@ -402,6 +389,21 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.validate.outputs.version }}"
+          expected_commit="${{ needs.validate.outputs.commit }}"
+          remote_commit="$(
+            git ls-remote --tags "https://github.com/${RELEASE_REPO}.git" "refs/tags/${RELEASE_TAG}^{}" \
+              | awk 'NR == 1 { print $1 }'
+          )"
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit="$(
+              git ls-remote --tags "https://github.com/${RELEASE_REPO}.git" "refs/tags/${RELEASE_TAG}" \
+                | awk 'NR == 1 { print $1 }'
+            )"
+          fi
+          if [[ "$remote_commit" != "$expected_commit" ]]; then
+            echo "release tag moved after validation: expected $expected_commit, found $remote_commit" >&2
+            exit 1
+          fi
           required=(
             "grow-${version}-linux-x86_64.tar.gz"
             "grow-${version}-linux-aarch64.tar.gz"
@@ -416,14 +418,10 @@ jobs:
           )
           mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' -printf '%f\n' | sort)
 
-          if [[ "${ACT:-}" != "true" ]]; then
-            test "${#assets[@]}" -eq "${#required[@]}"
-            for name in "${required[@]}"; do
-              test -s "$name"
-            done
-          else
-            test "${#assets[@]}" -ge 1
-          fi
+          test "${#assets[@]}" -eq "${#required[@]}"
+          for name in "${required[@]}"; do
+            test -s "$name"
+          done
 
           for name in "${assets[@]}"; do
             known=false
@@ -466,10 +464,9 @@ jobs:
               END { if (!found) exit 1 }
             '
           fi
-          sha256sum grow-*
+          sha256sum "${assets[@]}"
 
       - name: Prepare hidden GitHub Release
-        if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ env.RELEASE_REPO }}
@@ -483,7 +480,8 @@ jobs:
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" != "true" ]]; then
-              gh release edit "$RELEASE_TAG" --draft
+              echo "Release $RELEASE_TAG is already public; refusing to replace published assets" >&2
+              exit 1
             fi
           else
             release_args=(--verify-tag --draft --title "$RELEASE_TAG" --generate-notes)
@@ -499,7 +497,6 @@ jobs:
           fi
 
       - name: Upload Grow binaries
-        if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ env.RELEASE_REPO }}
@@ -508,13 +505,13 @@ jobs:
           gh release upload "$RELEASE_TAG" dist/grow-* --clobber
 
       - name: Verify and publish GitHub Release
-        if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ env.RELEASE_REPO }}
         run: |
           set -euo pipefail
           version="${{ needs.validate.outputs.version }}"
+          expected_commit="${{ needs.validate.outputs.commit }}"
           required=(
             "grow-${version}-linux-x86_64.tar.gz"
             "grow-${version}-linux-aarch64.tar.gz"
@@ -528,24 +525,86 @@ jobs:
             "grow-${version}-ohos-aarch64.tar.gz"
           )
           remote_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
-          remote_asset_count="$(sed '/^$/d' <<<"$remote_assets" | wc -l | tr -d ' ')"
-          if [[ "$remote_asset_count" -ne "${#required[@]}" ]]; then
-            echo "Release must contain exactly ${#required[@]} updater assets; found $remote_asset_count" >&2
-            printf '%s\n' "$remote_assets" >&2
-            exit 1
-          fi
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            known=false
+            if [[ "$name" == "SHA256SUMS" ]]; then
+              known=true
+            else
+              for required_name in "${required[@]}"; do
+                if [[ "$name" == "$required_name" ]]; then
+                  known=true
+                  break
+                fi
+              done
+            fi
+            if [[ "$known" != "true" ]]; then
+              echo "Release contains an asset outside the publication contract: $name" >&2
+              exit 1
+            fi
+          done <<<"$remote_assets"
           for name in "${required[@]}"; do
             grep -Fqx "$name" <<<"$remote_assets" || {
               echo "Release is missing updater asset: $name" >&2
               exit 1
             }
           done
+
+          # A retry may reuse assets already present in this hidden draft.
+          # Generate the manifest from every required remote asset only after
+          # the exact publication set is complete.
+          checksum_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release-checksum.XXXXXX")"
+          for name in "${required[@]}"; do
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$checksum_dir"
+            gh attestation verify "$checksum_dir/$name" \
+              --repo "$GH_REPO" \
+              --signer-workflow "LordCasser/grow/.github/workflows/build-one.yml" \
+              >/dev/null
+          done
+          (
+            cd "$checksum_dir"
+            sha256sum "${required[@]}" > SHA256SUMS
+            sha256sum --strict --check SHA256SUMS
+            mapfile -t manifest_names < <(sed -n 's/^[0-9a-f]\{64\}  //p' SHA256SUMS)
+            test "${#manifest_names[@]}" -eq "${#required[@]}"
+            for index in "${!required[@]}"; do
+              if [[ "${manifest_names[$index]}" != "${required[$index]}" ]]; then
+                echo "SHA256SUMS coverage/order mismatch at index $index" >&2
+                exit 1
+              fi
+            done
+          )
+          gh release upload "$RELEASE_TAG" "$checksum_dir/SHA256SUMS" --clobber
+
+          remote_checksum_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release-remote-checksum.XXXXXX")"
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS --dir "$remote_checksum_dir"
+          cmp "$checksum_dir/SHA256SUMS" "$remote_checksum_dir/SHA256SUMS"
+          (cd "$checksum_dir" && sha256sum --strict --check "$remote_checksum_dir/SHA256SUMS")
+          final_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          final_asset_count="$(sed '/^$/d' <<<"$final_assets" | wc -l | tr -d ' ')"
+          if [[ "$final_asset_count" -ne "$((${#required[@]} + 1))" ]]; then
+            echo "Release must contain exactly ${#required[@]} archives plus SHA256SUMS" >&2
+            printf '%s\n' "$final_assets" >&2
+            exit 1
+          fi
+          grep -Fqx "SHA256SUMS" <<<"$final_assets"
+          for name in "${required[@]}"; do
+            grep -Fqx "$name" <<<"$final_assets"
+          done
+          remote_commit="$(
+            git ls-remote --tags "https://github.com/${GH_REPO}.git" "refs/tags/${RELEASE_TAG}^{}" \
+              | awk 'NR == 1 { print $1 }'
+          )"
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit="$(
+              git ls-remote --tags "https://github.com/${GH_REPO}.git" "refs/tags/${RELEASE_TAG}" \
+                | awk 'NR == 1 { print $1 }'
+            )"
+          fi
+          if [[ "$remote_commit" != "$expected_commit" ]]; then
+            echo "release tag moved before publication: expected $expected_commit, found $remote_commit" >&2
+            exit 1
+          fi
           if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" == "true" ]]; then
             gh release edit "$RELEASE_TAG" --draft=false
           fi
-
-      - name: Act dry-run summary
-        if: ${{ env.ACT }}
-        working-directory: dist
-        shell: bash
-        run: ls -la grow-*

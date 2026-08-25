@@ -18,6 +18,7 @@ use crate::reminders::format_loop_iteration_prompt;
 use crate::types::resources::{SharedResources, State};
 
 use super::interval::interval_to_human;
+use super::occurrence_journal::{OneShotOccurrence, ScheduledOccurrenceVersions};
 use super::types::{
     LOOP_COMPLETION_OUTPUT_CAP, LOOP_FRESH_CHAIN_EVERY, ScheduledTask, SchedulerClock,
     SchedulerCommand, SchedulerError, SchedulerSnapshot, SchedulerState, SchedulerVersion,
@@ -103,6 +104,8 @@ pub struct SchedulerActor {
     pub(crate) cancel_token: CancellationToken,
     pub(crate) clock: SchedulerClock,
     pub(crate) pending_removal: Option<PendingDurableRemoval>,
+    /// Ephemeral fail-closed timer suppression. Durable one-shot entries are
+    /// reconstructed from the occurrence journal on every restart.
     pub(crate) blocked_expiries: HashSet<String>,
 }
 
@@ -134,6 +137,43 @@ impl SchedulerActor {
         .await
     }
 
+    async fn await_persistence_outcome(
+        &self,
+        acknowledgement: Result<
+            tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+            std::io::Error,
+        >,
+    ) -> ExpiryPersistenceOutcome {
+        let acknowledgement = match acknowledgement {
+            Ok(acknowledgement) => acknowledgement,
+            Err(error) => return ExpiryPersistenceOutcome::NotCommitted(error),
+        };
+        let deadline = tokio::time::Instant::now() + DURABILITY_BARRIER_TIMEOUT;
+        tokio::select! {
+            _ = self.cancel_token.cancelled() => {
+                ExpiryPersistenceOutcome::Unknown(SchedulerError::Cancelled)
+            }
+            result = tokio::time::timeout_at(deadline, acknowledgement) => {
+                match result {
+                    Ok(Ok(Ok(()))) => ExpiryPersistenceOutcome::Committed,
+                    Ok(Ok(Err(error)))
+                        if crate::persistence::ResourcesPersistence::error_was_published(&error) =>
+                    {
+                        ExpiryPersistenceOutcome::Unknown(SchedulerError::Persistence(error))
+                    }
+                    Ok(Ok(Err(error))) => ExpiryPersistenceOutcome::NotCommitted(error),
+                    Ok(Err(_)) => ExpiryPersistenceOutcome::Unknown(
+                        SchedulerError::Persistence(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "resources persistence writer dropped acknowledgement",
+                        )),
+                    ),
+                    Err(_) => ExpiryPersistenceOutcome::Unknown(SchedulerError::Timeout),
+                }
+            }
+        }
+    }
+
     async fn publish_durable_removal(
         &self,
         task_id: String,
@@ -144,6 +184,224 @@ impl SchedulerActor {
             .send_scheduled_task_removed_acknowledged(task_removed_payload(task_id, version));
         self.await_bounded(acknowledgements.wait(), SchedulerError::Notification)
             .await
+    }
+
+    async fn acknowledge_and_clear_one_shot(&mut self, occurrence: &OneShotOccurrence) -> bool {
+        if let Err(error) = self
+            .publish_durable_removal(
+                occurrence.task_id().to_owned(),
+                occurrence.removal_version(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = occurrence.task_id(),
+                %error,
+                "Durable one-shot tombstone was not acknowledged"
+            );
+            self.blocked_expiries
+                .insert(occurrence.task_id().to_owned());
+            return false;
+        }
+
+        let (finished, acknowledgement) = {
+            let mut resources = self.resources.lock().await;
+            let state = resources.get_or_default::<State<SchedulerState>>();
+            let finished = match state.finish_one_shot_removal(occurrence.occurrence_id()) {
+                Ok(finished) => finished,
+                Err(error) => {
+                    tracing::error!(
+                        task_id = occurrence.task_id(),
+                        %error,
+                        "Acknowledged one-shot receipt disappeared before durable clearing"
+                    );
+                    self.blocked_expiries
+                        .insert(occurrence.task_id().to_owned());
+                    return false;
+                }
+            };
+            let acknowledgement = self
+                .resources_persistence
+                .enqueue_save_and_flush(resources.serialize());
+            (finished, acknowledgement)
+        };
+
+        match self.await_persistence_outcome(acknowledgement).await {
+            ExpiryPersistenceOutcome::Committed => {
+                self.blocked_expiries.remove(occurrence.task_id());
+                true
+            }
+            ExpiryPersistenceOutcome::NotCommitted(error) => {
+                tracing::warn!(
+                    task_id = occurrence.task_id(),
+                    %error,
+                    "One-shot receipt clearing was not persisted"
+                );
+                let mut resources = self.resources.lock().await;
+                if let Err(restore_error) = resources
+                    .get_or_default::<State<SchedulerState>>()
+                    .restore_one_shot_receipt(finished)
+                {
+                    tracing::error!(
+                        task_id = occurrence.task_id(),
+                        %restore_error,
+                        "Failed to restore one-shot receipt after persistence rejection"
+                    );
+                }
+                self.blocked_expiries
+                    .insert(occurrence.task_id().to_owned());
+                false
+            }
+            ExpiryPersistenceOutcome::Unknown(error) => {
+                tracing::warn!(
+                    task_id = occurrence.task_id(),
+                    %error,
+                    "One-shot receipt clearing outcome is unknown"
+                );
+                self.blocked_expiries
+                    .insert(occurrence.task_id().to_owned());
+                false
+            }
+        }
+    }
+
+    async fn rollback_unadmitted_one_shot(
+        &mut self,
+        occurrence: &OneShotOccurrence,
+        task_index: usize,
+    ) -> bool {
+        let acknowledgement = {
+            let mut resources = self.resources.lock().await;
+            if let Err(error) = resources
+                .get_or_default::<State<SchedulerState>>()
+                .rollback_one_shot_occurrence(occurrence.occurrence_id(), task_index)
+            {
+                tracing::error!(
+                    task_id = occurrence.task_id(),
+                    %error,
+                    "Unadmitted one-shot receipt could not be rolled back"
+                );
+                self.blocked_expiries
+                    .insert(occurrence.task_id().to_owned());
+                return false;
+            }
+            self.resources_persistence
+                .enqueue_save_and_flush(resources.serialize())
+        };
+
+        match self.await_persistence_outcome(acknowledgement).await {
+            ExpiryPersistenceOutcome::Committed => {
+                self.blocked_expiries.remove(occurrence.task_id());
+                true
+            }
+            ExpiryPersistenceOutcome::NotCommitted(error) => {
+                tracing::warn!(
+                    task_id = occurrence.task_id(),
+                    %error,
+                    "Unadmitted one-shot rollback was not persisted"
+                );
+                let mut resources = self.resources.lock().await;
+                let state = resources.get_or_default::<State<SchedulerState>>();
+                state.tasks.retain(|task| task.id != occurrence.task_id());
+                if let Err(restore_error) = state.restore_one_shot_receipt(occurrence.clone()) {
+                    tracing::error!(
+                        task_id = occurrence.task_id(),
+                        %restore_error,
+                        "Failed to restore one-shot receipt after rollback rejection"
+                    );
+                }
+                self.blocked_expiries
+                    .insert(occurrence.task_id().to_owned());
+                false
+            }
+            ExpiryPersistenceOutcome::Unknown(error) => {
+                tracing::warn!(
+                    task_id = occurrence.task_id(),
+                    %error,
+                    "Unadmitted one-shot rollback outcome is unknown"
+                );
+                self.blocked_expiries
+                    .insert(occurrence.task_id().to_owned());
+                false
+            }
+        }
+    }
+
+    async fn reconcile_one_shot_occurrences(&mut self) {
+        let (
+            requires_resources_persistence,
+            recovery_required,
+            block_all_one_shots,
+            conflict_count,
+            overflowed,
+            blocked_task_ids,
+            task_ids_to_remove,
+            occurrences,
+        ) = {
+            let resources = self.resources.lock().await;
+            let Some(state) = resources.get::<State<SchedulerState>>() else {
+                return;
+            };
+            let reconciliation = state.reconcile_one_shot_occurrences();
+            (
+                reconciliation.requires_resources_persistence(),
+                reconciliation.recovery_required(),
+                reconciliation.block_all_one_shots(),
+                reconciliation.conflicts().len(),
+                reconciliation.overflow_error().is_some(),
+                reconciliation.blocked_task_ids().clone(),
+                reconciliation.task_ids_to_remove().to_vec(),
+                state.pending_one_shot_occurrences(),
+            )
+        };
+
+        self.blocked_expiries.extend(blocked_task_ids);
+        if recovery_required {
+            tracing::error!(
+                pending = occurrences.len(),
+                block_all_one_shots,
+                conflict_count,
+                overflowed,
+                "One-shot occurrence journal requires manual recovery; affected timers are suppressed"
+            );
+            return;
+        }
+
+        if requires_resources_persistence {
+            debug_assert!(!task_ids_to_remove.is_empty());
+            let acknowledgement = {
+                let mut resources = self.resources.lock().await;
+                resources
+                    .get_or_default::<State<SchedulerState>>()
+                    .tasks
+                    .retain(|task| !task_ids_to_remove.contains(&task.id));
+                self.resources_persistence
+                    .enqueue_save_and_flush(resources.serialize())
+            };
+            match self.await_persistence_outcome(acknowledgement).await {
+                ExpiryPersistenceOutcome::Committed => {}
+                ExpiryPersistenceOutcome::NotCommitted(error) => {
+                    tracing::error!(
+                        %error,
+                        "Restart reconciliation could not durably suppress resurrected one-shots"
+                    );
+                    return;
+                }
+                ExpiryPersistenceOutcome::Unknown(error) => {
+                    tracing::error!(
+                        %error,
+                        "Restart reconciliation persistence outcome is unknown"
+                    );
+                    return;
+                }
+            }
+        }
+
+        for occurrence in occurrences {
+            if !self.acknowledge_and_clear_one_shot(&occurrence).await {
+                break;
+            }
+        }
     }
 
     async fn complete_pending_removal(&mut self) -> Result<bool, SchedulerError> {
@@ -178,6 +436,7 @@ impl SchedulerActor {
     }
 
     pub async fn run(mut self) {
+        self.reconcile_one_shot_occurrences().await;
         self.await_subagent_wiring_for_due_tasks().await;
         self.announce_existing_tasks().await;
 
@@ -317,34 +576,7 @@ impl SchedulerActor {
             drop(res);
             tracing::info!(task_id = %task_id, "Scheduled task expired; removing without firing");
 
-            let persistence = match acknowledgement {
-                Ok(acknowledgement) => {
-                    let deadline = tokio::time::Instant::now() + DURABILITY_BARRIER_TIMEOUT;
-                    tokio::select! {
-                        _ = self.cancel_token.cancelled() => {
-                            ExpiryPersistenceOutcome::Unknown(SchedulerError::Cancelled)
-                        }
-                        result = tokio::time::timeout_at(deadline, acknowledgement) => {
-                            match result {
-                                Ok(Ok(Ok(()))) => ExpiryPersistenceOutcome::Committed,
-                                Ok(Ok(Err(error))) => {
-                                    ExpiryPersistenceOutcome::NotCommitted(error)
-                                }
-                                Ok(Err(_)) => ExpiryPersistenceOutcome::Unknown(
-                                    SchedulerError::Persistence(std::io::Error::new(
-                                        std::io::ErrorKind::BrokenPipe,
-                                        "resources persistence writer dropped acknowledgement",
-                                    )),
-                                ),
-                                Err(_) => {
-                                    ExpiryPersistenceOutcome::Unknown(SchedulerError::Timeout)
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => ExpiryPersistenceOutcome::NotCommitted(error),
-            };
+            let persistence = self.await_persistence_outcome(acknowledgement).await;
             match persistence {
                 ExpiryPersistenceOutcome::Committed => {}
                 ExpiryPersistenceOutcome::NotCommitted(error) => {
@@ -385,6 +617,15 @@ impl SchedulerActor {
             return;
         }
 
+        if should_remove
+            && is_durable
+            && self.notification_handle.durable_targets() == DurableNotificationTargets::None
+        {
+            tracing::error!(%task_id, "Durable one-shot fire unavailable without an acknowledging notification consumer");
+            self.blocked_expiries.insert(task_id);
+            return;
+        }
+
         let mut reservation = self.clock.prepare_transition(transition_count);
 
         if is_expired {
@@ -400,15 +641,113 @@ impl SchedulerActor {
 
         // Advance the cadence before releasing actor state to avoid immediate reselection.
         let task = &mut state.tasks[idx];
+        let previous_last_fired_at = task.last_fired_at;
         task.last_fired_at = Some(now);
         let next_fire_at = task.recurring.then(|| task.next_fire_at().to_rfc3339());
+
+        let occurrence = if should_remove && is_durable {
+            let versions = ScheduledOccurrenceVersions::try_new(
+                reservation.version_at(0),
+                reservation.version_at(1),
+            )
+            .expect("one-shot reservation contains consecutive versions");
+            match state.prepare_one_shot_occurrence(&task_id, versions) {
+                Ok(occurrence) => Some(occurrence),
+                Err(error) => {
+                    tracing::error!(
+                        %task_id,
+                        %error,
+                        "Durable one-shot occurrence could not be prepared"
+                    );
+                    self.blocked_expiries.insert(task_id);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         let spawn_deps = res.get::<SubagentEventSender>().cloned().zip(
             res.get::<SessionIdResource>()
                 .map(|session| session.0.clone()),
         );
 
+        let durability_barrier = is_durable.then(|| {
+            self.resources_persistence
+                .enqueue_save_and_flush(res.serialize())
+        });
+
         drop(res);
+
+        if let Some(acknowledgement) = durability_barrier {
+            match self.await_persistence_outcome(acknowledgement).await {
+                ExpiryPersistenceOutcome::Committed => {}
+                ExpiryPersistenceOutcome::NotCommitted(error) => {
+                    tracing::warn!(
+                        %task_id,
+                        %error,
+                        "Scheduled occurrence was not persisted before spawn"
+                    );
+                    if let Some(occurrence) = &occurrence {
+                        let mut resources = self.resources.lock().await;
+                        let state = resources.get_or_default::<State<SchedulerState>>();
+                        if let Err(rollback_error) =
+                            state.rollback_one_shot_occurrence(occurrence.occurrence_id(), idx)
+                        {
+                            tracing::error!(
+                                %task_id,
+                                %rollback_error,
+                                "Failed to roll back rejected one-shot occurrence"
+                            );
+                            self.blocked_expiries.insert(task_id);
+                        } else if let Some(task) =
+                            state.tasks.iter_mut().find(|task| task.id == task_id)
+                        {
+                            task.last_fired_at = previous_last_fired_at;
+                        }
+                    } else if is_durable {
+                        let mut resources = self.resources.lock().await;
+                        if let Some(task) = resources
+                            .get_or_default::<State<SchedulerState>>()
+                            .tasks
+                            .iter_mut()
+                            .find(|task| task.id == task_id)
+                        {
+                            task.last_fired_at = previous_last_fired_at;
+                        }
+                    }
+                    return;
+                }
+                ExpiryPersistenceOutcome::Unknown(error) => {
+                    tracing::warn!(
+                        %task_id,
+                        %error,
+                        "Scheduled occurrence persistence outcome is unknown; suppressing spawn"
+                    );
+                    if let Some(occurrence) = &occurrence {
+                        for expected in [
+                            occurrence.removal_version().revision() - 1,
+                            occurrence.removal_version().revision(),
+                        ] {
+                            let commit = reservation.commit_next(&mut self.clock);
+                            debug_assert_eq!(commit.version.revision(), expected);
+                            log_rollover(transition, Some(&task_id), commit.rollover);
+                        }
+                        self.blocked_expiries.insert(task_id);
+                    }
+                    return;
+                }
+            }
+        }
+
+        let durable_one_shot_versions = occurrence.as_ref().map(|occurrence| {
+            let fire = reservation.commit_next(&mut self.clock);
+            log_rollover(transition, Some(&task_id), fire.rollover);
+            let removal = reservation.commit_next(&mut self.clock);
+            debug_assert!(removal.rollover.is_none());
+            debug_assert_eq!(removal.version, occurrence.removal_version());
+            (fire.version, removal.version)
+        });
 
         tracing::info!(
             task_id = %task_id,
@@ -430,6 +769,7 @@ impl SchedulerActor {
                     last_subagent_id,
                     iterations_since_fresh,
                     chain_reset_pending,
+                    !should_remove,
                 )
                 .await
             }
@@ -443,6 +783,22 @@ impl SchedulerActor {
         };
 
         if matches!(&outcome, LoopFireOutcome::Skipped) {
+            if let Some(occurrence) = &occurrence {
+                if self.rollback_unadmitted_one_shot(occurrence, idx).await {
+                    let payload = {
+                        let resources = self.resources.lock().await;
+                        resources
+                            .get::<State<SchedulerState>>()
+                            .and_then(|state| state.tasks.iter().find(|task| task.id == task_id))
+                            .map(|task| task_created_payload(task, self.clock.snapshot()))
+                    };
+                    if let Some(payload) = payload {
+                        self.notification_handle
+                            .send_scheduled_task_created(payload);
+                    }
+                }
+                return;
+            }
             let version = self.clock.snapshot();
             let payload = {
                 let res = self.resources.lock().await;
@@ -458,17 +814,34 @@ impl SchedulerActor {
         }
 
         if should_remove {
-            let mut resources = self.resources.lock().await;
-            let state = resources.get_or_default::<State<SchedulerState>>();
-            state.tasks.retain(|task| task.id != task_id);
+            if occurrence.is_none() {
+                let mut resources = self.resources.lock().await;
+                let state = resources.get_or_default::<State<SchedulerState>>();
+                state.tasks.retain(|task| task.id != task_id);
+            }
         }
 
         match outcome {
             LoopFireOutcome::Skipped => unreachable!("skipped outcome returned above"),
             LoopFireOutcome::Spawned(id) => {
-                let commit = reservation.commit_next(&mut self.clock);
-                log_rollover(transition, Some(&task_id), commit.rollover);
-                let fire_version = commit.version;
+                if is_durable
+                    && !should_remove
+                    && let Err(error) = self.persist_resources().await
+                {
+                    tracing::error!(
+                        %task_id,
+                        %error,
+                        "Spawned recurring occurrence but failed to persist its chain anchor"
+                    );
+                }
+                let fire_version = durable_one_shot_versions.map_or_else(
+                    || {
+                        let commit = reservation.commit_next(&mut self.clock);
+                        log_rollover(transition, Some(&task_id), commit.rollover);
+                        commit.version
+                    },
+                    |(fire, _)| fire,
+                );
                 self.notification_handle
                     .send_scheduled_task_fired(ScheduledTaskFired {
                         task_id,
@@ -482,7 +855,9 @@ impl SchedulerActor {
             }
         }
 
-        if let Some(task_id) = removed_task_id {
+        if let Some(occurrence) = &occurrence {
+            let _ = self.acknowledge_and_clear_one_shot(occurrence).await;
+        } else if let Some(task_id) = removed_task_id {
             let removal = reservation.commit_next(&mut self.clock);
             debug_assert!(removal.rollover.is_none());
             self.notification_handle
@@ -501,6 +876,7 @@ impl SchedulerActor {
         last_subagent_id: Option<String>,
         iterations_since_fresh: u32,
         chain_reset_pending: bool,
+        track_chain: bool,
     ) -> LoopFireOutcome {
         let prev_snapshot = match &last_subagent_id {
             Some(prev_id) => {
@@ -625,7 +1001,7 @@ impl SchedulerActor {
             truncate_chars(prompt.lines().next().unwrap_or(prompt), 60)
         );
 
-        {
+        if track_chain {
             let mut res = self.resources.lock().await;
             let state = res.get_or_default::<State<SchedulerState>>();
             let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) else {
@@ -670,47 +1046,53 @@ impl SchedulerActor {
             }))
             .is_err()
         {
-            let mut res = self.resources.lock().await;
-            let state = res.get_or_default::<State<SchedulerState>>();
-            if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
-                // Restore the full pre-fire snapshot, including a pending
-                // chain reset the aborted spawn had consumed — losing it
-                // would let a later fire resume the old chain under a new
-                // prompt.
-                task.last_subagent_id = last_subagent_id;
-                task.iterations_since_fresh = iterations_since_fresh;
-                task.chain_reset_pending = chain_reset_pending;
+            if track_chain {
+                let mut res = self.resources.lock().await;
+                let state = res.get_or_default::<State<SchedulerState>>();
+                if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
+                    // Restore the full pre-fire snapshot, including a pending
+                    // chain reset the aborted spawn had consumed — losing it
+                    // would let a later fire resume the old chain under a new
+                    // prompt.
+                    task.last_subagent_id = last_subagent_id;
+                    task.iterations_since_fresh = iterations_since_fresh;
+                    task.chain_reset_pending = chain_reset_pending;
+                }
             }
             return LoopFireOutcome::Skipped;
         }
 
-        let resources = self.resources.clone();
-        let guard_task_id = task_id.to_string();
-        let spawned_id = subagent_id.clone();
-        tokio::spawn(async move {
-            let Ok(result) = result_rx.await else {
-                return;
-            };
-            if result.error.is_none() {
-                return;
-            }
-            tracing::warn!(
-                task_id = %guard_task_id,
-                subagent_id = %spawned_id,
-                error = ?result.error,
-                "Loop iteration spawn failed; clearing chain anchor"
-            );
-            let mut res = resources.lock().await;
-            let state = res.get_or_default::<State<SchedulerState>>();
-            if let Some(task) = state
-                .tasks
-                .iter_mut()
-                .find(|t| t.last_subagent_id.as_deref() == Some(spawned_id.as_str()))
-            {
-                task.last_subagent_id = None;
-                task.iterations_since_fresh = 0;
-            }
-        });
+        if track_chain {
+            let resources = self.resources.clone();
+            let guard_task_id = task_id.to_string();
+            let spawned_id = subagent_id.clone();
+            tokio::spawn(async move {
+                let Ok(result) = result_rx.await else {
+                    return;
+                };
+                if result.error.is_none() {
+                    return;
+                }
+                tracing::warn!(
+                    task_id = %guard_task_id,
+                    subagent_id = %spawned_id,
+                    error = ?result.error,
+                    "Loop iteration spawn failed; clearing chain anchor"
+                );
+                let mut res = resources.lock().await;
+                let state = res.get_or_default::<State<SchedulerState>>();
+                if let Some(task) = state
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.last_subagent_id.as_deref() == Some(spawned_id.as_str()))
+                {
+                    task.last_subagent_id = None;
+                    task.iterations_since_fresh = 0;
+                }
+            });
+        } else {
+            drop(result_rx);
+        }
 
         LoopFireOutcome::Spawned(subagent_id)
     }
@@ -2248,6 +2630,423 @@ mod tests {
         let next = tokio::time::timeout(Duration::from_millis(300), subagent_rx.recv()).await;
         assert!(!matches!(next, Ok(Some(SubagentEvent::Spawn(_)))));
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn durable_one_shot_fences_spawn_and_clears_receipt_after_tombstone_ack() {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let mut task = due_one_shot("durable-once");
+        task.durable = true;
+        resources
+            .get_or_default::<State<SchedulerState>>()
+            .tasks
+            .push(task);
+        let (subagent_tx, mut subagents) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(subagent_tx));
+        resources.insert(SessionIdResource("parent-session".into()));
+        let resources = Arc::new(Mutex::new(resources));
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = SchedulerActor {
+            resources: resources.clone(),
+            resources_persistence: Arc::new(persistence),
+            notification_handle,
+            cmd_rx,
+            cancel_token: CancellationToken::new(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+
+        let fire = actor.fire_next_task();
+        tokio::pin!(fire);
+        let (prepared, persisted) = tokio::select! {
+            _ = fire.as_mut() => panic!("one-shot must wait for its durable occurrence receipt"),
+            save = next_event(&mut saves) => save,
+        };
+        assert_eq!(
+            prepared["state"]["grow_build.Scheduler"]["tasks"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            prepared["state"]["grow_build.Scheduler"]["occurrenceJournal"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(subagents.try_recv().is_err());
+        assert!(notifications.try_recv().is_err());
+        persisted.send(Ok(())).unwrap();
+
+        let SubagentEvent::Spawn(spawn) = (tokio::select! {
+            _ = fire.as_mut() => panic!("one-shot must be admitted before fire completes"),
+            event = next_event(&mut subagents) => event,
+        }) else {
+            panic!("expected one-shot subagent spawn");
+        };
+        assert_eq!(
+            spawn.request.runtime_overrides.loop_task_id.as_deref(),
+            Some("durable-once")
+        );
+
+        let fired = tokio::select! {
+            _ = fire.as_mut() => panic!("one-shot must wait for tombstone acknowledgement"),
+            delivery = next_acknowledged(&mut notifications) => delivery,
+        };
+        assert!(fired.acknowledgement.is_none());
+        assert_eq!(
+            notification!(fired.notification, ScheduledTaskFired).task_id,
+            "durable-once"
+        );
+        let removed = tokio::select! {
+            _ = fire.as_mut() => panic!("one-shot must wait for tombstone acknowledgement"),
+            delivery = next_acknowledged(&mut notifications) => delivery,
+        };
+        assert_eq!(
+            notification!(removed.notification, ScheduledTaskRemoved).task_id,
+            "durable-once"
+        );
+        assert!(saves.try_recv().is_err(), "receipt must survive until ACK");
+        removed.acknowledgement.unwrap().send(Ok(())).unwrap();
+
+        let (cleared, persisted) = tokio::select! {
+            _ = fire.as_mut() => panic!("one-shot must durably clear its receipt"),
+            save = next_event(&mut saves) => save,
+        };
+        assert!(
+            cleared["state"]["grow_build.Scheduler"]
+                .get("occurrenceJournal")
+                .is_none()
+        );
+        persisted.send(Ok(())).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+            .await
+            .unwrap();
+        let state = resources.lock().await;
+        let state = state.get::<State<SchedulerState>>().unwrap();
+        assert!(state.tasks.is_empty() && state.occurrence_journal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_recurring_fire_flushes_cadence_before_spawn_and_anchor_after_spawn() {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let mut task = ScheduledTask::new(1, "durable-loop".into(), true, true);
+        task.id = "durable-loop".into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        resources
+            .get_or_default::<State<SchedulerState>>()
+            .tasks
+            .push(task);
+        let (subagent_tx, mut subagents) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(subagent_tx));
+        resources.insert(SessionIdResource("parent-session".into()));
+        let resources = Arc::new(Mutex::new(resources));
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = SchedulerActor {
+            resources,
+            resources_persistence: Arc::new(persistence),
+            notification_handle,
+            cmd_rx,
+            cancel_token: CancellationToken::new(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+
+        let fire = actor.fire_next_task();
+        tokio::pin!(fire);
+        let (cadence, persisted) = tokio::select! {
+            _ = fire.as_mut() => panic!("recurring fire must wait for cadence persistence"),
+            save = next_event(&mut saves) => save,
+        };
+        let task = &cadence["state"]["grow_build.Scheduler"]["tasks"][0];
+        assert!(!task["lastFiredAt"].is_null());
+        assert!(task["lastSubagentId"].is_null());
+        assert!(subagents.try_recv().is_err());
+        persisted.send(Ok(())).unwrap();
+
+        let SubagentEvent::Spawn(spawn) = (tokio::select! {
+            _ = fire.as_mut() => panic!("recurring fire must be admitted before completion"),
+            event = next_event(&mut subagents) => event,
+        }) else {
+            panic!("expected recurring subagent spawn");
+        };
+        let subagent_id = spawn.request.id.clone();
+        let (anchored, persisted) = tokio::select! {
+            _ = fire.as_mut() => panic!("recurring fire must wait for chain-anchor persistence"),
+            save = next_event(&mut saves) => save,
+        };
+        let task = &anchored["state"]["grow_build.Scheduler"]["tasks"][0];
+        assert_eq!(task["lastSubagentId"], subagent_id);
+        assert_eq!(task["iterationsSinceFresh"], 1);
+        assert!(notifications.try_recv().is_err());
+        persisted.send(Ok(())).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+            .await
+            .unwrap();
+        let fired = next_acknowledged(&mut notifications).await;
+        assert!(fired.acknowledgement.is_none());
+        assert_eq!(
+            notification!(fired.notification, ScheduledTaskFired).subagent_id,
+            subagent_id
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_one_shot_fence_restores_task_and_never_spawns() {
+        let mut task = due_one_shot("rejected-once");
+        task.durable = true;
+        let (mut actor, _) = make_boundary_actor(vec![task], 0);
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        actor.resources_persistence = Arc::new(persistence);
+
+        {
+            let fire = actor.fire_next_task();
+            tokio::pin!(fire);
+            let (_, persisted) = tokio::select! {
+                _ = fire.as_mut() => panic!("one-shot must wait for persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            persisted
+                .send(Err(std::io::Error::other("disk unavailable")))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+                .await
+                .unwrap();
+        }
+
+        let state = actor.resources.lock().await;
+        let state = state.get::<State<SchedulerState>>().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert!(state.tasks[0].last_fired_at.is_none());
+        assert!(state.occurrence_journal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_recurring_fence_restores_pre_fire_cadence() {
+        let mut task = ScheduledTask::new(1, "rejected-loop".into(), true, true);
+        task.id = "rejected-loop".into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        let (mut actor, _) = make_boundary_actor(vec![task], 0);
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        actor.resources_persistence = Arc::new(persistence);
+
+        {
+            let fire = actor.fire_next_task();
+            tokio::pin!(fire);
+            let (_, persisted) = tokio::select! {
+                _ = fire.as_mut() => panic!("recurring fire must wait for persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            persisted
+                .send(Err(std::io::Error::other("disk unavailable")))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+                .await
+                .unwrap();
+        }
+
+        let state = actor.resources.lock().await;
+        assert!(
+            state.get::<State<SchedulerState>>().unwrap().tasks[0]
+                .last_fired_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_one_shot_fence_retains_receipt_blocks_timer_and_never_spawns() {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let mut task = due_one_shot("unknown-once");
+        task.durable = true;
+        resources
+            .get_or_default::<State<SchedulerState>>()
+            .tasks
+            .push(task);
+        let (subagent_tx, mut subagents) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(subagent_tx));
+        resources.insert(SessionIdResource("parent-session".into()));
+        let resources = Arc::new(Mutex::new(resources));
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let mut actor = SchedulerActor {
+            resources: resources.clone(),
+            resources_persistence: Arc::new(persistence),
+            notification_handle,
+            cmd_rx,
+            cancel_token: cancel_token.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+
+        {
+            let fire = actor.fire_next_task();
+            tokio::pin!(fire);
+            let (_, _unknown_write) = tokio::select! {
+                _ = fire.as_mut() => panic!("one-shot must wait for its durable fence"),
+                save = next_event(&mut saves) => save,
+            };
+            cancel_token.cancel();
+            tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+                .await
+                .unwrap();
+        }
+
+        assert!(subagents.try_recv().is_err());
+        assert!(notifications.try_recv().is_err());
+        assert_eq!(actor.clock.snapshot().revision(), 2);
+        assert!(actor.blocked_expiries.contains("unknown-once"));
+        let resources = resources.lock().await;
+        let state = resources.get::<State<SchedulerState>>().unwrap();
+        assert!(state.tasks.is_empty());
+        assert_eq!(state.pending_one_shot_occurrences().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unadmitted_durable_one_shot_rolls_back_receipt_and_remains_scheduled() {
+        let mut task = due_one_shot("unwired-once");
+        task.durable = true;
+        let (mut actor, mut notifications) = make_boundary_actor(vec![task], 0);
+        actor.resources.lock().await.remove::<SubagentEventSender>();
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        actor.resources_persistence = Arc::new(persistence);
+
+        {
+            let fire = actor.fire_next_task();
+            tokio::pin!(fire);
+            let (prepared, persisted) = tokio::select! {
+                _ = fire.as_mut() => panic!("one-shot must wait for receipt persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            assert_eq!(
+                prepared["state"]["grow_build.Scheduler"]["tasks"],
+                serde_json::json!([])
+            );
+            persisted.send(Ok(())).unwrap();
+            let (rolled_back, persisted) = tokio::select! {
+                _ = fire.as_mut() => panic!("one-shot must wait for rollback persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            assert_eq!(
+                rolled_back["state"]["grow_build.Scheduler"]["tasks"][0]["id"],
+                "unwired-once"
+            );
+            assert!(
+                rolled_back["state"]["grow_build.Scheduler"]
+                    .get("occurrenceJournal")
+                    .is_none()
+            );
+            persisted.send(Ok(())).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), fire.as_mut())
+                .await
+                .unwrap();
+        }
+
+        let created = notification!(notifications.try_recv().unwrap(), ScheduledTaskCreated);
+        assert_eq!(created.task_id, "unwired-once");
+        assert!(notifications.try_recv().is_err());
+        let resources = actor.resources.lock().await;
+        let state = resources.get::<State<SchedulerState>>().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert!(state.tasks[0].last_fired_at.is_some());
+        assert!(state.occurrence_journal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_receipt_suppresses_spawn_replays_tombstone_and_clears_journal() {
+        let generation = uuid::Uuid::now_v7();
+        let mut task = due_one_shot("replayed-once");
+        task.durable = true;
+        let mut state = SchedulerState {
+            tasks: vec![task.clone()],
+            ..Default::default()
+        };
+        state
+            .prepare_one_shot_occurrence(
+                "replayed-once",
+                ScheduledOccurrenceVersions::try_new(
+                    SchedulerVersion::from_parts(generation, 1),
+                    SchedulerVersion::from_parts(generation, 2),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        state.tasks.push(task);
+
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        **resources.get_or_default::<State<SchedulerState>>() = state;
+        let (subagent_tx, mut subagents) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(subagent_tx));
+        resources.insert(SessionIdResource("parent-session".into()));
+        let resources = Arc::new(Mutex::new(resources));
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: resources.clone(),
+            resources_persistence: Arc::new(persistence),
+            notification_handle,
+            cmd_rx,
+            cancel_token: cancel_token.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+        let actor_task = tokio::spawn(actor.run());
+
+        let (suppressed, persisted) = next_event(&mut saves).await;
+        assert_eq!(
+            suppressed["state"]["grow_build.Scheduler"]["tasks"],
+            serde_json::json!([])
+        );
+        assert!(subagents.try_recv().is_err());
+        persisted.send(Ok(())).unwrap();
+
+        let removed = next_acknowledged(&mut notifications).await;
+        let removed_event = notification!(removed.notification, ScheduledTaskRemoved);
+        assert_eq!(
+            (removed_event.task_id.as_str(), removed_event.revision),
+            ("replayed-once", 2)
+        );
+        removed.acknowledgement.unwrap().send(Ok(())).unwrap();
+        let (cleared, persisted) = next_event(&mut saves).await;
+        assert!(
+            cleared["state"]["grow_build.Scheduler"]
+                .get("occurrenceJournal")
+                .is_none()
+        );
+        persisted.send(Ok(())).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(subagents.try_recv().is_err());
+        assert!(
+            resources
+                .lock()
+                .await
+                .get::<State<SchedulerState>>()
+                .unwrap()
+                .occurrence_journal
+                .is_empty()
+        );
+        cancel_token.cancel();
+        actor_task.await.unwrap();
     }
 
     #[tokio::test]

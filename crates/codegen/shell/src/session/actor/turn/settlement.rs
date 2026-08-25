@@ -400,16 +400,6 @@ impl SessionActor {
         }
     }
 
-    /// Whether a turn error is transient infra worth a goal retry. Keys on the
-    /// JSON-RPC code only (unlike `stop_failure_error_type`), so `-32603` counts
-    /// as infra.
-    pub(super) fn is_infra_turn_error(err: &acp::Error) -> bool {
-        matches!(
-            i32::from(err.code),
-            crate::sampling::error::RATE_LIMITED_ERROR_CODE | -32000 | -32603
-        )
-    }
-
     /// `(turn_succeeded, suppress_goal_continuation, goal_pause_message)`.
     /// Only a Goal-owned internal turn may degrade the Goal lifecycle. The same
     /// provider outcome on an ordinary user turn belongs to that turn alone and
@@ -441,7 +431,6 @@ impl SessionActor {
             .as_ref()
             .err()
             .filter(|_| goal_internal)
-            .filter(|err| Self::is_infra_turn_error(err))
             .map(Self::format_turn_error_message);
         let terminal_pause_message = goal_internal
             .then(|| result.as_ref().ok())
@@ -472,7 +461,7 @@ impl SessionActor {
         )
     }
 
-    pub(in crate::session::actor) async fn apply_infra_pause_after_turn_err(
+    pub(in crate::session::actor) async fn apply_goal_pause_after_turn_err(
         &self,
         message: String,
     ) -> bool {
@@ -495,7 +484,7 @@ impl SessionActor {
         paused
     }
 
-    /// Extract the best human-readable detail from an infra turn error.
+    /// Extract the best human-readable detail from a turn error.
     pub(super) fn turn_error_detail(err: &acp::Error) -> Option<String> {
         err.data
             .as_ref()
@@ -521,5 +510,29 @@ impl SessionActor {
         err: &agent::plugins::install_registry::InstallError,
     ) -> String {
         crate::plugin::classify_install_error(err)
+    }
+}
+
+#[cfg(test)]
+mod goal_degradation_tests {
+    use super::*;
+
+    #[test]
+    fn permanent_goal_turn_error_pauses_instead_of_reentering_idle_loop() {
+        let result: PromptTurnResult = Err(acp::Error::invalid_request());
+        let goal_origin = crate::session::PromptOrigin::GoalContinuation {
+            goal_id: "goal-1".to_string(),
+        };
+
+        let (_, suppress, pause_message) =
+            SessionActor::post_turn_goal_degradation_plan(&result, Some(&goal_origin));
+        assert!(!suppress);
+        assert!(pause_message.is_some());
+
+        let (_, _, user_pause_message) = SessionActor::post_turn_goal_degradation_plan(
+            &result,
+            Some(&crate::session::PromptOrigin::User),
+        );
+        assert!(user_pause_message.is_none());
     }
 }

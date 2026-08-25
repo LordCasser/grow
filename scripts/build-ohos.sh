@@ -18,7 +18,8 @@
 #   4. C deps need the OHOS SDK clang (aarch64-unknown-linux-ohos-clang) +
 #      sysroot; aws-lc-sys additionally needs OHOS_NDK_HOME + the SDK's cmake.
 #   5. jemalloc's configure doesn't know the `aarch64-unknown-linux-ohos`
-#      triplet -> build with --no-default-features --features sandbox-enforce.
+#      triplet -> build with --no-default-features
+#      --features release-dist,sandbox-enforce.
 #   6. nix 0.26.4 (pprof -> shell-base chain) predates OHOS; the repo vendors
 #      the patched `third_party/nix-ohos` via [patch.crates-io]. nix 0.28/0.30
 #      support OHOS natively and stay on the registry.
@@ -165,6 +166,12 @@ rustup toolchain link system "$RUST_PREFIX"
 export RUSTUP_TOOLCHAIN=system
 cargo --version
 rustc --version
+EXPECTED_OHOS_RUST_VERSION=1.97.1
+ACTUAL_OHOS_RUST_VERSION="$(rustc --version | awk '{ print $2 }')"
+if [ "$ACTUAL_OHOS_RUST_VERSION" != "$EXPECTED_OHOS_RUST_VERSION" ]; then
+  echo "error: OHOS release toolchain must be rustc $EXPECTED_OHOS_RUST_VERSION; found $ACTUAL_OHOS_RUST_VERSION" >&2
+  exit 1
+fi
 
 # ----------------------------------------------------- cargo mirror -------
 # crates.io / USTC TLS is flaky from this environment; rsproxy verified stable.
@@ -213,9 +220,10 @@ else
 fi
 
 # ------------------------------------------------------------ build -------
-# jemalloc's configure does not know the OHOS triplet; first version must
-# build without it (docs/ohos-porting.md §3.7). sandbox-enforce stays on.
-FEATURE_FLAGS=(--no-default-features --features sandbox-enforce)
+# jemalloc's configure does not know the OHOS triplet, so the standalone
+# release keeps default features off. The production release policy and
+# sandbox enforcement remain explicit.
+FEATURE_FLAGS=(--no-default-features --features release-dist,sandbox-enforce)
 LOG=/tmp/build-ohos.log
 ATTEMPT_LOG=/tmp/build-ohos-attempt.log
 
@@ -259,4 +267,4 @@ readelf -d "$BIN" 2>/dev/null | grep NEEDED | head -8 || true
 log "Done. Binary: $BIN"
 echo "Next: commit third_party/nix-ohos + Cargo.toml/Cargo.lock (if not yet),"
 echo "      then see docs/ohos-porting.md §9 for the roadmap (updater,"
-echo "      release matrix, Harmonybrew formula, real-device gates)."
+echo "      release matrix and real-device gates)."
