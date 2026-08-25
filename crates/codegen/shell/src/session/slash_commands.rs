@@ -575,6 +575,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "trajectory",
             "tour",
             "transcript",
             "tutorial",
@@ -2685,7 +2686,10 @@ mod tests {
     }
     #[test]
     fn goal_restart_resolves_to_restart() {
-        assert!(matches!(resolve_goal("restart"), BuiltinAction::GoalRestart));
+        assert!(matches!(
+            resolve_goal("restart"),
+            BuiltinAction::GoalRestart
+        ));
     }
     #[test]
     fn goal_clear_resolves_to_clear() {

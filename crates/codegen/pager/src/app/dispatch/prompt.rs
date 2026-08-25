@@ -524,19 +524,11 @@ pub(super) fn dispatch_send_prompt_inner(
                         .map(|(id, _info)| (id.0.to_string(), id.clone()))
                         .collect(),
                     behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
-                    workflows_available: agent.prompt.slash_controller.workflows_available(),
+                    workflows_available: agent
+                        .behavior_supported(tools::types::BehaviorId::Workflow),
                     deep_research_available: agent
-                        .prompt
-                        .slash_controller
-                        .registry()
-                        .get("deep-research")
-                        .is_some(),
-                    goal_available: agent
-                        .prompt
-                        .slash_controller
-                        .registry()
-                        .get("goal")
-                        .is_some(),
+                        .behavior_supported(tools::types::BehaviorId::DeepResearch),
+                    goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
                     show_tips: show_tips_from_app,
                     auto_update: auto_update_from_app,
                     vim_mode: crate::appearance::cache::load_vim_mode(),

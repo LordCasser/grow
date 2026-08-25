@@ -1,5 +1,35 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
+
+#[test]
+fn trajectory_launch_uses_the_exact_active_session_id() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
+        Some(acp::SessionId::new("trajectory-session"));
+
+    let effects = dispatch(Action::OpenTrajectory, &mut app);
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::LaunchTrajectory { agent_id, session_id }]
+            if *agent_id == AgentId(0) && session_id.0.as_ref() == "trajectory-session"
+    ));
+}
+
+#[test]
+fn update_restart_intent_survives_terminal_teardown() {
+    let mut app = test_app_with_agent();
+
+    let effects = dispatch(Action::RestartForUpdate, &mut app);
+
+    assert!(app.restart_for_update);
+    assert!(matches!(effects.last(), Some(Effect::Quit)));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::UnregisterActiveSession { session_id }
+            if session_id.0.as_ref() == "test-session"
+    )));
+}
 #[test]
 fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     use crate::app::agent_view::PromptInputMode;

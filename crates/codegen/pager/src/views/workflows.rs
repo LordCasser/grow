@@ -2164,7 +2164,7 @@ mod tests {
         );
         assert!(text.contains("— Running: rg -n needle"), "{text}");
         assert!(
-            text.contains("42k tok · 1m15s"),
+            text.contains("42k tok · 1m 15s"),
             "live tokens + elapsed match the header meta style: {text}"
         );
     }

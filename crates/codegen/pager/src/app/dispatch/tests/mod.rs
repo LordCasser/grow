@@ -149,7 +149,7 @@ fn test_app() -> AppView {
         session_picker_entries_query: None,
         startup_warnings: Vec::new(),
         pending_update_version: None,
-        quit_for_update: false,
+        restart_for_update: false,
         relaunch: None,
         screen_mode: crate::app::ScreenMode::Inline,
         pending_effects: Vec::new(),

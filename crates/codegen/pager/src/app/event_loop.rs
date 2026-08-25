@@ -61,7 +61,7 @@ pub(crate) struct TerminalState {
 /// Result of the event loop run.
 pub(crate) struct RunResult {
     pub exit_info: Option<super::ExitInfo>,
-    pub quit_for_update: bool,
+    pub restart_for_update: bool,
     /// When set, the process should re-exec into the other screen mode after
     /// terminal restore. See `/minimal` and `/fullscreen`.
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
@@ -2495,7 +2495,7 @@ fn make_run_result(app: &AppView) -> RunResult {
     });
     RunResult {
         exit_info,
-        quit_for_update: app.quit_for_update,
+        restart_for_update: app.restart_for_update,
         relaunch: app.relaunch.clone(),
     }
 }

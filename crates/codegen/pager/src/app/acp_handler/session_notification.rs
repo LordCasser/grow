@@ -824,6 +824,23 @@ fn handle_session_notification_inner(
                 false
             }
         }
+        GrowSessionUpdate::PluginUpdatesInstalled { updates } => {
+            if updates.is_empty() {
+                false
+            } else {
+                let details = updates
+                    .into_iter()
+                    .map(|(name, old_version, new_version)| {
+                        format!("{name} {old_version} → {new_version}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Plugin updates installed: {details}"
+                )));
+                true
+            }
+        }
         GrowSessionUpdate::SessionRecap { summary, auto } => {
             use crate::scrollback::block::RenderBlock;
             use crate::scrollback::blocks::SessionEvent;

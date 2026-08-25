@@ -1470,10 +1470,13 @@ impl SessionActor {
                     "Auto-recovery exhausted after {attempt} attempts for session {}: {error_desc}",
                     self.session_info.id.0,
                 );
-                self.send_grow_notification(GrowSessionUpdate::AutoRecoveryExhausted {
-                    attempts: attempt,
-                    error: error_desc,
-                })
+                self.send_grow_notification(GrowSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Exhausted {
+                        attempts: attempt,
+                        reason: error_desc,
+                        is_rate_limited: false,
+                    },
+                ))
                 .await;
                 return result;
             }
@@ -1489,12 +1492,13 @@ impl SessionActor {
                 self.session_info.id.0,
                 delay.as_millis(),
             );
-            self.send_grow_notification(GrowSessionUpdate::AutoRecoveryStarted {
-                attempt,
-                max_retries: recovery.max_retries,
-                error: error_desc,
-                delay_ms: delay.as_millis() as u64,
-            })
+            self.send_grow_notification(GrowSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::Retrying {
+                    attempt,
+                    max_retries: recovery.max_retries,
+                    reason: error_desc,
+                },
+            ))
             .await;
             sleep(delay).await;
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());

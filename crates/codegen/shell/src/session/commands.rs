@@ -89,10 +89,6 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
     })
 }
 pub enum SessionCommand {
-    Initialize {
-        system_prompt: String,
-        session_rules: Option<String>,
-    },
     /// Install an immutable Goal snapshot before a delegated child turn is
     /// admitted. The snapshot is read-only and never follows parent revisions.
     SetGoalContextSnapshot {

@@ -14,6 +14,13 @@ Goal's future continuation right, watchers, and background tasks do not occupy t
 
 The pager mirrors shell state. It does not infer ownership from Goal status, prompt text, token count, or prompt-id prefixes.
 
+Behavior capability follows the same ownership rule. Once the Shell publishes
+`grow/behaviorAvailability`, Pager settings, pickers, and transition guards all
+consume that projection. The advertised command catalog is an execution and
+discoverability surface, not a second Behavior capability model. Tool/command
+inspection is permitted only during the bootstrap window before the first
+structured projection arrives.
+
 ## Input classes
 
 1. Plain Enter sends `QueuePrompt`. While idle the common gate may start it; while running it remains in the user FIFO. Under the non-default `follow_up_behavior = "steer"`, a plain-Enter follow-up that arrives while a regular turn is running is auto-promoted into that turn through the same mid-turn interjection entry point as Ctrl+Enter; only a regular foreground turn is promotable — idle or compaction states, synthetic prompts, and bash or structured prompts are not promoted and stay on the FIFO.
@@ -80,6 +87,11 @@ enters the Goal degradation path.
 Compaction is the only non-regular foreground owner. Manual and automatic compaction cannot overlap a regular turn or each other. While it owns foreground, user input may queue but cannot steer it. When compaction ends, the same FIFO-first idle arbiter resumes scheduling.
 
 ## Recovery
+
+All provider and completion-requirement retry progress uses the single
+`RetryState` session update. Compaction resumes inside the same foreground turn
+and has no separate auto-continue terminal update; `TurnCompleted` remains the
+only regular-turn terminal authority.
 
 `TurnCompleted` is the durable lifecycle authority. Prompt response metadata is an idempotent secondary source. The pager watchdog may query shell prompt status when a submission appears stalled, but elapsed time alone never fabricates a terminal.
 

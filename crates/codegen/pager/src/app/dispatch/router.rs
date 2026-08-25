@@ -120,9 +120,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects.push(Effect::Quit);
             effects
         }
-        Action::QuitForUpdate => {
+        Action::RestartForUpdate => {
             let mut effects = unregister_all_active_sessions(app);
-            app.quit_for_update = true;
+            app.restart_for_update = true;
             effects.push(Effect::Quit);
             effects
         }
@@ -857,6 +857,22 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_show_release_notes(app, title, content)
         }
         Action::OpenTutorial => dispatch_open_tutorial(app),
+        Action::OpenTrajectory => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("No active session");
+                return vec![];
+            };
+            vec![Effect::LaunchTrajectory {
+                agent_id,
+                session_id,
+            }]
+        }
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),

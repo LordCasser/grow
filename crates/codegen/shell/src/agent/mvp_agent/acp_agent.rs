@@ -419,7 +419,12 @@ impl acp::Agent for MvpAgent {
                         mcp_meta_config_map,
                         persistence,
                         session_title_route,
-                        timeline_bootstrap: crate::session::TimelineBootstrap::Fresh,
+                        timeline_bootstrap: crate::session::TimelineBootstrap::Fresh {
+                            session_rules: session_rules_from_meta(
+                                arguments.meta.as_ref(),
+                                init.meta.as_ref(),
+                            ),
+                        },
                         rewind_points_source: None,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,

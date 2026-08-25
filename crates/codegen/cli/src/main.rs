@@ -25,7 +25,7 @@ mod jemalloc_malloc_conf {
     #[unsafe(export_name = "_rjem_malloc_conf")]
     static MALLOC_CONF: MallocConfPtr = MallocConfPtr(CONF.as_ptr());
 }
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pager::app::{
     AgentCmd, Command, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode, LeaderTargetArgs, PagerArgs,
     resolve_leader_mode, resolve_use_leader, warn_leader_disabled_by_sandbox,
@@ -1722,7 +1722,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("Update installed. Run `grow` to start.");
+                auto_update::restart_grow()
+                    .context("update installed but Grow could not restart")?;
             } else {
                 eprintln!("Update did not complete. Run `grow update` to retry.");
             }
@@ -1732,7 +1733,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         Err(e) => Err(e),
     }
 }
-/// Complete the update after a quit-for-update (Ctrl+U) exit. Returns `true`
+/// Complete the update after a restart-for-update (Ctrl+U) exit. Returns `true`
 /// when an update path completed without a reported failure.
 ///
 /// Prefers awaiting the parked waiter for the background `grow update` child

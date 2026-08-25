@@ -1,6 +1,6 @@
-//! Session initialization concern for `SessionActor`: `initialize`, prefix
-//! readiness, skills reload and reminders, session info, and model-metadata
-//! refresh.
+//! Session initialization concern for `SessionActor`: durable fresh-context
+//! commit, prefix readiness, skills reload and reminders, session info, and
+//! model-metadata refresh.
 use super::*;
 impl SessionActor {
     /// Resolve the slash-skill list for prompt building (disk/plugin skills only).
@@ -30,7 +30,11 @@ impl SessionActor {
     /// Set up `[system, session_rules?, skill_reminder?]` — prefix is deferred
     /// to background. Session rules are a typed Timeline item and never mutate
     /// the stable system head.
-    pub(super) async fn initialize(&self, system_prompt: String, session_rules: Option<String>) {
+    pub(super) async fn initialize_fresh_context_durably(
+        &self,
+        system_prompt: String,
+        session_rules: Option<String>,
+    ) -> std::io::Result<()> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
         let system_message = ConversationItem::system(system_prompt);
@@ -38,67 +42,33 @@ impl SessionActor {
         if let Some(rules) = session_rules {
             messages.push(ConversationItem::session_rules(rules));
         }
-        if let Some(effects) = self.inject_baseline_skill_reminder(&mut messages).await
-            && effects.send_available_commands
+        if let Some(effects) = bridge.apply_pending_skill_update().await
+            && let Some(item) = self.wrap_skill_reminder(&effects)
         {
-            self.send_available_commands_update().await;
+            messages.push(item);
         }
         let Some((current, source_surface_revision)) = self
             .chat_state_handle
             .get_conversation_with_revision()
             .await
         else {
-            tracing::error!("failed to publish initial context: chat-state actor stopped");
-            return;
+            return Err(std::io::Error::other(
+                "chat-state actor stopped before initial context commit",
+            ));
         };
         if !current.is_empty() {
-            tracing::error!(
-                items = current.len(),
-                "refusing to initialize a Timeline that already has a stable seed"
-            );
-            return;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to initialize a Timeline that already has a stable seed ({} items)",
+                    current.len()
+                ),
+            ));
         }
-        if let Err(error) = self
-            .chat_state_handle
+        self.chat_state_handle
             .replace_context_durably(messages, source_surface_revision)
             .await
-        {
-            tracing::error!(%error, "failed to durably publish initial session context");
-        }
-    }
-    /// Ensure the conversation carries the correct baseline skill
-    /// `<system-reminder>`: exactly one for an agent that has skills and uses reminders,
-    /// and none for an agent that renders skills inline via `<agent_skills>`
-    /// or when nothing is pending.
-    ///
-    /// Called from `initialize` (fresh start, conversation is just `[system]`)
-    /// and the zero-turn harness rebuild (`handle_rebuild_agent_for_definition`,
-    /// conversation is the inherited zero-turn shape). Both drain the current
-    /// bridge's pending baseline.
-    ///
-    /// Idempotent: strips any existing baseline skill reminder before
-    /// injecting, so a zero-turn Agent rebuild cannot double-list the baseline.
-    ///
-    /// Returns the drained effects so callers can honor `send_available_commands`
-    /// on their own schedule.
-    pub(super) async fn inject_baseline_skill_reminder(
-        &self,
-        conversation: &mut Vec<ConversationItem>,
-    ) -> Option<tools::types::skill_discovery_tracker::SkillUpdateEffects> {
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        conversation.retain(|item| {
-            !matches!(
-                item,
-                ConversationItem::User(u)
-                    if u.synthetic_reason
-                        == Some(sampling_types::SyntheticReason::SystemReminder)
-            )
-        });
-        let effects = bridge.apply_pending_skill_update().await?;
-        if let Some(item) = self.wrap_skill_reminder(&effects) {
-            conversation.push(item);
-        }
-        Some(effects)
+            .map_err(std::io::Error::other)
     }
     pub(super) async fn build_prefix_background(&self) -> String {
         let start = std::time::Instant::now();

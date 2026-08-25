@@ -1333,27 +1333,8 @@ impl AgentView {
 
     pub(super) fn sync_command_selection_context(&mut self) {
         let behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
-        let published = self.session.tracker.behavior_availability();
-        let deep_research = published
-            .and_then(|availability| availability.choice(tools::types::BehaviorId::DeepResearch))
-            .map(|choice| choice.supported)
-            .unwrap_or_else(|| {
-                self.prompt
-                    .slash_controller
-                    .registry()
-                    .get("deep-research")
-                    .is_some()
-            });
-        let goal = published
-            .and_then(|availability| availability.choice(tools::types::BehaviorId::Goal))
-            .map(|choice| choice.supported)
-            .unwrap_or_else(|| {
-                self.prompt
-                    .slash_controller
-                    .registry()
-                    .get("goal")
-                    .is_some()
-            });
+        let deep_research = self.behavior_supported(tools::types::BehaviorId::DeepResearch);
+        let goal = self.behavior_supported(tools::types::BehaviorId::Goal);
         let auto_permission = self
             .prompt
             .slash_controller

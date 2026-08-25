@@ -1059,7 +1059,7 @@ pub(crate) async fn run_shell_child(
         subagent_max_turns,
     )
     .await;
-    let (child_handle, _system_prompt, child_thread) = match spawn_result {
+    let (child_handle, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("Failed to spawn child session: {e}");

@@ -33,12 +33,6 @@ pub(super) fn notification_hook_for_update(
             None,
             Some("info".into()),
         )),
-        GrowSessionUpdate::AutoRecoveryExhausted { error, .. } => Some((
-            "agent_error".into(),
-            Some(error.clone()),
-            None,
-            Some("error".into()),
-        )),
         GrowSessionUpdate::RetryState(RetryState::Exhausted { reason, .. }) => Some((
             "agent_error".into(),
             Some(reason.clone()),
@@ -288,6 +282,25 @@ mod notification_hook_filter_tests {
             reason: "timeout".into(),
         });
         assert!(notification_hook_for_update(&update).is_none());
+    }
+
+    #[test]
+    fn retry_exhaustion_fires_one_agent_error_hook() {
+        let update = GrowSessionUpdate::RetryState(RetryState::Exhausted {
+            attempts: 3,
+            reason: "completion requirements were not met".into(),
+            is_rate_limited: false,
+        });
+
+        let (ty, message, title, level) =
+            notification_hook_for_update(&update).expect("terminal retry failure should fire");
+        assert_eq!(ty, "agent_error");
+        assert_eq!(
+            message.as_deref(),
+            Some("completion requirements were not met")
+        );
+        assert_eq!(title, None);
+        assert_eq!(level.as_deref(), Some("error"));
     }
 
     #[test]

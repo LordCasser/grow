@@ -383,16 +383,13 @@ async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
     );
 }
 
-/// Regression: a legacy id duplicated across cwd dirs is ambiguous to the
-/// session listings (`RelocationView::select` drops multi-path journal-less
-/// ids before the cwd filter), so its title never reaches selection: the pin
-/// stays unresolved, the profile peek finds nothing, and materialization
-/// fails closed with the hint instead of resuming under an unverified
-/// profile. The carried-profile path for unique ids is pinned by
-/// `pin_title_resume_finds_saved_profile_and_conflicts`.
+/// A title is resolved inside the requested cwd before sandbox entry. When an
+/// old non-UUID id also exists under another cwd, pinning must carry the chosen
+/// Summary's sandbox profile instead of looking the id up globally and drifting
+/// to the other session.
 #[serial_test::serial(GROW_HOME)]
 #[tokio::test]
-async fn duplicate_legacy_id_is_not_title_addressable() {
+async fn duplicate_legacy_id_title_pin_keeps_the_cwd_scoped_profile() {
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(
@@ -418,22 +415,24 @@ async fn duplicate_legacy_id_is_not_title_addressable() {
     args.pin_local_resume_target_for_cwd(Some(&cwd_str))
         .unwrap();
     assert!(args.resume_target_pinned);
-    assert_eq!(args.session_to_resume(), Some("locked down"));
-    assert!(args.saved_resume_profile_for_cwd(Some(&cwd_str)).is_none());
+    assert_eq!(args.session_to_resume(), Some("legacy-twin"));
+    assert_eq!(
+        args.saved_resume_profile_for_cwd(Some(&cwd_str)).as_deref(),
+        Some("strict")
+    );
 
     use crate::app::session_startup::{
-        MaterializeCtx, TitleResolution, materialize_startup_for_cwd,
+        MaterializeCtx, MaterializedStartup, TitleResolution, materialize_startup_for_cwd,
     };
     let ctx = MaterializeCtx::from_pager_args(&args);
     assert_eq!(ctx.title_resolution, TitleResolution::PinnedPreSandbox);
 
     let intent = args.session_startup_intent().unwrap();
-    let msg = materialize_startup_for_cwd(pinned_local_ctx(), intent, &cwd_str)
+    let materialized = materialize_startup_for_cwd(pinned_local_ctx(), intent, &cwd_str)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        msg.contains("no session id or title matched"),
-        "duplicate-id session must fail closed, not resume: {msg}"
-    );
+        .unwrap();
+    assert!(matches!(
+        materialized,
+        MaterializedStartup::Resume { ref session_id, .. } if session_id == "legacy-twin"
+    ));
 }

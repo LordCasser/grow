@@ -98,7 +98,6 @@ pub(crate) enum Lifecycle {
     CompactCompleted { pre_tokens: u64 },
     CompactFailed { error: String },
     CompactCancelled,
-    AutoContinue { total_tokens: u64 },
     ImageCompressed { message: String },
 }
 
@@ -115,7 +114,6 @@ impl Lifecycle {
             }
             Lifecycle::CompactFailed { error } => format!("Auto-compact failed: {error}"),
             Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
-            Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
         }
     }

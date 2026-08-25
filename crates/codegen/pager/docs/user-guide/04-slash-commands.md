@@ -47,6 +47,14 @@ Show session details — auth method, model, turn count, and context usage. Alia
 
 In fullscreen and inline modes this opens the tabbed usage modal on the Session Info tab, where each row (Session ID, working directory, model, …) can be clicked to copy. Minimal mode keeps the inline scrollback output.
 
+### `/trajectory`
+
+Open an independent local web debugger for the exact active session. The page
+tails its durable parent and Sideband Timelines, provides causal lanes and
+filters, and keeps running independently of the TUI. This command never falls
+back to the most recently used session, so the page identity always matches the
+session from which it was opened.
+
 ### `/fork`
 
 Branch the current session into a new agent, keeping history up to this point.

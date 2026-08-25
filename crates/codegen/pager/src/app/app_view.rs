@@ -6,7 +6,6 @@
 use super::ScreenMode;
 use crate::acp::model_state::ModelState;
 use crate::actions::{ActionId, ActionRegistry, When};
-use crate::app::agent::AgentSession;
 use crate::appearance::AppearanceConfig;
 use crate::input::KeyboardNormalizer;
 use crate::input::key::KeyShortcut;
@@ -739,9 +738,9 @@ pub struct AppView {
     /// a newer version is detected; rendered as a notification on the
     /// welcome screen.
     pub pending_update_version: Option<String>,
-    /// When true, the event loop should exit so the user can relaunch
-    /// to pick up the downloaded update.
-    pub quit_for_update: bool,
+    /// When true, the event loop should exit so the CLI can finish the update
+    /// and re-exec Grow after terminal restoration.
+    pub restart_for_update: bool,
     /// When set, the event loop should exit and the process re-exec into the
     /// other screen mode. Driven by `/minimal` and `/fullscreen`. Captures the
     /// session id at action time so a later teardown cannot drop `--resume`.
@@ -920,7 +919,7 @@ impl AppView {
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             pending_update_version: None,
-            quit_for_update: false,
+            restart_for_update: false,
             relaunch: None,
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
@@ -2325,7 +2324,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::QuitForUpdate);
+                return InputOutcome::Action(Action::RestartForUpdate);
             }
             if is_quit_signal(key) {
                 return InputOutcome::Action(Action::Quit);
@@ -3395,19 +3394,7 @@ impl AppView {
                 needs_redraw |= Self::tick_agent_block_viewer(child_view);
             }
             needs_redraw |= agent.drain_blocked();
-            let workflows_available = agent
-                .session
-                .tracker
-                .behavior_availability()
-                .and_then(|availability| availability.choice(tools::types::BehaviorId::Workflow))
-                .map(|choice| choice.supported)
-                .unwrap_or_else(|| {
-                    AgentSession::workflows_available(
-                        agent.session.available_tools.as_ref(),
-                        &agent.session.available_commands,
-                        !agent.workflow_runs.is_empty(),
-                    )
-                });
+            let workflows_available = agent.behavior_supported(tools::types::BehaviorId::Workflow);
             agent
                 .prompt
                 .slash_controller
@@ -4060,7 +4047,7 @@ pub(crate) mod tests {
             session_picker_entries_query: None,
             startup_warnings: Vec::new(),
             pending_update_version: None,
-            quit_for_update: false,
+            restart_for_update: false,
             relaunch: None,
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),

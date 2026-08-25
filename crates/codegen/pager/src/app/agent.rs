@@ -639,23 +639,22 @@ impl AgentSession {
     ) {
         self.permission_mode = mode;
     }
-    /// Whether workflows can be launched in this session. Gates the `/workflow`
-    /// command, the behavior-picker Workflow entry, and
-    /// `SetBehaviorMode(Workflow)`.
+    /// Bootstrap-only Workflow support heuristic used before the Shell's first
+    /// structured `BehaviorAvailability` projection arrives.
     ///
     /// Signals (any true → available):
-    /// 1. `available_tools` is `Some(_)` and contains the `workflow` tool —
-    ///    the authoritative tool-level signal from
-    ///    `AvailableCommandsUpdate.meta.tools` once the bootstrap window has
-    ///    closed.
+    /// 1. `available_tools` is `Some(_)` and contains the `workflow` tool.
     /// 2. A Workflow runtime slash command is advertised. During bootstrap
     ///    (`available_tools` is still `None`) private `deep-research` is the
     ///    stable signal; public `workflow-run` appears only in Workflow Behavior.
     /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
     ///    to the pager (running or history).
     ///
-    /// Recomputed by the app tick each frame; field/iterator checks only.
-    pub(crate) fn workflows_available(
+    /// Callers must stop consulting these signals as soon as the structured
+    /// projection exists;
+    /// [`AgentView::behavior_supported`](crate::app::agent_view::AgentView::behavior_supported)
+    /// owns that switch.
+    pub(crate) fn bootstrap_workflow_support(
         available_tools: Option<&HashSet<String>>,
         available_commands: &[acp::AvailableCommand],
         has_workflow_runs: bool,
@@ -979,7 +978,11 @@ mod tests {
         // (a) Tool-level signal: `AvailableCommandsUpdate.meta.tools` contains
         // the `workflow` tool, with no advertised commands or runs.
         let tools = HashSet::from([WORKFLOW_TOOL_NAME.to_string()]);
-        assert!(AgentSession::workflows_available(Some(&tools), &[], false));
+        assert!(AgentSession::bootstrap_workflow_support(
+            Some(&tools),
+            &[],
+            false
+        ));
     }
 
     #[test]
@@ -989,7 +992,7 @@ mod tests {
             WORKFLOW_RUN_COMMAND_NAME.to_string(),
             "run a workflow".to_string(),
         )];
-        assert!(AgentSession::workflows_available(None, &cmds, false));
+        assert!(AgentSession::bootstrap_workflow_support(None, &cmds, false));
     }
 
     #[test]
@@ -998,7 +1001,7 @@ mod tests {
             DEEP_RESEARCH_COMMAND_NAME.to_string(),
             "private research runtime".to_string(),
         )];
-        assert!(AgentSession::workflows_available(None, &cmds, false));
+        assert!(AgentSession::bootstrap_workflow_support(None, &cmds, false));
     }
 
     #[test]
@@ -1009,7 +1012,7 @@ mod tests {
             WORKFLOW_TOOL_NAME.to_string(),
             "workflows".to_string(),
         )];
-        assert!(AgentSession::workflows_available(
+        assert!(AgentSession::bootstrap_workflow_support(
             Some(&HashSet::new()),
             &cmds,
             false
@@ -1020,8 +1023,8 @@ mod tests {
     fn workflows_available_false_without_any_signal() {
         // (c) No tool, no command, no runs → unavailable. Covers both the
         // not-yet-received (None) and empty-toolset (Some(&[])) cases.
-        assert!(!AgentSession::workflows_available(None, &[], false));
-        assert!(!AgentSession::workflows_available(
+        assert!(!AgentSession::bootstrap_workflow_support(None, &[], false));
+        assert!(!AgentSession::bootstrap_workflow_support(
             Some(&HashSet::new()),
             &[],
             false
@@ -1032,7 +1035,7 @@ mod tests {
     fn workflows_available_true_when_workflow_runs_exist() {
         // (d) Runs-only signal: workflows stay selectable while a run exists,
         // regardless of tool/command advertisement.
-        assert!(AgentSession::workflows_available(None, &[], true));
+        assert!(AgentSession::bootstrap_workflow_support(None, &[], true));
     }
 
     #[test]

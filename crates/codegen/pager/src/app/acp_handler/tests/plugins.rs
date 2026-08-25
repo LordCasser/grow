@@ -45,6 +45,30 @@
     }
 
     #[test]
+    fn installed_plugin_updates_are_visible_in_durable_scrollback() {
+        let mut app = make_app_with_agent("sess-plugins");
+
+        let handled = handle(
+            make_ext_session_notification(
+                "sess-plugins",
+                GrowSessionUpdate::PluginUpdatesInstalled {
+                    updates: vec![
+                        ("alpha".into(), "1.0.0".into(), "2.0.0".into()),
+                        ("beta".into(), "3.1.0".into(), "3.2.0".into()),
+                    ],
+                },
+            ),
+            &mut app,
+        );
+
+        assert!(handled);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(scrollback_has_system_text(agent, "Plugin updates installed"));
+        assert!(scrollback_has_system_text(agent, "alpha 1.0.0 → 2.0.0"));
+        assert!(scrollback_has_system_text(agent, "beta 3.1.0 → 3.2.0"));
+    }
+
+    #[test]
     fn plugins_changed_seeds_collapse_when_it_wins_the_first_load_race() {
         use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
 

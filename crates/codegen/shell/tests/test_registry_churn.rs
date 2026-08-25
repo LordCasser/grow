@@ -261,7 +261,32 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
     let local = tokio::task::LocalSet::new();
     agent_rt.block_on(local.run_until(async move {
         let client_conn = connect_and_auth(&server.url()).await;
-        churn_one(&client_conn, workdir.path(), 0).await;
+        let warmup = new_session(&client_conn, workdir.path()).await;
+        let timeline =
+            shell::session::storage::load_timeline_by_id_at(warmup.0.as_ref(), grow_home.path())
+                .expect("read warmup Timeline")
+                .expect("warmup session exists");
+        assert!(matches!(
+            timeline.surface().first(),
+            Some(sampling_types::ConversationItem::System(_))
+        ));
+        assert!(
+            timeline.events().iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
+                    revision: 1,
+                    model_context: Some(chat_state::ControlContext {
+                        layer: chat_state::ControlContextLayer::AgentRole,
+                        activation: chat_state::ControlContextActivation::Transition,
+                        ..
+                    }),
+                    ..
+                })
+            )),
+            "new_session must return only after the initial Agent role is durable"
+        );
+        prompt_turn(&client_conn, &warmup, "churn ping 0").await;
+        close_session(&client_conn, &warmup).await;
         let baseline = read_counts(&client_conn).await;
         assert_eq!(
             baseline.sessions, 0,

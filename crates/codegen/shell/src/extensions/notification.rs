@@ -496,30 +496,6 @@ pub enum SessionUpdate {
         /// Reason for cancellation
         reason: AutoCompactCancelReason,
     },
-    /// Auto-continue completed after compaction
-    /// This signals the TUI to flush pending agent messages and end the turn
-    AutoContinueCompleted {
-        /// Total tokens used after auto-continue
-        total_tokens: u64,
-    },
-    /// Auto-recovery is starting after a prompt failure (e.g. remote/workspace recovery)
-    AutoRecoveryStarted {
-        /// Current recovery attempt number (1-indexed)
-        attempt: u32,
-        /// Maximum number of recovery attempts allowed
-        max_retries: u32,
-        /// The error that triggered recovery
-        error: String,
-        /// Delay in milliseconds before the retry
-        delay_ms: u64,
-    },
-    /// Auto-recovery exhausted all retries and the turn is failing
-    AutoRecoveryExhausted {
-        /// Total attempts made
-        attempts: u32,
-        /// The final error message
-        error: String,
-    },
     /// A hook annotation message for the TUI scrollback.
     /// Rendered inline with the preceding tool call block.
     HookAnnotation {

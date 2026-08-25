@@ -738,14 +738,6 @@ pub(super) async fn run_session(
                 };
 
                 match cmd {
-                    SessionCommand::Initialize { system_prompt, session_rules } => {
-                        session.initialize(system_prompt, session_rules).await;
-                        let s = session.clone();
-                        let handle = tokio::task::spawn_local(async move {
-                            s.build_prefix_background().await
-                        });
-                        session.deferred_prefix.arm(handle);
-                    }
                     SessionCommand::SetGoalContextSnapshot { snapshot } => {
                         session
                             .agent

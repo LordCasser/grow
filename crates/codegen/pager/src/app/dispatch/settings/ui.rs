@@ -55,6 +55,10 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
         .map(|(id, _info)| (id.0.to_string(), id.clone()))
         .collect();
     for agent in app.agents.values_mut() {
+        let workflows_available = agent.behavior_supported(tools::types::BehaviorId::Workflow);
+        let deep_research_available =
+            agent.behavior_supported(tools::types::BehaviorId::DeepResearch);
+        let goal_available = agent.behavior_supported(tools::types::BehaviorId::Goal);
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
         // through async persist failures.
@@ -74,19 +78,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 current_model_id: default_model_id.clone(),
                 available_models: default_model_catalog.clone(),
                 behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
-                workflows_available: agent.prompt.slash_controller.workflows_available(),
-                deep_research_available: agent
-                    .prompt
-                    .slash_controller
-                    .registry()
-                    .get("deep-research")
-                    .is_some(),
-                goal_available: agent
-                    .prompt
-                    .slash_controller
-                    .registry()
-                    .get("goal")
-                    .is_some(),
+                workflows_available,
+                deep_research_available,
+                goal_available,
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -223,19 +217,9 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         current_model_id: default_model_id,
         available_models: default_model_catalog,
         behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
-        workflows_available: agent.prompt.slash_controller.workflows_available(),
-        deep_research_available: agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("deep-research")
-            .is_some(),
-        goal_available: agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("goal")
-            .is_some(),
+        workflows_available: agent.behavior_supported(tools::types::BehaviorId::Workflow),
+        deep_research_available: agent.behavior_supported(tools::types::BehaviorId::DeepResearch),
+        goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
         show_tips: show_tips_from_app,
         auto_update: auto_update_from_app,
         vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -656,16 +640,16 @@ fn agent_workflows_available(app: &AppView) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.prompt.slash_controller.workflows_available();
+        return agent.behavior_supported(tools::types::BehaviorId::Workflow);
     }
     false
 }
 
-fn agent_command_available(app: &AppView, name: &str) -> bool {
+fn agent_behavior_available(app: &AppView, behavior: tools::types::BehaviorId) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.prompt.slash_controller.registry().get(name).is_some();
+        return agent.behavior_supported(behavior);
     }
     false
 }
@@ -684,8 +668,11 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
             .collect(),
         behavior_mode: agent_behavior_mode(app),
         workflows_available: agent_workflows_available(app),
-        deep_research_available: agent_command_available(app, "deep-research"),
-        goal_available: agent_command_available(app, "goal"),
+        deep_research_available: agent_behavior_available(
+            app,
+            tools::types::BehaviorId::DeepResearch,
+        ),
+        goal_available: agent_behavior_available(app, tools::types::BehaviorId::Goal),
         show_tips: app.show_tips,
         auto_update: app.auto_update,
         vim_mode: crate::appearance::cache::load_vim_mode(),

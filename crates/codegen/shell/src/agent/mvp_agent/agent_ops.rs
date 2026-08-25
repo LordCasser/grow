@@ -1682,11 +1682,7 @@ impl MvpAgent {
             ask_user_question: ask_user_question_params_json,
         };
         let is_new_session = timeline_bootstrap.is_fresh();
-        let init_meta = self
-            .initialize_request
-            .get()
-            .and_then(|init| init.meta.as_ref());
-        let (mut handle, agent_system_prompt, session_thread) = {
+        let (mut handle, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
             let credentials = chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
@@ -1867,20 +1863,6 @@ impl MvpAgent {
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
         self.push_roster_delta_upserted(&session_info.id);
-        if is_new_session {
-            let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
-            tracing::debug!(
-                session_id = %session_info.id.0,
-                "built system prompt"
-            );
-            let _ = handle
-                .cmd_tx
-                .send(SessionCommand::Initialize {
-                    system_prompt: agent_system_prompt,
-                    session_rules: session_rules_from_meta(session_meta, init_meta),
-                });
-            tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
-        }
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;

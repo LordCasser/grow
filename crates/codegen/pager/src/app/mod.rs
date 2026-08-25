@@ -423,8 +423,8 @@ async fn bounded_connect(
 /// pager skips the welcome screen and immediately loads that session (replaying
 /// its history). Sessions not found locally are restored from remote storage.
 ///
-/// Returns `Ok(true)` when the user accepted a pending update. The caller
-/// should print a message telling the user to relaunch `grow`.
+/// Returns `Ok(true)` when the user requested a pending update. The caller
+/// must finish the download and restart Grow after terminal restoration.
 const LLM_CONFIG_TEMPLATE: &str = r#"[models]
 default = "example/default"
 
@@ -811,7 +811,7 @@ pub async fn run(
     }
     match result {
         Ok(run_result) => {
-            if run_result.quit_for_update {
+            if run_result.restart_for_update {
                 return Ok(true);
             }
             if let Some(relaunch) = run_result.relaunch.as_ref() {

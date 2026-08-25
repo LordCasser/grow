@@ -61,6 +61,36 @@ pub(crate) fn execute(
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
             }
         }
+        Effect::LaunchTrajectory {
+            agent_id,
+            session_id,
+        } => {
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let error = match std::env::current_exe() {
+                    Ok(executable) => {
+                        let mut command = tokio::process::Command::new(executable);
+                        command
+                            .arg("trajectory")
+                            .arg(session_id.0.as_ref())
+                            .current_dir(cwd)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        tty_utils::detach_command(&mut command);
+                        command.spawn().err().map(|error| {
+                            sanitize_user_error(&format!(
+                                "couldn't open Trajectory debugger: {error}"
+                            ))
+                        })
+                    }
+                    Err(error) => Some(sanitize_user_error(&format!(
+                        "couldn't locate the Grow executable: {error}"
+                    ))),
+                };
+                TaskResult::SlashCommandExecuted { agent_id, error }
+            });
+        }
         Effect::CreateSession {
             agent_id,
             cwd: session_cwd,

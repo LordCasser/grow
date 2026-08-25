@@ -19,6 +19,69 @@ use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 impl AgentView {
+    /// Whether the Shell supports `behavior` for this session.
+    ///
+    /// `BehaviorAvailability` is the authoritative control-plane projection.
+    /// Command/tool inspection exists only for the bootstrap window before the
+    /// first structured projection arrives; callers must not derive their own
+    /// capability rules from the slash-command registry.
+    pub(crate) fn behavior_supported(&self, behavior: tools::types::BehaviorId) -> bool {
+        if let Some(availability) = self.session.tracker.behavior_availability() {
+            return availability
+                .choice(behavior)
+                .is_some_and(|choice| choice.supported);
+        }
+
+        match behavior {
+            tools::types::BehaviorId::Workflow => AgentSession::bootstrap_workflow_support(
+                self.session.available_tools.as_ref(),
+                &self.session.available_commands,
+                !self.workflow_runs.is_empty(),
+            ),
+            tools::types::BehaviorId::DeepResearch => self
+                .session
+                .available_commands
+                .iter()
+                .any(|command| command.name == "deep-research"),
+            tools::types::BehaviorId::Goal => self
+                .session
+                .available_commands
+                .iter()
+                .any(|command| command.name == "goal"),
+            tools::types::BehaviorId::Normal
+            | tools::types::BehaviorId::Clarify
+            | tools::types::BehaviorId::Plan => true,
+        }
+    }
+
+    /// Explain why a Behavior transition should be rejected locally.
+    /// Confirmation-required choices remain admissible: the Shell owns the
+    /// confirmation and revalidates every transition against current state.
+    pub(crate) fn behavior_unavailable_reason(
+        &self,
+        behavior: tools::types::BehaviorId,
+    ) -> Option<String> {
+        if let Some(availability) = self.session.tracker.behavior_availability() {
+            let Some(choice) = availability.choice(behavior) else {
+                return Some(format!(
+                    "{} behavior was not advertised by the Shell",
+                    behavior.display_label()
+                ));
+            };
+            if !choice.supported
+                || choice.disposition == tools::types::BehaviorAvailabilityDisposition::Unavailable
+            {
+                return Some(choice.reason.clone().unwrap_or_else(|| {
+                    format!("{} behavior is unavailable", behavior.display_label())
+                }));
+            }
+            return None;
+        }
+
+        (!self.behavior_supported(behavior))
+            .then(|| format!("{} behavior is unavailable", behavior.display_label()))
+    }
+
     /// Bind this view to a root session id, resetting the per-session
     /// reconnect cursor and both dedup highwaters (ACP + Grow) when the id
     /// actually changes — all three are meaningless against another session's
@@ -983,6 +1046,61 @@ impl AgentView {
     /// Show or hide the `/recap` slash command in this agent's registry.
     pub fn set_session_recap_available(&mut self, available: bool) {
         self.prompt.set_recap_visible(available);
+    }
+}
+
+#[cfg(test)]
+mod behavior_capability_tests {
+    use super::*;
+    use crate::acp::meta::NotificationMeta;
+    use agent_client_protocol as acp;
+
+    #[test]
+    fn structured_projection_replaces_bootstrap_command_inference() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.session.available_commands = vec![acp::AvailableCommand::new(
+            "goal".to_owned(),
+            "Manage Goal".to_owned(),
+        )];
+        assert!(agent.behavior_supported(tools::types::BehaviorId::Goal));
+        assert!(!agent.behavior_supported(tools::types::BehaviorId::Workflow));
+
+        let update = acp::SessionUpdate::AvailableCommandsUpdate(
+            acp::AvailableCommandsUpdate::new(vec![]).meta(
+                serde_json::json!({
+                    "grow/behaviorAvailability": {
+                        "current": "normal",
+                        "choices": [
+                            {
+                                "behavior": "goal",
+                                "supported": false,
+                                "disposition": "unavailable",
+                                "reason": "Goal tools are unavailable"
+                            },
+                            {
+                                "behavior": "workflow",
+                                "supported": true,
+                                "disposition": "available"
+                            }
+                        ]
+                    }
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        agent
+            .session
+            .handle_update(update, &NotificationMeta::default(), &mut agent.scrollback);
+
+        assert!(!agent.behavior_supported(tools::types::BehaviorId::Goal));
+        assert_eq!(
+            agent
+                .behavior_unavailable_reason(tools::types::BehaviorId::Goal)
+                .as_deref(),
+            Some("Goal tools are unavailable")
+        );
+        assert!(agent.behavior_supported(tools::types::BehaviorId::Workflow));
     }
 }
 /// Inputs for [`honest_turn_elapsed`]: the turn span and pause total measured

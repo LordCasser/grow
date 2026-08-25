@@ -28,7 +28,7 @@ pub enum Action {
     /// Quit the application.
     Quit,
     /// Restart the binary to pick up a downloaded update.
-    QuitForUpdate,
+    RestartForUpdate,
     /// Re-exec into the other screen mode (`true` = minimal).
     RelaunchInScreenMode {
         minimal: bool,
@@ -866,6 +866,8 @@ pub enum Action {
     OpenMemoryModal,
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,
+    /// Open the active session's durable Timeline in the Trajectory web debugger.
+    OpenTrajectory,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.
     SuspendForEditor {
         path: std::path::PathBuf,
@@ -1258,6 +1260,11 @@ pub enum Effect {
         model_id: Option<acp::ModelId>,
         /// Client-chosen session ID (`--session-id` / `meta.sessionId`).
         preferred_session_id: Option<String>,
+    },
+    /// Launch an independent Trajectory server for the exact active session.
+    LaunchTrajectory {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
     },
     /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },

@@ -230,7 +230,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                     }
 
-                    let mut plan_mode_modal_refresh_needed = false;
+                    let mut settings_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
                     let mut behavior_drain = None;
 
@@ -365,8 +365,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             agent.flush_pending_follow_ups(notif_pid);
                         }
                         // Detect plan mode transitions from tool call completions.
-                        plan_mode_modal_refresh_needed |=
+                        settings_modal_refresh_needed |=
                             detect_plan_mode_change(&notif.request.update, agent);
+                        settings_modal_refresh_needed |= matches!(
+                            &notif.request.update,
+                            acp::SessionUpdate::AvailableCommandsUpdate(_)
+                        );
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
                         agent.session.handle_update(
@@ -504,7 +508,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         app.pending_effects.extend(drain.effects);
                     }
 
-                    if plan_mode_modal_refresh_needed {
+                    if settings_modal_refresh_needed {
                         crate::app::dispatch::refresh_open_settings_modals(app);
                     }
                     if workflows_modal_refresh {

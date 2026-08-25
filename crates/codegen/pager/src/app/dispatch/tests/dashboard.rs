@@ -1993,10 +1993,21 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     let session_dir = home
         .path()
         .join("sessions")
-        .join(urlencoding::encode("/tmp").as_ref())
+        .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
-    std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+    let info = shell::session::info::Info {
+        id: acp::SessionId::new(child_sid.clone()),
+        cwd: "/tmp".into(),
+    };
+    let mut summary =
+        shell::session::persistence::Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+    summary.session_kind = Some("subagent".into());
+    std::fs::write(
+        session_dir.join("summary.json"),
+        serde_json::to_vec(&summary).unwrap(),
+    )
+    .unwrap();
     let tool_line = format!(
         r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
     );

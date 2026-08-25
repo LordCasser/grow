@@ -170,9 +170,6 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             error: String,
         },
         AutoCompactCancelled {},
-        AutoContinueCompleted {
-            total_tokens: u64,
-        },
         ImageCompressed {
             message: String,
         },
@@ -243,9 +240,6 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             ExtEvent::Lifecycle(Lifecycle::CompactFailed { error })
         }
         GrowUpdate::AutoCompactCancelled {} => ExtEvent::Lifecycle(Lifecycle::CompactCancelled),
-        GrowUpdate::AutoContinueCompleted { total_tokens } => {
-            ExtEvent::Lifecycle(Lifecycle::AutoContinue { total_tokens })
-        }
         GrowUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
         }

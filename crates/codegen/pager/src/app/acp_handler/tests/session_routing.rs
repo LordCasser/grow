@@ -222,6 +222,56 @@
     }
 
     #[test]
+    fn behavior_projection_refreshes_an_open_settings_snapshot() {
+        use crate::app::actions::Action;
+        use crate::views::modal::ActiveModal;
+
+        let mut app = make_app_with_agent("sess-A");
+        let _ = crate::app::dispatch::dispatch(Action::OpenSettings, &mut app);
+        let before = match &app.agents[&AgentId(0)].active_modal {
+            Some(ActiveModal::Settings { state }) => state.pager_snapshot.goal_available,
+            _ => panic!("expected settings modal"),
+        };
+        assert!(!before);
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new("sess-A"),
+            acp::SessionUpdate::AvailableCommandsUpdate(
+                acp::AvailableCommandsUpdate::new(vec![]).meta(
+                    serde_json::json!({
+                        "grow/behaviorAvailability": {
+                            "current": "normal",
+                            "choices": [{
+                                "behavior": "goal",
+                                "supported": true,
+                                "disposition": "available"
+                            }]
+                        }
+                    })
+                    .as_object()
+                    .cloned(),
+                ),
+            ),
+        );
+        let _ = handle(
+            AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        match &app.agents[&AgentId(0)].active_modal {
+            Some(ActiveModal::Settings { state }) => assert!(
+                state.pager_snapshot.goal_available,
+                "the open modal must consume the new structured projection"
+            ),
+            _ => panic!("expected settings modal"),
+        }
+    }
+
+    #[test]
     fn bg_task_stdout_for_inactive_agent_lands_in_its_bg_tasks() {
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));

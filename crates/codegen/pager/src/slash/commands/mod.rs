@@ -59,6 +59,7 @@ pub mod theme;
 pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
+pub mod trajectory;
 pub mod transcript;
 pub mod tutorial;
 pub mod usage;
@@ -133,6 +134,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(timestamps::TimestampsCommand),
         Arc::new(timeline::TimelineCommand),
+        Arc::new(trajectory::TrajectoryCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(rewind::RewindCommand),
@@ -218,6 +220,19 @@ mod tests {
     fn loop_command_declares_scheduler_tool_requirement() {
         let loop_cmd = loop_cmd::LoopCommand;
         assert_eq!(loop_cmd.required_tools(), &["scheduler_create"]);
+    }
+    #[test]
+    fn trajectory_command_opens_the_active_session_debugger() {
+        let models = sample_models();
+        let mut ctx = make_ctx(&models);
+        let result = trajectory::TrajectoryCommand.run(&mut ctx, "");
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenTrajectory)
+        ));
+
+        let result = trajectory::TrajectoryCommand.run(&mut ctx, "another-session");
+        assert!(matches!(result, CommandResult::Error(_)));
     }
     #[test]
     fn loop_command_hidden_when_scheduler_tools_absent() {
@@ -321,6 +336,7 @@ mod tests {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "trajectory",
             "tour",
             "transcript",
             "tutorial",

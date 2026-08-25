@@ -1043,12 +1043,7 @@ pub(super) fn write_child_updates_jsonl(
     child_sid: &str,
     content: &str,
 ) {
-    let sessions_dir = grow_home
-        .join("sessions")
-        .join(urlencoding::encode("/tmp").as_ref())
-        .join(child_sid);
-    std::fs::create_dir_all(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join("summary.json"), "{}").unwrap();
+    let sessions_dir = write_session_summary(grow_home, "/tmp", child_sid, Some("subagent"));
     let committed = if content.ends_with('\n') {
         content.to_owned()
     } else {
@@ -1087,11 +1082,7 @@ pub(super) fn write_subagent_spawn_timeline(
     subagent_id: &str,
     prompt: &str,
 ) {
-    let session_dir = grow_home
-        .join("sessions")
-        .join(urlencoding::encode("/tmp").as_ref())
-        .join(parent_sid);
-    std::fs::create_dir_all(&session_dir).unwrap();
+    let session_dir = write_session_summary(grow_home, "/tmp", parent_sid, None);
     let mut timeline = chat_state::Timeline::default();
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
@@ -1123,6 +1114,35 @@ pub(super) fn write_subagent_spawn_timeline(
         bytes.push(b'\n');
     }
     std::fs::write(session_dir.join("timeline.jsonl"), bytes).unwrap();
+}
+
+fn write_session_summary(
+    grow_home: &std::path::Path,
+    cwd: &str,
+    session_id: &str,
+    session_kind: Option<&str>,
+) -> std::path::PathBuf {
+    let session_dir = grow_home
+        .join("sessions")
+        .join(shell::util::grow_home::encode_cwd_dirname(cwd))
+        .join(session_id);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let info = shell::session::info::Info {
+        id: acp::SessionId::new(session_id),
+        cwd: cwd.to_owned(),
+    };
+    let mut summary = shell::session::persistence::Summary::new(
+        &info,
+        acp::ModelId::new("test-model"),
+    )
+    .unwrap();
+    summary.session_kind = session_kind.map(str::to_owned);
+    std::fs::write(
+        session_dir.join("summary.json"),
+        serde_json::to_vec(&summary).unwrap(),
+    )
+    .unwrap();
+    session_dir
 }
 pub(super) fn child_scrollback_matching_prompt_count(
     agent: &AgentView,

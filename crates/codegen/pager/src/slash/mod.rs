@@ -360,10 +360,6 @@ impl SlashController {
         self.workflows_available = available;
     }
 
-    pub fn workflows_available(&self) -> bool {
-        self.workflows_available
-    }
-
     pub fn set_agent_catalog(&mut self, agents: Vec<command::AgentArg>) {
         self.agent_catalog = agents;
     }

@@ -8,49 +8,6 @@ use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
-fn unavailable_reason(
-    agent: &crate::app::agent_view::AgentView,
-    mode: tools::types::BehaviorId,
-) -> Option<String> {
-    if let Some(availability) = agent.session.tracker.behavior_availability() {
-        let Some(choice) = availability.choice(mode) else {
-            return Some(format!(
-                "{} behavior was not advertised by the Shell",
-                mode.display_label()
-            ));
-        };
-        if choice.disposition == tools::types::BehaviorAvailabilityDisposition::Unavailable {
-            return Some(
-                choice
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| format!("{} behavior is unavailable", mode.display_label())),
-            );
-        }
-        return None;
-    }
-    // Bootstrap fallback: both signals still originate in the Shell's
-    // AvailableCommandsUpdate. Once the structured projection arrives, it is
-    // the only local source used for Behavior admission hints.
-    let unavailable = match mode {
-        tools::types::BehaviorId::Workflow => !agent.prompt.slash_controller.workflows_available(),
-        tools::types::BehaviorId::DeepResearch => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("deep-research")
-            .is_none(),
-        tools::types::BehaviorId::Goal => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("goal")
-            .is_none(),
-        _ => false,
-    };
-    unavailable.then(|| format!("{} behavior is unavailable", mode.display_label()))
-}
-
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
 ///
@@ -82,7 +39,7 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         return vec![];
     };
 
-    if let Some(reason) = unavailable_reason(agent, mode) {
+    if let Some(reason) = agent.behavior_unavailable_reason(mode) {
         agent.show_toast(&reason);
         return vec![];
     }
@@ -153,7 +110,7 @@ pub(super) fn dispatch_set_behavior_mode(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    if let Some(reason) = unavailable_reason(agent, mode) {
+    if let Some(reason) = agent.behavior_unavailable_reason(mode) {
         agent.show_toast(&reason);
         return vec![];
     }

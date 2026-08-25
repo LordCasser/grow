@@ -727,21 +727,19 @@ mod cli_catchall_drop_tests {
 /// Spawns a session actor. The permission-event receiver, when this session
 /// owns the shared manager, is consumed internally by the primary session's
 /// passive audit bridge.
-#[allow(clippy::too_many_arguments)]
-#[derive(Debug)]
 pub(crate) enum TimelineBootstrap {
-    Fresh,
+    Fresh { session_rules: Option<String> },
     Existing(Vec<chat_state::TimelineEvent>),
 }
 
 impl TimelineBootstrap {
     pub(crate) fn is_fresh(&self) -> bool {
-        matches!(self, Self::Fresh)
+        matches!(self, Self::Fresh { .. })
     }
 
     fn label(&self) -> &'static str {
         match self {
-            Self::Fresh => "fresh",
+            Self::Fresh { .. } => "fresh",
             Self::Existing(_) => "existing",
         }
     }
@@ -841,7 +839,7 @@ pub(crate) async fn spawn_session_actor(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-) -> Result<(SessionHandle, String, tokio::sync::oneshot::Receiver<()>), agent::AgentBuildError> {
+) -> Result<(SessionHandle, tokio::sync::oneshot::Receiver<()>), agent::AgentBuildError> {
     if max_turns == Some(0) {
         return Err(agent::AgentBuildError::InvalidConfig(
             "max_turns must be greater than 0".to_string(),
@@ -880,18 +878,21 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
-    let (resumed_timeline, validated_timeline, mut conversation) = match timeline_bootstrap {
-        TimelineBootstrap::Fresh => (None, None, Vec::new()),
-        TimelineBootstrap::Existing(events) => {
-            let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
-                agent::AgentBuildError::InvalidConfig(format!(
-                    "invalid persisted conversation timeline: {error}"
-                ))
-            })?;
-            let surface = timeline.surface().to_vec();
-            (Some(timeline.clone()), Some(timeline), surface)
-        }
-    };
+    let (resumed_timeline, validated_timeline, mut conversation, fresh_session_rules) =
+        match timeline_bootstrap {
+            TimelineBootstrap::Fresh { session_rules } => {
+                (None, None, Vec::new(), Some(session_rules))
+            }
+            TimelineBootstrap::Existing(events) => {
+                let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
+                    agent::AgentBuildError::InvalidConfig(format!(
+                        "invalid persisted conversation timeline: {error}"
+                    ))
+                })?;
+                let surface = timeline.surface().to_vec();
+                (Some(timeline.clone()), Some(timeline), surface, None)
+            }
+        };
     if validated_timeline.is_some()
         && !matches!(conversation.first(), Some(ConversationItem::System(_)))
     {
@@ -1581,14 +1582,15 @@ pub(crate) async fn spawn_session_actor(
         res.get::<tools::implementations::grow_build::scheduler::types::SchedulerHandle>()
             .cloned()
     };
-    if let Err(e) = workspace_ops.bind_local_session(
-        &session_info.id.0,
-        tool_context.cwd.as_path().to_path_buf(),
-        tool_context.hunk_tracker_handle.clone(),
-        agent.tool_bridge().toolset(),
-        None,
-    )
-    .await
+    if let Err(e) = workspace_ops
+        .bind_local_session(
+            &session_info.id.0,
+            tool_context.cwd.as_path().to_path_buf(),
+            tool_context.hunk_tracker_handle.clone(),
+            agent.tool_bridge().toolset(),
+            None,
+        )
+        .await
     {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
@@ -2415,6 +2417,19 @@ pub(crate) async fn spawn_session_actor(
             "failed to recover pending rewind transaction: {error}"
         )))
     })?;
+    let initialized_fresh_context = if let Some(session_rules) = fresh_session_rules {
+        session
+            .initialize_fresh_context_durably(system_prompt.clone(), session_rules)
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "initial model context was not durably recorded: {error}"
+                )))
+            })?;
+        true
+    } else {
+        false
+    };
     if persisted_control_revision == 0 {
         let (agent_name, role_prompt) = {
             let agent = session.agent.borrow();
@@ -2440,6 +2455,14 @@ pub(crate) async fn spawn_session_actor(
                 "active Control context was not restored: {error}"
             )))
         })?;
+    if initialized_fresh_context {
+        let prefix_session = session.clone();
+        session
+            .deferred_prefix
+            .arm(tokio::task::spawn_local(async move {
+                prefix_session.build_prefix_background().await
+            }));
+    }
     crate::session::context_recall::serve_context_recall(&session, context_recall_receiver);
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
@@ -2821,7 +2844,6 @@ pub(crate) async fn spawn_session_actor(
             tools_notification_handle: Some(tools_notification_handle.clone()),
             scheduler_handle: scheduler_handle_for_handle,
         },
-        system_prompt,
         session_done_rx,
     ))
 }
@@ -2846,15 +2868,14 @@ impl SessionThread {
 /// Return type from the session thread's initialization, sent via oneshot.
 struct SessionInitResult {
     handle: SessionHandle,
-    system_prompt: String,
 }
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
 ///
 /// The entire `spawn_session_actor` body runs on the session thread — the `!Send`
 /// `SessionActor` is constructed there and never crosses a thread boundary. The
 /// `Send` construction parameters are moved into the thread, and the `Send` results
-/// (`SessionHandle`, `system_prompt`) are sent back to the caller via a oneshot
-/// channel. The owning primary session consumes permission events through its
+/// (`SessionHandle`) are sent back to the caller via a oneshot channel. The
+/// owning primary session consumes permission events through its
 /// local audit bridge.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_session_on_thread(
@@ -2942,7 +2963,7 @@ pub(crate) async fn spawn_session_on_thread(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-) -> Result<(SessionHandle, String, SessionThread), acp::Error> {
+) -> Result<(SessionHandle, SessionThread), acp::Error> {
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, agent::AgentBuildError>>();
     let sid = session_info.id.0.to_string();
@@ -2965,7 +2986,7 @@ pub(crate) async fn spawn_session_on_thread(
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let (handle, system_prompt, session_done_rx) = match spawn_session_actor(
+                let (handle, session_done_rx) = match spawn_session_actor(
                     session_info,
                     session_dir,
                     gateway,
@@ -3057,10 +3078,7 @@ pub(crate) async fn spawn_session_on_thread(
                         return;
                     }
                 };
-                let _ = init_tx.send(Ok(SessionInitResult {
-                    handle,
-                    system_prompt,
-                }));
+                let _ = init_tx.send(Ok(SessionInitResult { handle }));
                 let _ = session_done_rx.await;
             });
         });
@@ -3085,11 +3103,7 @@ pub(crate) async fn spawn_session_on_thread(
         .map_err(|e| {
             acp::Error::internal_error().data(format!("session initialization failed: {e}"))
         })?;
-    Ok((
-        init.handle,
-        init.system_prompt,
-        SessionThread { join_handle },
-    ))
+    Ok((init.handle, SessionThread { join_handle }))
 }
 /// Production [`crate::session::mcp_restart::RestartActions`] impl.
 ///

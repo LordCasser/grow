@@ -78,9 +78,6 @@ enum AcpLine {
         error: String,
     },
     AutoCompactCancelled,
-    AutoContinueCompleted {
-        total_tokens: u64,
-    },
     ImageCompressed {
         message: String,
     },
@@ -195,7 +192,6 @@ fn acp_lifecycle_line(l: Lifecycle) -> AcpLine {
         Lifecycle::CompactCompleted { .. } => AcpLine::AutoCompactCompleted,
         Lifecycle::CompactFailed { error } => AcpLine::AutoCompactFailed { error },
         Lifecycle::CompactCancelled => AcpLine::AutoCompactCancelled,
-        Lifecycle::AutoContinue { total_tokens } => AcpLine::AutoContinueCompleted { total_tokens },
         Lifecycle::ImageCompressed { message } => AcpLine::ImageCompressed { message },
     }
 }
