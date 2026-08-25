@@ -413,8 +413,14 @@ fn open_fork_question_refuses_when_existing_question_is_open() {
         id: None,
     };
     let stashed = app.agents.get_mut(&AgentId(0)).unwrap().prompt.stash();
-    app.agents.get_mut(&AgentId(0)).unwrap().question_view =
-        Some(QuestionViewState::new("existing".into(), vec![q], stashed));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .replace_question_view(Some(QuestionViewState::new(
+            "existing".into(),
+            vec![q],
+            stashed,
+        )));
 
     let effects = dispatch(Action::Fork(fork_args(None, None)), &mut app);
     assert!(effects.is_empty());
@@ -1187,13 +1193,13 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         multi_select: Some(false),
         id: None,
     };
-    app.agents.get_mut(&id).unwrap().question_view = Some(
+    app.agents.get_mut(&id).unwrap().replace_question_view(Some(
         QuestionViewState::new("local-fork".into(), vec![q], stashed).with_local_kind(
             LocalQuestionKind::Fork {
                 directive: Some("dropped".into()),
             },
         ),
-    );
+    ));
     let scrollback_len_before = app.agents[&id].scrollback.len();
 
     // Drive the real production handler.

@@ -64,14 +64,14 @@
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             let stashed = agent.prompt.stash();
-            agent.question_view = Some(QuestionViewState::with_response_tx(
+            agent.replace_question_view(Some(QuestionViewState::with_response_tx(
                 Some("sess-1".into()),
                 "call-q".into(),
                 vec![],
                 stashed,
                 None,
                 tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
-            ));
+            )));
         }
 
         let changed =
@@ -299,7 +299,11 @@
         );
         let parent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            crate::app::activity::AgentActivityProjection::from_agent(parent).needs_input,
+            crate::app::activity::AgentActivityProjection::from_sessions(
+                &parent.session,
+                parent.subagent_views.values().map(|child| &child.session),
+            )
+            .needs_input,
             "a non-finished child with a pending question must set needs_input"
         );
         assert!(

@@ -64,7 +64,7 @@ pub(crate) fn handle_ask_user_question(
     };
 
     // If a question is already active, cancel it before replacing.
-    if let Some(mut old_qv) = agent.question_view.take() {
+    if let Some(mut old_qv) = agent.take_question_view() {
         agent.session.turn_paused_duration += old_qv.opened_at.elapsed();
         tracing::warn!(
             old_tool_call_id = %old_qv.tool_call_id,
@@ -103,14 +103,15 @@ pub(crate) fn handle_ask_user_question(
     }
 
     // Stash the current prompt and create the question view.
-    agent.question_view = Some(QuestionViewState::with_response_tx(
+    let stashed_prompt = agent.prompt.stash();
+    agent.replace_question_view(Some(QuestionViewState::with_response_tx(
         Some(ext_req.session_id.clone()),
         ext_req.tool_call_id,
         ext_req.questions,
-        agent.prompt.stash(),
+        stashed_prompt,
         Some(ext.response_tx),
         ext_req.mode,
-    ));
+    )));
 
     // Clear prompt for question interaction.
     agent.prompt.set_text("");

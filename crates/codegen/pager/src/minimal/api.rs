@@ -1021,7 +1021,7 @@ pub fn set_extensions_modal(v: &mut AgentView, val: Option<ExtensionsModalState>
 /// Test-only setter for `AgentView::question_view`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
-    v.question_view = val;
+    v.replace_question_view(val);
 }
 
 /// Test-only setter for the confirmed user-facing Behavior.

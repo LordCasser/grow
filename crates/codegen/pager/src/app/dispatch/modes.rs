@@ -242,7 +242,7 @@ fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config
         let root_session_id = agent.session.session_id.clone();
         let mut retained = std::collections::VecDeque::new();
         let mut approved_any = false;
-        while let Some(perm) = agent.permission_queue.pop_front() {
+        for perm in agent.take_permission_queue() {
             if root_session_id
                 .as_ref()
                 .is_some_and(|session_id| perm.request.request.session_id == *session_id)
@@ -264,7 +264,7 @@ fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config
                 retained.push_back(perm);
             }
         }
-        agent.permission_queue = retained;
+        agent.replace_permission_queue(retained);
         let front_removed = approved_any
             && original_front.is_some_and(|(session_id, tool_call_id)| {
                 agent.permission_queue.front().is_none_or(|permission| {

@@ -445,7 +445,7 @@ fn push_synthetic_permission(
         options_area_height: 0,
         options_scroll_offset: 0,
     };
-    agent.permission_queue.push_back(state);
+    agent.push_permission(state);
     rx
 }
 

@@ -2347,7 +2347,7 @@ mod focus_gained_restore_tests {
         let mut agent = scrollback_agent();
         agent.vim_mode = true;
         agent.session.state = AgentState::TurnRunning;
-        agent.question_view = Some(make_question_view_state_in_input_mode());
+        agent.replace_question_view(Some(make_question_view_state_in_input_mode()));
         assert!(agent.should_restore_prompt_on_focus_gained());
     }
     #[test]

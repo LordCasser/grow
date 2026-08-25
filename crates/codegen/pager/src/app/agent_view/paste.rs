@@ -1119,7 +1119,7 @@ pub(super) mod paste_key_tests {
     #[test]
     fn event_paste_question_view_input_mode_non_image_file_url_decoded_into_prompt() {
         assert_event_paste_arm_decodes_non_image("question_view", |agent| {
-            agent.question_view = Some(make_question_view_state_in_input_mode());
+            agent.replace_question_view(Some(make_question_view_state_in_input_mode()));
         });
     }
     /// Build a `PermissionViewState` already in FollowupInput focus —

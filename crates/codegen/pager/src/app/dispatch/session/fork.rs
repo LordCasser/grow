@@ -154,7 +154,7 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
         stashed,
     )
     .with_local_kind(LocalQuestionKind::Fork { directive });
-    agent.question_view = Some(state);
+    agent.replace_question_view(Some(state));
     agent.prompt.set_text("");
     vec![]
 }
@@ -291,7 +291,7 @@ pub(in crate::app::dispatch) fn open_project_question(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    agent.question_view = Some(state);
+    agent.replace_question_view(Some(state));
     agent.prompt.set_text("");
     crate::unified_log::info("project_picker.opened", None, None);
     vec![]

@@ -915,7 +915,7 @@ mod link_click_tests {
             "Allow once".to_string(),
             agent_client_protocol::PermissionOptionKind::AllowOnce,
         )];
-        agent.permission_queue.push_back(permission);
+        agent.push_permission(permission);
         let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);
         let rows: Vec<String> = (0..30)
             .map(|y| {
@@ -1930,8 +1930,9 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_question_pending() {
         let (mut agent, reg) = make_search_agent();
-        agent.question_view =
-            Some(super::paste_key_tests::make_question_view_state_in_input_mode());
+        agent.replace_question_view(Some(
+            super::paste_key_tests::make_question_view_state_in_input_mode(),
+        ));
         route_slash(&mut agent, &reg);
         assert!(agent.scrollback_search.is_none());
     }

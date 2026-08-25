@@ -4672,7 +4672,10 @@ fn dashboard_question_answer_sends_and_clears() {
         Some(tx),
         AskUserQuestionMode::Default,
     );
-    app.agents.get_mut(&AgentId(0)).unwrap().question_view = Some(qv);
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .replace_question_view(Some(qv));
     open_dashboard(&mut app);
     let effects = dispatch_dashboard_question_answer(
         &mut app,
@@ -4725,7 +4728,10 @@ fn dashboard_question_answer_walks_multiple_questions() {
         Some(tx),
         AskUserQuestionMode::Default,
     );
-    app.agents.get_mut(&AgentId(0)).unwrap().question_view = Some(qv);
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .replace_question_view(Some(qv));
     open_dashboard(&mut app);
     let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
     let fields =
@@ -4798,14 +4804,14 @@ fn dashboard_question_answer_refuses_subagent_rows() {
         make_test_agent_session(&app, AgentId(1), child_sid),
         ScrollbackState::new(),
     );
-    child.question_view = Some(QuestionViewState::with_response_tx(
+    child.replace_question_view(Some(QuestionViewState::with_response_tx(
         Some(child_sid.to_string()),
         "tc-child".to_string(),
         vec![question],
         StashedPrompt::default(),
         Some(tx),
         AskUserQuestionMode::Default,
-    ));
+    )));
     app.agents
         .get_mut(&parent)
         .unwrap()

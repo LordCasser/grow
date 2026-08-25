@@ -189,7 +189,7 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
             .is_some_and(|preview| preview.contains("Doctor Fix")),
         "the modal must retain the exact fix preview"
     );
-    app.agents.get_mut(&id).unwrap().question_view = None;
+    app.agents.get_mut(&id).unwrap().take_question_view();
 
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {

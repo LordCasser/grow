@@ -649,6 +649,13 @@ pub struct AgentSession {
     pub(crate) next_queue_id: u64,
     /// Canonical permission mode for this session.
     pub(crate) permission_mode: shell::util::config::PermissionMode,
+    /// Number of permission requests waiting for the session's response.
+    /// The permission view owns the presentation queue; this scalar is the
+    /// lifecycle fact consumed by activity projection.
+    pub(crate) pending_permission_count: usize,
+    /// Whether this session currently has a question awaiting user input.
+    /// The question view remains presentation state on `AgentView`.
+    pub(crate) question_pending: bool,
     /// Prompt history for the current session, fetched from ACP
     /// (`grow/prompt_history` scoped via `session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
@@ -951,6 +958,8 @@ impl AgentSession {
             pending_prompts: VecDeque::new(),
             next_queue_id: 0,
             permission_mode,
+            pending_permission_count: 0,
+            question_pending: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1059,6 +1068,11 @@ impl AgentSession {
     /// field access. Mutually exclusive with `is_always_approve()` (always-approve wins).
     pub fn is_auto(&self) -> bool {
         self.permission_mode.is_auto()
+    }
+
+    /// Whether this session currently requires user input.
+    pub(crate) fn needs_input(&self) -> bool {
+        self.pending_permission_count > 0 || self.question_pending
     }
     /// Test-only setter for the canonical session mode.
     #[cfg(any(test, feature = "test-support"))]

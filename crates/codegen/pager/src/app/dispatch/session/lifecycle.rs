@@ -194,7 +194,7 @@ pub(in crate::app::dispatch) fn open_new_session_question(app: &mut AppView) -> 
     )
     .with_local_kind(LocalQuestionKind::NewSession)
     .with_no_freeform();
-    agent.question_view = Some(state);
+    agent.replace_question_view(Some(state));
     agent.prompt.set_text("");
     vec![]
 }
@@ -342,7 +342,7 @@ pub(in crate::app::dispatch) fn open_delete_current_session_question(
         multi_select: Some(false),
     };
     let stashed = agent.prompt.stash();
-    agent.question_view = Some(
+    agent.replace_question_view(Some(
         QuestionViewState::new(
             format!("delete-session-{}", uuid::Uuid::new_v4()),
             vec![question],
@@ -350,7 +350,7 @@ pub(in crate::app::dispatch) fn open_delete_current_session_question(
         )
         .with_local_kind(LocalQuestionKind::DeleteCurrentSession)
         .with_no_freeform(),
-    );
+    ));
     agent.prompt.set_text("");
     vec![]
 }
@@ -683,7 +683,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
             started_at: Instant::now(),
         });
         agent.session.prompt_history_loading = true;
-        if let Some(qv) = agent.question_view.take() {
+        if let Some(qv) = agent.take_question_view() {
             agent.prompt.restore(qv.stashed_prompt);
         }
     }

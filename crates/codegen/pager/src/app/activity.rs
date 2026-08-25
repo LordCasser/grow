@@ -4,7 +4,7 @@
 //! It owns no state, is never serialized, and must never feed commands back
 //! into the session or Goal schedulers.
 
-use super::agent_view::AgentView;
+use super::agent::AgentSession;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentActivityProjection {
@@ -23,63 +23,45 @@ pub struct AgentActivityProjection {
 }
 
 impl AgentActivityProjection {
-    pub fn from_agent(agent: &AgentView) -> Self {
-        let root_session_id = agent.session.session_id.as_ref().map(|id| id.0.as_ref());
-        let root_permission_pending = root_session_id.is_some_and(|root| {
-            agent
-                .permission_queue
-                .iter()
-                .any(|permission| permission.request.request.session_id.0.as_ref() == root)
-        });
-        let root_question_pending = agent.question_view.as_ref().is_some_and(|question| {
-            question.source_session_id.is_none()
-                || question.source_session_id.as_deref() == root_session_id
-        });
+    pub fn from_sessions<'a>(
+        session: &AgentSession,
+        children: impl IntoIterator<Item = &'a AgentSession>,
+    ) -> Self {
         // A question parked on a non-finished child view (its own
         // `question_view`, not hoisted onto the parent) still demands user
         // input, so the dashboard NeedsInput rows light up while the child
         // waits in the background.
-        let child_question_pending = agent.subagent_views.iter().any(|(child_sid, child)| {
-            child.question_view.as_ref().is_some_and(|question| {
-                question.source_session_id.as_deref() == Some(child_sid.as_str())
-            }) && agent
-                .session
-                .subagent_sessions
-                .get(child_sid)
-                .is_some_and(|info| !info.finished)
+        let child_question_pending = children.into_iter().any(|child| {
+            child.question_pending
+                && child
+                    .session_id
+                    .as_ref()
+                    .and_then(|id| session.subagent_sessions.get(id.0.as_ref()))
+                    .is_some_and(|info| !info.finished)
         });
         Self {
-            foreground_busy: !agent.session.state.is_idle()
-                || agent.session.turn_activity().is_some(),
-            queued_prompts: !agent.session.pending_prompts.is_empty(),
-            needs_input: root_permission_pending || root_question_pending || child_question_pending,
-            replaying: agent.session.loading_replay,
-            background_tasks: agent
-                .session
+            foreground_busy: !session.state.is_idle() || session.turn_activity().is_some(),
+            queued_prompts: !session.pending_prompts.is_empty(),
+            needs_input: session.needs_input() || child_question_pending,
+            replaying: session.loading_replay,
+            background_tasks: session
                 .bg_tasks
                 .values()
                 .any(|task| task.status == crate::app::agent::BgTaskStatus::Running),
-            scheduled_work: !agent.session.scheduled_tasks.is_empty(),
-            subagents: agent
-                .session
+            scheduled_work: !session.scheduled_tasks.is_empty(),
+            subagents: session
                 .subagent_sessions
                 .values()
                 .any(|info| !info.finished && info.workflow_run_id.is_none()),
             // Active private runs (deep research) share the `workflows` flag:
             // this projection only drives motion/working chrome, never any
             // management surface (those iterate `workflow_runs` directly).
-            workflows: agent
-                .session
-                .workflow_runs
-                .iter()
-                .any(|run| run.is_active())
-                || agent
-                    .session
+            workflows: session.workflow_runs.iter().any(|run| run.is_active())
+                || session
                     .private_workflow_runs
                     .iter()
                     .any(|run| run.is_active()),
-            goal_active: agent
-                .session
+            goal_active: session
                 .goal_state
                 .as_ref()
                 .is_some_and(|goal| goal.status == crate::app::agent::GoalDisplayStatus::Active),
@@ -112,13 +94,20 @@ impl AgentActivityProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::agent_view::test_agent_view;
+    use crate::app::agent_view::{AgentView, test_agent_view};
+
+    fn projection(agent: &AgentView) -> AgentActivityProjection {
+        AgentActivityProjection::from_sessions(
+            &agent.session,
+            agent.subagent_views.values().map(|child| &child.session),
+        )
+    }
 
     #[test]
     fn active_goal_projects_work_while_foreground_is_idle() {
         let mut agent = test_agent_view(Some("goal-session"), "/tmp".into());
         agent.session.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        let projection = AgentActivityProjection::from_agent(&agent);
+        let projection = projection(&agent);
         assert!(projection.goal_active);
         assert!(projection.working());
     }
@@ -127,10 +116,21 @@ mod tests {
     fn queued_prompt_is_work_without_motion() {
         let mut agent = test_agent_view(Some("queued-session"), "/tmp".into());
         agent.session.enqueue_prompt("later".into());
-        let projection = AgentActivityProjection::from_agent(&agent);
+        let projection = projection(&agent);
         assert!(projection.queued_prompts);
         assert!(projection.working());
         assert!(!projection.animates());
+    }
+
+    #[test]
+    fn root_pending_input_comes_from_session_facts() {
+        let mut agent = test_agent_view(Some("pending-input-session"), "/tmp".into());
+        agent.session.pending_permission_count = 1;
+        assert!(projection(&agent).needs_input);
+
+        agent.session.pending_permission_count = 0;
+        agent.session.question_pending = true;
+        assert!(projection(&agent).needs_input);
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
                 pause_message: None,
                 result_summary: None,
             });
-        let projection = AgentActivityProjection::from_agent(&agent);
+        let projection = projection(&agent);
         assert!(
             projection.workflows,
             "an active private run must set the workflows projection flag"
@@ -212,7 +212,7 @@ mod tests {
                 pause_message: None,
                 result_summary: None,
             });
-        let projection = AgentActivityProjection::from_agent(&agent);
+        let projection = projection(&agent);
         assert!(!projection.workflows);
         assert!(!projection.working());
         assert!(!projection.animates());
@@ -267,14 +267,14 @@ mod tests {
         let mut child = test_agent_view(Some("child-1"), "/tmp".into());
         if park_question {
             let stashed = child.prompt.stash();
-            child.question_view = Some(crate::views::question_view::QuestionViewState::with_response_tx(
+            child.replace_question_view(Some(crate::views::question_view::QuestionViewState::with_response_tx(
                 Some("child-1".into()),
                 "call-q".into(),
                 vec![],
                 stashed,
                 None,
                 tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
-            ));
+            )));
         }
         parent
             .subagent_views
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn child_pending_question_projects_needs_input() {
         let parent = parent_with_child_question(false, true);
-        let projection = AgentActivityProjection::from_agent(&parent);
+        let projection = projection(&parent);
         assert!(
             projection.needs_input,
             "a non-finished child with a parked question must set needs_input"
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn finished_child_question_does_not_project_needs_input() {
         let parent = parent_with_child_question(true, true);
-        let projection = AgentActivityProjection::from_agent(&parent);
+        let projection = projection(&parent);
         assert!(
             !projection.needs_input,
             "a finished child must not contribute needs_input"
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn child_without_question_does_not_project_needs_input() {
         let parent = parent_with_child_question(false, false);
-        let projection = AgentActivityProjection::from_agent(&parent);
+        let projection = projection(&parent);
         assert!(
             !projection.needs_input,
             "a non-finished child with no question must not set needs_input"

@@ -2272,7 +2272,7 @@ pub(super) fn dispatch_dashboard_permission_select(
         return vec![];
     };
     let was_front = permission_pos == 0;
-    let Some(perm) = agent.permission_queue.remove(permission_pos) else {
+    let Some(perm) = agent.remove_permission(permission_pos) else {
         return vec![];
     };
 
@@ -2365,7 +2365,7 @@ pub(super) fn dispatch_dashboard_permission_followup(
         return vec![];
     };
     let was_front = permission_pos == 0;
-    let Some(perm) = agent.permission_queue.remove(permission_pos) else {
+    let Some(perm) = agent.remove_permission(permission_pos) else {
         return vec![];
     };
     // Resolve with the RejectOnce option + feedback; cancel if the

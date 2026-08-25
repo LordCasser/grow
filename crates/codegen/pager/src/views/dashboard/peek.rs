@@ -1601,14 +1601,15 @@ mod tests {
 
         let mut parent = crate::app::agent_view::test_agent_view(Some("root-sess"), "/tmp".into());
         let mut child = crate::app::agent_view::test_agent_view(Some("child-sess"), "/tmp".into());
-        child.question_view = Some(QuestionViewState::with_response_tx(
+        let child_stashed_prompt = child.prompt.stash();
+        child.replace_question_view(Some(QuestionViewState::with_response_tx(
             Some("child-sess".into()),
             "tc-child".into(),
             vec![single_question("Child choice?")],
-            child.prompt.stash(),
+            child_stashed_prompt,
             None,
             AskUserQuestionMode::Default,
-        ));
+        )));
         parent
             .subagent_views
             .insert("child-sess".into(), Box::new(child));
@@ -1644,15 +1645,18 @@ mod tests {
 
         // Regression guard: the root's own question (local, no source
         // session) still surfaces on the TopLevel peek for the SAME agent.
-        agents.get_mut(&AgentId(0)).unwrap().question_view =
-            Some(QuestionViewState::with_response_tx(
+        let root_stashed_prompt = agents.get_mut(&AgentId(0)).unwrap().prompt.stash();
+        agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .replace_question_view(Some(QuestionViewState::with_response_tx(
                 None,
                 "tc-root".into(),
                 vec![single_question("Root choice?")],
-                agents.get_mut(&AgentId(0)).unwrap().prompt.stash(),
+                root_stashed_prompt,
                 None,
                 AskUserQuestionMode::Default,
-            ));
+            )));
         let top_fields = compute_peek_fields(&DashboardRowId::TopLevel(AgentId(0)), &agents, now)
             .expect("root row must be peekable");
         assert_eq!(top_fields.question_id.as_deref(), Some("tc-root"));

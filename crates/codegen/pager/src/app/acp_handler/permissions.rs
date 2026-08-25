@@ -178,7 +178,7 @@ fn enqueue_permission(
     let active_idx = crate::appearance::permission_cursor::resolve_initial_cursor(&options);
 
     // 8. Queue the request FIFO (do NOT replace/cancel existing requests).
-    agent.permission_queue.push_back(PermissionViewState {
+    agent.push_permission(PermissionViewState {
         request: perm,
         id: perm_id,
         focus: PermissionFocus::Options,

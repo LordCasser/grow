@@ -21,6 +21,98 @@ use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 impl AgentView {
+    /// Add a pending permission while keeping the session's runtime fact in
+    /// sync with the presentation queue.
+    pub(crate) fn push_permission(
+        &mut self,
+        permission: crate::views::permission_view::PermissionViewState,
+    ) {
+        self.permission_queue.push_back(permission);
+        self.session.pending_permission_count =
+            self.session.pending_permission_count.saturating_add(1);
+        debug_assert_eq!(
+            self.session.pending_permission_count,
+            self.permission_queue.len()
+        );
+    }
+
+    /// Remove the front permission and update the session fact.
+    pub(crate) fn pop_permission_front(
+        &mut self,
+    ) -> Option<crate::views::permission_view::PermissionViewState> {
+        let permission = self.permission_queue.pop_front();
+        if permission.is_some() {
+            self.session.pending_permission_count =
+                self.session.pending_permission_count.saturating_sub(1);
+        }
+        debug_assert_eq!(
+            self.session.pending_permission_count,
+            self.permission_queue.len()
+        );
+        permission
+    }
+
+    /// Remove a permission by queue position and update the session fact.
+    pub(crate) fn remove_permission(
+        &mut self,
+        index: usize,
+    ) -> Option<crate::views::permission_view::PermissionViewState> {
+        let permission = self.permission_queue.remove(index);
+        if permission.is_some() {
+            self.session.pending_permission_count =
+                self.session.pending_permission_count.saturating_sub(1);
+        }
+        debug_assert_eq!(
+            self.session.pending_permission_count,
+            self.permission_queue.len()
+        );
+        permission
+    }
+
+    /// Take the whole presentation queue, clearing its runtime fact.
+    pub(crate) fn take_permission_queue(
+        &mut self,
+    ) -> std::collections::VecDeque<crate::views::permission_view::PermissionViewState> {
+        let queue = std::mem::take(&mut self.permission_queue);
+        self.session.pending_permission_count = 0;
+        debug_assert_eq!(
+            self.session.pending_permission_count,
+            self.permission_queue.len()
+        );
+        queue
+    }
+
+    /// Replace the whole presentation queue and derive the runtime fact from
+    /// the replacement, including filter/retain paths.
+    pub(crate) fn replace_permission_queue(
+        &mut self,
+        queue: std::collections::VecDeque<crate::views::permission_view::PermissionViewState>,
+    ) {
+        self.permission_queue = queue;
+        self.session.pending_permission_count = self.permission_queue.len();
+        debug_assert_eq!(
+            self.session.pending_permission_count,
+            self.permission_queue.len()
+        );
+    }
+
+    /// Replace the question presentation and synchronize the session fact.
+    pub(crate) fn replace_question_view(
+        &mut self,
+        question: Option<crate::views::question_view::QuestionViewState>,
+    ) -> Option<crate::views::question_view::QuestionViewState> {
+        let old = std::mem::replace(&mut self.question_view, question);
+        self.session.question_pending = self.question_view.is_some();
+        old
+    }
+
+    /// Take the question presentation and clear the session fact.
+    pub(crate) fn take_question_view(
+        &mut self,
+    ) -> Option<crate::views::question_view::QuestionViewState> {
+        self.replace_question_view(None)
+    }
+
     /// Handle key input when the permission view is active.
     ///
     /// Two modes (mirrors question view pattern):
@@ -1132,7 +1224,7 @@ impl AgentView {
         if is_doctor_fix {
             return self.submit_question_answers(true);
         }
-        if let Some(qv) = self.question_view.take() {
+        if let Some(qv) = self.take_question_view() {
             self.session.turn_paused_duration += qv.opened_at.elapsed();
             self.prompt.restore(qv.stashed_prompt);
         }
@@ -1182,7 +1274,7 @@ impl AgentView {
                 && p.request.request.tool_call.tool_call_id.0.as_ref() == tool_call_id
         }) {
             let was_front = pos == 0;
-            let _ = self.permission_queue.remove(pos);
+            let _ = self.remove_permission(pos);
             if was_front {
                 super::dispatch::resolve_permission_queue_transition(self);
             }
@@ -1201,7 +1293,7 @@ impl AgentView {
     fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use tools::implementations::grow_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();
-        let Some(mut qv) = self.question_view.take() else {
+        let Some(mut qv) = self.take_question_view() else {
             return InputOutcome::Changed;
         };
         self.session.turn_paused_duration += qv.opened_at.elapsed();
@@ -1297,11 +1389,11 @@ impl AgentView {
         freeform: String,
     ) -> PeekAnswerOutcome {
         use crate::views::question_view::QuestionSelection;
-        let Some(mut qv) = self.question_view.take() else {
+        let Some(mut qv) = self.take_question_view() else {
             return PeekAnswerOutcome::NoOp;
         };
         if qv.local_kind.is_some() {
-            self.question_view = Some(qv);
+            self.replace_question_view(Some(qv));
             return PeekAnswerOutcome::NoOp;
         }
         let active = qv.active_tab;
@@ -1314,7 +1406,7 @@ impl AgentView {
             }
             None => {
                 if freeform.trim().is_empty() {
-                    self.question_view = Some(qv);
+                    self.replace_question_view(Some(qv));
                     return PeekAnswerOutcome::NoOp;
                 }
                 if let Some(slot) = qv.per_question_freeform.get_mut(active) {
@@ -1330,7 +1422,7 @@ impl AgentView {
         }
         if active + 1 < qv.questions.len() {
             qv.next_question();
-            self.question_view = Some(qv);
+            self.replace_question_view(Some(qv));
             return PeekAnswerOutcome::Advanced;
         }
         self.session.turn_paused_duration += qv.opened_at.elapsed();
@@ -1614,7 +1706,7 @@ mod permission_mouse_tests {
             option("opt-allow-always", acp::PermissionOptionKind::AllowAlways),
             option("opt-reject-once", acp::PermissionOptionKind::RejectOnce),
         ];
-        agent.permission_queue.push_back(perm);
+        agent.push_permission(perm);
         agent.pane_areas.prompt = Rect::new(0, 20, 80, 10);
         assert_eq!(agent.permission_item_at(10, OPTIONS_START_Y), Some(0));
     }
@@ -1755,7 +1847,7 @@ mod permission_scope_key_tests {
             },
         );
         perm.bash_selection_count = 2;
-        agent.permission_queue.push_back(perm);
+        agent.push_permission(perm);
     }
     /// ←/→ on the "Never allow" (RejectAlways) row must adjust the scope in
     /// place — never yank the cursor onto the AllowAlways row, where Enter
@@ -1852,11 +1944,11 @@ mod question_no_freeform_tests {
             vec![fixed_choice_question()],
             StashedPrompt::default(),
         );
-        agent.question_view = Some(if no_freeform {
+        agent.replace_question_view(Some(if no_freeform {
             state.with_no_freeform()
         } else {
             state
-        });
+        }));
     }
     /// Draw one 80x30 frame so `pane_areas` and `question_scroll_region`
     /// hold the real rendered layout the mouse handler hit-tests against.

@@ -1476,8 +1476,14 @@ fn handle_ask_user_question_does_not_push_system_block_when_displaced_acp_modal(
         multi_select: Some(false),
         id: None,
     };
-    app.agents.get_mut(&id).unwrap().question_view =
-        Some(QuestionViewState::new("first-acp".into(), vec![q], stashed));
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .replace_question_view(Some(QuestionViewState::new(
+            "first-acp".into(),
+            vec![q],
+            stashed,
+        )));
     let scrollback_len_before = app.agents[&id].scrollback.len();
     let (args, _rx) = make_ask_user_question_args("second-acp");
     let handled = crate::app::acp_handler::handle_ask_user_question(args, &mut app);
@@ -1931,11 +1937,11 @@ fn classify_top_level_question_view_some_is_needs_input() {
     use crate::views::question_view::QuestionViewState;
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    agent.question_view = Some(QuestionViewState::new(
+    agent.replace_question_view(Some(QuestionViewState::new(
         "tc-1".to_string(),
         Vec::new(),
         crate::views::prompt_widget::StashedPrompt::default(),
-    ));
+    )));
     assert_eq!(classify_top_level(agent), RowState::NeedsInput);
 }
 /// ANSI escapes in `display_name` are stripped at row

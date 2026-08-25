@@ -410,7 +410,10 @@ fn append_roster_rows(
 /// monitors / loops can wake the agent for a fresh turn — so the agent
 /// isn't meaningfully idle while any are running.
 pub fn classify_top_level(agent: &AgentView) -> RowState {
-    let activity = crate::app::activity::AgentActivityProjection::from_agent(agent);
+    let activity = crate::app::activity::AgentActivityProjection::from_sessions(
+        &agent.session,
+        agent.subagent_views.values().map(|child| &child.session),
+    );
     if activity.needs_input {
         return RowState::NeedsInput;
     }

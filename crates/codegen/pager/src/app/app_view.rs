@@ -3730,7 +3730,11 @@ impl AppView {
     /// Shared by every visible status surface through the read-only activity
     /// projection. Lifecycle recovery is deliberately not part of this test.
     fn agent_surface_animating(agent: &AgentView) -> bool {
-        crate::app::activity::AgentActivityProjection::from_agent(agent).animates()
+        crate::app::activity::AgentActivityProjection::from_sessions(
+            &agent.session,
+            agent.subagent_views.values().map(|child| &child.session),
+        )
+        .animates()
     }
     /// Effective redraw interval for currently visible time-varying pixels.
     /// The configured interval is a sampling cap; semantic motion cadence is
@@ -3893,8 +3897,11 @@ impl AppView {
                 // An Active Goal may be between continuation turns while the
                 // session is Idle. Keep the tab-title spinner and OSC 9;4
                 // progress aligned with the status-bar Goal chip.
-                let is_busy =
-                    crate::app::activity::AgentActivityProjection::from_agent(agent).animates();
+                let is_busy = crate::app::activity::AgentActivityProjection::from_sessions(
+                    &agent.session,
+                    agent.subagent_views.values().map(|child| &child.session),
+                )
+                .animates();
                 (name, model, activity, has_perms, elapsed, is_busy)
             } else {
                 (None, None, None, false, None, false)
@@ -7051,11 +7058,11 @@ pub(crate) mod tests {
             }),
             ("question_view", |a| {
                 let stashed = a.prompt.stash();
-                a.question_view = Some(crate::views::question_view::QuestionViewState::new(
+                a.replace_question_view(Some(crate::views::question_view::QuestionViewState::new(
                     "call-q".into(),
                     vec![],
                     stashed,
-                ));
+                )));
             }),
         ];
         for (name, install) in installers {
@@ -8760,11 +8767,11 @@ pub(crate) mod tests {
         let a = app.agents.get_mut(&id).unwrap();
         a.in_dashboard_overlay = true;
         a.active_pane = crate::app::agent_view::AgentPane::Prompt;
-        a.question_view = Some(QuestionViewState::new(
+        a.replace_question_view(Some(QuestionViewState::new(
             "c".into(),
             questions,
             crate::views::prompt_widget::StashedPrompt::default(),
-        ));
+        )));
     }
     /// Graduated back-out: at the plan feedback top state (empty prompt,
     /// no pending comment) a bare Esc returns to the dashboard, leaving

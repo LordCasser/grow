@@ -60,7 +60,7 @@ pub(super) fn dispatch_permission_select(
     let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
-    let Some(perm) = agent.permission_queue.pop_front() else {
+    let Some(perm) = agent.pop_permission_front() else {
         return vec![];
     };
 
@@ -179,7 +179,7 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
     let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
-    let Some(perm) = agent.permission_queue.pop_front() else {
+    let Some(perm) = agent.pop_permission_front() else {
         return vec![];
     };
 
@@ -230,7 +230,7 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
-    let Some(perm) = agent.permission_queue.pop_front() else {
+    let Some(perm) = agent.pop_permission_front() else {
         return vec![];
     };
 
@@ -259,7 +259,7 @@ pub(crate) fn drain_root_permission_queue(agent: &mut AgentView) {
     });
     let mut retained = std::collections::VecDeque::new();
     let mut cancelled_any = false;
-    while let Some(perm) = agent.permission_queue.pop_front() {
+    for perm in agent.take_permission_queue() {
         if perm.request.request.session_id == root_session_id {
             cancelled_any = true;
             respond_permission(
@@ -271,7 +271,7 @@ pub(crate) fn drain_root_permission_queue(agent: &mut AgentView) {
             retained.push_back(perm);
         }
     }
-    agent.permission_queue = retained;
+    agent.replace_permission_queue(retained);
     let front_removed = cancelled_any
         && original_front.is_some_and(|(session_id, tool_call_id)| {
             agent.permission_queue.front().is_none_or(|permission| {

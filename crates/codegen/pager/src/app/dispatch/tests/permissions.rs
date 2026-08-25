@@ -79,7 +79,7 @@ fn set_always_approve_mode_on_drains_permission_queue_with_allow_once() {
         ],
     );
     let options = request.options.clone();
-    agent.permission_queue.push_back(PermissionViewState {
+    agent.push_permission(PermissionViewState {
         request: acp_transport::AcpArgs {
             request,
             response_tx,

@@ -161,11 +161,11 @@ pub(super) fn open_doctor_fix_question(
         id: None,
     };
     let stashed = agent.prompt.stash();
-    agent.question_view = Some(
+    agent.replace_question_view(Some(
         QuestionViewState::new("doctor-fix".to_owned(), vec![question], stashed)
             .with_local_kind(LocalQuestionKind::DoctorFix { target, plan })
             .with_no_freeform(),
-    );
+    ));
     agent.prompt.set_text("");
 }
 

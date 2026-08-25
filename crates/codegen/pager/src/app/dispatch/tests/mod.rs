@@ -584,7 +584,7 @@ fn enqueue_permission_with_enable_always_approve(
         ],
     );
     let options = request.options.clone();
-    agent.permission_queue.push_back(PermissionViewState {
+    agent.push_permission(PermissionViewState {
         request: acp_transport::AcpArgs {
             request,
             response_tx,
@@ -740,7 +740,7 @@ fn push_synthetic_permission(
         options_area_height: 0,
         options_scroll_offset: 0,
     };
-    agent.permission_queue.push_back(state);
+    agent.push_permission(state);
     rx
 }
 const MOUSE_OFF_STICKY: &str = crate::app::MOUSE_OFF_HINT;

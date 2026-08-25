@@ -2036,7 +2036,7 @@ impl AgentView {
                 // Child pending questions light the parent turn-status ◆ only
                 // for a NON-FINISHED subagent whose own ACP question is parked
                 // on its child view. This must stay in sync with
-                // `activity::AgentActivityProjection::from_agent`'s
+                // `activity::AgentActivityProjection::from_sessions`'s
                 // `child_question_pending` (same source-session match +
                 // non-finished guards): a finished child's residual question
                 // view (InteractionResolved lost in a reconnect race) or a
@@ -4394,14 +4394,15 @@ mod behavior_status_tests {
             parent.session.state = crate::app::agent::AgentState::TurnRunning;
             if let Some(source) = child_question_source {
                 let mut child = make_agent();
-                child.question_view = Some(QuestionViewState::with_response_tx(
+                let stashed_prompt = child.prompt.stash();
+                child.replace_question_view(Some(QuestionViewState::with_response_tx(
                     source.map(str::to_string),
                     "call-q".into(),
                     vec![],
-                    child.prompt.stash(),
+                    stashed_prompt,
                     None,
                     AskUserQuestionMode::Default,
-                ));
+                )));
                 parent
                     .subagent_views
                     .insert("child-1".into(), Box::new(child));
