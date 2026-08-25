@@ -321,21 +321,11 @@ fn handle_session_notification_inner(
                 agent.session.replayed_terminal_prompts.insert(prompt_id);
                 false
             } else {
-                let cancel_trigger = session_notif
-                    .meta
-                    .as_ref()
-                    .and_then(|v| v.get("cancelTrigger"))
-                    .and_then(|v| v.as_str());
-                terminal_outcome = Some(
-                    super::super::turn_completion::finalize_turn_from_durable_terminal(
-                        agent,
-                        root_session_id,
-                        &prompt_id,
-                        Some(&stop_reason),
-                        agent_result.as_deref(),
-                        cancel_trigger,
-                    ),
-                );
+                terminal_outcome = Some(agent.finalize_turn_from_durable_terminal(
+                    &prompt_id,
+                    Some(&stop_reason),
+                    agent_result.as_deref(),
+                ));
                 false
             }
         }
@@ -1002,9 +992,7 @@ fn handle_session_notification_inner(
         }
     }
     if let Some(outcome) = terminal_outcome {
-        return super::super::turn_completion::apply_terminal_outcome(
-            outcome, app, parent_id, is_active,
-        );
+        return app.apply_terminal_outcome(outcome, parent_id, is_active);
     }
     changed && is_active
 }

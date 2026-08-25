@@ -1121,7 +1121,7 @@ pub(super) fn handle_prompt_response(
             && (agent.session.current_prompt_id.is_none()
                 || agent.session.current_prompt_id.as_deref() == Some(response_pid))
         {
-            crate::app::turn_completion::merge_finalized_pr_meta(agent, &result);
+            agent.merge_finalized_pr_meta(&result);
             return vec![];
         }
         {
@@ -1197,8 +1197,7 @@ pub(super) fn handle_prompt_response(
     // full teardown, records the winner, and consumes
     // promptId metadata attributes the response to its exact foreground owner.
     let was_bash_turn = agent.bash_turn;
-    let outcome = crate::app::turn_completion::finalize_prompt_terminal(
-        agent,
+    let outcome = agent.finalize_prompt_terminal(
         response_pid.as_deref(),
         crate::app::turn_completion::TerminalMeta {
             pr_ok: result.is_ok(),
@@ -1230,12 +1229,7 @@ pub(super) fn handle_prompt_response(
         .agents
         .get(&agent_id)
         .is_some_and(|agent| agent.session.pending_prompts.is_empty());
-    crate::app::turn_completion::apply_terminal_notifications(
-        app,
-        agent_id,
-        notification,
-        queue_empty,
-    );
+    app.apply_terminal_notifications(agent_id, notification, queue_empty);
 
     // Cancelled turns resume queue processing one item at a time
     // through the same drain path as normal completions.

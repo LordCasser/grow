@@ -40,8 +40,7 @@ fn running_driver(prompt_id: &str) -> AgentView {
 #[test]
 fn durable_terminal_immediately_finalizes_driver() {
     let mut agent = running_driver("p1");
-    let outcome =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
     assert!(agent.session.state.is_idle());
     assert!(agent.session.current_prompt_id.is_none());
@@ -54,8 +53,7 @@ fn durable_terminal_immediately_finalizes_driver() {
 #[test]
 fn stale_durable_terminal_cannot_finish_new_driver_turn() {
     let mut agent = running_driver("new");
-    let outcome =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "old", Some("end_turn"), None, None);
+    let outcome = agent.finalize_turn_from_durable_terminal("old", Some("end_turn"), None);
     assert!(matches!(outcome.apply, TerminalApply::Ignored));
     assert!(agent.session.state.is_turn_running());
     assert_eq!(agent.session.current_prompt_id.as_deref(), Some("new"));
@@ -65,8 +63,7 @@ fn stale_durable_terminal_cannot_finish_new_driver_turn() {
 #[test]
 fn viewer_finalize_idles_and_pushes_completed_marker() {
     let mut agent = running_viewer("p1");
-    let outcome =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
     assert!(agent.session.state.is_idle());
     assert!(agent.session.current_prompt_id.is_none());
@@ -121,8 +118,7 @@ fn marker_push_consumes_matching_stop_hook_stash() {
         groups: one_stop_group(),
     });
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
@@ -148,8 +144,7 @@ fn marker_push_flushes_stale_stash_standalone() {
         groups: one_stop_group(),
     });
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
@@ -176,8 +171,7 @@ fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
         groups: one_stop_group(),
     });
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
@@ -203,7 +197,7 @@ fn no_marker_flushes_stash_as_standalone_block() {
         groups: one_stop_group(),
     });
 
-    push_turn_terminal_marker(&mut agent, None, Some("p1"));
+    agent.push_turn_terminal_marker(None, Some("p1"));
 
     assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
     assert!(agent.pending_stop_hooks.is_none());
@@ -219,8 +213,7 @@ fn viewer_finalize_consumes_stop_hook_stash() {
         groups: one_stop_group(),
     });
 
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
 
     assert_eq!(last_marker_groups(&agent.scrollback), Some(1));
     assert!(agent.pending_stop_hooks.is_none());
@@ -229,13 +222,11 @@ fn viewer_finalize_consumes_stop_hook_stash() {
 #[test]
 fn viewer_finalize_duplicate_terminal_is_noop() {
     let mut agent = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     let len_after_first = agent.scrollback.len();
 
     // A duplicate/stale terminal for the now-finished turn does nothing.
-    let outcome =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert!(matches!(outcome.apply, TerminalApply::Ignored));
     assert!(agent.session.state.is_idle());
     assert_eq!(
@@ -249,8 +240,7 @@ fn viewer_finalize_duplicate_terminal_is_noop() {
 fn viewer_finalize_stop_reason_to_marker_mapping() {
     // cancelled → Turn cancelled.
     let mut agent = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("cancelled"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("cancelled"), None);
     assert!(matches!(
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCancelled { .. })
@@ -258,14 +248,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
 
     // error (+agentResult) → Turn failed carrying the error text.
     let mut agent = running_viewer("p1");
-    let _ = finalize_turn_from_durable_terminal(
-        &mut agent,
-        "s1",
-        "p1",
-        Some("error"),
-        Some("boom"),
-        None,
-    );
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("error"), Some("boom"));
     match last_session_event(&agent.scrollback) {
         Some(SessionEvent::TurnFailed { error, .. }) => assert_eq!(error, "boom"),
         other => panic!("expected TurnFailed, got {other:?}"),
@@ -273,8 +256,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
 
     // rate_limit → finished, but no marker (not actionable from a viewer).
     let mut agent = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("rate_limit"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("rate_limit"), None);
     assert!(agent.session.state.is_idle());
     assert!(
         last_session_event(&agent.scrollback).is_none(),
@@ -283,8 +265,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
 
     // unknown/other reason → Turn completed (the catch-all).
     let mut agent = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("max_tokens"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("max_tokens"), None);
     assert!(matches!(
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCompleted { .. })
@@ -336,8 +317,7 @@ fn real_end_marker_stays_plain_with_running_work() {
     let mut agent = running_driver("p1");
     insert_bg_task(&mut agent, "bg-1", false);
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
@@ -358,8 +338,7 @@ fn real_end_marker_stays_plain_with_running_work() {
 fn workless_marker_renders_legacy_text() {
     let mut agent = running_driver("p1");
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
@@ -380,8 +359,7 @@ fn turn_end_after_park_pushes_single_marker() {
     assert!(agent.renders_parked());
     assert_eq!(count_turn_markers(&agent), 0, "the park writes no marker");
 
-    push_turn_terminal_marker(
-        &mut agent,
+    agent.push_turn_terminal_marker(
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(5)),
         }),
@@ -491,8 +469,7 @@ fn viewer_finalize_runs_full_teardown_once() {
         "suggestion must be installed before the finalize"
     );
 
-    let outcome =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
 
     assert!(agent.permission_queue.is_empty(), "permissions drained");
@@ -526,8 +503,7 @@ fn viewer_finalize_runs_full_teardown_once() {
     assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
 
     // The duplicate/stale terminal must not repeat any of the teardown.
-    let duplicate =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let duplicate = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert!(matches!(duplicate.apply, TerminalApply::Ignored));
     assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
     assert!(agent.permission_queue.is_empty());
@@ -542,8 +518,7 @@ fn viewer_finalize_runs_full_teardown_once() {
 #[test]
 fn late_prompt_response_merges_usage_and_structured_output_only() {
     let mut agent = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     assert_eq!(agent.session.finalized_prompt.as_deref(), Some("p1"));
 
     let mut meta = serde_json::Map::new();
@@ -552,7 +527,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     let pr = acp::PromptResponse::new(acp::StopReason::EndTurn)
         .usage(acp::Usage::new(42, 10, 32))
         .meta(meta);
-    merge_finalized_pr_meta(&mut agent, &Ok(pr));
+    agent.merge_finalized_pr_meta(&Ok(pr));
 
     let merged = agent
         .session
@@ -571,7 +546,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     assert!(merged.error.is_none());
 
     // A second late response fills only the missing fields (no clobber).
-    merge_finalized_pr_meta(&mut agent, &Err("late boom".to_string()));
+    agent.merge_finalized_pr_meta(&Err("late boom".to_string()));
     let merged = agent.session.finalized_pr_meta.as_ref().unwrap();
     assert_eq!(merged.error.as_deref(), Some("late boom"));
     assert_eq!(
@@ -586,18 +561,16 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
 
     // The structured-output-error form maps to Err.
     let mut agent2 = running_viewer("p1");
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent2, "s1", "p1", Some("end_turn"), None, None);
+    let _ = agent2.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);
     let mut meta = serde_json::Map::new();
     meta.insert("promptId".into(), serde_json::json!("p1"));
     meta.insert(
         "structuredOutputError".into(),
         serde_json::json!("schema mismatch"),
     );
-    merge_finalized_pr_meta(
-        &mut agent2,
-        &Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta)),
-    );
+    agent2.merge_finalized_pr_meta(&Ok(
+        acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta)
+    ));
     assert!(
         matches!(
             agent2.session.finalized_pr_meta.as_ref().unwrap().structured_output.as_ref(),

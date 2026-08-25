@@ -468,23 +468,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         agent.start_turn_boundary(Some(&prompt_id));
                     }
                     agent.session.current_prompt_id = Some(prompt_id.clone());
-                    let session_id = agent
-                        .session
-                        .session_id
-                        .as_ref()
-                        .map(|id| id.0.to_string())
-                        .unwrap_or_default();
-                    let outcome = crate::app::turn_completion::finalize_turn_from_durable_terminal(
-                        agent,
-                        &session_id,
+                    let outcome = agent.finalize_turn_from_durable_terminal(
                         &prompt_id,
                         Some(&stop_reason),
                         agent_result.as_deref(),
-                        None,
                     );
-                    crate::app::turn_completion::apply_terminal_outcome(
-                        outcome, app, agent_id, is_active,
-                    );
+                    app.apply_terminal_outcome(outcome, agent_id, is_active);
                     vec![]
                 }
                 Ok(PromptStatusWire::Unknown) => {
