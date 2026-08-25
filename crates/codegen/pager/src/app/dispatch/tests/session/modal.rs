@@ -17,7 +17,7 @@ fn open_extensions_modal_no_session_sets_flag_no_fetches() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 0);
-    assert!(app.agents[&id].pending_extensions_fetch);
+    assert!(app.agents[&id].session.pending_extensions_fetch());
     assert!(app.agents[&id].extensions_modal.is_some());
 }
 
@@ -34,7 +34,7 @@ fn open_extensions_modal_with_session_emits_fetches_no_flag() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 5);
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 
 #[test]
@@ -42,7 +42,11 @@ fn open_extensions_modal_with_session_resets_stale_flag() {
     use crate::views::extensions_modal::ExtensionsTab;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().pending_extensions_fetch = true;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .set_pending_extensions_fetch();
     let effects = dispatch(
         Action::OpenExtensionsModal {
             tab: ExtensionsTab::Hooks,
@@ -51,7 +55,7 @@ fn open_extensions_modal_with_session_resets_stale_flag() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 5);
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 
 #[test]
@@ -61,7 +65,7 @@ fn session_created_with_flag_but_modal_closed_clears_flag_no_fetches() {
     {
         let a = app.agents.get_mut(&id).unwrap();
         a.session.session_id = None;
-        a.pending_extensions_fetch = true;
+        a.session.set_pending_extensions_fetch();
         a.extensions_modal = None;
     }
     let effects = dispatch(
@@ -73,7 +77,7 @@ fn session_created_with_flag_but_modal_closed_clears_flag_no_fetches() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 0);
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 
 // ── /new dispatcher tests ─────────────────────────────────────────────
@@ -243,7 +247,7 @@ fn extensions_modal_in_non_project_dir_creates_session() {
             .any(|e| matches!(e, Effect::CreateSession { .. })),
         "session-less modal open must create the deferred session"
     );
-    assert!(app.agents[&id].pending_extensions_fetch);
+    assert!(app.agents[&id].session.pending_extensions_fetch());
 }
 
 fn count_marketplace_fetches(effects: &[Effect]) -> usize {

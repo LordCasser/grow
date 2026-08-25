@@ -2,7 +2,7 @@
 use super::lifecycle::dispatch_new_session_inner_with_id;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession};
-use crate::app::agent_view::{AgentView, McpInitProgress};
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::{SwitchCause, switch_to_agent};
 use crate::app::dispatch::modes::inherit_permission_mode;
@@ -338,11 +338,7 @@ pub(in crate::app::dispatch) fn dispatch_project_selected(
         }
     }
     if let Some(agent) = app.agents.get_mut(&id) {
-        agent.mcp_init_progress = Some(McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: Instant::now(),
-        });
+        agent.session.update_mcp_init_progress(0, 0);
         agent.session.prompt_history_loading = true;
     }
     let preferred_session_id = app.deferred_startup.preferred_session_id.take();
@@ -538,7 +534,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Fork session failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.pending_extensions_fetch = false;
+        agent.session.clear_pending_extensions_fetch();
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished();

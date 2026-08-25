@@ -174,55 +174,6 @@ pub type AgentPane = ActivePane;
 ///
 /// Owns both business state (session, entries) and UI state (scroll,
 /// selection, pane focus). See module docs for future split plans.
-/// MCP server initialization progress, received from the shell.
-#[derive(Debug, Clone)]
-pub struct McpInitProgress {
-    pub total: u32,
-    pub connected: u32,
-    pub started_at: Instant,
-}
-impl McpInitProgress {
-    /// Max age for a `total == 0` seed before it auto-expires.
-    pub const SEED_EXPIRE: std::time::Duration = std::time::Duration::from_secs(30);
-    /// Whether the progress indicator should be visible in the UI.
-    ///
-    /// - `total > 0` (real servers): always visible until
-    ///   `grow/mcp_initialized` clears the progress.
-    /// - `total == 0` (seed / 0-server): visible for at most
-    ///   [`SEED_EXPIRE`] seconds, then auto-expires as
-    ///   defense-in-depth against the shell failing to send
-    ///   `mcp_initialized`.
-    pub fn is_visible(&self) -> bool {
-        self.total > 0 || self.started_at.elapsed() < Self::SEED_EXPIRE
-    }
-}
-#[cfg(test)]
-mod mcp_init_progress_tests {
-    use super::McpInitProgress;
-    #[test]
-    fn is_visible_requires_servers_or_fresh_seed() {
-        let real = McpInitProgress {
-            total: 3,
-            connected: 1,
-            started_at: std::time::Instant::now(),
-        };
-        assert!(real.is_visible(), "real progress must be visible");
-        let fresh = McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: std::time::Instant::now(),
-        };
-        assert!(fresh.is_visible(), "fresh seed must be visible");
-        let expired = McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: std::time::Instant::now()
-                - McpInitProgress::SEED_EXPIRE
-                - std::time::Duration::from_secs(1),
-        };
-        assert!(!expired.is_visible(), "expired seed must not be visible");
-    }
-}
 /// A clickable/hoverable screen region.
 ///
 /// Tracks an optional screen rect (set during render) and whether the
@@ -1033,7 +984,6 @@ pub struct AgentView {
     /// Y-range of the scrollable options area (set during render).
     /// Scroll events outside this range are ignored.
     pub(crate) question_scroll_region: Option<(u16, u16)>,
-    pub(crate) pending_extensions_fetch: bool,
     /// Whether this view was last rendered inside the dashboard's session
     /// overlay. Updated every frame by `draw`; read when building the
     /// shortcuts cheatsheet so the overlay-scoped shortcuts
@@ -1042,7 +992,6 @@ pub struct AgentView {
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `grow/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
-    pub(crate) mcp_init_progress: Option<McpInitProgress>,
     /// Last synced ACP command generation. When this differs from
     /// `session.available_commands_generation`, `sync_acp_commands()`
     /// is called on the prompt. Starts at 0 so bootstrap (generation 1)

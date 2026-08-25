@@ -181,7 +181,8 @@ impl WorktreeMode {
 use super::PagerTerminal;
 use super::actions::Action;
 use super::agent::AgentId;
-use super::agent_view::{AgentView, AppRenderParams, McpInitProgress};
+use super::agent::McpInitProgress;
+use super::agent_view::{AgentView, AppRenderParams};
 use super::bundle::BundleState;
 /// Which view is currently displayed.
 ///
@@ -3752,8 +3753,8 @@ impl AppView {
                     || agent.tasks.has_live_motion()
                     || agent.session.loading_replay
                     || agent
-                        .mcp_init_progress
-                        .as_ref()
+                        .session
+                        .mcp_init_progress()
                         .is_some_and(McpInitProgress::is_visible)
                     || agent.plugin_cta.phase.is_spinner()
                     || agent.has_visible_inline_media_load()

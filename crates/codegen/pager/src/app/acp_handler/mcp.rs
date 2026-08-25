@@ -14,16 +14,9 @@ pub(super) fn handle_mcp_init_progress(notif: &acp::ExtNotification, app: &mut A
     let Some((is_active, agent)) = mcp_target_agent(app, &payload.session_id) else {
         return false;
     };
-    if let Some(ref mut progress) = agent.mcp_init_progress {
-        progress.total = payload.total;
-        progress.connected = payload.connected;
-    } else {
-        agent.mcp_init_progress = Some(super::super::agent_view::McpInitProgress {
-            total: payload.total,
-            connected: payload.connected,
-            started_at: std::time::Instant::now(),
-        });
-    }
+    agent
+        .session
+        .update_mcp_init_progress(payload.total, payload.connected);
     is_active
 }
 
@@ -59,7 +52,7 @@ pub(super) fn handle_mcp_initialized(notif: &acp::ExtNotification, app: &mut App
 
     app.agents
         .get_mut(&id)
-        .is_some_and(|agent| agent.mcp_init_progress.take().is_some())
+        .is_some_and(|agent| agent.session.clear_mcp_init_progress())
         && is_active
 }
 

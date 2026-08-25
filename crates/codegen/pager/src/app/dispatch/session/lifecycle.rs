@@ -5,7 +5,7 @@ use super::modal::remove_agent_and_cleanup;
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::app::actions::{Action, Effect};
 use crate::app::agent::{AgentCommand, AgentId, AgentSession};
-use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
+use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
@@ -272,11 +272,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     }
     if !app.needs_project_picker() {
         if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.mcp_init_progress = Some(McpInitProgress {
-                total: 0,
-                connected: 0,
-                started_at: Instant::now(),
-            });
+            agent.session.update_mcp_init_progress(0, 0);
             agent.session.prompt_history_loading = true;
         }
         let preferred_session_id = app.deferred_startup.preferred_session_id.take();
@@ -671,17 +667,13 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
     if app
         .agents
         .get(&agent_id)
-        .is_some_and(|a| a.session.session_id.is_some() || a.mcp_init_progress.is_some())
+        .is_some_and(|a| a.session.session_id.is_some() || a.session.mcp_init_progress().is_some())
     {
         return vec![];
     }
     app.mark_project_picker_done();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.mcp_init_progress = Some(McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: Instant::now(),
-        });
+        agent.session.update_mcp_init_progress(0, 0);
         agent.session.prompt_history_loading = true;
         if let Some(qv) = agent.take_question_view() {
             agent.prompt.restore(qv.stashed_prompt);
@@ -779,7 +771,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 mode_id: acp::SessionModeId::new(mode.as_id()),
             });
         }
-        if std::mem::take(&mut agent.pending_extensions_fetch)
+        if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
             effects.extend(extensions_modal_tab_fetches(
@@ -876,7 +868,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 mode_id: acp::SessionModeId::new(mode.as_id()),
             });
         }
-        if std::mem::take(&mut agent.pending_extensions_fetch)
+        if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
             effects.extend(extensions_modal_tab_fetches(
@@ -942,9 +934,9 @@ pub(in crate::app::dispatch) fn handle_session_failed(
             push_session_create_failure_warning(app, &msg);
         }
     } else if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.pending_extensions_fetch = false;
+        agent.session.clear_pending_extensions_fetch();
         agent.session.prompt_history_loading = false;
-        agent.mcp_init_progress = None;
+        agent.session.clear_mcp_init_progress();
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished();
@@ -992,9 +984,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
             });
         }
     } else if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.pending_extensions_fetch = false;
+        agent.session.clear_pending_extensions_fetch();
         agent.session.prompt_history_loading = false;
-        agent.mcp_init_progress = None;
+        agent.session.clear_mcp_init_progress();
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished();

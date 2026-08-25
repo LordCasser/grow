@@ -445,7 +445,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
     {
         let a = app.agents.get_mut(&id).unwrap();
         a.session.session_id = None;
-        a.pending_extensions_fetch = true;
+        a.session.set_pending_extensions_fetch();
         a.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
     }
     let effects = dispatch(
@@ -466,7 +466,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             .iter()
             .any(|e| matches!(e, Effect::FetchMcpsList { cache: true, .. }))
     );
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 #[test]
 fn session_load_failed_clears_flag_no_fetches() {
@@ -475,7 +475,7 @@ fn session_load_failed_clears_flag_no_fetches() {
     let id = AgentId(0);
     {
         let a = app.agents.get_mut(&id).unwrap();
-        a.pending_extensions_fetch = true;
+        a.session.set_pending_extensions_fetch();
         a.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
     }
     let effects = dispatch(
@@ -487,7 +487,7 @@ fn session_load_failed_clears_flag_no_fetches() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 0);
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 #[test]
 fn load_session_seeds_available_commands_from_bootstrap() {

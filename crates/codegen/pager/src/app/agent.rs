@@ -15,6 +15,52 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use tools::implementations::grow_build::workflow::WORKFLOW_TOOL_NAME;
+
+/// MCP server initialization progress, received from the shell.
+#[derive(Debug, Clone)]
+pub struct McpInitProgress {
+    pub total: u32,
+    pub connected: u32,
+    pub started_at: Instant,
+}
+
+impl McpInitProgress {
+    /// Max age for a `total == 0` seed before it auto-expires.
+    pub const SEED_EXPIRE: Duration = Duration::from_secs(30);
+
+    /// Whether the progress indicator should be visible in the UI.
+    pub fn is_visible(&self) -> bool {
+        self.total > 0 || self.started_at.elapsed() < Self::SEED_EXPIRE
+    }
+}
+
+#[cfg(test)]
+mod mcp_init_progress_tests {
+    use super::McpInitProgress;
+    #[test]
+    fn is_visible_requires_servers_or_fresh_seed() {
+        let real = McpInitProgress {
+            total: 3,
+            connected: 1,
+            started_at: std::time::Instant::now(),
+        };
+        assert!(real.is_visible(), "real progress must be visible");
+        let fresh = McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: std::time::Instant::now(),
+        };
+        assert!(fresh.is_visible(), "fresh seed must be visible");
+        let expired = McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: std::time::Instant::now()
+                - McpInitProgress::SEED_EXPIRE
+                - std::time::Duration::from_secs(1),
+        };
+        assert!(!expired.is_visible(), "expired seed must not be visible");
+    }
+}
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub usize);
@@ -656,6 +702,10 @@ pub struct AgentSession {
     /// Whether this session currently has a question awaiting user input.
     /// The question view remains presentation state on `AgentView`.
     pub(crate) question_pending: bool,
+    /// Whether an extensions list fetch is pending for this session.
+    pending_extensions_fetch: bool,
+    /// MCP server initialization progress owned by this ACP session.
+    mcp_init_progress: Option<McpInitProgress>,
     /// IDs of interjections this client sent and already rendered locally.
     /// The shell broadcasts each interjection to every attached pane; the
     /// originating session consumes its own id here to suppress the echoed
@@ -974,6 +1024,8 @@ impl AgentSession {
             permission_mode,
             pending_permission_count: 0,
             question_pending: false,
+            pending_extensions_fetch: false,
+            mcp_init_progress: None,
             self_interjection_ids: HashSet::new(),
             session_agent_name: None,
             agent_switch_pending: None,
@@ -1139,6 +1191,47 @@ impl AgentSession {
     /// Whether this session currently requires user input.
     pub(crate) fn needs_input(&self) -> bool {
         self.pending_permission_count > 0 || self.question_pending
+    }
+
+    pub(crate) fn mcp_init_progress(&self) -> Option<&McpInitProgress> {
+        self.mcp_init_progress.as_ref()
+    }
+
+    pub(crate) fn update_mcp_init_progress(&mut self, total: u32, connected: u32) {
+        match self.mcp_init_progress.as_mut() {
+            Some(progress) => {
+                progress.total = total;
+                progress.connected = connected;
+            }
+            None => {
+                self.mcp_init_progress = Some(McpInitProgress {
+                    total,
+                    connected,
+                    started_at: Instant::now(),
+                });
+            }
+        }
+    }
+
+    pub(crate) fn clear_mcp_init_progress(&mut self) -> bool {
+        self.mcp_init_progress.take().is_some()
+    }
+
+    pub(crate) fn set_pending_extensions_fetch(&mut self) {
+        self.pending_extensions_fetch = true;
+    }
+
+    pub(crate) fn take_pending_extensions_fetch(&mut self) -> bool {
+        std::mem::take(&mut self.pending_extensions_fetch)
+    }
+
+    pub(crate) fn clear_pending_extensions_fetch(&mut self) {
+        self.pending_extensions_fetch = false;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pending_extensions_fetch(&self) -> bool {
+        self.pending_extensions_fetch
     }
     /// Test-only setter for the canonical session mode.
     #[cfg(any(test, feature = "test-support"))]

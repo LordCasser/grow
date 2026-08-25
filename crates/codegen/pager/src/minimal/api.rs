@@ -36,8 +36,9 @@ use crate::acp::tracker::TurnActivity;
 // Only the test-only setters below reference `AgentSession`.
 #[cfg(any(test, feature = "test-support"))]
 use crate::app::agent::AgentSession;
+use crate::app::agent::McpInitProgress;
 use crate::app::agent::{AgentId, AgentState};
-use crate::app::agent_view::{AgentView, McpInitProgress};
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry, TrustState};
 use crate::appearance::AppearanceConfig;
 use crate::appearance::LayoutConfig;
@@ -565,9 +566,9 @@ pub fn plan_phase(v: &AgentView) -> Option<&str> {
     v.session.plan_phase.as_deref()
 }
 
-/// `AgentView::mcp_init_progress`.
+/// Session-owned MCP initialization progress for this view.
 pub fn mcp_init_progress(v: &AgentView) -> Option<&McpInitProgress> {
-    v.mcp_init_progress.as_ref()
+    v.session.mcp_init_progress()
 }
 
 /// `AgentView::plan_approval_view`.

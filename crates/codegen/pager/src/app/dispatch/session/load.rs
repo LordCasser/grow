@@ -601,7 +601,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 prev_model_id: None,
             });
         }
-        if std::mem::take(&mut agent.pending_extensions_fetch)
+        if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
             effects.extend(extensions_modal_tab_fetches(
@@ -633,7 +633,7 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
         }
-        agent.pending_extensions_fetch = false;
+        agent.session.clear_pending_extensions_fetch();
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();
         agent.mark_turn_finished();

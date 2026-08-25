@@ -1116,7 +1116,7 @@ impl AgentView {
         let turn_status_height = if turn_status::should_show(
             &self.session.state,
             drain_blocked,
-            self.mcp_init_progress.as_ref(),
+            self.session.mcp_init_progress(),
             watchers,
             parked,
         ) {
@@ -1322,8 +1322,8 @@ impl AgentView {
             );
         }
         if let Some(mcp_line) = self
-            .mcp_init_progress
-            .as_ref()
+            .session
+            .mcp_init_progress()
             .and_then(|p| crate::views::agent_status::mcp_status_line(p, frame_stamp, &theme))
         {
             status.push("mcp", mcp_line);
@@ -2072,7 +2072,7 @@ impl AgentView {
                         }),
                         has_running_execute,
                         total_tokens: self.session.context_state.as_ref().map(|c| c.used),
-                        mcp_init_progress: self.mcp_init_progress.as_ref(),
+                        mcp_init_progress: self.session.mcp_init_progress(),
                         is_bash_turn: self.bash_turn,
                         is_pending_user_input,
                         watchers,

@@ -464,10 +464,10 @@ pub(super) fn dispatch_open_extensions_modal(
     let Some(session_id) = agent.session.session_id.clone() else {
         // Tabs default to Loading; the fetch fires on SessionCreated. With a
         // picker-deferred session nothing else would create one, so do it now.
-        agent.pending_extensions_fetch = true;
+        agent.session.set_pending_extensions_fetch();
         return skip_picker_and_create_session(app, id);
     };
-    agent.pending_extensions_fetch = false;
+    agent.session.clear_pending_extensions_fetch();
     let Some(modal) = agent.extensions_modal.as_mut() else {
         return vec![];
     };

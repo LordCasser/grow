@@ -455,7 +455,7 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
     {
         let a = app.agents.get_mut(&id).unwrap();
         a.session.session_id = None;
-        a.pending_extensions_fetch = true;
+        a.session.set_pending_extensions_fetch();
         a.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
     }
     let effects = dispatch(
@@ -472,14 +472,14 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
             .iter()
             .any(|e| matches!(e, Effect::FetchMcpsList { cache: true, .. }))
     );
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 #[test]
 fn session_created_without_flag_emits_no_extension_fetches() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.session_id = None;
-    assert!(!app.agents[&id].pending_extensions_fetch);
+    assert!(!app.agents[&id].session.pending_extensions_fetch());
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: id,
@@ -497,12 +497,8 @@ fn session_failed_keeps_agent_clears_loading_and_toasts() {
     {
         let a = app.agents.get_mut(&id).unwrap();
         a.session.session_id = Some(acp::SessionId::new("existing"));
-        a.pending_extensions_fetch = true;
-        a.mcp_init_progress = Some(crate::app::agent_view::McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: std::time::Instant::now(),
-        });
+        a.session.set_pending_extensions_fetch();
+        a.session.update_mcp_init_progress(0, 0);
     }
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionFailed {
@@ -513,8 +509,8 @@ fn session_failed_keeps_agent_clears_loading_and_toasts() {
     );
     assert!(effects.is_empty());
     let agent = &app.agents[&id];
-    assert!(!agent.pending_extensions_fetch);
-    assert!(agent.mcp_init_progress.is_none());
+    assert!(!agent.session.pending_extensions_fetch());
+    assert!(agent.session.mcp_init_progress().is_none());
     assert_eq!(
         agent.toast.as_ref().map(|(m, _)| m.as_str()),
         Some("Session creation failed: No space left on device"),
@@ -528,11 +524,7 @@ fn session_failed_orphan_returns_to_welcome_with_warning() {
         let a = app.agents.get_mut(&id).unwrap();
         a.session.session_id = None;
         a.session.forked_from = None;
-        a.mcp_init_progress = Some(crate::app::agent_view::McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: std::time::Instant::now(),
-        });
+        a.session.update_mcp_init_progress(0, 0);
     }
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionFailed {
@@ -657,7 +649,7 @@ fn new_session_seeds_mcp_init_progress() {
     let mut app = test_app();
     dispatch(Action::NewSession, &mut app);
     let id = AgentId(0);
-    let progress = app.agents[&id].mcp_init_progress.as_ref();
+    let progress = app.agents[&id].session.mcp_init_progress();
     assert!(
         progress.is_some(),
         "new session must seed mcp_init_progress",
