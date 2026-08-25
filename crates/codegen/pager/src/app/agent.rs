@@ -704,6 +704,14 @@ pub struct AgentSession {
     pub(crate) question_pending: bool,
     /// Whether an extensions list fetch is pending for this session.
     pending_extensions_fetch: bool,
+    /// IDs of this client's server-queue rows that are still optimistic
+    /// echoes: their `session/prompt` RPC is in flight and no authoritative
+    /// `grow/queue/changed` broadcast has confirmed them yet.
+    optimistic_queue_ids: HashSet<String>,
+    /// A queue-row send-now intent parked until its optimistic echo is
+    /// confirmed. Sending earlier could overtake the row's `session/prompt`
+    /// RPC and silently no-op in the shell.
+    send_now_awaiting_confirm: Option<String>,
     /// MCP server initialization progress owned by this ACP session.
     mcp_init_progress: Option<McpInitProgress>,
     /// IDs of interjections this client sent and already rendered locally.
@@ -1025,6 +1033,8 @@ impl AgentSession {
             pending_permission_count: 0,
             question_pending: false,
             pending_extensions_fetch: false,
+            optimistic_queue_ids: HashSet::new(),
+            send_now_awaiting_confirm: None,
             mcp_init_progress: None,
             self_interjection_ids: HashSet::new(),
             session_agent_name: None,
@@ -1144,6 +1154,63 @@ impl AgentSession {
 
     pub(crate) fn clear_prompt_status_query(&mut self) {
         self.prompt_status_query_for = None;
+    }
+
+    pub(crate) fn mark_optimistic_queue_echo(&mut self, prompt_id: impl Into<String>) {
+        self.optimistic_queue_ids.insert(prompt_id.into());
+    }
+
+    pub(crate) fn has_optimistic_queue_echo(&self, prompt_id: &str) -> bool {
+        self.optimistic_queue_ids.contains(prompt_id)
+    }
+
+    pub(crate) fn park_send_now_until_queue_confirmation(&mut self, prompt_id: String) {
+        self.send_now_awaiting_confirm = Some(prompt_id);
+    }
+
+    /// Reconcile optimistic echoes against the raw, pre-merge
+    /// `grow/queue/changed` entries and resolve a parked queue-row send-now.
+    /// The mirrored queue cannot be used here because it re-pins unconfirmed
+    /// echoes and therefore cannot distinguish an echo from confirmation.
+    ///
+    /// Returns `Some((id, version))` when the parked row is now confirmed as
+    /// QUEUED. A parked row confirmed as RUNNING clears the park with nothing
+    /// to do (the natural drain won the race). A row in neither set stays
+    /// parked (its RPC is still in flight).
+    pub(crate) fn resolve_send_now_awaiting_confirm(
+        &mut self,
+        broadcast_entries: &[(String, u64)],
+        running_prompt_id: Option<&str>,
+    ) -> Option<(String, u64)> {
+        self.optimistic_queue_ids.retain(|id| {
+            running_prompt_id != Some(id.as_str())
+                && !broadcast_entries.iter().any(|(eid, _)| eid == id)
+        });
+        let awaiting = self.send_now_awaiting_confirm.as_deref()?;
+        if running_prompt_id == Some(awaiting) {
+            self.send_now_awaiting_confirm = None;
+            return None;
+        }
+        if let Some((id, version)) = broadcast_entries.iter().find(|(eid, _)| eid == awaiting) {
+            self.send_now_awaiting_confirm = None;
+            return Some((id.clone(), *version));
+        }
+        None
+    }
+
+    /// A server-queue echo resolved without landing (RPC failure, removal, or
+    /// cancellation): forget it and any parked send-now intent because there
+    /// is no row left to promote.
+    pub(crate) fn note_queue_echo_retired(&mut self, prompt_id: &str) {
+        self.optimistic_queue_ids.remove(prompt_id);
+        if self.send_now_awaiting_confirm.as_deref() == Some(prompt_id) {
+            self.send_now_awaiting_confirm = None;
+        }
+    }
+
+    pub(crate) fn clear_queue_echo_state(&mut self) {
+        self.optimistic_queue_ids.clear();
+        self.send_now_awaiting_confirm = None;
     }
 
     /// Update context state with a full snapshot from live callers.

@@ -530,7 +530,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session.shared_queue.retain(|e| e.id != prompt_id);
-                agent.note_queue_echo_retired(&prompt_id);
+                agent.session.note_queue_echo_retired(&prompt_id);
                 // `maybe_drain_queue` painted a provisional user bubble and
                 // entered TurnSubmitting before the sequential mode RPC ran.
                 // The Shell explicitly says no turn was admitted, so unwind

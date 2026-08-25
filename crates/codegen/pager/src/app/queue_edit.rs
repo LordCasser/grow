@@ -224,7 +224,7 @@ impl AgentView {
         // it. Ignore until the confirming `grow/queue/changed` lands (mirrors
         // the send-now park gate in `force_interject_queue_row`).
         if let Some(sid) = row.as_ref().and_then(|r| r.server_id.as_deref())
-            && self.optimistic_queue_ids.contains(sid)
+            && self.session.has_optimistic_queue_echo(sid)
         {
             return;
         }

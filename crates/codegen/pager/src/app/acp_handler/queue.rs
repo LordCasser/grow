@@ -114,7 +114,9 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         // fire the interject with the authoritative version (racing it
         // earlier would have no-opped shell-side and dropped the send-now).
         let fire = app.agents.get_mut(&aid).and_then(|agent| {
-            agent.resolve_send_now_awaiting_confirm(&raw_entries, running_prompt_id.as_deref())
+            agent
+                .session
+                .resolve_send_now_awaiting_confirm(&raw_entries, running_prompt_id.as_deref())
         });
         if let Some((id, expected_version)) = fire {
             let Some(expected_turn_id) = running_prompt_id.clone() else {

@@ -1139,7 +1139,7 @@ pub(super) fn handle_prompt_response(
                     response_pid,
                 );
                 agent.session.shared_queue.retain(|e| e.id != response_pid);
-                agent.note_queue_echo_retired(response_pid);
+                agent.session.note_queue_echo_retired(response_pid);
             }
             // Resolved-without-running never adopts; explicit for the
             // session-less arm (no note_queue_echo_retired above).

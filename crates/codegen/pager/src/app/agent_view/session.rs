@@ -345,8 +345,6 @@ impl AgentView {
             pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
             deferred_send: None,
-            optimistic_queue_ids: std::collections::HashSet::new(),
-            send_now_awaiting_confirm: None,
             plugin_cta: PluginCtaState::default(),
             follow_ups: None,
             follow_up_shown_prompt_id: None,
@@ -429,8 +427,7 @@ impl AgentView {
         self.session.clear_prompt_status_query();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
-        self.optimistic_queue_ids.clear();
-        self.send_now_awaiting_confirm = None;
+        self.session.clear_queue_echo_state();
         self.workflow_blocks.clear();
         self.session.workflow_run_revisions.clear();
         self.session.cleared_workflow_runs.clear();

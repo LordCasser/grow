@@ -256,8 +256,9 @@ impl AgentView {
                 // the intent; the confirming `grow/queue/changed` broadcast
                 // fires it with the row's authoritative version (see
                 // `resolve_send_now_awaiting_confirm`).
-                if self.optimistic_queue_ids.contains(&server_id) {
-                    self.send_now_awaiting_confirm = Some(server_id);
+                if self.session.has_optimistic_queue_echo(&server_id) {
+                    self.session
+                        .park_send_now_until_queue_confirmation(server_id);
                     return InputOutcome::Changed;
                 }
                 return InputOutcome::Action(Action::QueueInterjectShared {
@@ -275,49 +276,6 @@ impl AgentView {
             });
         }
         InputOutcome::Changed
-    }
-
-    /// Reconcile this client's optimistic queue echoes against a raw
-    /// `grow/queue/changed` broadcast (pre-merge entries — the mirrored
-    /// snapshot re-pins unconfirmed echoes, so it can't tell confirmation
-    /// apart), and resolve a parked queue-row send-now
-    /// ([`Self::send_now_awaiting_confirm`]).
-    ///
-    /// Returns `Some((id, version))` when the parked row is now confirmed as
-    /// QUEUED — the caller fires `grow/queue/interject` with that
-    /// authoritative version. A parked row confirmed as RUNNING clears the
-    /// park with nothing to do (the natural drain won the race). A row in
-    /// neither set stays parked (its RPC is still in flight).
-    pub(crate) fn resolve_send_now_awaiting_confirm(
-        &mut self,
-        broadcast_entries: &[(String, u64)],
-        running_prompt_id: Option<&str>,
-    ) -> Option<(String, u64)> {
-        // Confirmed ids (queued or running) leave the optimistic set.
-        self.optimistic_queue_ids.retain(|id| {
-            running_prompt_id != Some(id.as_str())
-                && !broadcast_entries.iter().any(|(eid, _)| eid == id)
-        });
-        let awaiting = self.send_now_awaiting_confirm.as_deref()?;
-        if running_prompt_id == Some(awaiting) {
-            self.send_now_awaiting_confirm = None;
-            return None;
-        }
-        if let Some((id, version)) = broadcast_entries.iter().find(|(eid, _)| eid == awaiting) {
-            self.send_now_awaiting_confirm = None;
-            return Some((id.clone(), *version));
-        }
-        None
-    }
-
-    /// A server-queue echo resolved without landing (RPC failed / removed /
-    /// cancelled): forget it, and drop any send-now parked on it — there is
-    /// no row left to promote.
-    pub(crate) fn note_queue_echo_retired(&mut self, prompt_id: &str) {
-        self.optimistic_queue_ids.remove(prompt_id);
-        if self.send_now_awaiting_confirm.as_deref() == Some(prompt_id) {
-            self.send_now_awaiting_confirm = None;
-        }
     }
 
     /// Toggle queue pane visibility (shared by Ctrl-; shortcut and badge click).
@@ -525,13 +483,17 @@ mod queue_steering_tests {
     #[test]
     fn optimistic_row_converts_to_steer_only_after_confirmation() {
         let mut agent = running_agent_local_only();
-        agent.optimistic_queue_ids.insert("queued-1".into());
-        agent.send_now_awaiting_confirm = Some("queued-1".into());
+        agent.session.mark_optimistic_queue_echo("queued-1");
+        agent
+            .session
+            .park_send_now_until_queue_confirmation("queued-1".into());
         assert_eq!(
-            agent.resolve_send_now_awaiting_confirm(&[("queued-1".into(), 3)], Some("running")),
+            agent
+                .session
+                .resolve_send_now_awaiting_confirm(&[("queued-1".into(), 3)], Some("running")),
             Some(("queued-1".into(), 3))
         );
-        assert!(agent.send_now_awaiting_confirm.is_none());
+        assert!(!agent.session.has_optimistic_queue_echo("queued-1"));
     }
 
     #[test]

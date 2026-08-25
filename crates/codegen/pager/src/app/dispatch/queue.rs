@@ -90,8 +90,8 @@ pub(super) fn push_server_queue_echo(
         agent.session.shared_queue = snapshot;
         // Track the unconfirmed echo so a queue-row send-now against it is
         // parked until the confirming broadcast (see
-        // `AgentView::send_now_awaiting_confirm`).
-        agent.optimistic_queue_ids.insert(prompt_id.to_string());
+        // `AgentSession::send_now_awaiting_confirm`).
+        agent.session.mark_optimistic_queue_echo(prompt_id);
     }
 }
 

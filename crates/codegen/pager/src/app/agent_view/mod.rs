@@ -1161,23 +1161,6 @@ pub struct AgentView {
     /// complete. Kind-only: the payload is re-derived from the widget on
     /// reissue so the freshly attached image chip travels with it.
     pub(crate) deferred_send: Option<AgentDeferredSend>,
-    /// Prompt-id currently being reconciled by the submission watchdog. This
-    /// prevents the lifecycle deadline from issuing duplicate status RPCs.
-    /// Ids of THIS client's server-queue rows that are still optimistic
-    /// echoes — the `session/prompt` RPC is in flight and no
-    /// `grow/queue/changed` broadcast has confirmed the row yet. Inserted by
-    /// the echo push, drained when a broadcast lists the id (queued or
-    /// running) or the RPC resolves without the row landing.
-    pub(crate) optimistic_queue_ids: std::collections::HashSet<String>,
-    /// A queue-row send-now the user fired while the row was still an
-    /// optimistic echo. Firing `grow/queue/interject` then would race the
-    /// row's own in-flight `session/prompt` and silently no-op shell-side
-    /// (a rapid double-Enter on a queued bash command could "disappear" — the
-    /// interject overtook the row, the no-op dropped the send-now, and the
-    /// armed cancel expectation hid the still-queued row).
-    /// Parked here and fired from the confirming `grow/queue/changed`
-    /// broadcast with the row's authoritative version.
-    pub(crate) send_now_awaiting_confirm: Option<String>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,
