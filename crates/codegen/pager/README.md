@@ -30,10 +30,43 @@ src/
 
 ## Key Concepts
 
-- **AppView** — owns the welcome screen, agent sessions, and global config
-- **AgentView** — one per session; owns the prompt, scrollback, tool panes, and modals
+- **AppView** — the root owner for navigation, the agent roster, dashboard,
+  session picker, global configuration, the effect mailbox, and root render state
+- **AgentSession** — the per-session owner for Shell/ACP facts, including
+  foreground and queue state, Behavior/Goal/Workflow projections,
+  replay/reconnect cursors, event highwaters, prompt identity, terminal
+  finalization, and runtime activity
+- **AgentView** — one presentation owner per session; owns the prompt,
+  scrollback, panes, overlays, selection, links, media, geometry, and render caches
 - **PromptWidget** — text editor component with file search (`@`), slash commands (`/`), history search, and paste elements
 - **Action/Effect** — Elm-style architecture: input → Action → dispatch → Effect → state update
+
+`AppView`, `AgentView`, and `AgentSession` are composition roots, not public state
+bags. ACP routing and synchronous dispatch update them through semantic methods.
+Operations such as permission handling, replay terminal settlement, and workflow
+ingest that affect projection, scrollback, and overlays are committed by one
+`AgentView` domain method so the visible state cannot become partially updated.
+
+## Dependency and mutation rules
+
+The crate direction is fixed:
+
+```text
+pager-minimal -> pager -> pager-render
+```
+
+`pager` must not depend on `pager-minimal`, and `pager-render` must not depend on
+Pager view types. `pager-minimal` may receive `AppView`/`AgentView` references in
+its renderer signature, but all state access goes through `pager::minimal_api`.
+The reverse call direction remains the installed function-pointer hook in
+`minimal_hook`.
+
+Dispatch remains synchronous and deterministic: `Action -> Effect`. Effects
+perform I/O in the event loop and feed results back as actions; reducers do not
+await. Render code may update presentation caches and geometry, but must never
+mutate runtime/liveness facts or infer the Shell foreground owner. Timeline is
+the only persistent fact source, while Pager state is a projection plus
+presentation state.
 
 ## Keyboard Shortcuts
 
