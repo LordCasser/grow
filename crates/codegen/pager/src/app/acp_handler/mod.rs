@@ -60,8 +60,6 @@ use routing::{
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 
-use workflow_ingest::ingest_workflow_update;
-
 use session_notification::{
     advance_reconnect_cursor, behavior_mode_update_applied, confirm_context_used,
     detect_plan_mode_change, drop_unexpected_replay,
@@ -117,10 +115,6 @@ use settings::*;
 #[cfg(test)]
 #[allow(unused_imports)]
 use subagent_activity::*;
-#[cfg(test)]
-#[allow(unused_imports)]
-use workflow_ingest::*;
-
 /// Handle an ACP notification (session update, permission request, etc.).
 ///
 /// Returns `true` if the active view was visually affected (needs redraw).

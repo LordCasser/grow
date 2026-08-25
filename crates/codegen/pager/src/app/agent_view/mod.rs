@@ -132,6 +132,7 @@ use ratatui::widgets::Widget;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
+mod goal;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;

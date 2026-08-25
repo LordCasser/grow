@@ -52,45 +52,6 @@ pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
     view.session.note_context_used(used);
 }
 
-/// Project a durable Goal transition into scrollback.
-fn goal_transition_event(
-    previous: Option<&GoalDisplayState>,
-    goal_id: &str,
-    objective: &str,
-    status: GoalDisplayStatus,
-    elapsed_ms: u64,
-) -> Option<SessionEvent> {
-    let previous = previous.filter(|goal| goal.goal_id == goal_id);
-    let Some(previous) = previous else {
-        return match status {
-            GoalDisplayStatus::Active => Some(SessionEvent::GoalCreated),
-            GoalDisplayStatus::Complete => Some(SessionEvent::GoalCompleted {
-                elapsed: std::time::Duration::from_millis(elapsed_ms),
-            }),
-            _ => None,
-        };
-    };
-
-    if status == GoalDisplayStatus::Complete && previous.status != GoalDisplayStatus::Complete {
-        return Some(SessionEvent::GoalCompleted {
-            elapsed: std::time::Duration::from_millis(elapsed_ms),
-        });
-    }
-    if objective != previous.objective {
-        return Some(SessionEvent::GoalObjectiveUpdated);
-    }
-    if status != previous.status {
-        return match status {
-            GoalDisplayStatus::Active => Some(SessionEvent::GoalRestarted),
-            GoalDisplayStatus::Paused => Some(SessionEvent::GoalPaused),
-            GoalDisplayStatus::Blocked => Some(SessionEvent::GoalBlocked),
-            GoalDisplayStatus::UsageLimited => Some(SessionEvent::GoalUsageLimited),
-            GoalDisplayStatus::BudgetLimited => Some(SessionEvent::GoalBudgetLimited),
-            GoalDisplayStatus::Complete => None,
-        };
-    }
-    None
-}
 /// Replay gate shared by the ACP and Grow session-update paths. Returns `true`
 /// when the update must be dropped.
 ///
@@ -952,7 +913,7 @@ fn handle_session_notification_inner(
             });
             true
         }
-        update @ GrowSessionUpdate::WorkflowUpdated { .. } => ingest_workflow_update(agent, update),
+        update @ GrowSessionUpdate::WorkflowUpdated { .. } => agent.ingest_workflow_update(update),
         GrowSessionUpdate::GoalUpdated {
             goal_id,
             objective,
@@ -965,41 +926,13 @@ fn handle_session_notification_inner(
             status_message,
         } => {
             if status == "cleared" {
-                if let Some(g) = agent.session.goal_state.take() {
-                    agent.session.last_cleared_goal_id = Some(g.goal_id);
-                    agent
-                        .scrollback
-                        .push_block(RenderBlock::session_event(SessionEvent::GoalCleared));
-                }
-                agent.set_goal_detail_visible(false);
-                true
-            } else if agent.session.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
-                false
+                agent.clear_goal()
             } else {
                 let Some(new_status) = GoalDisplayStatus::parse(&status) else {
                     tracing::warn!(status, "ignored malformed GoalUpdated state");
                     return false;
                 };
-                let elapsed_floor_ms = agent
-                    .session
-                    .goal_state
-                    .as_ref()
-                    .filter(|g| g.goal_id == goal_id)
-                    .map(|g| g.live_elapsed_ms())
-                    .unwrap_or(0)
-                    .max(elapsed_ms);
-                if let Some(event) = goal_transition_event(
-                    agent.session.goal_state.as_ref(),
-                    &goal_id,
-                    &objective,
-                    new_status,
-                    elapsed_floor_ms,
-                ) {
-                    agent
-                        .scrollback
-                        .push_block(RenderBlock::session_event(event));
-                }
-                agent.session.goal_state = Some(GoalDisplayState {
+                agent.apply_goal_update(GoalDisplayState {
                     goal_id,
                     objective,
                     status: new_status,
@@ -1010,9 +943,8 @@ fn handle_session_notification_inner(
                     updated_at,
                     status_message,
                     received_at: std::time::Instant::now(),
-                    elapsed_floor_ms,
-                });
-                true
+                    elapsed_floor_ms: elapsed_ms,
+                })
             }
         }
         GrowSessionUpdate::InteractionResolved { tool_call_id } => {
