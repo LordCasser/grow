@@ -566,6 +566,7 @@ impl AgentView {
                                     }
                                     TaskEntryId::Agent(sid) => {
                                         if let Some(child_sid) = self
+                                            .session
                                             .subagent_sessions
                                             .iter()
                                             .find(|(_, info)| {
@@ -585,6 +586,7 @@ impl AgentView {
                                             .get(tid)
                                             .and_then(|info| info.last_subagent_id.clone())
                                             && let Some(child_sid) = self
+                                                .session
                                                 .subagent_sessions
                                                 .iter()
                                                 .find(|(_, info)| {

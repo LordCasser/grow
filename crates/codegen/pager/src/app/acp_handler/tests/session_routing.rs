@@ -57,7 +57,7 @@
         {
             let parent = app.agents.get_mut(&AgentId(0)).unwrap();
             parent
-                .subagent_sessions
+                .session.subagent_sessions
                 .insert(child_sid.into(), make_subagent_info(child_sid));
             parent
                 .subagent_views

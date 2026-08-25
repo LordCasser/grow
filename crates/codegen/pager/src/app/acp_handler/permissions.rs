@@ -227,7 +227,7 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
         return None;
     }
     // Tier 1: tracked subagent with full metadata.
-    if let Some(info) = agent.subagent_sessions.get(sid) {
+    if let Some(info) = agent.session.subagent_sessions.get(sid) {
         return Some(format!(
             "Subagent {}:",
             crate::app::subagent::format_subagent_title(info)

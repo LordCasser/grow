@@ -156,6 +156,7 @@ fn global_cancel_subagents_pref_skips_panel_without_session_override() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent
+            .session
             .subagent_sessions
             .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
     }
@@ -1738,6 +1739,7 @@ fn session_id_resolver_round_trip_subagent() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let info = make_test_subagent("child-1", "sa-1");
     agent
+        .session
         .subagent_sessions
         .insert(info.child_session_id.to_string(), info);
     let resolver = SessionIdResolver::from_agents(&app.agents);

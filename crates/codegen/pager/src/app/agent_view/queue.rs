@@ -167,6 +167,7 @@ impl AgentView {
         }
         watchers.loops = self.session.scheduled_tasks.len();
         watchers.subagents = self
+            .session
             .subagent_sessions
             .values()
             .filter(|s| s.is_running() && s.workflow_run_id.is_none())
@@ -646,8 +647,14 @@ mod watcher_tests {
         child_a.workflow_run_id = Some("wf-1".into());
         let mut child_b = test_fixtures::running_subagent_info("child-b");
         child_b.workflow_run_id = Some("wf-1".into());
-        agent.subagent_sessions.insert("child-a".into(), child_a);
-        agent.subagent_sessions.insert("child-b".into(), child_b);
+        agent
+            .session
+            .subagent_sessions
+            .insert("child-a".into(), child_a);
+        agent
+            .session
+            .subagent_sessions
+            .insert("child-b".into(), child_b);
 
         assert_eq!(
             agent.watchers(),
@@ -668,9 +675,10 @@ mod watcher_tests {
         let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
         workflow_child.workflow_run_id = Some("wf-1".into());
         agent
+            .session
             .subagent_sessions
             .insert("workflow-child".into(), workflow_child);
-        agent.subagent_sessions.insert(
+        agent.session.subagent_sessions.insert(
             "standalone-child".into(),
             test_fixtures::running_subagent_info("standalone-child"),
         );

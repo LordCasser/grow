@@ -894,7 +894,7 @@
         assert!(matches!(agent.session.state, AgentState::Idle));
 
         let info = agent
-            .subagent_sessions
+            .session.subagent_sessions
             .get("child-sub")
             .expect("replayed spawn registers the subagent row");
         assert!(

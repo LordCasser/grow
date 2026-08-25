@@ -43,6 +43,7 @@ impl AgentActivityProjection {
             child.question_view.as_ref().is_some_and(|question| {
                 question.source_session_id.as_deref() == Some(child_sid.as_str())
             }) && agent
+                .session
                 .subagent_sessions
                 .get(child_sid)
                 .is_some_and(|info| !info.finished)
@@ -60,6 +61,7 @@ impl AgentActivityProjection {
                 .any(|task| task.status == crate::app::agent::BgTaskStatus::Running),
             scheduled_work: !agent.session.scheduled_tasks.is_empty(),
             subagents: agent
+                .session
                 .subagent_sessions
                 .values()
                 .any(|info| !info.finished && info.workflow_run_id.is_none()),
@@ -278,6 +280,7 @@ mod tests {
             .subagent_views
             .insert("child-1".into(), Box::new(child));
         parent
+            .session
             .subagent_sessions
             .insert("child-1".into(), make_subagent_info(finished));
         parent

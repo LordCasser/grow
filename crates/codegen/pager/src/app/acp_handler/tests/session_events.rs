@@ -488,7 +488,7 @@
         let mut agent = make_agent(Some("root-sess"));
         let child_sid = "child-sess-1";
         agent
-            .subagent_sessions
+            .session.subagent_sessions
             .insert(child_sid.into(), make_subagent_info(child_sid));
         let child_view = make_agent(Some(child_sid));
         agent
@@ -504,7 +504,7 @@
         let changed = handle_child_session_notification(update, child_sid, &mut agent);
         assert!(changed);
 
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.tokens_used, Some(25000));
         // 25000 / 131072 * 100 ~= 19
         assert_eq!(info.context_usage_pct, Some(19));
@@ -525,7 +525,7 @@
         let mut agent = make_agent(Some("root-sess"));
         let child_sid = "child-sess-3";
         agent
-            .subagent_sessions
+            .session.subagent_sessions
             .insert(child_sid.into(), make_subagent_info(child_sid));
         let mut child_view = make_agent(Some(child_sid));
         child_view.session.context_state = Some(shell::session::ContextInfo::from_notification(
@@ -570,7 +570,7 @@
         let child_sid = "child-sess-2";
         // SubagentInfo exists but no child view (race between notification and spawn).
         agent
-            .subagent_sessions
+            .session.subagent_sessions
             .insert(child_sid.into(), make_subagent_info(child_sid));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
@@ -583,7 +583,7 @@
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.tokens_used, Some(25000));
         assert_eq!(info.context_usage_pct, Some(19));
     }

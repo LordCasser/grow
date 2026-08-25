@@ -114,6 +114,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             let has_turn =
                 agent.session.state.is_turn_running() || agent.session.state.is_compact_running();
             let running_subagents = agent
+                .session
                 .subagent_sessions
                 .values()
                 .filter(|s| s.is_running() && s.workflow_run_id.is_none())
@@ -147,6 +148,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             // but intentional: subagents kept alive from a previous cancel should
             // still prompt the user on the next cancel.
             let running_count = agent
+                .session
                 .subagent_sessions
                 .values()
                 .filter(|s| s.is_running() && s.workflow_run_id.is_none())
@@ -606,7 +608,7 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
     };
 
     // Mark as pending_kill for UI feedback
-    for info in agent.subagent_sessions.values_mut() {
+    for info in agent.session.subagent_sessions.values_mut() {
         if info.subagent_id.as_ref() == subagent_id {
             info.pending_kill = true;
             info.kill_requested_at = Some(Instant::now());

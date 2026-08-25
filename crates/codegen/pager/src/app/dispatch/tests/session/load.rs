@@ -32,6 +32,7 @@ fn cancel_turn_picker_grabs_focus_from_scrollback() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent
+            .session
             .subagent_sessions
             .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
         agent.active_pane = ActivePane::Scrollback;
@@ -703,6 +704,7 @@ fn resume_focuses_existing_agent_for_open_session() {
     {
         let agent = app.agents.get_mut(&agent_0).unwrap();
         agent
+            .session
             .subagent_sessions
             .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
         agent.active_subagent = Some("child-1".into());

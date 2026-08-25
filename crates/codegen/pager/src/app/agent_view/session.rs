@@ -333,7 +333,6 @@ impl AgentView {
             timeline_hover_preview: None,
             session_agent_name: None,
             agent_switch_pending: None,
-            subagent_sessions: HashMap::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
             is_subagent_view: false,
@@ -896,13 +895,14 @@ impl AgentView {
                 return Some(cmd.to_string());
             }
         }
-        if let Some(info) = self.subagent_sessions.get(task_id) {
+        if let Some(info) = self.session.subagent_sessions.get(task_id) {
             let desc = info.description.trim();
             if !desc.is_empty() {
                 return Some(first_nonempty_line(desc).to_string());
             }
         }
-        self.subagent_sessions
+        self.session
+            .subagent_sessions
             .values()
             .find(|info| info.subagent_id.as_ref() == task_id)
             .and_then(|info| {
@@ -918,7 +918,8 @@ impl AgentView {
     /// `run_in_background`) is currently running. The parent turn is blocked on
     /// it, so the spinner should read "Waiting on subagent…".
     fn has_running_foreground_subagent(&self) -> bool {
-        self.subagent_sessions
+        self.session
+            .subagent_sessions
             .values()
             .any(|s| s.is_running() && !s.is_background && s.workflow_run_id.is_none())
     }
@@ -1540,7 +1541,7 @@ mod resolve_turn_activity_tests {
         use std::time::Instant;
         let mut view = running_view();
         let now = Instant::now();
-        view.subagent_sessions.insert(
+        view.session.subagent_sessions.insert(
             "child-session-xyz".into(),
             SubagentInfo {
                 subagent_id: Arc::from("sub-id-42"),

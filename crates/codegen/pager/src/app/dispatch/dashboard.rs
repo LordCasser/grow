@@ -222,7 +222,7 @@ fn dashboard_alive_fn(
             child_session_id,
         } => agents
             .get(parent)
-            .is_some_and(|a| a.subagent_sessions.contains_key(child_session_id)),
+            .is_some_and(|a| a.session.subagent_sessions.contains_key(child_session_id)),
         // Roster-only rows are not locally hosted; they aren't tracked by
         // `agents` and are never persisted, so treat them as not alive for
         // pinned/reorder GC purposes.
@@ -269,7 +269,7 @@ fn rearm_session_overlay(app: &mut AppView, id: AgentId) {
     let live_child = app.agents.get(&id).and_then(|a| {
         a.active_subagent
             .as_ref()
-            .filter(|c| a.subagent_sessions.contains_key(*c))
+            .filter(|c| a.session.subagent_sessions.contains_key(*c))
             .cloned()
     });
     let row = match live_child {
@@ -348,7 +348,7 @@ pub(super) fn dispatch_dashboard_attach(
             let alive = app
                 .agents
                 .get(&parent)
-                .is_some_and(|a| a.subagent_sessions.contains_key(&child_session_id));
+                .is_some_and(|a| a.session.subagent_sessions.contains_key(&child_session_id));
             if !alive {
                 if let Some(d) = app.dashboard.as_mut() {
                     d.set_error_toast("Subagent no longer running");
@@ -1865,7 +1865,7 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
             let Some(agent) = app.agents.get_mut(parent) else {
                 return vec![];
             };
-            let Some(info) = agent.subagent_sessions.get_mut(child_session_id) else {
+            let Some(info) = agent.session.subagent_sessions.get_mut(child_session_id) else {
                 return vec![];
             };
             let subagent_id = info.subagent_id.to_string();

@@ -24,7 +24,7 @@ const PROMPT_MULTI_CLICK_MS: u128 = 300;
 ///
 /// Top-level rows key by `AgentId`. Subagent rows key by their parent
 /// agent + `child_session_id` (the parent's hash map key in
-/// `AgentView::subagent_sessions`). When the parent closes, the subagent
+/// `AgentSession::subagent_sessions`). When the parent closes, the subagent
 /// rows naturally disappear because the row builder iterates
 /// `app.agents.values()` — no separate cleanup needed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1185,8 +1185,12 @@ impl SessionIdResolver {
                     // And call out the subagents we're
                     // dropping by name so a debugger can correlate the
                     // missing children back to the losing parent.
-                    let dropped: Vec<&str> =
-                        agent.subagent_sessions.keys().map(String::as_str).collect();
+                    let dropped: Vec<&str> = agent
+                        .session
+                        .subagent_sessions
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
                     tracing::warn!(
                         session_id = %sid_str,
                         first = ?prev,
@@ -1203,7 +1207,7 @@ impl SessionIdResolver {
                     // child_session_id within a single parent's map
                     // would also warn rather than silently overwrite.
                     let children = subs.entry(sid_str.clone()).or_default();
-                    for child_sid in agent.subagent_sessions.keys() {
+                    for child_sid in agent.session.subagent_sessions.keys() {
                         if let Some(prev_child) = children.get(child_sid) {
                             tracing::warn!(
                                 parent_session_id = %sid_str,

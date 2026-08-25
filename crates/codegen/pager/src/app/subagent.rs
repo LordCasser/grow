@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 /// Enriched subagent tracking info.
 ///
-/// Keyed by `child_session_id` in `AgentView::subagent_sessions`.
+/// Keyed by `child_session_id` in `AgentSession::subagent_sessions`.
 /// Populated from `SubagentSpawned` notifications, updated by
 /// `SubagentProgress` and `SubagentFinished`.
 #[derive(Debug, Clone)]
@@ -244,6 +244,7 @@ pub(crate) fn restore_descendant_lifecycle(
         return;
     };
     let replayed_direct_children = root
+        .session
         .subagent_sessions
         .keys()
         .cloned()
@@ -350,6 +351,7 @@ pub(crate) fn ensure_subagent_child_replayed(
     child_sid: &str,
 ) {
     let should_replay = parent
+        .session
         .subagent_sessions
         .get(child_sid)
         .is_some_and(|info| !info.child_updates_replayed)
@@ -361,6 +363,7 @@ pub(crate) fn ensure_subagent_child_replayed(
         return;
     }
     let finished_elapsed = parent
+        .session
         .subagent_sessions
         .get(child_sid)
         .filter(|info| info.finished)
@@ -376,7 +379,7 @@ pub(crate) fn ensure_subagent_child_replayed(
             child_view.scrollback.finish_all_running();
         }
     }
-    if let Some(info) = parent.subagent_sessions.get_mut(child_sid) {
+    if let Some(info) = parent.session.subagent_sessions.get_mut(child_sid) {
         info.child_updates_replayed = true;
     }
 }
@@ -652,7 +655,10 @@ mod tests {
         let mut info = make_info();
         info.child_session_id = child_sid.into();
         info.child_updates_replayed = true;
-        parent.subagent_sessions.insert(child_sid.to_string(), info);
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
         ensure_subagent_child_replayed(&mut parent, child_sid);
         let child = parent.subagent_views.get(child_sid).unwrap();
         assert_eq!(child.scrollback.len(), 1);
@@ -702,7 +708,10 @@ mod tests {
             .insert(child_sid.to_string(), Box::new(make_min_child_view()));
         let mut info = make_info();
         info.child_session_id = child_sid.into();
-        parent.subagent_sessions.insert(child_sid.to_string(), info);
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
         let before = test_support::calls();
         ensure_subagent_child_replayed(&mut parent, child_sid);
         assert_eq!(
@@ -711,7 +720,7 @@ mod tests {
             "a real replay must purge after the parsed transient drops"
         );
         assert!(
-            parent.subagent_sessions[child_sid].child_updates_replayed,
+            parent.session.subagent_sessions[child_sid].child_updates_replayed,
             "fixture sanity: the replay attempt must mark the child replayed"
         );
         let before = test_support::calls();
@@ -728,6 +737,7 @@ mod tests {
         let mut ghost = make_info();
         ghost.child_session_id = ghost_sid.into();
         parent
+            .session
             .subagent_sessions
             .insert(ghost_sid.to_string(), ghost);
         let before = test_support::calls();
@@ -737,7 +747,7 @@ mod tests {
             before,
             "a no-op replay (missing transcript) must not purge"
         );
-        assert!(parent.subagent_sessions[ghost_sid].child_updates_replayed);
+        assert!(parent.session.subagent_sessions[ghost_sid].child_updates_replayed);
         let empty_sid = "child-purge-empty";
         let empty_dir = home
             .path()
@@ -753,6 +763,7 @@ mod tests {
         let mut empty = make_info();
         empty.child_session_id = empty_sid.into();
         parent
+            .session
             .subagent_sessions
             .insert(empty_sid.to_string(), empty);
         let before = test_support::calls();
@@ -762,7 +773,7 @@ mod tests {
             before,
             "an empty replay (zero updates parsed) must not purge"
         );
-        assert!(parent.subagent_sessions[empty_sid].child_updates_replayed);
+        assert!(parent.session.subagent_sessions[empty_sid].child_updates_replayed);
         set_replay_grow_home_for_tests(None);
     }
     #[test]

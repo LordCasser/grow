@@ -793,7 +793,10 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
         let agent = app.agents.get_mut(&id).unwrap();
         let mut info = make_test_subagent("child-1", "sa-1");
         info.pending_kill = true;
-        agent.subagent_sessions.insert("child-1".into(), info);
+        agent
+            .session
+            .subagent_sessions
+            .insert("child-1".into(), info);
     }
 
     // RPC failed → leave the row (the subagent may still be running).
@@ -806,7 +809,7 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
         &mut app,
     );
     assert!(
-        !app.agents[&id].subagent_sessions["child-1"].finished,
+        !app.agents[&id].session.subagent_sessions["child-1"].finished,
         "a failed cancel RPC must not finalize the row"
     );
 
@@ -820,7 +823,7 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
         &mut app,
     );
     assert!(
-        app.agents[&id].subagent_sessions["child-1"].finished,
+        app.agents[&id].session.subagent_sessions["child-1"].finished,
         "nothing-live must finalize the orphan row"
     );
 }
@@ -836,7 +839,10 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
         let agent = app.agents.get_mut(&id).unwrap();
         let mut info = make_test_subagent("child-1", "sa-1");
         info.pending_kill = true;
-        agent.subagent_sessions.insert("child-1".into(), info);
+        agent
+            .session
+            .subagent_sessions
+            .insert("child-1".into(), info);
     }
 
     dispatch_task_result(
@@ -849,7 +855,7 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
         },
         &mut app,
     );
-    let info = &app.agents[&id].subagent_sessions["child-1"];
+    let info = &app.agents[&id].session.subagent_sessions["child-1"];
     assert!(info.finished, "already-finished orphan must be finalized");
     assert_eq!(
         info.status.as_deref(),

@@ -96,6 +96,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
 
     // ── Subagents ──
     let mut subs: Vec<_> = agent
+        .session
         .subagent_sessions
         .values()
         .filter(|s| s.workflow_run_id.is_none())

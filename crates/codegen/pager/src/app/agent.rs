@@ -5,6 +5,7 @@
 use crate::acp::meta::NotificationMeta;
 use crate::acp::model_state::ModelState;
 use crate::acp::tracker::{AcpUpdateTracker, TurnActivity};
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::EntryId;
 use crate::scrollback::state::ScrollbackState;
 use acp_transport::AcpAgentTx;
@@ -634,6 +635,13 @@ pub struct AgentSession {
     /// navigation does not consult it -- the session picker is the
     /// source of truth for navigation history.
     pub forked_from: Option<AgentId>,
+    /// Runtime metadata for child sessions owned by this ACP session.
+    ///
+    /// This is the canonical lifecycle/provenance map used by notification
+    /// routing, permission attribution, dashboard rows, and reconnect
+    /// reconciliation. The recursive `AgentView::subagent_views` tree remains
+    /// presentation state and is intentionally kept on the view side.
+    pub subagent_sessions: HashMap<String, SubagentInfo>,
     /// Prompts waiting to be sent. Drained front-to-back when
     /// `state` becomes [`AgentState::Idle`].
     pub pending_prompts: VecDeque<QueuedPrompt>,
@@ -939,6 +947,7 @@ impl AgentSession {
             cleared_workflow_runs: HashSet::new(),
             is_worktree: false,
             forked_from: None,
+            subagent_sessions: HashMap::new(),
             pending_prompts: VecDeque::new(),
             next_queue_id: 0,
             permission_mode,

@@ -412,7 +412,10 @@ pub fn compute_peek_fields(
             child_session_id,
         } => {
             let parent_agent = agents.get(parent)?;
-            let info = parent_agent.subagent_sessions.get(child_session_id)?;
+            let info = parent_agent
+                .session
+                .subagent_sessions
+                .get(child_session_id)?;
             let label = {
                 let (l, _) = crate::app::subagent::format_subagent_label(info);
                 sanitize_display_text(&l).into_owned()
@@ -502,7 +505,7 @@ pub fn peek_model_and_mode(
         } => match agents.get(parent) {
             Some(parent_agent) => {
                 let child = parent_agent.subagent_views.get(child_session_id);
-                let info = parent_agent.subagent_sessions.get(child_session_id);
+                let info = parent_agent.session.subagent_sessions.get(child_session_id);
                 let model = child
                     .and_then(|c| c.session.models.current_model_name())
                     .or_else(|| parent_agent.session.models.current_model_name());
@@ -1609,7 +1612,7 @@ mod tests {
         parent
             .subagent_views
             .insert("child-sess".into(), Box::new(child));
-        parent.subagent_sessions.insert(
+        parent.session.subagent_sessions.insert(
             "child-sess".into(),
             crate::app::agent_view::test_fixtures::running_subagent_info("child-sess"),
         );

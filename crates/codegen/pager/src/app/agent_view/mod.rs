@@ -102,7 +102,6 @@ pub(crate) struct InlineMediaHitAreas {
 use super::actions::Action;
 use super::agent::AgentSession;
 use super::app_view::InputOutcome;
-use crate::app::subagent::SubagentInfo;
 use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
@@ -514,7 +513,7 @@ pub(crate) struct PendingForkBanner {
 ///
 /// Restore scope: the stash covers the transcript-critical state below (plus
 /// the todo list). Satellite state the replay also mutates —
-/// `subagent_sessions`/`subagent_views`, bg/scheduled tasks,
+/// `AgentSession::subagent_sessions`/`subagent_views`, bg/scheduled tasks,
 /// `available_commands`, context usage — is NOT restored on failure: live
 /// updates keep routing through those maps during the window, so stashing
 /// them would break mid-window routing, and they re-converge on the next
@@ -1135,10 +1134,6 @@ pub struct AgentView {
     /// `Effect::SwitchAgent`, cleared on `SwitchAgentComplete`. Used so the
     /// success scrollback is not suppressed when `AgentChanged` arrives first.
     pub agent_switch_pending: Option<String>,
-    /// Map of child session IDs to subagent metadata. Populated on
-    /// `SubagentSpawned` notifications, used for permission routing
-    /// (which agent owns a session) and provenance display.
-    pub subagent_sessions: HashMap<String, SubagentInfo>,
     /// Child subagent views. Keyed by child_session_id.
     /// Created eagerly on SubagentSpawned so updates are tracked from the start.
     pub subagent_views: HashMap<String, Box<AgentView>>,
@@ -2054,7 +2049,7 @@ pub(crate) mod test_fixtures {
         );
         agent.tasks.sync(
             &agent.session.bg_tasks,
-            &agent.subagent_sessions,
+            &agent.session.subagent_sessions,
             &agent.session.scheduled_tasks,
             &agent.session.workflow_runs,
         );

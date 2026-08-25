@@ -273,7 +273,7 @@
                 .subagent_views
                 .insert("child-1".into(), Box::new(make_agent(Some("child-1"))));
             parent
-                .subagent_sessions
+                .session.subagent_sessions
                 .insert("child-1".into(), make_subagent_info("child-1"));
         }
 

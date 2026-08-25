@@ -1890,6 +1890,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     {
         let agent = app.agents.get_mut(&parent).unwrap();
         agent
+            .session
             .subagent_sessions
             .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-1"));
     }
@@ -2023,6 +2024,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     app.agents
         .get_mut(&parent)
         .unwrap()
+        .session
         .subagent_sessions
         .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-1"));
     let child_session = make_test_agent_session(&app, AgentId(1), &child_sid);
@@ -2054,6 +2056,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     );
     assert!(
         agent
+            .session
             .subagent_sessions
             .get(&child_sid)
             .is_some_and(|i| i.child_updates_replayed),
@@ -2327,6 +2330,7 @@ fn dashboard_overlay_exit_then_exit_restores_subagent_row() {
     app.agents
         .get_mut(&parent)
         .unwrap()
+        .session
         .subagent_sessions
         .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-ret"));
     let child_view = AgentView::new(
@@ -3949,6 +3953,7 @@ fn dashboard_stop_subagent_emits_kill_subagent_effect() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let info = make_test_subagent("child-xyz", "sa-xyz");
     agent
+        .session
         .subagent_sessions
         .insert(info.child_session_id.to_string(), info);
     open_dashboard(&mut app);
@@ -4808,6 +4813,7 @@ fn dashboard_question_answer_refuses_subagent_rows() {
     app.agents
         .get_mut(&parent)
         .unwrap()
+        .session
         .subagent_sessions
         .insert(child_sid.to_string(), make_test_subagent(child_sid, "sa-1"));
     open_dashboard(&mut app);
@@ -5039,6 +5045,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent
+            .session
             .subagent_sessions
             .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
         agent.active_subagent = Some("child-1".into());

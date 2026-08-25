@@ -28,7 +28,7 @@ pub(super) fn sync_subagent_activity(
     child_key: &str,
     activity_label: Option<String>,
 ) {
-    let Some(info) = parent.subagent_sessions.get_mut(child_key) else {
+    let Some(info) = parent.session.subagent_sessions.get_mut(child_key) else {
         return;
     };
     sync_activity_label(
@@ -66,6 +66,7 @@ pub(crate) fn finalize_killed_subagent(
     };
     // Idempotency: skip if already finished.
     let Some(child_session_id) = agent
+        .session
         .subagent_sessions
         .values()
         .find(|i| i.subagent_id.as_ref() == subagent_id && !i.finished)

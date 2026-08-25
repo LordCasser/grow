@@ -329,7 +329,7 @@ pub fn render_dashboard(
             }) => {
                 let parent_ok = agents
                     .get(parent)
-                    .is_some_and(|p| p.subagent_sessions.contains_key(child_session_id));
+                    .is_some_and(|p| p.session.subagent_sessions.contains_key(child_session_id));
                 let loaded = agents
                     .get(parent)
                     .is_some_and(|p| p.subagent_views.contains_key(child_session_id));

@@ -20,7 +20,7 @@
         );
 
         let root = &app.agents[&AgentId(0)];
-        assert!(root.subagent_sessions.contains_key("grandchild-session"));
+        assert!(root.session.subagent_sessions.contains_key("grandchild-session"));
         assert!(root.subagent_views.contains_key("grandchild-session"));
         assert!(matches!(
             find_session_match(&app, &acp::SessionId::new("grandchild-session")),
@@ -44,7 +44,7 @@
             ),
             &mut app,
         );
-        assert!(app.agents[&AgentId(0)].subagent_sessions["grandchild-session"].finished);
+        assert!(app.agents[&AgentId(0)].session.subagent_sessions["grandchild-session"].finished);
     }
 
     #[test]
@@ -205,7 +205,7 @@
             crate::app::subagent::restore_descendant_lifecycle(&mut app, AgentId(0));
 
             let root = &app.agents[&AgentId(0)];
-            assert!(root.subagent_sessions.contains_key(grandchild_sid));
+            assert!(root.session.subagent_sessions.contains_key(grandchild_sid));
             assert!(root.subagent_views.contains_key(grandchild_sid));
             assert_eq!(root.scrollback.len(), before_restore + 1);
             assert_eq!(
@@ -305,7 +305,7 @@
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let info = agent
-            .subagent_sessions
+            .session.subagent_sessions
             .get("child-1")
             .expect("subagent present after replay");
         assert!(
@@ -343,7 +343,7 @@
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.loading_replay = false;
-            let info = agent.subagent_sessions.get_mut("child-1").unwrap();
+            let info = agent.session.subagent_sessions.get_mut("child-1").unwrap();
             assert!(!info.finished);
             info.pending_kill = true;
             info.kill_requested_at = Some(std::time::Instant::now());
@@ -359,7 +359,7 @@
         assert!(finalized, "row should have been finalized");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get("child-1").unwrap();
+        let info = agent.session.subagent_sessions.get("child-1").unwrap();
         assert!(info.finished, "kill must finalize the stuck orphan row");
         assert_eq!(info.status.as_deref(), Some("cancelled"));
         assert!(
@@ -396,7 +396,7 @@
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.loading_replay = false;
-            let info = agent.subagent_sessions.get_mut("child-1").unwrap();
+            let info = agent.session.subagent_sessions.get_mut("child-1").unwrap();
             info.pending_kill = true;
         }
 
@@ -409,7 +409,7 @@
         assert!(finalized, "row should have been finalized");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get("child-1").unwrap();
+        let info = agent.session.subagent_sessions.get("child-1").unwrap();
         assert!(info.finished);
         assert_eq!(
             info.status.as_deref(),
@@ -441,7 +441,7 @@
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let info = agent
-            .subagent_sessions
+            .session.subagent_sessions
             .get(child_sid)
             .expect("SubagentSpawned must register subagent_sessions");
         assert_eq!(info.description.as_ref(), "scan src/");
@@ -476,7 +476,7 @@
         );
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert!(info.finished);
         assert_eq!(info.status.as_deref(), Some("completed"));
         assert_eq!(info.tool_calls, Some(2));
@@ -526,7 +526,7 @@
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.activity_label.as_deref(), Some("Responding"));
         let entry_id = info.scrollback_entry_id.unwrap();
         let entry = agent.scrollback.get_by_id(entry_id).unwrap();
@@ -539,7 +539,7 @@
         app.agents
             .get_mut(&AgentId(0))
             .unwrap()
-            .subagent_sessions
+            .session.subagent_sessions
             .get_mut(child_sid)
             .unwrap()
             .activity_label = None;
@@ -553,7 +553,7 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
             agent
-                .subagent_sessions
+                .session.subagent_sessions
                 .get(child_sid)
                 .unwrap()
                 .activity_label
@@ -566,7 +566,7 @@
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert!(
             info.activity_label.is_none(),
             "finish must clear the info label"
@@ -603,7 +603,7 @@
             );
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| i.child_updates_replayed),
                 "spawn must set child_updates_replayed"
@@ -640,7 +640,7 @@
             );
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| !i.child_updates_replayed),
                 "resume spawn must leave child_updates_replayed unset for lazy load"
@@ -656,7 +656,7 @@
             );
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| i.child_updates_replayed),
                 "lazy open must set child_updates_replayed"
@@ -702,7 +702,7 @@
             );
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| !i.child_updates_replayed),
                 "finished-during-resume must leave child_updates_replayed unset"
@@ -818,7 +818,7 @@
             );
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| i.child_updates_replayed)
             );
@@ -867,7 +867,7 @@
                     .scrollback
                     .push_block(RenderBlock::user_prompt("task only"));
             }
-            if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+            if let Some(info) = agent.session.subagent_sessions.get_mut(child_sid) {
                 info.child_updates_replayed = false;
             }
 
@@ -876,7 +876,7 @@
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
             assert!(
                 agent
-                    .subagent_sessions
+                    .session.subagent_sessions
                     .get(child_sid)
                     .is_some_and(|i| i.child_updates_replayed)
             );
@@ -946,7 +946,7 @@
 
         let agent_a = app.agents.get(&AgentId(0)).unwrap();
         let info = agent_a
-            .subagent_sessions
+            .session.subagent_sessions
             .get(child_sid)
             .expect("SubagentSpawned must register on inactive agent A");
         assert!(
@@ -981,7 +981,7 @@
         );
 
         let agent_a = app.agents.get(&AgentId(0)).unwrap();
-        let info = agent_a.subagent_sessions.get(child_sid).unwrap();
+        let info = agent_a.session.subagent_sessions.get(child_sid).unwrap();
         assert!(info.finished);
         assert_eq!(info.status.as_deref(), Some("completed"));
         let entry = agent_a.scrollback.get_by_id(entry_id).unwrap();
@@ -1006,7 +1006,7 @@
         assert!(!affected, "unknown session_id must not request a redraw");
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            agent.subagent_sessions.is_empty(),
+            agent.session.subagent_sessions.is_empty(),
             "SubagentSpawned for unknown session must not register subagent_sessions"
         );
         assert!(

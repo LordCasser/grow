@@ -325,6 +325,7 @@ fn handle_session_notification_inner(
             latency_ms,
         } => {
             let subagent_title = agent
+                .session
                 .subagent_sessions
                 .get(&child_session_id)
                 .map(crate::app::subagent::format_subagent_title);
@@ -405,7 +406,7 @@ fn handle_session_notification_inner(
                 .remove(&subagent_id)
                 .unwrap_or(false);
             let model_display = model.clone();
-            agent.subagent_sessions.insert(
+            agent.session.subagent_sessions.insert(
                 child_session_id.clone(),
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
@@ -448,7 +449,7 @@ fn handle_session_notification_inner(
                 },
             );
             if let Some(ref sid) = agent.session.session_id
-                && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
+                && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
             {
                 crate::app::subagent::enrich_from_timeline(
                     info,
@@ -458,7 +459,7 @@ fn handle_session_notification_inner(
             }
             let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
                 &agent.session.cwd,
-                agent.subagent_sessions.get(&child_session_id),
+                agent.session.subagent_sessions.get(&child_session_id),
             );
             let child_session = {
                 let mut session = AgentSession::new(
@@ -506,7 +507,7 @@ fn handle_session_notification_inner(
                 if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                     crate::app::subagent::replay_inherited_updates(child_view, &child_session_id);
                 }
-                if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+                if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                     info.child_updates_replayed = true;
                 }
             }
@@ -520,11 +521,11 @@ fn handle_session_notification_inner(
                 );
                 let entry_id = agent.scrollback.push_block(RenderBlock::Subagent(block));
                 agent.scrollback.set_last_running(true);
-                if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+                if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                     info.scrollback_entry_id = Some(entry_id);
                     info.is_background = is_background;
                 }
-            } else if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+            } else if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                 info.is_background = is_background;
             }
             true
@@ -541,7 +542,7 @@ fn handle_session_notification_inner(
             error_count,
             ..
         } => {
-            if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+            if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                 info.duration_ms = Some(duration_ms);
                 info.turn_count = Some(turn_count);
                 info.tool_call_count = Some(tool_call_count);
@@ -586,7 +587,7 @@ fn handle_session_notification_inner(
                 "Subagent finished"
             );
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
-            let info_ref = agent.subagent_sessions.get(&child_session_id);
+            let info_ref = agent.session.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
             let is_background = info_ref.is_some_and(|s| s.is_background);
             let description = info_ref.map(|s| s.description.clone()).unwrap_or_default();
@@ -643,7 +644,7 @@ fn handle_session_notification_inner(
                 }
                 entry.invalidate_cache();
             }
-            if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+            if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                 info.finished = true;
                 info.status = Some(Arc::from(status));
                 info.error = error.map(Arc::from);
@@ -1119,7 +1120,7 @@ pub(super) fn handle_child_session_notification(
                 }
             }
             if let Some(tokens_after) = compact_tokens
-                && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
+                && let Some(info) = agent.session.subagent_sessions.get_mut(child_sid)
             {
                 info.tokens_used = Some(tokens_after);
                 if let Some(cw) = info.context_window_tokens.filter(|&cw| cw > 0) {

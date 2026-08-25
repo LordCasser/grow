@@ -3825,6 +3825,7 @@ impl AppView {
                     crate::views::dashboard::row::classify_top_level(agent)
                         != crate::views::dashboard::RowState::Idle
                         || agent
+                            .session
                             .subagent_sessions
                             .values()
                             .any(|info| !info.finished && info.workflow_run_id.is_none())

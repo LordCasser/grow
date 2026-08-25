@@ -6,7 +6,11 @@ use diagnostics::events::{
 use diagnostics::session_ctx::log_event;
 
 pub(super) fn log_dashboard_opened(app: &AppView) {
-    let subagents: usize = app.agents.values().map(|a| a.subagent_sessions.len()).sum();
+    let subagents: usize = app
+        .agents
+        .values()
+        .map(|a| a.session.subagent_sessions.len())
+        .sum();
     log_event(DashboardOpened {
         agents: app.agents.len(),
         subagents,

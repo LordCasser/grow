@@ -341,6 +341,7 @@ fn cancel_turn_with_running_subagents_shows_panel() {
     app.agents
         .get_mut(&id)
         .unwrap()
+        .session
         .subagent_sessions
         .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
 
@@ -481,10 +482,15 @@ fn goal_panel_choice_count_follows_subagents() {
 
     // Re-open with a running subagent → third entry appears.
     app.agents.get_mut(&id).unwrap().goal_interrupt_view = None;
-    app.agents.get_mut(&id).unwrap().subagent_sessions.insert(
-        "sa-1".into(),
-        crate::app::agent_view::test_fixtures::running_subagent_info("child-1"),
-    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .subagent_sessions
+        .insert(
+            "sa-1".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child-1"),
+        );
     let _ = dispatch(Action::CancelTurn, &mut app);
     assert_eq!(
         app.agents[&id]
@@ -660,6 +666,7 @@ fn cancel_turn_choice_after_subagents_finished_still_cancels() {
     app.agents
         .get_mut(&id)
         .unwrap()
+        .session
         .subagent_sessions
         .insert("child-1".into(), info);
 
@@ -687,6 +694,7 @@ fn cancel_turn_double_dispatch_falls_through_when_panel_open() {
     app.agents
         .get_mut(&id)
         .unwrap()
+        .session
         .subagent_sessions
         .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
 
@@ -1260,6 +1268,7 @@ fn always_stop_preference_skips_panel() {
     app.agents
         .get_mut(&id)
         .unwrap()
+        .session
         .subagent_sessions
         .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
 
@@ -1285,6 +1294,7 @@ fn always_continue_preference_skips_panel() {
     app.agents
         .get_mut(&id)
         .unwrap()
+        .session
         .subagent_sessions
         .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
 
@@ -1715,6 +1725,7 @@ fn build_rows_collapses_many_subagents() {
     for i in 0..9 {
         let info = make_test_subagent(&format!("c{i}"), &format!("sa{i}"));
         agent
+            .session
             .subagent_sessions
             .insert(info.child_session_id.to_string(), info);
     }
@@ -1744,6 +1755,7 @@ fn build_rows_seven_subagents_no_placeholder() {
     for i in 0..7 {
         let info = make_test_subagent(&format!("c{i}"), &format!("sa{i}"));
         agent
+            .session
             .subagent_sessions
             .insert(info.child_session_id.to_string(), info);
     }
@@ -1770,6 +1782,7 @@ fn build_rows_eight_subagents_no_placeholder() {
     for i in 0..8 {
         let info = make_test_subagent(&format!("c{i}"), &format!("sa{i}"));
         agent
+            .session
             .subagent_sessions
             .insert(info.child_session_id.to_string(), info);
     }
@@ -1797,6 +1810,7 @@ fn build_rows_sixteen_subagents_placeholder_counts_remainder() {
     for i in 0..16 {
         let info = make_test_subagent(&format!("c{i}"), &format!("sa{i}"));
         agent
+            .session
             .subagent_sessions
             .insert(info.child_session_id.to_string(), info);
     }
@@ -1827,6 +1841,7 @@ fn build_rows_with_roster_hides_subagent_rows() {
     for i in 0..3 {
         let info = make_test_subagent(&format!("c{i}"), &format!("sa{i}"));
         agent
+            .session
             .subagent_sessions
             .insert(info.child_session_id.to_string(), info);
     }
@@ -1868,6 +1883,7 @@ fn subagent_label_strips_control_characters() {
     let mut info = make_test_subagent("child-evil", "sa-evil");
     info.subagent_type = Arc::from("a\x1b[31mevil\x1b[0m");
     agent
+        .session
         .subagent_sessions
         .insert(info.child_session_id.to_string(), info);
     let rows = build_rows(

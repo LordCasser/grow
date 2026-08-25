@@ -254,7 +254,7 @@ pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) {
     agent.session.state = AgentState::TurnRunning;
     agent.session.current_prompt_id = Some("p1".into());
     for &child_id in child_ids {
-        agent.subagent_sessions.insert(child_id.into(), make_subagent_info(child_id));
+        agent.session.subagent_sessions.insert(child_id.into(), make_subagent_info(child_id));
     }
     simulate_task_output_wait_ids(agent, child_ids);
     assert!(agent.renders_parked());
@@ -929,7 +929,7 @@ pub(super) fn snapshot_after_subagent_spawn(
     child_sid: &str,
 ) -> SubagentSpawnSnapshot {
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    let info = agent.subagent_sessions.get(child_sid).unwrap();
+    let info = agent.session.subagent_sessions.get(child_sid).unwrap();
     let entry_id = info.scrollback_entry_id.expect("scrollback_entry_id after spawn");
     let entry = agent.scrollback.get_by_id(entry_id).unwrap();
     let RenderBlock::Subagent(sb) = &entry.block else {
@@ -959,7 +959,7 @@ pub(super) fn snapshot_after_subagent_finish(
     child_sid: &str,
 ) -> SubagentFinishSnapshot {
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    let info = agent.subagent_sessions.get(child_sid).unwrap();
+    let info = agent.session.subagent_sessions.get(child_sid).unwrap();
     let entry_id = info.scrollback_entry_id.expect("scrollback_entry_id after finish");
     let entry = agent.scrollback.get_by_id(entry_id).unwrap();
     let RenderBlock::Subagent(sb) = &entry.block else {
@@ -1341,7 +1341,7 @@ pub(super) fn make_app_with_parent_and_child(
 ) -> AppView {
     let mut app = make_app_with_agent(parent_sid);
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    agent.subagent_sessions.insert(child_sid.into(), make_subagent_info(child_sid));
+    agent.session.subagent_sessions.insert(child_sid.into(), make_subagent_info(child_sid));
     let child_view = make_agent(Some(child_sid));
     agent.subagent_views.insert(child_sid.into(), Box::new(child_view));
     app

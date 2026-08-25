@@ -226,6 +226,7 @@ fn build_local_rows(
             continue;
         }
         let mut subagents: Vec<&SubagentInfo> = agent
+            .session
             .subagent_sessions
             .values()
             .filter(|info| info.workflow_run_id.is_none())
@@ -494,7 +495,7 @@ fn is_empty_top_level(agent: &AgentView) -> bool {
     if !agent.session.pending_prompts.is_empty() {
         return false;
     }
-    if !agent.subagent_sessions.is_empty() || !agent.session.bg_tasks.is_empty() {
+    if !agent.session.subagent_sessions.is_empty() || !agent.session.bg_tasks.is_empty() {
         return false;
     }
     if super::peek::extract_first_user_message(agent).is_some() {
@@ -1160,6 +1161,7 @@ mod tests {
         let mut workflow_child = make_subagent("workflow-child", false, None);
         workflow_child.workflow_run_id = Some(Arc::from("wf_1"));
         agent
+            .session
             .subagent_sessions
             .insert("workflow-child".into(), workflow_child);
         agents.insert(AgentId(0), agent);

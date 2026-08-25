@@ -463,7 +463,7 @@ impl AgentView {
         let _title_row = frame.title_row;
         let inner = frame.content;
         let _border_style = Style::default().fg(border_color);
-        let info = self.subagent_sessions.get(child_sid);
+        let info = self.session.subagent_sessions.get(child_sid);
         let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
         let is_running = info.is_some_and(|s| s.is_running());
         let elapsed = info
@@ -1065,7 +1065,7 @@ impl AgentView {
                     task.kill_requested_at = None;
                 }
             }
-            for info in self.subagent_sessions.values_mut() {
+            for info in self.session.subagent_sessions.values_mut() {
                 if let Some(requested) = info.kill_requested_at
                     && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
                 {
@@ -1076,7 +1076,7 @@ impl AgentView {
         }
         self.tasks.sync_at(
             &self.session.bg_tasks,
-            &self.subagent_sessions,
+            &self.session.subagent_sessions,
             &self.session.scheduled_tasks,
             &self.session.workflow_runs,
             &self.session.private_workflow_runs,
@@ -1277,7 +1277,7 @@ impl AgentView {
         }
         let running_count = self.tasks.running_count(
             &self.session.bg_tasks,
-            &self.subagent_sessions,
+            &self.session.subagent_sessions,
             &self.session.scheduled_tasks,
             &self.session.workflow_runs,
         );
@@ -1303,6 +1303,7 @@ impl AgentView {
         }
         if let Some(ref goal) = self.session.goal_state {
             let active_subagent_tokens: u64 = self
+                .session
                 .subagent_sessions
                 .values()
                 .filter(|s| !s.finished && s.workflow_run_id.is_none())
@@ -1852,7 +1853,7 @@ impl AgentView {
                 bg_focused,
                 layout_cfg,
                 &self.session.bg_tasks,
-                &self.subagent_sessions,
+                &self.session.subagent_sessions,
                 &self.session.scheduled_tasks,
                 frame_stamp,
             );
@@ -2047,6 +2048,7 @@ impl AgentView {
                         child.question_view.as_ref().is_some_and(|question| {
                             question.source_session_id.as_deref() == Some(child_sid.as_str())
                         }) && self
+                            .session
                             .subagent_sessions
                             .get(child_sid)
                             .is_some_and(|info| !info.finished)
@@ -4138,6 +4140,7 @@ impl AgentView {
             let mut view = self.workflows_view.clone();
             view.normalize(&runs);
             let live: crate::views::workflows::WorkflowAgentLiveMap = self
+                .session
                 .subagent_sessions
                 .iter()
                 .filter(|(_, info)| info.workflow_run_id.is_some() && info.is_running())
@@ -4404,7 +4407,10 @@ mod behavior_status_tests {
                     .insert("child-1".into(), Box::new(child));
                 let mut info = super::super::test_fixtures::running_subagent_info("child-1");
                 info.finished = finished;
-                parent.subagent_sessions.insert("child-1".into(), info);
+                parent
+                    .session
+                    .subagent_sessions
+                    .insert("child-1".into(), info);
             }
             draw_text(&mut parent)
         };
