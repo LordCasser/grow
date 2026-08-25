@@ -1515,12 +1515,12 @@ fn set_plan_mode_no_session_starts_with_deferred_behavior() {
             .any(|effect| matches!(effect, Effect::CreateSession { .. }))
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert_eq!(agent.plan_mode_pending, Some(true));
+    assert_eq!(agent.session.plan_mode_pending, Some(true));
     assert_eq!(
-        agent.deferred_session_mode,
+        agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan)
     );
-    assert!(!agent.plan_mode_active);
+    assert!(!agent.session.plan_mode_active);
 }
 /// Non-idempotent ON transition: emits
 /// `Effect::SetSessionMode(plan)` and sets `plan_mode_pending`.
@@ -1539,7 +1539,7 @@ fn set_plan_mode_on_from_off_emits_set_session_mode() {
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
-        agent.plan_mode_pending,
+        agent.session.plan_mode_pending,
         Some(true),
         "optimistic pending must be set to Some(true)"
     );

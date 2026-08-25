@@ -1093,25 +1093,6 @@ pub struct AgentView {
     /// Y-range of the scrollable options area (set during render).
     /// Scroll events outside this range are ignored.
     pub(crate) question_scroll_region: Option<(u16, u16)>,
-    /// Whether the confirmed Behavior is Plan. Derived only from
-    /// `CurrentModeUpdate`; tool titles never change it.
-    pub(crate) plan_mode_active: bool,
-    /// Confirmed user-facing Behavior. Permission policy is tracked separately.
-    pub(crate) behavior_mode: tools::types::BehaviorId,
-    /// Optimistic Plan projection set immediately by a Behavior selection.
-    /// Cleared to `None` when `detect_plan_mode_change()` confirms real state.
-    /// Selectors use `plan_mode_pending.unwrap_or(plan_mode_active)` so the UI
-    /// remains responsive while waiting for ACP confirmation.
-    pub(crate) plan_mode_pending: Option<bool>,
-    /// Optimistic Behavior selection awaiting `CurrentModeUpdate`.
-    pub(crate) behavior_mode_pending: Option<tools::types::BehaviorId>,
-    pub(crate) plan_phase: Option<String>,
-    /// Session mode to apply once this agent's ACP session exists. Set when
-    /// the agent is spawned from the dashboard with `/plan` active (the
-    /// session does not exist yet, so the mode can't be sent immediately).
-    /// Consumed in the `SessionCreated` / `WorktreeSessionCreated` handlers,
-    /// mirroring `AgentSession.deferred_model_switch`.
-    pub(crate) deferred_session_mode: Option<tools::types::BehaviorId>,
     pub(crate) pending_extensions_fetch: bool,
     /// Whether this view was last rendered inside the dashboard's session
     /// overlay. Updated every frame by `draw`; read when building the

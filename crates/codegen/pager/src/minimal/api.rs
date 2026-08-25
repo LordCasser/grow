@@ -554,12 +554,14 @@ pub fn hovered_permission_item(v: &AgentView) -> Option<usize> {
 
 /// Confirmed or optimistically selected user-facing Behavior.
 pub fn effective_behavior_mode(v: &AgentView) -> BehaviorId {
-    v.behavior_mode_pending.unwrap_or(v.behavior_mode)
+    v.session
+        .behavior_mode_pending
+        .unwrap_or(v.session.behavior_mode)
 }
 
 /// Current Plan phase supplied by `CurrentModeUpdate` metadata.
 pub fn plan_phase(v: &AgentView) -> Option<&str> {
-    v.plan_phase.as_deref()
+    v.session.plan_phase.as_deref()
 }
 
 /// `AgentView::mcp_init_progress`.
@@ -1024,8 +1026,8 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
 /// Test-only setter for the confirmed user-facing Behavior.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: BehaviorId) {
-    v.behavior_mode = mode;
-    v.behavior_mode_pending = None;
+    v.session.behavior_mode = mode;
+    v.session.behavior_mode_pending = None;
 }
 
 /// Test-only mutable access to `PromptWidget::suggestions`.

@@ -1359,13 +1359,13 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         );
         return false;
     };
-    let previous = agent.behavior_mode;
-    agent.behavior_mode = mode;
+    let previous = agent.session.behavior_mode;
+    agent.session.behavior_mode = mode;
     if mode != BehaviorId::Workflow {
         agent.show_workflows = false;
     }
-    agent.behavior_mode_pending = None;
-    agent.plan_phase = cmu
+    agent.session.behavior_mode_pending = None;
+    agent.session.plan_phase = cmu
         .meta
         .as_ref()
         .and_then(|meta| meta.get("grow/planPhase"))
@@ -1391,10 +1391,10 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             agent.show_toast_for(message, std::time::Duration::from_millis(990));
         }
     }
-    let was_active = agent.plan_mode_active;
+    let was_active = agent.session.plan_mode_active;
     let now_active = mode.is_plan();
-    agent.plan_mode_active = now_active;
-    agent.plan_mode_pending = None;
+    agent.session.plan_mode_active = now_active;
+    agent.session.plan_mode_pending = None;
     if previous != mode || was_active != now_active {
         tracing::info!(
             mode_id = %cmu.current_mode_id.0,

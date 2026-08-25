@@ -1554,12 +1554,12 @@ pub(super) fn apply_pending_dispatch_config(
         // dashboard's `/model` choice wins.
         agent.session.deferred_model_switch = m.effort.map(|e| (m.id.clone(), Some(e)));
     }
-    agent.deferred_session_mode =
+    agent.session.deferred_session_mode =
         (pending_behavior != tools::types::BehaviorId::Normal).then_some(pending_behavior);
     if pending_behavior == tools::types::BehaviorId::Plan {
         // Optimistic so the Agent view reflects Plan immediately when opened,
         // before the ACP round-trip confirms it.
-        agent.plan_mode_pending = Some(true);
+        agent.session.plan_mode_pending = Some(true);
     }
 
     agent.session.permission_mode = match pending_permission {

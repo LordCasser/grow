@@ -1356,7 +1356,7 @@ pub(super) mod paste_key_tests {
     #[test]
     fn plan_nudge_suppressed_by_state_gates() {
         let mut agent = make_agent();
-        agent.plan_mode_pending = Some(true);
+        agent.session.plan_mode_pending = Some(true);
         arm_plan_nudge(&mut agent);
         assert!(
             agent.take_prompt_tip_signal().is_none(),

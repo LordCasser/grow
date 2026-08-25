@@ -477,7 +477,10 @@ pub fn peek_model_and_mode(
             Some(agent) => {
                 // Prefer the optimistic pending plan state over the
                 // confirmed one (matches `dispatch_cycle_mode`).
-                let plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+                let plan = agent
+                    .session
+                    .plan_mode_pending
+                    .unwrap_or(agent.session.plan_mode_active);
                 PeekModeBadge {
                     agent: Some(
                         agent

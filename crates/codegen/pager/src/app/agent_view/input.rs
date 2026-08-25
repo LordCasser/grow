@@ -1332,7 +1332,10 @@ impl AgentView {
     }
 
     pub(super) fn sync_command_selection_context(&mut self) {
-        let behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
+        let behavior = self
+            .session
+            .behavior_mode_pending
+            .unwrap_or(self.session.behavior_mode);
         let deep_research = self.behavior_supported(tools::types::BehaviorId::DeepResearch);
         let goal = self.behavior_supported(tools::types::BehaviorId::Goal);
         let auto_permission = self

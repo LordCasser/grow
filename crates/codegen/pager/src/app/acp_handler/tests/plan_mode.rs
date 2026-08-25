@@ -262,7 +262,7 @@
     #[test]
     fn tool_call_title_does_not_activate_plan_behavior() {
         let mut agent = make_agent(Some("s1"));
-        assert!(!agent.plan_mode_active);
+        assert!(!agent.session.plan_mode_active);
 
         let updates = [
             make_tool_call("plan_control"),
@@ -277,7 +277,7 @@
                 "tool-call title (not a CurrentModeUpdate) must not request refresh"
             );
             assert!(
-                !agent.plan_mode_active,
+                !agent.session.plan_mode_active,
                 "tool-call title must not flip plan mode"
             );
         }
@@ -287,7 +287,7 @@
     #[test]
     fn tool_call_title_does_not_deactivate_plan_behavior() {
         let mut agent = make_agent(Some("s1"));
-        agent.plan_mode_active = true;
+        agent.session.plan_mode_active = true;
 
         let updates = [
             make_tool_call("plan_control"),
@@ -298,7 +298,7 @@
             let refresh_needed = detect_plan_mode_change(update, &mut agent);
             assert!(!refresh_needed);
             assert!(
-                agent.plan_mode_active,
+                agent.session.plan_mode_active,
                 "tool-call title must not flip plan mode"
             );
         }
@@ -307,25 +307,25 @@
     #[test]
     fn current_mode_update_plan_activates_plan_mode() {
         let mut agent = make_agent(Some("s1"));
-        assert!(!agent.plan_mode_active);
+        assert!(!agent.session.plan_mode_active);
 
         let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
         assert!(refresh_needed);
-        assert!(agent.plan_mode_active);
-        assert!(agent.plan_mode_pending.is_none());
+        assert!(agent.session.plan_mode_active);
+        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     #[test]
     fn current_mode_update_normal_deactivates_plan_mode() {
         let mut agent = make_agent(Some("s1"));
-        agent.plan_mode_active = true;
-        agent.plan_mode_pending = Some(true);
+        agent.session.plan_mode_active = true;
+        agent.session.plan_mode_pending = Some(true);
 
         let refresh_needed =
             detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
         assert!(refresh_needed);
-        assert!(!agent.plan_mode_active);
-        assert!(agent.plan_mode_pending.is_none());
+        assert!(!agent.session.plan_mode_active);
+        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     /// Unknown mode ids are invalid control-plane data. They must not silently
@@ -333,12 +333,12 @@
     #[test]
     fn current_mode_update_unknown_id_is_ignored() {
         let mut agent = make_agent(Some("s1"));
-        agent.plan_mode_active = true;
+        agent.session.plan_mode_active = true;
 
         let refresh_needed =
             detect_plan_mode_change(&make_current_mode_update("browser_use"), &mut agent);
         assert!(!refresh_needed);
-        assert!(agent.plan_mode_active);
+        assert!(agent.session.plan_mode_active);
     }
 
     /// Idempotent CurrentModeUpdate still signals refresh because
@@ -346,16 +346,16 @@
     #[test]
     fn current_mode_update_signals_refresh_even_on_no_op_active_change() {
         let mut agent = make_agent(Some("s1"));
-        agent.plan_mode_active = true;
-        agent.plan_mode_pending = Some(true);
+        agent.session.plan_mode_active = true;
+        agent.session.plan_mode_pending = Some(true);
 
         let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
         assert!(
             refresh_needed,
             "CurrentModeUpdate must always signal refresh — pending was cleared"
         );
-        assert!(agent.plan_mode_active);
-        assert!(agent.plan_mode_pending.is_none());
+        assert!(agent.session.plan_mode_active);
+        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     /// The `grow/behaviorChange` meta of a `CurrentModeUpdate` mirrors the
@@ -395,17 +395,17 @@
     #[test]
     fn behavior_change_confirmation_required_is_display_only() {
         let mut agent = make_agent(Some("s1"));
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_mode_active = true;
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
 
         let refresh = detect_plan_mode_change(
             &behavior_change_update("confirmation_required", "plan", "normal"),
             &mut agent,
         );
         assert!(refresh);
-        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Plan);
-        assert!(agent.plan_mode_active);
-        assert!(agent.behavior_mode_pending.is_none());
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert!(agent.session.plan_mode_active);
+        assert!(agent.session.behavior_mode_pending.is_none());
         assert!(
             agent.mode_switch_banner.is_some(),
             "the warning banner must be visible"
@@ -421,9 +421,9 @@
     fn confirmation_required_does_not_release_held_fifo() {
         let mut app = make_app_with_agent("s1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_mode_active = true;
-        agent.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
+        agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("held until selection repeats".into());
 
         let changed = handle(
@@ -445,9 +445,9 @@
     fn applied_behavior_releases_held_fifo_under_new_identity() {
         let mut app = make_app_with_agent("s1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_mode_active = true;
-        agent.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
+        agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("run after selection applies".into());
 
         let changed = handle(
@@ -460,7 +460,7 @@
 
         assert!(changed);
         let agent = &app.agents[&AgentId(0)];
-        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(
             agent.session.state,
@@ -476,26 +476,26 @@
     #[test]
     fn behavior_change_applied_installs_target_identity() {
         let mut agent = make_agent(Some("s1"));
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_mode_active = true;
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
 
         let update = behavior_change_update("applied", "normal", "normal");
         detect_plan_mode_change(&update, &mut agent);
 
-        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
-        assert!(!agent.plan_mode_active);
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(!agent.session.plan_mode_active);
         assert!(behavior_mode_update_applied(&update));
     }
 
     #[test]
     fn leaving_workflow_closes_management_workspace_immediately() {
         let mut agent = make_agent(Some("s1"));
-        agent.behavior_mode = tools::types::BehaviorId::Workflow;
+        agent.session.behavior_mode = tools::types::BehaviorId::Workflow;
         agent.show_workflows = true;
 
         detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
 
-        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
         assert!(!agent.show_workflows);
     }
 
@@ -503,14 +503,14 @@
     #[test]
     fn behavior_change_rejected_retains_source_identity() {
         let mut agent = make_agent(Some("s1"));
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_mode_active = true;
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
 
         let update = behavior_change_update("rejected", "plan", "normal");
         detect_plan_mode_change(&update, &mut agent);
 
-        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Plan);
-        assert!(agent.plan_mode_active);
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
+        assert!(agent.session.plan_mode_active);
         assert!(!behavior_mode_update_applied(&update));
         assert!(agent.toast.is_some());
     }

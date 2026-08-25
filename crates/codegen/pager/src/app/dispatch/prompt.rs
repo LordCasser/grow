@@ -523,7 +523,10 @@ pub(super) fn dispatch_send_prompt_inner(
                         .iter()
                         .map(|(id, _info)| (id.0.to_string(), id.clone()))
                         .collect(),
-                    behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+                    behavior_mode: agent
+                        .session
+                        .behavior_mode_pending
+                        .unwrap_or(agent.session.behavior_mode),
                     workflows_available: agent
                         .behavior_supported(tools::types::BehaviorId::Workflow),
                     deep_research_available: agent

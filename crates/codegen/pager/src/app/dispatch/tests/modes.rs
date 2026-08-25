@@ -14,7 +14,7 @@ fn behavior_picker_selection_changes_behavior_without_touching_permission() {
 
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
-        agent.behavior_mode_pending,
+        agent.session.behavior_mode_pending,
         Some(tools::types::BehaviorId::Plan)
     );
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
@@ -175,8 +175,8 @@ fn accept_word_select_tip_no_op_when_tip_not_showing() {
 fn slash_plan_no_args_not_in_plan_enters_plan_mode() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    assert!(!app.agents[&id].plan_mode_active);
-    assert!(app.agents[&id].plan_mode_pending.is_none());
+    assert!(!app.agents[&id].session.plan_mode_active);
+    assert!(app.agents[&id].session.plan_mode_pending.is_none());
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
 
@@ -187,7 +187,7 @@ fn slash_plan_no_args_not_in_plan_enters_plan_mode() {
         "expected SetSessionMode(plan), got: {effects:?}"
     );
     // Optimistic pending state should be set.
-    assert_eq!(app.agents[&id].plan_mode_pending, Some(true));
+    assert_eq!(app.agents[&id].session.plan_mode_pending, Some(true));
 }
 
 #[test]
@@ -195,8 +195,8 @@ fn slash_plan_no_args_already_in_plan_shows_plan() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.plan_mode_active = true;
-    agent.behavior_mode = tools::types::BehaviorId::Plan;
+    agent.session.plan_mode_active = true;
+    agent.session.behavior_mode = tools::types::BehaviorId::Plan;
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
 
@@ -225,14 +225,14 @@ fn slash_plan_with_args_not_in_plan_enters_and_sends_prompt() {
         ),
         "expected SetModeThenPrompt(plan, \"add auth to the app\"), got: {effects:?}"
     );
-    assert_eq!(app.agents[&id].plan_mode_pending, Some(true));
+    assert_eq!(app.agents[&id].session.plan_mode_pending, Some(true));
 }
 
 #[test]
 fn slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().plan_mode_active = true;
+    app.agents.get_mut(&id).unwrap().session.plan_mode_active = true;
 
     let effects = dispatch(
         Action::SendPrompt("/plan add auth to the app".into()),
@@ -255,8 +255,8 @@ fn repeated_behavior_selection_reissues_the_same_target() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.behavior_mode_pending = None;
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.behavior_mode_pending = None;
     }
 
     let effects = dispatch(
@@ -273,7 +273,7 @@ fn repeated_behavior_selection_reissues_the_same_target() {
         "the repeated user selection must reach the Shell unchanged: {effects:?}"
     );
     assert_eq!(
-        agent.behavior_mode_pending,
+        agent.session.behavior_mode_pending,
         Some(tools::types::BehaviorId::Normal)
     );
 }
@@ -288,8 +288,8 @@ fn repeated_behavior_selection_reissues_the_same_target() {
 fn set_plan_mode_mutates_only_active_agent_not_others() {
     let mut app = test_app_with_agent();
     insert_placeholder_agent(&mut app, AgentId(1));
-    assert!(app.agents[&AgentId(0)].plan_mode_pending.is_none());
-    assert!(app.agents[&AgentId(1)].plan_mode_pending.is_none());
+    assert!(app.agents[&AgentId(0)].session.plan_mode_pending.is_none());
+    assert!(app.agents[&AgentId(1)].session.plan_mode_pending.is_none());
 
     let _ = dispatch(
         Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
@@ -297,16 +297,16 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
     );
 
     assert_eq!(
-        app.agents[&AgentId(0)].plan_mode_pending,
+        app.agents[&AgentId(0)].session.plan_mode_pending,
         Some(true),
         "active agent must have optimistic plan_mode_pending = Some(true)",
     );
     assert!(
-        app.agents[&AgentId(1)].plan_mode_pending.is_none(),
+        app.agents[&AgentId(1)].session.plan_mode_pending.is_none(),
         "non-active agent must NOT receive the plan_mode pending state",
     );
     assert!(
-        !app.agents[&AgentId(1)].plan_mode_active,
+        !app.agents[&AgentId(1)].session.plan_mode_active,
         "non-active agent's confirmed plan_mode_active must stay false",
     );
 }
@@ -472,7 +472,11 @@ fn set_session_always_approve_notifies_without_changing_default() {
 #[test]
 fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().plan_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .plan_mode_active = true;
 
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
@@ -488,7 +492,11 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
 
     // Pending (optimistic) plan state counts too — same as the flag renderer.
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().plan_mode_pending = Some(true);
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .plan_mode_pending = Some(true);
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
@@ -523,7 +531,11 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
 fn set_permission_mode_always_approve_under_plan_uses_plan_aware_toast() {
     use crate::app::actions::PermissionModeKind;
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().plan_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .plan_mode_active = true;
 
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),

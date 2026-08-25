@@ -928,7 +928,7 @@ fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.session_id = Some("sess-1".into());
-        agent.behavior_mode = tools::types::BehaviorId::Goal;
+        agent.session.behavior_mode = tools::types::BehaviorId::Goal;
         agent.goal_state = None;
         agent.prompt.sync_acp_commands(
             &agent.session.available_commands,
@@ -951,7 +951,7 @@ fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
     assert_eq!(app.agents[&id].scrollback.len(), before + 1);
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     assert_eq!(
-        app.agents[&id].behavior_mode,
+        app.agents[&id].session.behavior_mode,
         tools::types::BehaviorId::Goal
     );
 }
@@ -1585,7 +1585,10 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                 );
             }
             ("behavior", SettingKind::Enum { default, .. }) => {
-                let effective = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+                let effective = agent
+                    .session
+                    .behavior_mode_pending
+                    .unwrap_or(agent.session.behavior_mode);
                 let expected = effective.as_id();
                 assert_eq!(
                     *default, expected,

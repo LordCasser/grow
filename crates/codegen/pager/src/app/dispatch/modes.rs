@@ -47,8 +47,8 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         agent.show_toast("No active session");
         return vec![];
     };
-    agent.behavior_mode_pending = Some(mode);
-    agent.plan_mode_pending = Some(mode.is_plan());
+    agent.session.behavior_mode_pending = Some(mode);
+    agent.session.plan_mode_pending = Some(mode.is_plan());
     let mode_id = acp::SessionModeId::new(mode.as_id());
     if let Some(prompt) = prompt {
         let skill_token_ranges = agent
@@ -114,7 +114,10 @@ pub(super) fn dispatch_set_behavior_mode(
         agent.show_toast(&reason);
         return vec![];
     }
-    let effective = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+    let effective = agent
+        .session
+        .behavior_mode_pending
+        .unwrap_or(agent.session.behavior_mode);
     if effective == mode {
         agent.show_toast("Behavior is already selected");
         return vec![];
@@ -130,13 +133,14 @@ pub(super) fn dispatch_set_behavior_mode(
             .ephemeral_tip
             .clear(crate::tips::plan_nudge::PLAN_NUDGE_KEY);
     }
-    agent.behavior_mode_pending = Some(mode);
-    agent.plan_mode_pending = Some(mode.is_plan());
+    agent.session.behavior_mode_pending = Some(mode);
+    agent.session.plan_mode_pending = Some(mode.is_plan());
     agent.show_mode_switch_banner(mode.display_label());
 
     let session_id = agent.session.session_id.clone();
     if session_id.is_none() {
-        agent.deferred_session_mode = (mode != tools::types::BehaviorId::Normal).then_some(mode);
+        agent.session.deferred_session_mode =
+            (mode != tools::types::BehaviorId::Normal).then_some(mode);
     }
     refresh_open_settings_modals(app);
     let Some(session_id) = session_id else {
@@ -318,7 +322,9 @@ pub(super) fn set_permission_mode(
         .map(|a| {
             (
                 a.session.session_id.clone(),
-                a.plan_mode_pending.unwrap_or(a.plan_mode_active),
+                a.session
+                    .plan_mode_pending
+                    .unwrap_or(a.session.plan_mode_active),
             )
         })
         .unwrap_or((None, false));

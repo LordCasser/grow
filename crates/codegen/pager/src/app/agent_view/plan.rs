@@ -64,7 +64,8 @@ impl AgentView {
         &self,
         appearance: &crate::appearance::AppearanceConfig,
     ) -> bool {
-        (self.plan_mode_active || appearance.show_plan_chip) && self.plan_preview_available()
+        (self.session.plan_mode_active || appearance.show_plan_chip)
+            && self.plan_preview_available()
     }
     fn inline_plan_content(&self) -> Option<&str> {
         self.plan_approval_view
@@ -189,7 +190,7 @@ impl AgentView {
             return InputOutcome::Changed;
         };
         pav.send_abandoned();
-        self.plan_mode_pending = Some(false);
+        self.session.plan_mode_pending = Some(false);
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
@@ -697,7 +698,7 @@ mod plan_chip_tests {
     #[test]
     fn plan_chip_hidden_after_exit_by_default() {
         let mut agent = make_agent();
-        agent.plan_mode_active = false;
+        agent.session.plan_mode_active = false;
         let appearance = AppearanceConfig::default();
         assert!(!appearance.show_plan_chip);
         assert!(!agent.should_show_plan_chip(&appearance));
@@ -705,14 +706,14 @@ mod plan_chip_tests {
     #[test]
     fn plan_chip_visible_while_plan_mode_active() {
         let mut agent = make_agent();
-        agent.plan_mode_active = true;
+        agent.session.plan_mode_active = true;
         let appearance = AppearanceConfig::default();
         assert!(!agent.should_show_plan_chip(&appearance));
     }
     #[test]
     fn plan_chip_visible_when_config_overrides() {
         let mut agent = make_agent();
-        agent.plan_mode_active = false;
+        agent.session.plan_mode_active = false;
         let appearance = AppearanceConfig {
             show_plan_chip: true,
             ..Default::default()

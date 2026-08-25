@@ -726,7 +726,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent.session.models = app.models.clone();
         }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
-        let deferred_mode = agent.deferred_session_mode.take();
+        let deferred_mode = agent.session.deferred_session_mode.take();
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
@@ -823,7 +823,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             worktree_path.display()
         )));
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
-        let deferred_mode = agent.deferred_session_mode.take();
+        let deferred_mode = agent.session.deferred_session_mode.take();
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;

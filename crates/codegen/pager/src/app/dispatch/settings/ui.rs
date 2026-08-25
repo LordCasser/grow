@@ -77,7 +77,10 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 permission_mode: agent.session.permission_mode(),
                 current_model_id: default_model_id.clone(),
                 available_models: default_model_catalog.clone(),
-                behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+                behavior_mode: agent
+                    .session
+                    .behavior_mode_pending
+                    .unwrap_or(agent.session.behavior_mode),
                 workflows_available,
                 deep_research_available,
                 goal_available,
@@ -216,7 +219,10 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         permission_mode: agent.session.permission_mode(),
         current_model_id: default_model_id,
         available_models: default_model_catalog,
-        behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+        behavior_mode: agent
+            .session
+            .behavior_mode_pending
+            .unwrap_or(agent.session.behavior_mode),
         workflows_available: agent.behavior_supported(tools::types::BehaviorId::Workflow),
         deep_research_available: agent.behavior_supported(tools::types::BehaviorId::DeepResearch),
         goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
@@ -631,7 +637,10 @@ fn agent_behavior_mode(app: &AppView) -> tools::types::BehaviorId {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+        return agent
+            .session
+            .behavior_mode_pending
+            .unwrap_or(agent.session.behavior_mode);
     }
     tools::types::BehaviorId::Normal
 }

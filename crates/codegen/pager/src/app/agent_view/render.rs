@@ -775,8 +775,14 @@ impl AgentView {
             .models
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
-        let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
-        let effective_behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
+        let effective_plan = self
+            .session
+            .plan_mode_pending
+            .unwrap_or(self.session.plan_mode_active);
+        let effective_behavior = self
+            .session
+            .behavior_mode_pending
+            .unwrap_or(self.session.behavior_mode);
         // Expiration is reduced by AppView's UI deadline clock. Rendering is
         // read-only with respect to lifecycle and transient input state.
         let leader_active = self
@@ -2178,7 +2184,7 @@ impl AgentView {
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
         let behavior_label = if effective_behavior == tools::types::BehaviorId::Plan {
-            match self.plan_phase.as_deref() {
+            match self.session.plan_phase.as_deref() {
                 Some("awaiting_approval") => "plan · awaiting approval",
                 Some("executing") => "plan · executing",
                 Some("amending") => "plan · amending",
@@ -4341,7 +4347,7 @@ mod behavior_status_tests {
     #[test]
     fn prompt_status_places_behavior_before_permission() {
         let mut agent = make_agent();
-        agent.behavior_mode = tools::types::BehaviorId::Workflow;
+        agent.session.behavior_mode = tools::types::BehaviorId::Workflow;
         agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         let text = draw_text(&mut agent);
         let behavior = text.find("workflow").expect("workflow Behavior status");
@@ -4354,8 +4360,8 @@ mod behavior_status_tests {
     #[test]
     fn prompt_status_shows_the_active_plan_phase() {
         let mut agent = make_agent();
-        agent.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.plan_phase = Some("executing".into());
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_phase = Some("executing".into());
         let text = draw_text(&mut agent);
         assert!(
             text.contains("plan · executing"),

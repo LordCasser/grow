@@ -464,10 +464,10 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
         "effort must be stashed for the shell",
     );
     assert_eq!(
-        agent.deferred_session_mode,
+        agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.plan_mode_pending, Some(true));
+    assert_eq!(agent.session.plan_mode_pending, Some(true));
 }
 /// Images pasted into the dispatch input survive a worktree dispatch:
 /// stashed when the dialog opens, replayed onto the worktree agent's queued
@@ -1138,7 +1138,7 @@ fn dashboard_behavior_and_permission_are_staged_independently() {
     let _ = dispatch_dashboard_dispatch(&mut app, "clarify this".into(), false);
     let spawned = app.agents.values().next().unwrap();
     assert_eq!(
-        spawned.deferred_session_mode,
+        spawned.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Clarify)
     );
     assert!(spawned.session.is_always_approve());
@@ -1196,7 +1196,7 @@ fn dashboard_plan_description_transforms_snapshot_and_chip_ranges() {
             .all(|chip| chip.range.end <= queued.text.len())
     );
     assert_eq!(
-        agent.deferred_session_mode,
+        agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan)
     );
 }
@@ -1511,10 +1511,10 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
         "effort must be stashed for the shell"
     );
     assert_eq!(
-        agent.deferred_session_mode,
+        agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.plan_mode_pending, Some(true));
+    assert_eq!(agent.session.plan_mode_pending, Some(true));
 }
 /// The `[+ New Agent]` button path (`DashboardCreateNewAgentWithDetail`,
 /// no queued prompt) applies the same staged model + mode as the dispatch
@@ -1552,10 +1552,10 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         "effort must be stashed for the shell"
     );
     assert_eq!(
-        agent.deferred_session_mode,
+        agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.plan_mode_pending, Some(true));
+    assert_eq!(agent.session.plan_mode_pending, Some(true));
 }
 /// The deferred plan `BehaviorId` is emitted (and cleared) once the
 /// session exists, mirroring the deferred model switch.
@@ -1566,7 +1566,11 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     let id = AgentId(0);
     let session_id: acp::SessionId = "new-session".into();
     app.agents.get_mut(&id).unwrap().session.session_id = None;
-    app.agents.get_mut(&id).unwrap().deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .deferred_session_mode = Some(tools::types::BehaviorId::Plan);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: id,
@@ -1576,7 +1580,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
         &mut app,
     );
     assert!(
-        app.agents[&id].deferred_session_mode.is_none(),
+        app.agents[&id].session.deferred_session_mode.is_none(),
         "deferred mode must be consumed"
     );
     assert!(
