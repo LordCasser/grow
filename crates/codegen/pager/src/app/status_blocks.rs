@@ -49,10 +49,17 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     let mut rows: Vec<String> = Vec::new();
 
     let mut workflows: Vec<_> = agent
+        .session
         .workflow_runs
         .iter()
         .map(|run| (run, false))
-        .chain(agent.private_workflow_runs.iter().map(|run| (run, true)))
+        .chain(
+            agent
+                .session
+                .private_workflow_runs
+                .iter()
+                .map(|run| (run, true)),
+        )
         .collect();
     workflows.sort_by(|(a, _), (b, _)| {
         b.is_active()
@@ -420,8 +427,9 @@ mod tests {
         use crate::app::agent_view::test_agent_view;
         let mut agent = test_agent_view(Some("tasks-sess"), "/tmp".into());
         agent
+            .session
             .private_workflow_runs
-            .push(crate::views::workflows::WorkflowRunSnapshot {
+            .push(crate::app::agent::WorkflowRunSnapshot {
                 run_id: "wf_private".into(),
                 definition_id: None,
                 definition_scope: None,
@@ -433,7 +441,7 @@ mod tests {
                 builtin: false,
                 phases: Vec::new(),
                 current_phase: Some("Research".into()),
-                agents: vec![crate::views::workflows::WorkflowAgentRowView {
+                agents: vec![crate::app::agent::WorkflowAgentRowView {
                     agent_id: "a1".into(),
                     label: "researcher-0".into(),
                     phase: None,

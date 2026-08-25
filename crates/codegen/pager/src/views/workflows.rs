@@ -2,22 +2,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::app::agent::WorkflowRunSnapshot;
 use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::agent_status::format_tokens_compact;
 use crate::views::goal_detail::{format_elapsed, strip_control_chars, truncate_to_width};
 use crate::views::picker::{PickerRow, render_picker_row};
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowAgentRowView {
-    pub agent_id: String,
-    pub label: String,
-    pub phase: Option<String>,
-    pub model: Option<String>,
-    pub state: String,
-    pub tokens_used: u64,
-    pub duration_ms: u64,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowAgentLiveStatus {
@@ -47,100 +37,7 @@ pub struct WorkflowDiagnosticSnapshot {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct WorkflowRunSnapshot {
-    pub run_id: String,
-    pub definition_id: Option<String>,
-    pub definition_scope: Option<String>,
-    pub definition_hash: Option<String>,
-    pub name: String,
-    pub objective: String,
-    pub status: String,
-    pub management_available: bool,
-    pub builtin: bool,
-    pub phases: Vec<(String, String)>,
-    pub current_phase: Option<String>,
-    pub agents: Vec<WorkflowAgentRowView>,
-    pub agent_budget: Option<u64>,
-    pub agents_used: u64,
-    pub agents_remaining: Option<u64>,
-    pub agent_usage_incomplete: bool,
-    pub active_agents: u32,
-    pub elapsed_ms: u64,
-    pub received_at: std::time::Instant,
-    pub pause_message: Option<String>,
-    pub result_summary: Option<String>,
-}
-
 impl WorkflowRunSnapshot {
-    pub fn is_active(&self) -> bool {
-        self.status == "active"
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.status.as_str(),
-            "interrupted" | "complete" | "failed" | "cancelled"
-        )
-    }
-
-    pub fn can_pause(&self) -> bool {
-        self.management_available && self.is_active()
-    }
-
-    pub fn can_resume(&self) -> bool {
-        if !self.management_available {
-            return false;
-        }
-        matches!(
-            self.status.as_str(),
-            "user_paused"
-                | "back_off_paused"
-                | "no_progress_paused"
-                | "infra_paused"
-                | "blocked"
-                | "failed"
-        )
-    }
-
-    pub fn can_stop(&self) -> bool {
-        self.management_available && !self.is_terminal()
-    }
-
-    pub fn active_agent_count(&self) -> usize {
-        self.agents.iter().filter(|a| a.state == "running").count()
-    }
-
-    pub fn live_elapsed_ms_at(&self, now: std::time::Instant) -> u64 {
-        let base = self.elapsed_ms;
-        if self.is_active() {
-            base.saturating_add(now.saturating_duration_since(self.received_at).as_millis() as u64)
-        } else {
-            base
-        }
-    }
-
-    pub fn live_elapsed_ms(&self) -> u64 {
-        self.live_elapsed_ms_at(std::time::Instant::now())
-    }
-
-    pub fn agents_in_phase(&self, phase: Option<&str>) -> Vec<&WorkflowAgentRowView> {
-        match phase {
-            Some(title) => self
-                .agents
-                .iter()
-                .filter(|a| a.phase.as_deref() == Some(title))
-                .collect(),
-            None => self.agents.iter().collect(),
-        }
-    }
-
-    pub fn phase_has_running_agents(&self, phase: &str) -> bool {
-        self.agents
-            .iter()
-            .any(|a| a.state == "running" && a.phase.as_deref() == Some(phase))
-    }
-
     pub fn effective_active_phase(&self) -> Option<String> {
         phase_rail(self)
             .iter()
@@ -150,7 +47,7 @@ impl WorkflowRunSnapshot {
             .or_else(|| self.current_phase.clone())
     }
 
-    fn done_agents(&self) -> usize {
+    pub(crate) fn done_agents(&self) -> usize {
         self.agents.iter().filter(|a| a.state != "running").count()
     }
 }
@@ -1426,6 +1323,7 @@ fn render_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::agent::WorkflowAgentRowView;
 
     pub(crate) fn make_run(run_id: &str, name: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {

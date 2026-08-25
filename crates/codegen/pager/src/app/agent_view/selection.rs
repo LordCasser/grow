@@ -1817,8 +1817,8 @@ mod tests {
 
     #[test]
     fn workflow_double_click_opens_matching_run_id_and_closes_goal_detail() {
+        use crate::app::agent::WorkflowRunSnapshot;
         use crate::scrollback::blocks::WorkflowBlock;
-        use crate::views::workflows::WorkflowRunSnapshot;
 
         let run = |run_id: &str| WorkflowRunSnapshot {
             run_id: run_id.to_owned(),
@@ -1844,7 +1844,7 @@ mod tests {
             result_summary: None,
         };
         let mut agent = make_agent();
-        agent.workflow_runs = vec![run("wf_other"), run("wf_target")];
+        agent.session.workflow_runs = vec![run("wf_other"), run("wf_target")];
         agent.show_goal_detail = true;
         agent
             .scrollback

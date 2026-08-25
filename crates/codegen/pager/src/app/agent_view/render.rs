@@ -1078,8 +1078,8 @@ impl AgentView {
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
-            &self.workflow_runs,
-            &self.private_workflow_runs,
+            &self.session.workflow_runs,
+            &self.session.private_workflow_runs,
             frame_stamp,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
@@ -1279,7 +1279,7 @@ impl AgentView {
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
-            &self.workflow_runs,
+            &self.session.workflow_runs,
         );
         if running_count > 0 {
             let spinner_frames = crate::glyphs::dot_spinner_frames();
@@ -2239,6 +2239,7 @@ impl AgentView {
             });
         }
         let active_workflow_runs = self
+            .session
             .workflow_runs
             .iter()
             .filter(|run| !run.is_terminal())

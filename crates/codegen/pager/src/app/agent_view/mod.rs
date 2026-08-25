@@ -532,8 +532,8 @@ pub(crate) struct SessionReload {
     /// Pre-outage todo list (replayed Plan updates overwrite the live pane).
     todo: TodoPane,
     workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
-    workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
-    private_workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    workflow_runs: Vec<crate::app::agent::WorkflowRunSnapshot>,
+    private_workflow_runs: Vec<crate::app::agent::WorkflowRunSnapshot>,
     workflow_run_revisions: std::collections::HashMap<String, u64>,
     cleared_workflow_runs: std::collections::HashSet<String>,
     /// Reconnect cursor as of window open, restored with the stash so a
@@ -697,14 +697,6 @@ pub struct AgentView {
     /// View-only scroll state for the Goal detail overlay.
     pub(crate) goal_detail_renderer: crate::views::goal_detail::GoalDetailRenderer,
     pub workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
-    pub workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
-    /// Active private workflow runs (deep research). These are deliberately
-    /// kept out of [`Self::workflow_runs`]: they must render running status
-    /// (transcript block, tasks pane, activity projection) but never appear
-    /// in any public Workflow management surface.
-    pub private_workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
-    pub workflow_run_revisions: std::collections::HashMap<String, u64>,
-    pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
     /// Live `stop`/`stop_failure` hook runs held for the turn's terminal
@@ -2104,7 +2096,7 @@ pub(crate) mod test_fixtures {
             &agent.session.bg_tasks,
             &agent.subagent_sessions,
             &agent.session.scheduled_tasks,
-            &agent.workflow_runs,
+            &agent.session.workflow_runs,
         );
     }
     pub fn add_running_execute(agent: &mut AgentView) {
@@ -2378,8 +2370,8 @@ pub(crate) mod test_fixtures {
         assert!(agent.follow_up_seen.is_empty());
         assert_eq!(agent.follow_up_next_gen, 0);
     }
-    fn wf_snapshot(run_id: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
-        crate::views::workflows::WorkflowRunSnapshot {
+    fn wf_snapshot(run_id: &str, status: &str) -> crate::app::agent::WorkflowRunSnapshot {
+        crate::app::agent::WorkflowRunSnapshot {
             run_id: run_id.to_string(),
             definition_id: None,
             definition_scope: None,
@@ -2412,34 +2404,43 @@ pub(crate) mod test_fixtures {
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::Workflow(block));
         agent.workflow_blocks.insert("wf-1".to_string(), block_id);
-        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 4);
-        agent.cleared_workflow_runs.insert("wf-old".to_string());
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "active"));
+        agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 4);
+        agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-old".to_string());
         agent.begin_session_reload(1);
         assert!(
-            agent.workflow_runs.is_empty(),
+            agent.session.workflow_runs.is_empty(),
             "staging clears the run list"
         );
         assert!(
             agent.workflow_blocks.is_empty(),
             "staging clears the block map"
         );
-        assert!(agent.workflow_run_revisions.is_empty());
-        assert!(agent.cleared_workflow_runs.is_empty());
+        assert!(agent.session.workflow_run_revisions.is_empty());
+        assert!(agent.session.cleared_workflow_runs.is_empty());
         assert!(agent.finish_session_reload(1, false));
         assert_eq!(
-            agent.workflow_runs.len(),
+            agent.session.workflow_runs.len(),
             1,
             "run list restored on failed reload"
         );
-        assert_eq!(agent.workflow_runs[0].run_id, "wf-1");
+        assert_eq!(agent.session.workflow_runs[0].run_id, "wf-1");
         assert_eq!(
-            agent.workflow_run_revisions.get("wf-1").copied(),
+            agent.session.workflow_run_revisions.get("wf-1").copied(),
             Some(4),
             "revision highwater restored so a stale re-delivery is still deduped"
         );
         assert!(
-            agent.cleared_workflow_runs.contains("wf-old"),
+            agent.session.cleared_workflow_runs.contains("wf-old"),
             "cleared tombstone set restored"
         );
         assert_eq!(
@@ -2455,18 +2456,27 @@ pub(crate) mod test_fixtures {
     #[test]
     fn reconnect_reload_success_drops_stashed_workflow_projection() {
         let mut agent = make_agent();
-        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 2);
-        agent.cleared_workflow_runs.insert("wf-old".to_string());
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "active"));
+        agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 2);
+        agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-old".to_string());
         agent.begin_session_reload(1);
         agent.mark_reload_replay_seen();
         assert!(agent.finish_session_reload(1, true));
         assert!(
-            agent.workflow_runs.is_empty(),
+            agent.session.workflow_runs.is_empty(),
             "success keeps the rebuilt (here empty) run list, not the stash"
         );
-        assert!(agent.workflow_run_revisions.is_empty());
-        assert!(agent.cleared_workflow_runs.is_empty());
+        assert!(agent.session.workflow_run_revisions.is_empty());
+        assert!(agent.session.cleared_workflow_runs.is_empty());
     }
     /// A load response reports an actor-owned regular foreground turn. Prompt
     /// id spelling is identity only: every reported live id is adoptable, and

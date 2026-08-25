@@ -172,6 +172,7 @@ impl AgentView {
             .filter(|s| s.is_running() && s.workflow_run_id.is_none())
             .count();
         watchers.workflows = self
+            .session
             .workflow_runs
             .iter()
             .filter(|run| run.is_active())
@@ -557,8 +558,8 @@ mod queue_steering_tests {
 #[cfg(test)]
 mod watcher_tests {
     use super::super::{test_agent_view, test_fixtures};
+    use crate::app::agent::WorkflowRunSnapshot;
     use crate::views::turn_status::Watchers;
-    use crate::views::workflows::WorkflowRunSnapshot;
 
     fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
@@ -640,7 +641,7 @@ mod watcher_tests {
     #[test]
     fn workflow_children_coalesce_into_one_workflow_watcher() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.session.workflow_runs.push(active_workflow("wf-1"));
         let mut child_a = test_fixtures::running_subagent_info("child-a");
         child_a.workflow_run_id = Some("wf-1".into());
         let mut child_b = test_fixtures::running_subagent_info("child-b");
@@ -663,7 +664,7 @@ mod watcher_tests {
     #[test]
     fn standalone_subagent_and_workflow_remain_distinct_watchers() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.session.workflow_runs.push(active_workflow("wf-1"));
         let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
         workflow_child.workflow_run_id = Some("wf-1".into());
         agent

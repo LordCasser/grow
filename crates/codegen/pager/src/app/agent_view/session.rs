@@ -36,7 +36,7 @@ impl AgentView {
             tools::types::BehaviorId::Workflow => AgentSession::bootstrap_workflow_support(
                 self.session.available_tools.as_ref(),
                 &self.session.available_commands,
-                !self.workflow_runs.is_empty(),
+                !self.session.workflow_runs.is_empty(),
             ),
             tools::types::BehaviorId::DeepResearch => self
                 .session
@@ -178,10 +178,6 @@ impl AgentView {
             modal_hovered_key: None,
             goal_detail_renderer: crate::views::goal_detail::GoalDetailRenderer::default(),
             workflow_blocks: std::collections::HashMap::new(),
-            workflow_runs: Vec::new(),
-            private_workflow_runs: Vec::new(),
-            workflow_run_revisions: std::collections::HashMap::new(),
-            cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
             pending_stop_hooks: None,
@@ -454,10 +450,10 @@ impl AgentView {
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.workflow_blocks.clear();
-        self.workflow_run_revisions.clear();
-        self.cleared_workflow_runs.clear();
-        self.workflow_runs.clear();
-        self.private_workflow_runs.clear();
+        self.session.workflow_run_revisions.clear();
+        self.session.cleared_workflow_runs.clear();
+        self.session.workflow_runs.clear();
+        self.session.private_workflow_runs.clear();
     }
     /// Open a reconnect reload window: stash the current transcript/tracker
     /// and point the live fields at fresh state for the incoming
@@ -502,10 +498,10 @@ impl AgentView {
             ),
             todo: std::mem::take(&mut self.todo),
             workflow_blocks: std::mem::take(&mut self.workflow_blocks),
-            workflow_runs: std::mem::take(&mut self.workflow_runs),
-            private_workflow_runs: std::mem::take(&mut self.private_workflow_runs),
-            workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
-            cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            workflow_runs: std::mem::take(&mut self.session.workflow_runs),
+            private_workflow_runs: std::mem::take(&mut self.session.private_workflow_runs),
+            workflow_run_revisions: std::mem::take(&mut self.session.workflow_run_revisions),
+            cleared_workflow_runs: std::mem::take(&mut self.session.cleared_workflow_runs),
             last_seen_event_id: self.session.last_seen_event_id.clone(),
             last_applied_event_seq: self.session.last_applied_event_seq,
             last_applied_grow_event_seq: self.session.last_applied_grow_event_seq,
@@ -653,10 +649,11 @@ impl AgentView {
             self.scrollback.append_entries_from(tail);
             self.workflow_blocks.extend(reload.workflow_blocks);
             {
-                let mut live_by_id: HashMap<String, _> = std::mem::take(&mut self.workflow_runs)
-                    .into_iter()
-                    .map(|run| (run.run_id.clone(), run))
-                    .collect();
+                let mut live_by_id: HashMap<String, _> =
+                    std::mem::take(&mut self.session.workflow_runs)
+                        .into_iter()
+                        .map(|run| (run.run_id.clone(), run))
+                        .collect();
                 let mut merged = Vec::with_capacity(reload.workflow_runs.len() + live_by_id.len());
                 for run in reload.workflow_runs {
                     if let Some(live) = live_by_id.remove(&run.run_id) {
@@ -668,14 +665,15 @@ impl AgentView {
                 let mut live_only: Vec<_> = live_by_id.into_values().collect();
                 live_only.sort_by_key(|run| run.received_at);
                 merged.extend(live_only);
-                self.cleared_workflow_runs
+                self.session
+                    .cleared_workflow_runs
                     .extend(reload.cleared_workflow_runs);
-                merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
-                self.workflow_runs = merged;
+                merged.retain(|run| !self.session.cleared_workflow_runs.contains(&run.run_id));
+                self.session.workflow_runs = merged;
             }
             {
                 let mut live_by_id: HashMap<String, _> =
-                    std::mem::take(&mut self.private_workflow_runs)
+                    std::mem::take(&mut self.session.private_workflow_runs)
                         .into_iter()
                         .map(|run| (run.run_id.clone(), run))
                         .collect();
@@ -691,11 +689,12 @@ impl AgentView {
                 let mut live_only: Vec<_> = live_by_id.into_values().collect();
                 live_only.sort_by_key(|run| run.received_at);
                 merged.extend(live_only);
-                merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
-                self.private_workflow_runs = merged;
+                merged.retain(|run| !self.session.cleared_workflow_runs.contains(&run.run_id));
+                self.session.private_workflow_runs = merged;
             }
             for (run_id, rev) in reload.workflow_run_revisions {
-                self.workflow_run_revisions
+                self.session
+                    .workflow_run_revisions
                     .entry(run_id)
                     .and_modify(|live| *live = (*live).max(rev))
                     .or_insert(rev);
@@ -714,10 +713,10 @@ impl AgentView {
             self.session.tracker = reload.tracker;
             self.todo = reload.todo;
             self.workflow_blocks = reload.workflow_blocks;
-            self.workflow_runs = reload.workflow_runs;
-            self.private_workflow_runs = reload.private_workflow_runs;
-            self.workflow_run_revisions = reload.workflow_run_revisions;
-            self.cleared_workflow_runs = reload.cleared_workflow_runs;
+            self.session.workflow_runs = reload.workflow_runs;
+            self.session.private_workflow_runs = reload.private_workflow_runs;
+            self.session.workflow_run_revisions = reload.workflow_run_revisions;
+            self.session.cleared_workflow_runs = reload.cleared_workflow_runs;
             self.session.last_seen_event_id = reload.last_seen_event_id;
             self.session.last_applied_event_seq = reload.last_applied_event_seq;
             self.session.last_applied_grow_event_seq = reload.last_applied_grow_event_seq;
@@ -1753,7 +1752,7 @@ mod status_window_tests {
 #[cfg(test)]
 mod reconnect_workflow_maps_tests {
     use super::super::test_agent_view;
-    use crate::views::workflows::WorkflowRunSnapshot;
+    use crate::app::agent::WorkflowRunSnapshot;
     fn wf_snapshot(run_id: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_string(),
@@ -1782,58 +1781,90 @@ mod reconnect_workflow_maps_tests {
     #[test]
     fn cursor_reconnect_restores_stashed_workflow_run_maps() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 4);
-        agent.cleared_workflow_runs.insert("wf-old".to_string());
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "active"));
+        agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 4);
+        agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-old".to_string());
         agent.begin_session_reload(1);
         assert!(
-            agent.workflow_runs.is_empty()
-                && agent.workflow_run_revisions.is_empty()
-                && agent.cleared_workflow_runs.is_empty(),
+            agent.session.workflow_runs.is_empty()
+                && agent.session.workflow_run_revisions.is_empty()
+                && agent.session.cleared_workflow_runs.is_empty(),
             "staging starts empty for all three maps"
         );
         assert!(agent.finish_session_reload(1, true));
         assert_eq!(
-            agent.workflow_runs.len(),
+            agent.session.workflow_runs.len(),
             1,
             "run list must be restored from the stash on cursor reconnect"
         );
-        assert_eq!(agent.workflow_runs[0].run_id, "wf-1");
-        assert_eq!(agent.workflow_runs[0].status, "active");
+        assert_eq!(agent.session.workflow_runs[0].run_id, "wf-1");
+        assert_eq!(agent.session.workflow_runs[0].status, "active");
         assert_eq!(
-            agent.workflow_run_revisions.get("wf-1").copied(),
+            agent.session.workflow_run_revisions.get("wf-1").copied(),
             Some(4),
             "revision highwater must survive so stale re-deliveries still dedupe"
         );
         assert!(
-            agent.cleared_workflow_runs.contains("wf-old"),
+            agent.session.cleared_workflow_runs.contains("wf-old"),
             "clear tombstones must survive cursor reconnect"
         );
     }
     #[test]
     fn cursor_reconnect_prefers_live_workflow_maps_over_stash() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
         agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "active"));
+        agent
+            .session
             .workflow_runs
             .push(wf_snapshot("wf-stash-only", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 3);
         agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 3);
+        agent
+            .session
             .workflow_run_revisions
             .insert("wf-stash-only".to_string(), 1);
-        agent.cleared_workflow_runs.insert("wf-old".to_string());
-        agent.begin_session_reload(1);
-        agent.workflow_runs.push(wf_snapshot("wf-1", "complete"));
         agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-old".to_string());
+        agent.begin_session_reload(1);
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "complete"));
+        agent
+            .session
             .workflow_runs
             .push(wf_snapshot("wf-live-only", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 5);
         agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 5);
+        agent
+            .session
             .workflow_run_revisions
             .insert("wf-live-only".to_string(), 2);
-        agent.cleared_workflow_runs.insert("wf-new".to_string());
+        agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-new".to_string());
         assert!(agent.finish_session_reload(1, true));
         let by_id: std::collections::HashMap<_, _> = agent
+            .session
             .workflow_runs
             .iter()
             .map(|r| (r.run_id.as_str(), r.status.as_str()))
@@ -1854,47 +1885,78 @@ mod reconnect_workflow_maps_tests {
             "live-only runs are kept"
         );
         assert_eq!(
-            agent.workflow_run_revisions.get("wf-1").copied(),
+            agent.session.workflow_run_revisions.get("wf-1").copied(),
             Some(5),
             "max revision per run_id"
         );
         assert_eq!(
-            agent.workflow_run_revisions.get("wf-stash-only").copied(),
+            agent
+                .session
+                .workflow_run_revisions
+                .get("wf-stash-only")
+                .copied(),
             Some(1)
         );
         assert_eq!(
-            agent.workflow_run_revisions.get("wf-live-only").copied(),
+            agent
+                .session
+                .workflow_run_revisions
+                .get("wf-live-only")
+                .copied(),
             Some(2)
         );
-        assert!(agent.cleared_workflow_runs.contains("wf-old"));
-        assert!(agent.cleared_workflow_runs.contains("wf-new"));
+        assert!(agent.session.cleared_workflow_runs.contains("wf-old"));
+        assert!(agent.session.cleared_workflow_runs.contains("wf-new"));
     }
     #[test]
     fn cursor_reconnect_does_not_resurrect_cleared_runs() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
-        agent.workflow_runs.push(wf_snapshot("wf-keep", "active"));
         agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-1", "active"));
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-keep", "active"));
+        agent
+            .session
             .workflow_runs
             .push(wf_snapshot("wf-stash-survivor", "active"));
-        agent.workflow_run_revisions.insert("wf-1".to_string(), 2);
         agent
+            .session
+            .workflow_run_revisions
+            .insert("wf-1".to_string(), 2);
+        agent
+            .session
             .workflow_run_revisions
             .insert("wf-keep".to_string(), 1);
         agent
+            .session
             .workflow_run_revisions
             .insert("wf-stash-survivor".to_string(), 1);
         agent.begin_session_reload(1);
-        agent.workflow_runs.push(wf_snapshot("wf-keep", "complete"));
-        agent.cleared_workflow_runs.insert("wf-1".to_string());
+        agent
+            .session
+            .workflow_runs
+            .push(wf_snapshot("wf-keep", "complete"));
+        agent
+            .session
+            .cleared_workflow_runs
+            .insert("wf-1".to_string());
         assert!(agent.finish_session_reload(1, true));
         assert!(
-            agent.workflow_runs.iter().all(|r| r.run_id != "wf-1"),
+            agent
+                .session
+                .workflow_runs
+                .iter()
+                .all(|r| r.run_id != "wf-1"),
             "cleared-during-window runs must not reappear from the stash"
         );
-        assert!(agent.cleared_workflow_runs.contains("wf-1"));
+        assert!(agent.session.cleared_workflow_runs.contains("wf-1"));
         assert_eq!(
             agent
+                .session
                 .workflow_runs
                 .iter()
                 .find(|r| r.run_id == "wf-stash-survivor")
@@ -1904,6 +1966,7 @@ mod reconnect_workflow_maps_tests {
         );
         assert_eq!(
             agent
+                .session
                 .workflow_runs
                 .iter()
                 .find(|r| r.run_id == "wf-keep")

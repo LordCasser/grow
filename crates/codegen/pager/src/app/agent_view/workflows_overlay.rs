@@ -8,7 +8,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 
 fn management_command(
     op: &str,
-    target: Option<&crate::views::workflows::WorkflowRunSnapshot>,
+    target: Option<&crate::app::agent::WorkflowRunSnapshot>,
 ) -> Option<String> {
     let run = target?;
     let allowed = match op {
@@ -25,7 +25,7 @@ fn management_command(
 
 fn resolve_management_command(
     op: &str,
-    target: Option<&crate::views::workflows::WorkflowRunSnapshot>,
+    target: Option<&crate::app::agent::WorkflowRunSnapshot>,
 ) -> Option<String> {
     management_command(op, target).or_else(|| {
         if op == "resume"
@@ -74,7 +74,7 @@ fn definition_command(
 }
 
 fn transcript_target(
-    run: &crate::views::workflows::WorkflowRunSnapshot,
+    run: &crate::app::agent::WorkflowRunSnapshot,
     phase: Option<&str>,
 ) -> Option<String> {
     let all_agents = run.phases.is_empty() && run.current_phase.is_none();
@@ -90,6 +90,7 @@ fn transcript_target(
 impl AgentView {
     pub(crate) fn open_workflow_detail(&mut self, name: &str) {
         let Some(run_id) = self
+            .session
             .workflow_runs
             .iter()
             .find(|r| r.name == name)
@@ -101,7 +102,12 @@ impl AgentView {
     }
 
     pub(crate) fn open_workflow_detail_by_run_id(&mut self, run_id: &str) {
-        if !self.workflow_runs.iter().any(|r| r.run_id == run_id) {
+        if !self
+            .session
+            .workflow_runs
+            .iter()
+            .any(|r| r.run_id == run_id)
+        {
             return;
         }
         self.workflows_view.reset();
@@ -413,8 +419,8 @@ mod workflows_overlay_key_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
+    use crate::app::agent::WorkflowRunSnapshot;
     use crate::app::app_view::InputOutcome;
-    use crate::views::workflows::WorkflowRunSnapshot;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> Event {
@@ -454,7 +460,7 @@ mod workflows_overlay_key_tests {
     fn workflows_agent(run_ids: &[&str]) -> AgentView {
         let mut agent = make_agent();
         for id in run_ids {
-            agent.workflow_runs.push(make_workflow_run(id));
+            agent.session.workflow_runs.push(make_workflow_run(id));
         }
         agent.show_workflows = true;
         agent
@@ -551,7 +557,10 @@ mod workflows_overlay_key_tests {
             agent.workflows_view.selected_run_id.as_deref(),
             Some("wf_old")
         );
-        agent.workflow_runs.push(make_workflow_run("wf_newest"));
+        agent
+            .session
+            .workflow_runs
+            .push(make_workflow_run("wf_newest"));
 
         assert!(matches!(
             agent.handle_input(&key(KeyCode::Enter), &reg),
@@ -566,11 +575,11 @@ mod workflows_overlay_key_tests {
     #[test]
     fn enter_in_detail_opens_selected_phase_transcript() {
         let mut agent = workflows_agent(&["wf_run"]);
-        let run = agent.workflow_runs.last_mut().unwrap();
+        let run = agent.session.workflow_runs.last_mut().unwrap();
         run.phases = vec![("Research".to_owned(), "active".to_owned())];
         run.current_phase = Some("Research".to_owned());
         run.agents = vec![
-            crate::views::workflows::WorkflowAgentRowView {
+            crate::app::agent::WorkflowAgentRowView {
                 agent_id: "child-done".to_owned(),
                 label: "done".to_owned(),
                 phase: Some("Research".to_owned()),
@@ -579,7 +588,7 @@ mod workflows_overlay_key_tests {
                 tokens_used: 0,
                 duration_ms: 0,
             },
-            crate::views::workflows::WorkflowAgentRowView {
+            crate::app::agent::WorkflowAgentRowView {
                 agent_id: "child-running".to_owned(),
                 label: "running".to_owned(),
                 phase: Some("Research".to_owned()),
@@ -629,7 +638,7 @@ mod workflows_overlay_key_tests {
     fn paused_budget_limited_and_failed_runs_are_resumable_others_fail_closed() {
         let mut agent = workflows_agent(&["wf_run"]);
         let reg = ActionRegistry::defaults();
-        agent.workflow_runs[0].status = "user_paused".to_string();
+        agent.session.workflow_runs[0].status = "user_paused".to_string();
         agent.workflows_view.detail_run_id = Some("wf_run".to_string());
 
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
@@ -640,7 +649,7 @@ mod workflows_overlay_key_tests {
         ));
 
         agent.show_workflows = true;
-        agent.workflow_runs[0].status = "budget_limited".to_string();
+        agent.session.workflow_runs[0].status = "budget_limited".to_string();
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(
             out,
@@ -653,7 +662,7 @@ mod workflows_overlay_key_tests {
         );
 
         agent.show_workflows = true;
-        agent.workflow_runs[0].status = "failed".to_string();
+        agent.session.workflow_runs[0].status = "failed".to_string();
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(
             matches!(
@@ -669,19 +678,19 @@ mod workflows_overlay_key_tests {
         );
 
         agent.show_workflows = true;
-        agent.workflow_runs[0].status = "complete".to_string();
+        agent.session.workflow_runs[0].status = "complete".to_string();
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows, "completed runs must not be resumed");
 
-        agent.workflow_runs[0].status = "user_paused".to_string();
-        agent.workflow_runs[0].management_available = false;
+        agent.session.workflow_runs[0].status = "user_paused".to_string();
+        agent.session.workflow_runs[0].management_available = false;
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows, "unsupported resume must fail closed");
 
-        agent.workflow_runs[0].status = "budget_limited".to_string();
-        agent.workflow_runs[0].management_available = false;
+        agent.session.workflow_runs[0].status = "budget_limited".to_string();
+        agent.session.workflow_runs[0].management_available = false;
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(
@@ -769,7 +778,7 @@ mod workflows_overlay_key_tests {
             ("Plan".to_string(), "active".to_string()),
             ("Do".to_string(), "pending".to_string()),
         ];
-        agent.workflow_runs.push(run);
+        agent.session.workflow_runs.push(run);
         agent.show_workflows = true;
         agent.workflows_view.phase_hits = vec![
             (rect(2, 3, 12, 1), "Plan".to_owned()),

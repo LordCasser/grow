@@ -186,8 +186,8 @@ impl AgentView {
     }
     pub(crate) fn workflow_runs_newest_first(
         &self,
-    ) -> Vec<&crate::views::workflows::WorkflowRunSnapshot> {
-        self.workflow_runs.iter().rev().collect()
+    ) -> Vec<&crate::app::agent::WorkflowRunSnapshot> {
+        self.session.workflow_runs.iter().rev().collect()
     }
     /// No per-pane `Esc` consumer is pending (text selection, link highlight,
     /// goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker),
@@ -1269,9 +1269,13 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('g')
             && key.modifiers.is_empty()
-            && (self.session.goal_state.is_some() || !self.workflow_runs.is_empty())
+            && (self.session.goal_state.is_some() || !self.session.workflow_runs.is_empty())
         {
-            let has_active_workflow = self.workflow_runs.iter().any(|run| !run.is_terminal());
+            let has_active_workflow = self
+                .session
+                .workflow_runs
+                .iter()
+                .any(|run| !run.is_terminal());
             return InputOutcome::Action(
                 if self.session.goal_state.is_some() && !has_active_workflow {
                     Action::ToggleGoalDetail

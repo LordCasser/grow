@@ -128,8 +128,8 @@ fn build_workflow_run_snapshot(
     elapsed_ms: u64,
     pause_message: Option<String>,
     result_summary: Option<String>,
-) -> crate::views::workflows::WorkflowRunSnapshot {
-    crate::views::workflows::WorkflowRunSnapshot {
+) -> crate::app::agent::WorkflowRunSnapshot {
+    crate::app::agent::WorkflowRunSnapshot {
         run_id,
         definition_id,
         definition_scope,
@@ -146,7 +146,7 @@ fn build_workflow_run_snapshot(
         current_phase,
         agents: agents
             .iter()
-            .map(|a| crate::views::workflows::WorkflowAgentRowView {
+            .map(|a| crate::app::agent::WorkflowAgentRowView {
                 agent_id: a.agent_id.clone(),
                 label: a.label.clone(),
                 phase: a.phase.clone(),
@@ -223,22 +223,23 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
         );
     }
     if status != "cleared" {
-        match agent.workflow_run_revisions.get(&run_id).copied() {
+        match agent.session.workflow_run_revisions.get(&run_id).copied() {
             Some(last) if revision == 0 && last > 0 => return false,
             Some(last) if revision > 0 && revision <= last => return false,
             _ => {}
         }
-        if revision == 0 && agent.cleared_workflow_runs.contains(&run_id) {
+        if revision == 0 && agent.session.cleared_workflow_runs.contains(&run_id) {
             return false;
         }
     }
     if revision > 0 {
         agent
+            .session
             .workflow_run_revisions
             .insert(run_id.clone(), revision);
     }
     if status == "cleared" {
-        agent.cleared_workflow_runs.insert(run_id.clone());
+        agent.session.cleared_workflow_runs.insert(run_id.clone());
     }
     let management_available = agent
         .session
@@ -247,7 +248,10 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
         .any(|c| c.name == "workflow-run");
     let builtin = super::is_builtin_workflow_handle(&agent.session.available_commands, &name);
     if status == "cleared" {
-        agent.workflow_runs.retain(|run| run.run_id != run_id);
+        agent
+            .session
+            .workflow_runs
+            .retain(|run| run.run_id != run_id);
     } else {
         let snapshot = build_workflow_run_snapshot(
             run_id.clone(),
@@ -271,12 +275,13 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
             result_summary,
         );
         match agent
+            .session
             .workflow_runs
             .iter_mut()
             .find(|run| run.run_id == run_id)
         {
             Some(existing) => *existing = snapshot,
-            None => agent.workflow_runs.push(snapshot),
+            None => agent.session.workflow_runs.push(snapshot),
         }
     }
     let active = agents.iter().filter(|a| a.state == "running").count() as u32;
@@ -298,7 +303,7 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
 /// never enter any public Workflow management surface. The shell keeps
 /// publishing `WorkflowUpdated` for them; this path keeps the transcript
 /// progress block, the tasks pane row and the activity projection alive while
-/// `agent.workflow_runs` is never touched.
+/// `agent.session.workflow_runs` is never touched.
 fn ingest_private_workflow_update(agent: &mut AgentView, update: PrivateWorkflowUpdate) -> bool {
     let PrivateWorkflowUpdate {
         run_id,
@@ -324,22 +329,23 @@ fn ingest_private_workflow_update(agent: &mut AgentView, update: PrivateWorkflow
     // Same revision/cleared dedup guards as the public path. Run ids share the
     // `wf_<uuid>` namespace, so the shared maps are collision-free.
     if status != "cleared" {
-        match agent.workflow_run_revisions.get(&run_id).copied() {
+        match agent.session.workflow_run_revisions.get(&run_id).copied() {
             Some(last) if revision == 0 && last > 0 => return false,
             Some(last) if revision > 0 && revision <= last => return false,
             _ => {}
         }
-        if revision == 0 && agent.cleared_workflow_runs.contains(&run_id) {
+        if revision == 0 && agent.session.cleared_workflow_runs.contains(&run_id) {
             return false;
         }
     }
     if revision > 0 {
         agent
+            .session
             .workflow_run_revisions
             .insert(run_id.clone(), revision);
     }
     if status == "cleared" {
-        agent.cleared_workflow_runs.insert(run_id.clone());
+        agent.session.cleared_workflow_runs.insert(run_id.clone());
     }
 
     // Settled = cleared, terminal, or budget-limited: private runs have no
@@ -353,6 +359,7 @@ fn ingest_private_workflow_update(agent: &mut AgentView, update: PrivateWorkflow
         );
     if settled {
         agent
+            .session
             .private_workflow_runs
             .retain(|run| run.run_id != run_id);
     } else {
@@ -378,12 +385,13 @@ fn ingest_private_workflow_update(agent: &mut AgentView, update: PrivateWorkflow
             result_summary,
         );
         match agent
+            .session
             .private_workflow_runs
             .iter_mut()
             .find(|run| run.run_id == run_id)
         {
             Some(existing) => *existing = snapshot,
-            None => agent.private_workflow_runs.push(snapshot),
+            None => agent.session.private_workflow_runs.push(snapshot),
         }
     }
 

@@ -68,7 +68,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_goal_status.contains(mouse.column, mouse.row) {
-                    if !self.workflow_runs.is_empty() {
+                    if !self.session.workflow_runs.is_empty() {
                         self.show_workflows = !self.show_workflows;
                         if self.show_workflows {
                             self.workflows_view.reset();

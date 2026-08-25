@@ -112,11 +112,11 @@ fn private_active_update_creates_progress_block_and_isolates_from_public_lists()
 
     // Management isolation is structural: nothing lands in workflow_runs.
     assert!(
-        agent.workflow_runs.is_empty(),
+        agent.session.workflow_runs.is_empty(),
         "a private run must never enter the public workflow_runs list"
     );
-    assert_eq!(agent.private_workflow_runs.len(), 1);
-    let run = &agent.private_workflow_runs[0];
+    assert_eq!(agent.session.private_workflow_runs.len(), 1);
+    let run = &agent.session.private_workflow_runs[0];
     assert_eq!(run.run_id, "wf_deep");
     assert_eq!(run.name, "deep-research");
     assert_eq!(run.status, "active");
@@ -185,13 +185,13 @@ fn private_phase_update_refreshes_block_and_replaces_snapshot() {
     ));
     let agent = app.agents.get(&AgentId(0)).unwrap();
 
-    assert!(agent.workflow_runs.is_empty());
+    assert!(agent.session.workflow_runs.is_empty());
     assert_eq!(
-        agent.private_workflow_runs.len(),
+        agent.session.private_workflow_runs.len(),
         1,
         "same run must be upserted, not duplicated"
     );
-    let run = &agent.private_workflow_runs[0];
+    let run = &agent.session.private_workflow_runs[0];
     assert_eq!(run.current_phase.as_deref(), Some("Verify"));
     assert_eq!(run.elapsed_ms, 45000);
 
@@ -231,7 +231,7 @@ fn private_terminal_converges_block_and_removes_private_entry() {
     let agent = app.agents.get(&AgentId(0)).unwrap();
 
     assert!(
-        agent.private_workflow_runs.is_empty(),
+        agent.session.private_workflow_runs.is_empty(),
         "terminal private runs must not linger in the tasks pane"
     );
     assert!(
@@ -267,7 +267,7 @@ fn private_budget_limited_converges_block_to_failed_and_clears_entry() {
         None,
     ));
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert!(agent.private_workflow_runs.is_empty());
+    assert!(agent.session.private_workflow_runs.is_empty());
     assert!(!agent.workflow_blocks.contains_key("wf_deep"));
     let wb = transcript_workflow_block(agent, "wf_deep");
     assert!(
@@ -295,10 +295,10 @@ fn private_cleared_removes_block_collection_and_guards_revision_zero() {
         None,
     ));
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert!(agent.private_workflow_runs.is_empty());
+    assert!(agent.session.private_workflow_runs.is_empty());
     assert!(!agent.workflow_blocks.contains_key("wf_deep"));
     assert!(
-        agent.cleared_workflow_runs.contains("wf_deep"),
+        agent.session.cleared_workflow_runs.contains("wf_deep"),
         "cleared guard must remember the run id"
     );
 
@@ -312,6 +312,7 @@ fn private_cleared_removes_block_collection_and_guards_revision_zero() {
         app.agents
             .get(&AgentId(0))
             .unwrap()
+            .session
             .private_workflow_runs
             .is_empty()
     );
@@ -341,9 +342,9 @@ fn private_revision_dedup_matches_public_semantics() {
         None,
     ));
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert_eq!(agent.private_workflow_runs.len(), 1);
+    assert_eq!(agent.session.private_workflow_runs.len(), 1);
     assert_eq!(
-        agent.private_workflow_runs[0].current_phase.as_deref(),
+        agent.session.private_workflow_runs[0].current_phase.as_deref(),
         Some("Research"),
         "stale revisions must not overwrite the snapshot"
     );
@@ -364,10 +365,10 @@ fn replay_rebuilds_the_same_private_progress_block() {
     ));
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.workflow_runs.is_empty(),
+        agent.session.workflow_runs.is_empty(),
         "replayed private run must stay out of public lists"
     );
-    assert_eq!(agent.private_workflow_runs.len(), 1);
+    assert_eq!(agent.session.private_workflow_runs.len(), 1);
     let wb = mapped_workflow_block(agent, "wf_deep");
     assert!(matches!(wb.status, WorkflowBlockStatus::Running));
     assert_eq!(wb.current_phase.as_deref(), Some("Research"));
@@ -386,12 +387,12 @@ fn public_runs_still_ingest_into_workflow_runs_and_blocks() {
     assert!(send_workflow_update(&mut app, update, None));
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
-        agent.workflow_runs.len(),
+        agent.session.workflow_runs.len(),
         1,
         "public runs must keep landing in workflow_runs"
     );
-    assert!(agent.private_workflow_runs.is_empty());
-    assert_eq!(agent.workflow_runs[0].name, "deep-research");
+    assert!(agent.session.private_workflow_runs.is_empty());
+    assert_eq!(agent.session.workflow_runs[0].name, "deep-research");
     assert!(agent.workflow_blocks.contains_key("wf_deep"));
     let wb = mapped_workflow_block(agent, "wf_deep");
     assert!(matches!(wb.status, WorkflowBlockStatus::Running));

@@ -486,6 +486,115 @@ pub(crate) struct FinalizedPrMeta {
     /// `agent_result` may be coarser or absent).
     pub(crate) error: Option<String>,
 }
+
+/// A workflow agent row projected from the Shell's runtime state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowAgentRowView {
+    pub agent_id: String,
+    pub label: String,
+    pub phase: Option<String>,
+    pub model: Option<String>,
+    pub state: String,
+    pub tokens_used: u64,
+    pub duration_ms: u64,
+}
+
+/// A workflow run snapshot projected from the Shell's runtime state.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunSnapshot {
+    pub run_id: String,
+    pub definition_id: Option<String>,
+    pub definition_scope: Option<String>,
+    pub definition_hash: Option<String>,
+    pub name: String,
+    pub objective: String,
+    pub status: String,
+    pub management_available: bool,
+    pub builtin: bool,
+    pub phases: Vec<(String, String)>,
+    pub current_phase: Option<String>,
+    pub agents: Vec<WorkflowAgentRowView>,
+    pub agent_budget: Option<u64>,
+    pub agents_used: u64,
+    pub agents_remaining: Option<u64>,
+    pub agent_usage_incomplete: bool,
+    pub active_agents: u32,
+    pub elapsed_ms: u64,
+    pub received_at: Instant,
+    pub pause_message: Option<String>,
+    pub result_summary: Option<String>,
+}
+
+impl WorkflowRunSnapshot {
+    pub fn is_active(&self) -> bool {
+        self.status == "active"
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "interrupted" | "complete" | "failed" | "cancelled"
+        )
+    }
+
+    pub fn can_pause(&self) -> bool {
+        self.management_available && self.is_active()
+    }
+
+    pub fn can_resume(&self) -> bool {
+        if !self.management_available {
+            return false;
+        }
+        matches!(
+            self.status.as_str(),
+            "user_paused"
+                | "back_off_paused"
+                | "no_progress_paused"
+                | "infra_paused"
+                | "blocked"
+                | "failed"
+        )
+    }
+
+    pub fn can_stop(&self) -> bool {
+        self.management_available && !self.is_terminal()
+    }
+
+    pub fn active_agent_count(&self) -> usize {
+        self.agents.iter().filter(|a| a.state == "running").count()
+    }
+
+    pub fn live_elapsed_ms_at(&self, now: Instant) -> u64 {
+        let base = self.elapsed_ms;
+        if self.is_active() {
+            base.saturating_add(now.saturating_duration_since(self.received_at).as_millis() as u64)
+        } else {
+            base
+        }
+    }
+
+    pub fn live_elapsed_ms(&self) -> u64 {
+        self.live_elapsed_ms_at(Instant::now())
+    }
+
+    pub fn agents_in_phase(&self, phase: Option<&str>) -> Vec<&WorkflowAgentRowView> {
+        match phase {
+            Some(title) => self
+                .agents
+                .iter()
+                .filter(|a| a.phase.as_deref() == Some(title))
+                .collect(),
+            None => self.agents.iter().collect(),
+        }
+    }
+
+    pub fn phase_has_running_agents(&self, phase: &str) -> bool {
+        self.agents
+            .iter()
+            .any(|a| a.state == "running" && a.phase.as_deref() == Some(phase))
+    }
+}
+
 /// Per-agent business logic (ACP session, models, state).
 ///
 /// External code should use the facade methods (`handle_update`,
@@ -509,6 +618,15 @@ pub struct AgentSession {
     /// chip/modal. Single slot: goal ids are unique, so only the latest clear
     /// can race a stale update.
     pub(crate) last_cleared_goal_id: Option<String>,
+    /// Public workflow runs projected from ACP/Grow notifications.
+    pub(crate) workflow_runs: Vec<WorkflowRunSnapshot>,
+    /// Private workflow runs retained for activity and task-pane projections;
+    /// they never enter public workflow management surfaces.
+    pub(crate) private_workflow_runs: Vec<WorkflowRunSnapshot>,
+    /// Highest accepted revision per workflow run.
+    pub(crate) workflow_run_revisions: HashMap<String, u64>,
+    /// Tombstones for workflow runs explicitly cleared by the user/runtime.
+    pub(crate) cleared_workflow_runs: HashSet<String>,
     /// Whether this session is running inside a git worktree.
     pub is_worktree: bool,
     /// `AgentId` of the parent session if this session was created via
@@ -775,6 +893,10 @@ impl AgentSession {
             context_state: None,
             goal_state: None,
             last_cleared_goal_id: None,
+            workflow_runs: Vec::new(),
+            private_workflow_runs: Vec::new(),
+            workflow_run_revisions: HashMap::new(),
+            cleared_workflow_runs: HashSet::new(),
             is_worktree: false,
             forked_from: None,
             pending_prompts: VecDeque::new(),

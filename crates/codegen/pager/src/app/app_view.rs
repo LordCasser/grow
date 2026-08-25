@@ -3828,7 +3828,11 @@ impl AppView {
                             .subagent_sessions
                             .values()
                             .any(|info| !info.finished && info.workflow_run_id.is_none())
-                        || agent.workflow_runs.iter().any(|run| run.is_active())
+                        || agent
+                            .session
+                            .workflow_runs
+                            .iter()
+                            .any(|run| run.is_active())
                 });
                 // Leader-roster sessions are not local agents; a Working /
                 // NeedsInput roster row still paints a spinner / blinking
@@ -7899,8 +7903,9 @@ pub(crate) mod tests {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.subagent_views.insert(child_sid.to_owned(), child);
         agent
+            .session
             .workflow_runs
-            .push(crate::views::workflows::WorkflowRunSnapshot {
+            .push(crate::app::agent::WorkflowRunSnapshot {
                 run_id: "wf_run".to_owned(),
                 definition_id: None,
                 definition_scope: None,
@@ -7912,7 +7917,7 @@ pub(crate) mod tests {
                 builtin: false,
                 phases: vec![("Research".to_owned(), "active".to_owned())],
                 current_phase: Some("Research".to_owned()),
-                agents: vec![crate::views::workflows::WorkflowAgentRowView {
+                agents: vec![crate::app::agent::WorkflowAgentRowView {
                     agent_id: child_sid.to_owned(),
                     label: "researcher".to_owned(),
                     phase: Some("Research".to_owned()),

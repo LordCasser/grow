@@ -457,7 +457,7 @@ impl TaskEntry {
         }
     }
 
-    fn from_workflow_run(run: &crate::views::workflows::WorkflowRunSnapshot, now: Instant) -> Self {
+    fn from_workflow_run(run: &crate::app::agent::WorkflowRunSnapshot, now: Instant) -> Self {
         let theme = Theme::current();
         let running = run.is_active();
 
@@ -545,7 +545,7 @@ impl TaskEntry {
     /// management action. The label uses "Deep Research" (not "Workflow") to
     /// avoid confusing the run with the public workspace.
     fn from_private_workflow_run(
-        run: &crate::views::workflows::WorkflowRunSnapshot,
+        run: &crate::app::agent::WorkflowRunSnapshot,
         now: Instant,
     ) -> Self {
         let theme = Theme::current();
@@ -888,7 +888,7 @@ pub struct TasksPane {
     opened_by_auto: bool,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
     last_theme: ThemeKind,
-    workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    workflow_runs: Vec<crate::app::agent::WorkflowRunSnapshot>,
 }
 
 impl Default for TasksPane {
@@ -1001,7 +1001,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
-        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        workflow_runs: &[crate::app::agent::WorkflowRunSnapshot],
     ) {
         self.sync_at(
             bg_tasks,
@@ -1019,8 +1019,8 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
-        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
-        private_workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        workflow_runs: &[crate::app::agent::WorkflowRunSnapshot],
+        private_workflow_runs: &[crate::app::agent::WorkflowRunSnapshot],
         frame: crate::motion::FrameStamp,
     ) {
         // Detect theme switch and refresh caches.
@@ -1256,7 +1256,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
-        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        workflow_runs: &[crate::app::agent::WorkflowRunSnapshot],
     ) -> usize {
         bg_tasks
             .values()
@@ -1608,7 +1608,7 @@ impl TasksPane {
         area: Rect,
         buf: &mut Buffer,
         y: u16,
-        run: &crate::views::workflows::WorkflowRunSnapshot,
+        run: &crate::app::agent::WorkflowRunSnapshot,
         theme: &Theme,
         frame: crate::motion::FrameStamp,
     ) {
@@ -3288,8 +3288,8 @@ mod tests {
         );
     }
 
-    fn make_workflow_run(name: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
-        crate::views::workflows::WorkflowRunSnapshot {
+    fn make_workflow_run(name: &str, status: &str) -> crate::app::agent::WorkflowRunSnapshot {
+        crate::app::agent::WorkflowRunSnapshot {
             run_id: format!("wf_{name}"),
             definition_id: None,
             definition_scope: None,
@@ -3367,7 +3367,7 @@ mod tests {
     fn workflow_suffix_counts_only_running_roster_rows() {
         let mut run = make_workflow_run("deep-research", "active");
         run.agents = vec![
-            crate::views::workflows::WorkflowAgentRowView {
+            crate::app::agent::WorkflowAgentRowView {
                 agent_id: "a1".into(),
                 label: "one".into(),
                 phase: None,
@@ -3376,7 +3376,7 @@ mod tests {
                 tokens_used: 0,
                 duration_ms: 0,
             },
-            crate::views::workflows::WorkflowAgentRowView {
+            crate::app::agent::WorkflowAgentRowView {
                 agent_id: "a2".into(),
                 label: "two".into(),
                 phase: None,
@@ -3393,7 +3393,7 @@ mod tests {
 
     #[test]
     fn workflow_row_stoppable_tracks_can_stop_not_is_active() {
-        fn stoppable_of(run: &crate::views::workflows::WorkflowRunSnapshot) -> bool {
+        fn stoppable_of(run: &crate::app::agent::WorkflowRunSnapshot) -> bool {
             match TaskEntry::from_workflow_run(run, Instant::now()) {
                 TaskEntry::Workflow { stoppable, .. } => stoppable,
                 _ => panic!("expected a workflow entry"),
@@ -3428,7 +3428,7 @@ mod tests {
         let mut pane = TasksPane::new();
         let mut run = make_workflow_run("deep-research", "active");
         run.management_available = false;
-        run.agents = vec![crate::views::workflows::WorkflowAgentRowView {
+        run.agents = vec![crate::app::agent::WorkflowAgentRowView {
             agent_id: "a1".into(),
             label: "researcher-0".into(),
             phase: Some("Research".into()),
