@@ -1695,6 +1695,7 @@ impl SessionActor {
                 // Fail-open: pruning is an optimization; continue with the
                 // summary path (the conversation is simply not pruned).
                 tracing::warn!(
+                    target: super::SESSION_LOG,
                     session_id = %self.session_info.id.0,
                     error = %e,
                     "pre-prune failed; continuing with summary compaction"

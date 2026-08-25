@@ -871,7 +871,7 @@ fn stop_failure_not_emitted_on_success() {
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
-            actor.client_hooks.borrow_mut().insert(
+            actor.hooks.client_hooks.borrow_mut().insert(
                 ::hooks::event::HookEventName::StopFailure,
                 vec![crate::extensions::hooks::ClientHookGroup {
                     matcher: None,
@@ -918,7 +918,7 @@ fn stop_failure_emitted_on_unrecoverable() {
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
-            actor.client_hooks.borrow_mut().insert(
+            actor.hooks.client_hooks.borrow_mut().insert(
                 ::hooks::event::HookEventName::StopFailure,
                 vec![crate::extensions::hooks::ClientHookGroup {
                     matcher: None,

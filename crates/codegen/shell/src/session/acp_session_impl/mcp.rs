@@ -241,8 +241,8 @@ impl SessionActor {
         refresh_mcp_snapshot_and_schedule_reminder_with(
             self.agent.borrow().tool_bridge().clone(),
             Arc::clone(&self.mcp_state),
-            self.tool_metadata_snapshot.clone(),
-            Arc::clone(&self.mcp_reminder_dirty),
+            self.mcp.tool_metadata_snapshot.clone(),
+            Arc::clone(&self.mcp.reminder_dirty),
             mcp_initialized,
         )
         .await;
@@ -252,7 +252,7 @@ impl SessionActor {
     /// Called after MCP fingerprint changes, skill update effects, and
     /// compaction so that resumed sessions start with accurate tracking state.
     pub(super) async fn persist_announcement_state(&self) {
-        let mcp_fingerprints = self.mcp_announced_servers.lock().clone();
+        let mcp_fingerprints = self.mcp.announced_servers.lock().clone();
         let skill_names = self.tool_bridge_handle().get_announced_skill_names().await;
         let state = crate::session::announcement_state::AnnouncementState {
             mcp_server_fingerprints: crate::session::announcement_state::to_persisted_fingerprints(
@@ -277,7 +277,8 @@ impl SessionActor {
     /// dirty flag is still cleared.
     pub(super) async fn maybe_inject_mcp_reminder(&self) {
         if !self
-            .mcp_reminder_dirty
+            .mcp
+            .reminder_dirty
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
@@ -288,8 +289,8 @@ impl SessionActor {
         let server_summaries = self.connected_server_summaries();
         let new_fingerprints = fingerprint_servers(&server_summaries);
         let (reminder_text, mcp_fingerprints_changed) = {
-            let mut announced = self.mcp_announced_servers.lock();
-            let text = match self.mcp_reminder_mode {
+            let mut announced = self.mcp.announced_servers.lock();
+            let text = match self.mcp.reminder_mode {
                 McpReminderMode::Delta => build_delta_reminder(&announced, &server_summaries),
                 McpReminderMode::Full => {
                     if *announced == new_fingerprints {
@@ -307,7 +308,8 @@ impl SessionActor {
             }
             (text, changed)
         };
-        self.mcp_reminder_dirty
+        self.mcp
+            .reminder_dirty
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let failed_section = {
             let mcp_state = self.mcp_state.lock().await;
@@ -370,7 +372,7 @@ impl SessionActor {
             tracing::info!(
                 servers = server_summaries.len(),
                 has_failed = failed_section.is_some(),
-                mode = ?self.mcp_reminder_mode,
+                mode = ?self.mcp.reminder_mode,
                 "Injected MCP server system-reminder"
             );
         } else {
@@ -657,7 +659,7 @@ impl SessionActor {
         Ok(())
     }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {
-        if self.mcp_connecting_reminder_injected.get() {
+        if self.mcp.connecting_reminder_injected.get() {
             return;
         }
         let connecting: Vec<String> = {
@@ -669,7 +671,7 @@ impl SessionActor {
         if connecting.is_empty() {
             return;
         }
-        self.mcp_connecting_reminder_injected.set(true);
+        self.mcp.connecting_reminder_injected.set(true);
         let mut text =
             "MCP servers currently connecting (tools will become available shortly):\n".to_string();
         for name in &connecting {
@@ -752,7 +754,7 @@ impl SessionActor {
                         params.into(),
                     ));
             }
-            self.mcp_handshakes_done.notify_waiters();
+            self.mcp.handshakes_done.notify_waiters();
             return;
         }
         let cwd = std::path::Path::new(&self.session_info.cwd);
@@ -778,7 +780,7 @@ impl SessionActor {
             }
             mcp_state.mark_servers_initializing(names);
         }
-        self.mcp_connecting_reminder_injected.set(false);
+        self.mcp.connecting_reminder_injected.set(false);
         let init_total = (configs_to_start.len() + acp_pending_names.len()) as u32;
         if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
             "total": init_total,
@@ -814,7 +816,7 @@ impl SessionActor {
                         params.into(),
                     ));
             }
-            self.mcp_handshakes_done.notify_waiters();
+            self.mcp.handshakes_done.notify_waiters();
             return;
         }
         let mut timer = crate::instrumentation_timer!("session.mcp_init");
@@ -824,7 +826,7 @@ impl SessionActor {
             "Starting MCP initialization ({} new servers, {} already initialized, strategy: {:?})",
             configs_to_start.len(),
             existing_client_names.len(),
-            self.mcp_strategy
+            self.mcp.strategy
         );
         let session_id = self.session_info.id.0.as_ref();
         tokio::task::yield_now().await;
@@ -906,9 +908,9 @@ impl SessionActor {
         let mcp_state_bg = std::sync::Arc::clone(&self.mcp_state);
         let tool_bridge = self.agent.borrow().tool_bridge().clone();
         let gateway = self.notifications.gateway.clone();
-        let tool_snapshot = self.tool_metadata_snapshot.clone();
-        let mcp_reminder_dirty = Arc::clone(&self.mcp_reminder_dirty);
-        let mcp_handshakes_done = Arc::clone(&self.mcp_handshakes_done);
+        let tool_snapshot = self.mcp.tool_metadata_snapshot.clone();
+        let mcp_reminder_dirty = Arc::clone(&self.mcp.reminder_dirty);
+        let mcp_handshakes_done = Arc::clone(&self.mcp.handshakes_done);
         let session_id_owned = self.session_info.id.0.clone();
         let server_access_bg = crate::util::config::get_mcp_server_max_access(
             std::path::Path::new(&self.session_info.cwd),
@@ -934,7 +936,7 @@ impl SessionActor {
             })
             .collect();
         let server_count = (mcp_server_configs.len() + acp_pending_names.len()) as u32;
-        let mcp_strategy = self.mcp_strategy;
+        let mcp_strategy = self.mcp.strategy;
         let is_reinit = !existing_client_names.is_empty();
         let init_total_bg = init_total;
         tokio::task::spawn_local(async move {
@@ -1371,7 +1373,7 @@ impl SessionActor {
     ) -> Vec<tools::types::tool_index::ServerSummary> {
         use tools::types::tool_index::ToolSearchIndex;
         let mut summaries = crate::session::tool_index::Bm25ToolSearchIndex::new(
-            self.tool_metadata_snapshot.clone(),
+            self.mcp.tool_metadata_snapshot.clone(),
         )
         .list_server_summaries();
         if let Some(capabilities) = &self.subagent_capabilities {

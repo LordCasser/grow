@@ -560,7 +560,7 @@ impl SessionActor {
                         description: Some(description.clone()),
                     },
                 );
-                let hook_registry_snapshot = self.hook_registry.borrow().clone();
+                let hook_registry_snapshot = self.hooks.registry.borrow().clone();
                 if let Some(registry) = hook_registry_snapshot {
                     let ctx = self.hook_run_ctx();
                     let _ = ::hooks::dispatcher::dispatch_non_blocking(
@@ -628,7 +628,7 @@ impl SessionActor {
                 level,
             },
         );
-        let hook_registry_snapshot = self.hook_registry.borrow().clone();
+        let hook_registry_snapshot = self.hooks.registry.borrow().clone();
         let Some(registry) = hook_registry_snapshot else {
             return;
         };

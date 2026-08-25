@@ -633,7 +633,7 @@ impl SessionActor {
         for err in &errors {
             tracing::warn!("hook reload error: {err}");
         }
-        *self.hook_load_errors.borrow_mut() = errors.iter().map(|e| e.to_string()).collect();
+        *self.hooks.load_errors.borrow_mut() = errors.iter().map(|e| e.to_string()).collect();
         // Re-append plugin hooks from current plugin registry.
         // Clone the Arc out of the RefCell so the borrow is dropped immediately.
         let plugin_registry_snapshot = self.plugin_registry.borrow().clone();
@@ -668,7 +668,7 @@ impl SessionActor {
         }
         let hook_count = registry.len();
         {
-            let mut reg = self.hook_registry.borrow_mut();
+            let mut reg = self.hooks.registry.borrow_mut();
             if registry.is_empty() {
                 *reg = None;
             } else {
@@ -683,7 +683,7 @@ impl SessionActor {
         {
             use crate::extensions::hooks::hook_spec_to_info;
             let hooks = {
-                let reg = self.hook_registry.borrow();
+                let reg = self.hooks.registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
@@ -693,7 +693,7 @@ impl SessionActor {
                     None => Vec::new(),
                 }
             };
-            let load_errors = self.hook_load_errors.borrow().clone();
+            let load_errors = self.hooks.load_errors.borrow().clone();
             let project_trusted = is_trusted;
             self.send_grow_notification(GrowSessionUpdate::HooksChanged {
                 hooks,
@@ -867,7 +867,7 @@ impl SessionActor {
             }
             hooks_reloaded = new_specs.len();
             {
-                let mut reg = self.hook_registry.borrow_mut();
+                let mut reg = self.hooks.registry.borrow_mut();
                 if let Some(ref mut arc_reg) = *reg {
                     let hook_reg = Arc::make_mut(arc_reg);
                     hook_reg.remove_by_prefix("plugin/");
@@ -907,7 +907,7 @@ impl SessionActor {
         // non-deterministic). Mirrors the `UpdateMcpServers` command handler.
         let t_mcp = std::time::Instant::now();
         let new_mcp_servers = crate::session::mcp_catalog::merge_mcp_servers(
-            self.initial_client_mcp_servers.clone(),
+            self.mcp.initial_client_servers.clone(),
             session_cwd,
             new_registry_snapshot.as_deref(),
         );
@@ -976,7 +976,7 @@ impl SessionActor {
             use crate::extensions::hooks::hook_spec_to_info;
 
             let hooks = {
-                let reg = self.hook_registry.borrow();
+                let reg = self.hooks.registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
@@ -986,7 +986,7 @@ impl SessionActor {
                     None => Vec::new(),
                 }
             };
-            let load_errors = self.hook_load_errors.borrow().clone();
+            let load_errors = self.hooks.load_errors.borrow().clone();
             // Report the folder-trust verdict so the flag matches the gated registry.
             let project_trusted = crate::agent::folder_trust::project_scope_allowed(
                 std::path::Path::new(&self.session_info.cwd),

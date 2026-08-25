@@ -228,7 +228,7 @@ fn stop_cancelled_emitted_with_reason_and_never_blocks_cancel() {
                 messages_turn(&[text_block("partial")], END_TURN),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server).await;
-            actor.client_hooks.borrow_mut().insert(
+            actor.hooks.client_hooks.borrow_mut().insert(
                 ::hooks::event::HookEventName::StopCancelled,
                 vec![crate::extensions::hooks::ClientHookGroup {
                     matcher: None,
@@ -328,7 +328,7 @@ fn stop_cancelled_not_emitted_without_a_cancelled_turn() {
         rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let (actor, mut gateway_rx) = actor_with_sampler(&server).await;
-            actor.client_hooks.borrow_mut().insert(
+            actor.hooks.client_hooks.borrow_mut().insert(
                 ::hooks::event::HookEventName::StopCancelled,
                 vec![crate::extensions::hooks::ClientHookGroup {
                     matcher: None,

@@ -142,7 +142,8 @@ impl SessionActor {
     /// `has_enabled_hooks` for the precise check the stop gate
     /// uses), while client hooks are checked per event.
     pub(super) fn hook_event_active(&self, event: HookEventName) -> bool {
-        self.hook_registry.borrow().is_some() || self.client_hooks.borrow().contains_key(&event)
+        self.hooks.registry.borrow().is_some()
+            || self.hooks.client_hooks.borrow().contains_key(&event)
     }
 
     /// Build the envelope for an observe-only event, fire observe client hooks for it, and
@@ -254,6 +255,7 @@ impl SessionActor {
         // Clone the matched groups so we don't hold the `client_hooks` borrow across the
         // dispatch awaits below.
         let Some(groups) = self
+            .hooks
             .client_hooks
             .borrow()
             .get(&HookEventName::PreToolUse)
@@ -305,6 +307,7 @@ impl SessionActor {
         let mut out = ::hooks::dispatcher::StopDispatchResult::default();
         // Clone: don't hold the borrow across awaits (see run_pre_tool_use_client_hook).
         let Some(groups) = self
+            .hooks
             .client_hooks
             .borrow()
             .get(&envelope.hook_event_name)
@@ -397,7 +400,7 @@ impl SessionActor {
     /// Fire-and-forget (no decision is consumed); independent of file hooks, so it
     /// runs even when no on-disk hook registry exists. No-op when nothing is registered.
     pub(super) fn notify_client_hooks(&self, envelope: &HookEventEnvelope) {
-        let hooks = self.client_hooks.borrow();
+        let hooks = self.hooks.client_hooks.borrow();
         let Some(groups) = hooks.get(&envelope.hook_event_name) else {
             return;
         };
@@ -486,12 +489,12 @@ mod tests {
                 .await;
 
                 // Inert: no file registry, no client hooks.
-                assert!(actor.hook_registry.borrow().is_none());
-                assert!(actor.client_hooks.borrow().is_empty());
+                assert!(actor.hooks.registry.borrow().is_none());
+                assert!(actor.hooks.client_hooks.borrow().is_empty());
                 assert!(!actor.hook_event_active(HookEventName::PreToolUse));
 
                 // A registered client hook activates exactly its event.
-                actor.client_hooks.borrow_mut().insert(
+                actor.hooks.client_hooks.borrow_mut().insert(
                     HookEventName::PreToolUse,
                     vec![ClientHookGroup {
                         matcher: None,
@@ -503,7 +506,7 @@ mod tests {
                 assert!(!actor.hook_event_active(HookEventName::Stop));
 
                 // A present file registry activates every event, even ones with no client hook.
-                *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(
+                *actor.hooks.registry.borrow_mut() = Some(std::sync::Arc::new(
                     ::hooks::discovery::HookRegistry::default(),
                 ));
                 assert!(actor.hook_event_active(HookEventName::Stop));

@@ -224,13 +224,13 @@ impl SessionActor {
         use workspace::file_system::{git_status_short, jj_status};
         use workspace::session::git::VcsKind;
 
-        let kind = match self.vcs_kind {
+        let kind = match self.hooks.vcs_kind {
             VcsKind::None => return None,
             VcsKind::Git => VcsSnapshotKind::Git,
             VcsKind::JujutsuColocated => VcsSnapshotKind::Jujutsu,
         };
         let timeout = std::time::Duration::from_secs(5);
-        let result = if self.vcs_kind.is_jj() {
+        let result = if self.hooks.vcs_kind.is_jj() {
             tokio::time::timeout(timeout, jj_status(cwd)).await
         } else {
             tokio::time::timeout(timeout, git_status_short(cwd)).await

@@ -279,7 +279,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::HooksList => {
-                let text = match &*self.hook_registry.borrow() {
+                let text = match &*self.hooks.registry.borrow() {
                     Some(registry) => {
                         let hooks = registry.all_hooks();
                         if hooks.is_empty() {

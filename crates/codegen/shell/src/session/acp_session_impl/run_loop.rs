@@ -648,7 +648,7 @@ pub(super) async fn run_session(
                             tool_call_count: None,
                         },
                     );
-                    if let Some(registry) = session.hook_registry.borrow().clone() {
+                    if let Some(registry) = session.hooks.registry.borrow().clone() {
                         let ctx = session.hook_run_ctx();
                         let results = ::hooks::dispatcher::dispatch_non_blocking(
                             &registry,
@@ -1079,7 +1079,7 @@ pub(super) async fn run_session(
                     SessionCommand::GetHooksList { respond_to } => {
                         use crate::extensions::hooks::hook_spec_to_info;
 
-                        let hooks = match &*session.hook_registry.borrow() {
+                        let hooks = match &*session.hooks.registry.borrow() {
                             Some(registry) => registry
                                 .all_hooks()
                                 .iter()
@@ -1098,7 +1098,7 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(extension_types::HooksListResponse {
                             hooks,
                             project_trusted,
-                            load_errors: session.hook_load_errors.borrow().clone(),
+                            load_errors: session.hooks.load_errors.borrow().clone(),
                         });
                     }
                     SessionCommand::HooksAction { action, respond_to } => {
@@ -1773,10 +1773,10 @@ pub(super) async fn run_session(
                         ));
                     }
                     SessionCommand::SnapshotClientHooks { respond_to } => {
-                        let _ = respond_to.send(session.client_hooks.borrow().clone());
+                        let _ = respond_to.send(session.hooks.client_hooks.borrow().clone());
                     }
                     SessionCommand::SetClientHooks { hooks } => {
-                        *session.client_hooks.borrow_mut() = hooks;
+                        *session.hooks.client_hooks.borrow_mut() = hooks;
                     }
                     SessionCommand::GetMcpStatus { respond_to } => {
                         let mcp_state = session.mcp_state.clone();
@@ -1857,7 +1857,7 @@ pub(super) async fn run_session(
                                 agent_type: None,
                             },
                         );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
+                        if let Some(registry) = session.hooks.registry.borrow().clone() {
                             let ctx = session.hook_run_ctx();
                             let results = ::hooks::dispatcher::dispatch_non_blocking(
                                 &registry,
@@ -2043,7 +2043,7 @@ pub(super) async fn run_session(
                                 tool_call_count: None,
                             },
                         );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
+                        if let Some(registry) = session.hooks.registry.borrow().clone() {
                             let ctx = session.hook_run_ctx();
                             let results = ::hooks::dispatcher::dispatch_non_blocking(
                                 &registry,

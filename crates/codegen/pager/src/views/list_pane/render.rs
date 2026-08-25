@@ -1036,7 +1036,7 @@ mod tests {
         use ratatui::text::{Line, Span};
 
         // Synthetic tracing line shaped like production logs (plain, ANSI-stripped).
-        let plain = "2026-02-23T15:01:05.563125Z  INFO session.handle_prompt{session_id=019e0000-0000-7000-8000-000000000001 prompt_id=019e0000-0000-7000-8000-000000000011 prompt_preview=\"<user_query>\\nwhats the date, use bash command\\n</user_query>\"}:session.process_conversation_turn_with_recovery{req_id=019e0000-0000-7000-8000-000000000011 session_id=019e0000-0000-7000-8000-000000000001}:session.process_conversation_turn{session_id=019e0000-0000-7000-8000-000000000001}:tools.execute{tool_count=1}: shell::session::acp_session: Model requesting tool: name='run_terminal_cmd', call_id='toolu_fake_01ABCDEFGHIJKLMNOPQRSTUV', arguments={\"command\": \"date\", \"description\": \"Get the current date\"}";
+        let plain = "2026-02-23T15:01:05.563125Z  INFO session.handle_prompt{session_id=019e0000-0000-7000-8000-000000000001 prompt_id=019e0000-0000-7000-8000-000000000011 prompt_preview=\"<user_query>\\nwhats the date, use bash command\\n</user_query>\"}:session.process_conversation_turn_with_recovery{req_id=019e0000-0000-7000-8000-000000000011 session_id=019e0000-0000-7000-8000-000000000001}:session.process_conversation_turn{session_id=019e0000-0000-7000-8000-000000000001}:tools.execute{tool_count=1}: grow_session: Model requesting tool: name='run_terminal_cmd', call_id='toolu_fake_01ABCDEFGHIJKLMNOPQRSTUV', arguments={\"command\": \"date\", \"description\": \"Get the current date\"}";
 
         // Styled version with multiple spans (simulating ansi-to-tui output).
         let styled = Line::from(vec![
@@ -1082,10 +1082,7 @@ mod tests {
             ),
             Span::styled(":", Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
-            Span::styled(
-                "shell::session::acp_session:",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("grow_session:", Style::default().fg(Color::DarkGray)),
             Span::raw(
                 " Model requesting tool: name='run_terminal_cmd', call_id='toolu_fake_01ABCDEFGHIJKLMNOPQRSTUV', arguments={\"command\": \"date\", \"description\": \"Get the current date\"}",
             ),
@@ -1286,7 +1283,7 @@ mod tests {
     }
 
     /// Synthetic long tracing line (800+ chars) for wrap regression tests.
-    const LONG_LINE: &str = r#"2026-03-06T20:17:47.790351Z  INFO session.handle_prompt{session_id=019e0000-0000-7000-8000-000000000002 prompt_id=019e0000-0000-7000-8000-000000000012 prompt_preview="<user_query>\ncheck current weather in 10 ways\n</user_query>"}:session.process_conversation_turn_with_recovery{req_id=019e0000-0000-7000-8000-000000000012 session_id=019e0000-0000-7000-8000-000000000002}:session.process_conversation_turn{session_id=019e0000-0000-7000-8000-000000000002}:tools.execute{tool_count=10}: shell::session::acp_session: Model requesting tool: name='run_terminal_cmd', call_id='toolu_fake_01WXYZABCDEFGHIJKLMNOPQR', arguments={"command": "curl -s \"v2.wttr.in/?0\" 2>/dev/null", "description": "Way 6: v2.wttr.in fancy graphical view", "timeout": 15000}"#;
+    const LONG_LINE: &str = r#"2026-03-06T20:17:47.790351Z  INFO session.handle_prompt{session_id=019e0000-0000-7000-8000-000000000002 prompt_id=019e0000-0000-7000-8000-000000000012 prompt_preview="<user_query>\ncheck current weather in 10 ways\n</user_query>"}:session.process_conversation_turn_with_recovery{req_id=019e0000-0000-7000-8000-000000000012 session_id=019e0000-0000-7000-8000-000000000002}:session.process_conversation_turn{session_id=019e0000-0000-7000-8000-000000000002}:tools.execute{tool_count=10}: grow_session: Model requesting tool: name='run_terminal_cmd', call_id='toolu_fake_01WXYZABCDEFGHIJKLMNOPQR', arguments={"command": "curl -s \"v2.wttr.in/?0\" 2>/dev/null", "description": "Way 6: v2.wttr.in fancy graphical view", "timeout": 15000}"#;
 
     /// Helper: collect all non-space characters from buffer as a String.
     fn collect_rendered(buf: &Buffer, width: u16, height: u16) -> String {

@@ -1069,7 +1069,7 @@ pub(crate) async fn spawn_session_actor(
         )
     };
     chat_state_handle.update_credentials(credentials);
-    let state = TokioMutex::new(State {
+    let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
@@ -2239,8 +2239,25 @@ pub(crate) async fn spawn_session_actor(
         tool_context,
         deny_read_globs,
         mcp_state: mcp_state.clone(),
-        mcp_strategy,
-        initial_client_mcp_servers: initial_client_mcp_servers.clone(),
+        mcp: McpSessionState {
+            strategy: mcp_strategy,
+            initial_client_servers: initial_client_mcp_servers.clone(),
+            tool_metadata_snapshot,
+            announced_servers: Mutex::new(
+                persisted_announcement_state
+                    .as_ref()
+                    .map(|s| {
+                        crate::session::announcement_state::from_persisted_fingerprints(
+                            &s.mcp_server_fingerprints,
+                        )
+                    })
+                    .unwrap_or_default(),
+            ),
+            reminder_mode: McpReminderMode::from_env(),
+            reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            connecting_reminder_injected: std::cell::Cell::new(false),
+            handshakes_done: Arc::new(tokio::sync::Notify::new()),
+        },
         chat_state_handle: chat_state_handle.clone(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
@@ -2360,21 +2377,6 @@ pub(crate) async fn spawn_session_actor(
         goal_command_tx,
         workflow_manager: workflow_manager.clone(),
         workflow_tx: workflow_tx.clone(),
-        tool_metadata_snapshot,
-        mcp_announced_servers: Mutex::new(
-            persisted_announcement_state
-                .as_ref()
-                .map(|s| {
-                    crate::session::announcement_state::from_persisted_fingerprints(
-                        &s.mcp_server_fingerprints,
-                    )
-                })
-                .unwrap_or_default(),
-        ),
-        mcp_reminder_mode: McpReminderMode::from_env(),
-        mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        mcp_connecting_reminder_injected: std::cell::Cell::new(false),
-        mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
         deferred_prefix: TaskSlot::new(),
@@ -2382,19 +2384,21 @@ pub(crate) async fn spawn_session_actor(
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
-        hook_registry: std::cell::RefCell::new(built_hook_registry),
-        client_hooks: std::cell::RefCell::new(client_hooks),
-        hook_resolved_workspace_root: resolved_workspace_root,
-        vcs_kind: {
-            let root = std::path::Path::new(&session_info.cwd);
-            match workspace::session::git::discover_git_root(root) {
-                workspace::session::git::GitDiscoveryResult::Found(git_root) => {
-                    workspace::session::git::detect_vcs_kind(&git_root)
+        hooks: HookSessionState {
+            registry: std::cell::RefCell::new(built_hook_registry),
+            client_hooks: std::cell::RefCell::new(client_hooks),
+            resolved_workspace_root,
+            vcs_kind: {
+                let root = std::path::Path::new(&session_info.cwd);
+                match workspace::session::git::discover_git_root(root) {
+                    workspace::session::git::GitDiscoveryResult::Found(git_root) => {
+                        workspace::session::git::detect_vcs_kind(&git_root)
+                    }
+                    _ => workspace::session::git::VcsKind::None,
                 }
-                _ => workspace::session::git::VcsKind::None,
-            }
+            },
+            load_errors: std::cell::RefCell::new(_hook_load_errors),
         },
-        hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
         plugin_registry_handle,
         events: crate::session::events::EventTracker::new(chat_state_handle.clone()),
@@ -2529,7 +2533,7 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     {
-        let snapshot = session.tool_metadata_snapshot.clone();
+        let snapshot = session.mcp.tool_metadata_snapshot.clone();
         let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
         session
             .agent
@@ -2760,7 +2764,8 @@ pub(crate) async fn spawn_session_actor(
     );
     if let Some(metrics) = harness_metrics {
         let hooks: Vec<super::diagnostics::HookRegInfo> = session
-            .hook_registry
+            .hooks
+            .registry
             .borrow()
             .as_ref()
             .map(|reg| {

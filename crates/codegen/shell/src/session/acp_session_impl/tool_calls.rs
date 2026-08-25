@@ -1560,6 +1560,7 @@ impl SessionActor {
         let tool_call_id = acp::ToolCallId::new(Arc::from(call.id.clone()));
         let model_id_str = self.current_model_id().await;
         tracing::info!(
+            target: SESSION_LOG,
             "Model requesting tool: name='{}', call_id='{}'",
             call.function.name,
             call.id,
@@ -1601,7 +1602,7 @@ impl SessionActor {
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
         if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
-            match self.mcp_strategy {
+            match self.mcp.strategy {
                 McpInitStrategy::Blocking => {
                     let _span = tracing::info_span!("tool.wait_mcp_init").entered();
                     self.wait_for_mcp_initialized().await;
@@ -1863,7 +1864,7 @@ impl SessionActor {
                     subagent_type: self.subagent_type_label(),
                 },
             );
-            let hook_registry_snapshot = self.hook_registry.borrow().clone();
+            let hook_registry_snapshot = self.hooks.registry.borrow().clone();
             if let Some(registry) = hook_registry_snapshot {
                 let ctx = self.hook_run_ctx();
                 let pre_result =

@@ -87,7 +87,7 @@ impl SessionActor {
 
         // User prompts have priority over queued synthetic auto-wake prompts;
         // the guarded sweep exempts the running turn's own slot (see
-        // `State::sweep_pending_inputs`). Gate deliberately keyed on
+        // `AdmissionState::sweep_pending_inputs`). Gate deliberately keyed on
         // completion-id-bearing synthetics only (pre-existing shape): a queue
         // holding only notification-drain synthetics is never preempted.
         if !origin.is_synthetic() {
@@ -298,7 +298,7 @@ impl SessionActor {
     /// (it is shown via the normal turn stream, not the queue).
     pub(super) fn build_queue_wire(
         &self,
-        state: &State,
+        state: &AdmissionState,
     ) -> Vec<crate::session::prompt_queue::QueueEntryWire> {
         // Race-free running identity (`running_task` lives under the same lock
         // as `pending_inputs`); the `current_prompt_id` pin is cleared early by
@@ -331,7 +331,7 @@ impl SessionActor {
     /// Broadcast the current authoritative prompt queue to all subscribers
     /// Fire-and-forget via the gateway, carrying `sessionId`
     /// so session routing fans it to every attached client. Never persisted.
-    pub(super) fn broadcast_queue_changed(&self, state: &State) {
+    pub(super) fn broadcast_queue_changed(&self, state: &AdmissionState) {
         let running = state.running_prompt_id().and_then(|pid| {
             state
                 .pending_inputs
@@ -346,7 +346,7 @@ impl SessionActor {
     /// so clients paint before the user-echo races in).
     pub(super) fn broadcast_queue_changed_promoting(
         &self,
-        state: &State,
+        state: &AdmissionState,
         running: RunningPromptDisplay,
     ) {
         self.broadcast_queue_changed_inner(state, Some(running));
@@ -370,7 +370,11 @@ impl SessionActor {
         }
     }
 
-    fn broadcast_queue_changed_inner(&self, state: &State, running: Option<RunningPromptDisplay>) {
+    fn broadcast_queue_changed_inner(
+        &self,
+        state: &AdmissionState,
+        running: Option<RunningPromptDisplay>,
+    ) {
         let running_id = running.as_ref().map(|r| r.id.clone());
         // Exclude the running/promoting row from `entries` (same as when
         // `running_task` is set).
@@ -432,7 +436,7 @@ impl SessionActor {
     /// (race-free under the caller's state lock), not the `current_prompt_id`
     /// pin, which `handle_completion` clears while the finished front is still
     /// unpopped — a queue edit in that window must still refuse the front.
-    fn is_running_prompt(state: &State, prompt_id: &str) -> bool {
+    fn is_running_prompt(state: &AdmissionState, prompt_id: &str) -> bool {
         state.running_prompt_id() == Some(prompt_id)
     }
 

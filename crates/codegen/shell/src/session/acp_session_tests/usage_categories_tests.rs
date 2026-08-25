@@ -14,7 +14,7 @@ fn mcp_tool(server: &str, tool: &str) -> ToolMetadata {
     }
 }
 fn install_mcp_servers(actor: &SessionActor) {
-    let mut snapshot = actor.tool_metadata_snapshot.lock().unwrap();
+    let mut snapshot = actor.mcp.tool_metadata_snapshot.lock().unwrap();
     snapshot.tools = vec![mcp_tool("demo", "echo"), mcp_tool("demo", "add")];
     snapshot.servers = vec![ServerMetadata {
         name: "demo".to_string(),
@@ -76,7 +76,7 @@ async fn mcp_snapshot_matches_full_mode_injected_reminder() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.mcp_reminder_mode = McpReminderMode::Full;
+            actor.mcp.reminder_mode = McpReminderMode::Full;
             install_mcp_servers(&actor);
             let snapshot = actor
                 .mcp_announcement_snapshot()
@@ -90,7 +90,8 @@ async fn mcp_snapshot_matches_full_mode_injected_reminder() {
                 snapshot.text
             );
             actor
-                .mcp_reminder_dirty
+                .mcp
+                .reminder_dirty
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             actor.maybe_inject_mcp_reminder().await;
             let conversation = actor.chat_state_handle.get_conversation().await;

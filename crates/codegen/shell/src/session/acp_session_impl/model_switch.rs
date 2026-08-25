@@ -262,7 +262,7 @@ impl SessionActor {
         }
         {
             let bridge = self.agent.borrow().tool_bridge().clone();
-            let snapshot = self.tool_metadata_snapshot.clone();
+            let snapshot = self.mcp.tool_metadata_snapshot.clone();
             let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
             bridge
                 .update_resource(tools::types::tool_index::ToolIndex(std::sync::Arc::new(
@@ -292,7 +292,7 @@ impl SessionActor {
             self.inject_deny_read_globs().await;
         }
         {
-            let notified = self.mcp_handshakes_done.notified();
+            let notified = self.mcp.handshakes_done.notified();
             tokio::pin!(notified);
             let needs_wait = {
                 let s = self.mcp_state.lock().await;
@@ -320,7 +320,8 @@ impl SessionActor {
                 agent_name: Some(new_agent_name.clone()),
                 reasoning_effort: Some(current_sampling.reasoning_effort),
             });
-        self.mcp_reminder_dirty
+        self.mcp
+            .reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.refresh_goal_runtime_availability().await;
         self.send_available_commands_update().await;

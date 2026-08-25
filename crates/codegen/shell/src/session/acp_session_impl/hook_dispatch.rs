@@ -53,7 +53,7 @@ impl SessionActor {
     pub(super) fn hook_run_ctx(&self) -> ::hooks::runner::RunContext<'_> {
         ::hooks::runner::RunContext {
             session_id: &self.session_info.id.0,
-            workspace_root: &self.hook_resolved_workspace_root,
+            workspace_root: &self.hooks.resolved_workspace_root,
             process_scope: self.tool_context.process_scope.clone(),
         }
     }
@@ -149,7 +149,7 @@ impl SessionActor {
 
     /// Returns the resolved workspace root for hook envelopes.
     pub(super) fn hook_workspace_root(&self) -> String {
-        self.hook_resolved_workspace_root.clone()
+        self.hooks.resolved_workspace_root.clone()
     }
 
     /// Subagent type for tool-hook attribution, or `None` for the top-level session. Prefers
@@ -194,7 +194,7 @@ impl SessionActor {
         }
         // Fires observe-only client hooks before (and independent of) the on-disk registry guard below.
         let envelope = self.fire_hook(event, prompt_id.map(|s| s.to_string()), payload);
-        let Some(registry) = self.hook_registry.borrow().clone() else {
+        let Some(registry) = self.hooks.registry.borrow().clone() else {
             return;
         };
         let ctx = self.hook_run_ctx();

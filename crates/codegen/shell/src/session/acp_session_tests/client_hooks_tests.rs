@@ -15,7 +15,7 @@ fn install_client_hook(
             timeout: None,
         }],
     );
-    *actor.client_hooks.borrow_mut() = client_hooks;
+    *actor.hooks.client_hooks.borrow_mut() = client_hooks;
 }
 
 /// Acks UI notifications so `deny_tool` cannot block the gate.
@@ -61,7 +61,7 @@ async fn client_hooks_fire_without_file_registry() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             assert!(
-                actor.hook_registry.borrow().is_none(),
+                actor.hooks.registry.borrow().is_none(),
                 "fixture must have no file registry for this invariant"
             );
             install_client_hook(&actor, ::hooks::event::HookEventName::Stop, &["cb_0"]);
@@ -125,7 +125,7 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
                     timeout: None,
                 }],
             );
-            *actor.client_hooks.borrow_mut() = client_hooks;
+            *actor.hooks.client_hooks.borrow_mut() = client_hooks;
             spawn_deny_responder(gateway_rx, "nope");
 
             let call = ToolCallResponse {
@@ -183,10 +183,10 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
                 create_test_actor(0, 256_000, 85, child_gateway_tx, child_persistence_tx).await;
 
             assert!(
-                subagent.client_hooks.borrow().is_empty(),
+                subagent.hooks.client_hooks.borrow().is_empty(),
                 "the subagent starts with no hooks of its own"
             );
-            *subagent.client_hooks.borrow_mut() = parent.client_hooks.borrow().clone();
+            *subagent.hooks.client_hooks.borrow_mut() = parent.hooks.client_hooks.borrow().clone();
 
             let seen_subagent_type = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
             let seen = seen_subagent_type.clone();
@@ -374,7 +374,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                     }],
                 );
             }
-            *actor.client_hooks.borrow_mut() = client_hooks;
+            *actor.hooks.client_hooks.borrow_mut() = client_hooks;
 
             let drain =
                 |rx: &mut tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>| {
@@ -718,9 +718,9 @@ async fn file_force_stop_skips_client_gate_but_notifies() {
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            actor.hooks.resolved_workspace_root = "/tmp".to_string();
 
-            *actor.hook_registry.borrow_mut() =
+            *actor.hooks.registry.borrow_mut() =
                 Some(std::sync::Arc::new(file_registry_with_stop_spec(
                     ::hooks::event::HookEventName::Stop,
                     r#"echo '{"continue":false,"stopReason":"budget exhausted"}'"#,
@@ -877,9 +877,9 @@ async fn subagent_session_gates_on_subagent_stop() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
-            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            actor.hooks.resolved_workspace_root = "/tmp".to_string();
 
-            *actor.hook_registry.borrow_mut() =
+            *actor.hooks.registry.borrow_mut() =
                 Some(std::sync::Arc::new(file_registry_with_stop_spec(
                     ::hooks::event::HookEventName::SubagentStop,
                     r#"echo '{"decision":"block","reason":"verify the summary"}'"#,

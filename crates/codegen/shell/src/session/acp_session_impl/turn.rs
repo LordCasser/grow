@@ -2195,7 +2195,7 @@ impl SessionActor {
                     turn_index,
                     mcp_count,
                     mcp_tools,
-                    self.mcp_strategy,
+                    self.mcp.strategy,
                     self.current_model_id().await,
                 );
             }

@@ -123,7 +123,7 @@ impl SessionActor {
                 session_crons: None,
             },
         );
-        let Some(registry) = self.hook_registry.borrow().clone() else {
+        let Some(registry) = self.hooks.registry.borrow().clone() else {
             return;
         };
         let ctx = self.hook_run_ctx();
@@ -258,11 +258,12 @@ impl SessionActor {
             event::HookEventName::Stop
         };
         let has_file_hooks = self
-            .hook_registry
+            .hooks
+            .registry
             .borrow()
             .as_ref()
             .is_some_and(|r| r.has_enabled_hooks(event));
-        let has_client_hooks = self.client_hooks.borrow().contains_key(&event);
+        let has_client_hooks = self.hooks.client_hooks.borrow().contains_key(&event);
         if !has_file_hooks && !has_client_hooks {
             return StopGateDecision::AllowStop;
         }
@@ -289,7 +290,7 @@ impl SessionActor {
         let mut result = dispatcher::StopDispatchResult::default();
         // Clone out of the RefCell before the awaits so no `Ref` is held
         // across them.
-        let registry = self.hook_registry.borrow().clone();
+        let registry = self.hooks.registry.borrow().clone();
         if let Some(registry) = registry {
             let ctx = self.hook_run_ctx();
             result = dispatcher::dispatch_stop(&registry, event, &envelope, &ctx).await;

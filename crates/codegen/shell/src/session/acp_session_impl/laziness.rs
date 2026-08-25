@@ -903,7 +903,7 @@ impl SessionActor {
         // history push AND the counter increment. `push_system_reminder`
         // delegates to a non-blocking `chat_state_handle.push_user_message`
         // (channel send + return), so it is safe to call under the
-        // `TokioMutex<State>` guard — no inversion, no deadlock.
+        // `TokioMutex<AdmissionState>` guard — no inversion, no deadlock.
         //
         // No `pending_inputs.push_back` and no `maybe_start_running_task`
         // wake: the reminder is invisible until the next real user

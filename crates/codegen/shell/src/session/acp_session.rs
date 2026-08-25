@@ -208,7 +208,7 @@ pub(crate) struct InputItem {
 /// fully migrated to `ChatStateActor` via `chat_state_handle`.
 /// Credentials (api_key, optional extra access key, client_version) live in
 /// the `credentials` sync mutex on `SessionActor`.
-pub(crate) struct State {
+struct AdmissionState {
     /// The sole owner of foreground execution. Goal's future continuation
     /// right is not foreground work and therefore cannot block user admission.
     pub(crate) foreground: ForegroundState,
@@ -273,7 +273,7 @@ impl ForegroundState {
     }
 }
 
-impl State {
+impl AdmissionState {
     /// Prompt id of the in-flight regular turn, if any. Foreground ownership
     /// and the FIFO share this lock, so completion and queue mutations compare
     /// against one race-free identity.
@@ -333,15 +333,15 @@ impl State {
 /// Returns `true` exactly when: no turn or manual compaction is running, no
 /// user prompt is queued, and interactive Ctrl+C has not suppressed
 /// notifications pending genuine user re-engagement.
-pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
+fn is_session_idle_for_injection(state: &AdmissionState) -> bool {
     state.foreground.is_idle() && state.pending_inputs.is_empty() && !state.notifications_suppressed
 }
 /// Canonical actor-owned blocker for idle unload. An Active Goal remains
 /// resident because it owns the right to request the next idle continuation.
 /// A parked Plan approval is also live work even though its reverse-request
 /// runs in a detached task.
-pub(crate) fn session_has_work(
-    state: &State,
+fn session_has_work(
+    state: &AdmissionState,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
     has_parked_plan_approval: bool,
 ) -> bool {
@@ -430,6 +430,37 @@ pub(crate) struct ModelAuthMemo {
     pub(crate) facts: crate::agent::config::ModelAuthFacts,
     pub(crate) provider: Option<crate::auth::AuthProviderRef>,
 }
+
+/// Session-local MCP policy and readiness state.
+///
+/// This groups MCP configuration and reminder bookkeeping without taking
+/// ownership of foreground admission, Timeline notifications, or MCP process
+/// lifetimes. The individual synchronization primitives retain their existing
+/// boundaries.
+struct McpSessionState {
+    strategy: McpInitStrategy,
+    initial_client_servers: Vec<acp::McpServer>,
+    tool_metadata_snapshot: Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,
+    announced_servers:
+        Mutex<HashMap<String, tools::implementations::search_tool::ServerFingerprint>>,
+    reminder_mode: McpReminderMode,
+    reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
+    connecting_reminder_injected: std::cell::Cell<bool>,
+    handshakes_done: Arc<tokio::sync::Notify>,
+}
+
+/// Session-local hook discovery and workspace context.
+///
+/// Plugin registry state deliberately remains on [`SessionActor`] as a
+/// separate lifecycle concern.
+struct HookSessionState {
+    registry: std::cell::RefCell<Option<Arc<::hooks::discovery::HookRegistry>>>,
+    client_hooks: std::cell::RefCell<crate::extensions::hooks::ClientHooks>,
+    resolved_workspace_root: String,
+    vcs_kind: workspace::session::git::VcsKind,
+    load_errors: std::cell::RefCell<Vec<String>>,
+}
+
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
@@ -458,7 +489,7 @@ pub(crate) struct SessionActor {
     /// its id, keying on the id alone is insufficient: each model/credential
     /// chokepoint must clear this memo (`replace(None)`).
     pub(crate) model_auth_memo: std::cell::RefCell<Option<ModelAuthMemo>>,
-    pub(crate) state: TokioMutex<State>,
+    state: TokioMutex<AdmissionState>,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
@@ -469,8 +500,7 @@ pub(crate) struct SessionActor {
     /// Consolidated MCP state (configs, clients, init status) protected by a single lock.
     /// This ensures atomicity when updating configs or checking initialization status.
     pub(crate) mcp_state: Arc<TokioMutex<McpState>>,
-    /// MCP initialization strategy
-    pub(crate) mcp_strategy: McpInitStrategy,
+    mcp: McpSessionState,
     /// Actor-based chat state handle — manages conversation, tokens, timing, and persistence.
     /// Also stores credentials (api_key, optional extra access key,
     /// client_version) opaquely.
@@ -636,25 +666,6 @@ pub(crate) struct SessionActor {
     pub(crate) workflow_tx: tokio::sync::mpsc::UnboundedSender<
         tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >,
-    /// Original client-provided MCP servers from session creation.
-    /// Retained for re-merge during plugin reload.
-    pub(crate) initial_client_mcp_servers: Vec<acp::McpServer>,
-    /// Shared MCP tool metadata for the BM25 search index. Updated after MCP init.
-    pub(crate) tool_metadata_snapshot:
-        Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,
-    /// Tracks which servers have been announced via system-reminder, for
-    /// change detection. Maps server_name -> (tool_count, description_hash).
-    pub(crate) mcp_announced_servers:
-        Mutex<HashMap<String, tools::implementations::search_tool::ServerFingerprint>>,
-    /// Controls whether MCP server reminders inject only changes (Delta)
-    /// or the full server list (Full). Read from `MCP_REMINDER_MODE` env var.
-    pub(crate) mcp_reminder_mode: McpReminderMode,
-    /// Set when the MCP server set changes and a reminder needs injection.
-    /// Cleared by `maybe_inject_mcp_reminder` after injecting.
-    pub(crate) mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) mcp_connecting_reminder_injected: std::cell::Cell<bool>,
-    /// Wakes bounded MCP readiness waiters when background handshakes finish.
-    pub(crate) mcp_handshakes_done: Arc<tokio::sync::Notify>,
     /// Background-computed user-message prefix, injected before the first prompt.
     pub(crate) deferred_prefix: TaskSlot<String>,
     /// Debounced idle notification state. Tests that construct the actor
@@ -669,24 +680,7 @@ pub(crate) struct SessionActor {
     /// Timestamp (millis since epoch) of the last successful API request.
     /// Used to detect session resume after idle and proactively refresh model metadata.
     pub(crate) last_api_request_at: std::sync::atomic::AtomicI64,
-    /// Hook registry for session lifecycle and tool event hooks.
-    /// Loaded at session startup; can be updated mid-session via `/plugins reload`.
-    /// `None` when no plugin registry was supplied at spawn time.
-    /// Wrapped in `RefCell` for mid-session reload from `&self` methods.
-    /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
-    pub(crate) hook_registry: std::cell::RefCell<Option<Arc<::hooks::discovery::HookRegistry>>>,
-    /// Client hooks from `session/new` `_meta["grow/hooks"]`; gated in
-    /// [`crate::session::acp_session::hooks`]. `RefCell` so `load_session` reconnect can
-    /// replace the set on the live actor (see `SessionCommand::SetClientHooks`).
-    pub(crate) client_hooks: std::cell::RefCell<crate::extensions::hooks::ClientHooks>,
-    /// Resolved workspace root for hooks: git worktree root if in a git repo,
-    /// otherwise session cwd. Used for hook child process cwd, envelope fields,
-    /// and GROW_WORKSPACE_ROOT env var.
-    pub(crate) hook_resolved_workspace_root: String,
-    /// The detected VCS kind for this session's workspace.
-    pub(crate) vcs_kind: workspace::session::git::VcsKind,
-    /// Errors from last hook config load (parse failures, etc.).
-    pub(crate) hook_load_errors: std::cell::RefCell<Vec<String>>,
+    hooks: HookSessionState,
     /// Plugin registry snapshot for this session. Updated on `/plugins reload`.
     /// `RefCell` for mid-session reload from `&self` methods.
     pub(crate) plugin_registry:
@@ -889,7 +883,7 @@ impl SessionActor {
             scheduler: tool_names
                 .iter()
                 .any(|n| n == tools::implementations::grow_build::SCHEDULER_CREATE_TOOL_NAME),
-            hooks: self.hook_registry.borrow().is_some(),
+            hooks: self.hooks.registry.borrow().is_some(),
             plugins: self.plugin_registry.borrow().is_some(),
             goal,
             workflows: tool_names

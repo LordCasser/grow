@@ -783,7 +783,7 @@ fn pre_prune_error_fails_open_to_summary() {
             }
             assert!(
                 raw_events.iter().any(|e| {
-                    e.target == "shell::session::acp_session::compaction"
+                    e.target == SESSION_LOG
                         && e.fields
                             .get("message")
                             .is_some_and(|m| m.contains("pre-prune failed"))
