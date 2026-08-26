@@ -53,6 +53,25 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
             actor.session_dir = session_dir;
             actor.session_directory = session_directory.clone();
 
+            let mut workspace =
+                crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+                    &session_directory,
+                    project.path(),
+                )
+                .expect("open Workflow workspace");
+            workspace
+                .draft(
+                    project.path(),
+                    None,
+                    tools::implementations::grow_build::workflow::WorkflowDraftSource::Definition {
+                        definition_id: crate::session::workflow::registry::definition_id(
+                            tools::implementations::grow_build::workflow::WorkflowScope::Project,
+                            &name,
+                        ),
+                    },
+                )
+                .expect("derive a same-name session draft");
+
             let tracker = Arc::new(parking_lot::Mutex::new(
                 crate::session::workflow::tracker::WorkflowTracker::default(),
             ));

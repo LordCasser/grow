@@ -20,7 +20,7 @@ Grow 适配 `aarch64-unknown-linux-ohos` **理论可行**（Rust 官方已将其
 |---|---|
 | `aarch64-unknown-linux-ohos` 是 **Tier 2 with host tools**（官方文档有独立页面 `platform-support/openharmony.html`） | [Rust Platform Support](https://doc.rust-lang.org/rustc/platform-support.html) |
 | rustc 对 `aarch64-unknown-linux-ohos` 报告 `target_os="linux"`、`target_env="ohos"`、`target_family="unix"` → 所有 `cfg(target_os="linux")` 分支**编译期原样生效** | 本机 `rustc --print cfg` 实测 |
-| OHOS 宿主工具链（`rust-<ver>-aarch64-unknown-linux-ohos.tar.xz`）**从 1.93.0 起**发布（1.92.0 = 404） | `curl -I` 实测；Harmonybrew rust formula 用 1.97.1 |
+| OHOS 宿主工具链（`rust-<ver>-aarch64-unknown-linux-ohos.tar.xz`）**从 1.93.0 起**发布（1.92.0 = 404） | `curl -I` 实测；Harmonybrew rust formula 用 1.98.0 |
 | rustup 在 OHOS 上把宿主误判为 `aarch64-unknown-linux-musl`，其 rustc 依赖 `libgcc_s.so.1` + `_Unwind_*`，OHOS musl 没有 → **不能用 musl 宿主工具链** | 容器实测（加载失败） |
 | 官方 ohos dist 的 `cargo` 动态链接 `libssl.so`/`libcrypto.so`/`libz.so`（系统只有改名版 `.z.so` 且符号不全）→ 必须按 rust formula 的 rpath 方案（openssl@3 + zlib-ng-compat） | 容器实测（LD_LIBRARY_PATH 直链改名库仍因 `SSL_get0_group_name` 缺失失败） |
 | OHOS SDK（ci-runner 内 `/opt/ohos-sdk/ohos/native`）提供 `aarch64-unknown-linux-ohos-clang` 包装（`-target aarch64-linux-ohos --sysroot=... -D__MUSL__`）、`sysroot/usr`、`build/cmake/ohos.toolchain.cmake`、`build-tools/cmake/bin/cmake` | 容器实测 |
@@ -137,8 +137,8 @@ GitHub Actions / ubuntu-24.04-arm
 
 - release.yml：新增 `asset_platform: ohos-aarch64` / `target: aarch64-unknown-linux-ohos` / `runner: ubuntu-24.04-arm` / `smoke: false`；**3 处** 9→10 资产清单（`Verify staged binaries`、`Verify and publish` 的 `required` 数组 + 资产校验段）。
 - `.cargo/config.toml` 只加 `[target.aarch64-unknown-linux-ohos]` 的 **rustflags**（`force-unwind-tables` + `-Wl,-z,relro,-z,now,-z,noexecstack`，与 linux 段一致）；**不硬编码 SDK 路径** —— linker/sysroot/SDK 根由 CI 环境注入：`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER`、`CC_/CXX_`、`OHOS_NDK_HOME`、PATH 追加 SDK `llvm/bin` 与 `build-tools/cmake/bin`。
-- rust 版本：OHOS 宿主工具链从 1.93 起才发布。当前固定 ci-runner 镜像使用 Harmonybrew 官方 OHOS
-  host Rust 1.97.1，`scripts/build-ohos.sh` 会拒绝其他版本；CI 内 `RUSTUP_TOOLCHAIN=system`。
+- rust 版本：OHOS 宿主工具链从 1.93 起才发布。构建脚本将官方 Harmonybrew core 固定到
+  `e3a9ec87f881ce05d563912f5f0cbd6f1693b4f3`，使用其 OHOS host Rust 1.98.0 bottle，并拒绝其他版本；CI 内 `RUSTUP_TOOLCHAIN=system`。这避免 pinned ci-runner 内旧 formula 指向已被上游清理的 bottle。
   其他正式目标与仓库 `rust-toolchain.toml` 的 1.93.1 保持一致。
 - `scripts/build-ohos.sh --smoke` 的语义是“只冒烟现有产物”，不会调用 Cargo。发布链不得在 strip 后再次构建，否则会把带 DWARF 的 ELF 写回并使最终包从约 36 MB 膨胀到约 159 MB。
 - 已实测的容器网络坑（重要）：
@@ -189,9 +189,9 @@ GitHub Release 形成两套版本、签名和更新契约。`distro-pm` feature 
 | 2 | 宿主：`cargo check --target ...-ohos`（无 SDK） | ❌ ring 缺 sysroot 头 —— 证明必须用 OHOS SDK clang |
 | 3 | 容器：musl 宿主 rustc | ❌ `libgcc_s`/`_Unwind_*` 缺失 |
 | 4 | 容器：官方 dist 1.92.0 ohos 宿主 | ❌ 不存在（404）；1.93+ 有 |
-| 5 | 容器：rustup 1.97.1 ohos 宿主（`--force-non-host`） | ✅ rustc 可跑；cargo 缺 libssl/libcrypto/libz |
+| 5 | 容器：rustup 1.98.0 ohos 宿主（`--force-non-host`） | ✅ rustc 可跑；cargo 缺 libssl/libcrypto/libz |
 | 6 | 容器：LD_LIBRARY_PATH 指 OHOS 改名库 | ❌ 符号版本不全 |
-| 7 | 容器：`brew install rust`（1.97.1，599MB，rpath 已修） | ✅ cargo 可运行 |
+| 7 | 容器：`brew install rust`（1.98.0，官方 bottle，rpath 已修） | ✅ cargo 可运行 |
 | 8 | 容器：cargo fetch | ⚠️ crates.io 索引 TLS 间歇失败 → USTC 镜像收敛；随后 USTC 下载端点全挂 → 切 rsproxy（下载 5/5 成功） |
 | 9 | 容器：ohos-ripgrep 预编译 rg 15.1.0 直接执行 | ✅ 原生运行（ELF interpreter `/lib/ld-musl-aarch64.so.1`，DYNAMIC musl，NEON）—— 参考资料产物可用 |
 | 10 | 容器：`cargo build --release -p cli --bin grow`（默认 feature） | ❌ nix 0.26.4 编译失败（libc 缺 `O_FSYNC`/`__fsword_t`/`XFS_SUPER_MAGIC`/`ST_RELATIME`）；sqlite-vec C 代码用 glibc 专有 `u_int*_t`；jemalloc configure 不认 ohos 三元组 |

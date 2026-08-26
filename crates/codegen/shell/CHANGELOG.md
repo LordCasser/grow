@@ -22,10 +22,11 @@
 - Agent Role、Behavior 和 Permission 保持独立；Behavior 变更通过原子 Timeline Control 事实持久化。
 - Goal 收敛为一个长期目标及其生命周期。每次 continuation 先检查目标是否完成，再使用普通
   task/todo 执行下一个小步；旧 planner/verifier、board、Goal task type 和 finalization 阶段已删除。
+- Goal mutation authority 绑定当前 prompt 与 Goal 自身的 id/definition revision/lifecycle；token 记账、提醒、上下文重投影和压缩 checkpoint 不再让同一 turn 的 `update_goal` 永久失效。
 - foreground settlement 在 durable turn terminal 与客户端终态提交前保持 non-idle fence，避免首条
   Goal objective 与自动 continuation 产生重叠 turn；自动 Goal stop 还会封闭精确 prompt 的迟到 child admission。
 - Plan/Goal lifecycle call 是工具批次屏障：只执行 provider 顺序中的第一个控制调用，其余调用统一取消并闭合后重新采样。
-- Deep Research 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，作为普通 User workflow 由统一 Registry 扫描；不再有 Builtin scope、Behavior 或重复的私有 Registry/Run 机制。
+- Deep Research 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，作为普通 User workflow 由统一 Registry 扫描；受管文件在每次启动时幂等核验，同版本缺失也会补齐。不再有 Builtin scope、Behavior 或重复的私有 Registry/Run 机制。
 - 子 Agent 权限由请求模式与直接父级不可变授权上限取交集；权限交互只保留 `ask`、`auto` 和
   `always-approve`。
 - nested child 恢复按直接安全父级隔离，Workflow 私有 child 也不能被模型按普通 Task id 取消。
@@ -37,6 +38,7 @@
 - Trajectory 面向长会话重建 turn/step 聚合、因果导航、过滤和按需展开；流式 phase 噪声不持久化。
 - 已保存 Workflow 的动态命令在 Tokio blocking domain 执行同步 Rhai 预检，保留 Behavior admission 和
   Definition 快照契约，不再因 `blocking_recv()` 在 async worker 中 panic。
+- Workflow 动态命令只枚举已保存的 Project/User Definition；同名 session 草稿保留在 Workspace 中，但不会再造成命令隐藏或命名启动歧义。
 - Workflow Run 冻结完整、无 credential 的 sampler route，敏感 transport 值只保留在 runtime lease；
   route 只包含 Task-selectable models，catalog reload 不会使既有 Run 漂移，重启后无法安全重建
   credential 时 fail closed。初始 manifest 在 Timeline spawn 前使用 writer 的 512 KiB canonical encoder
@@ -47,7 +49,7 @@
 ## Distribution
 
 - 官方分发收敛为 GitHub Release 的 10 个平台资产。所有正式构建显式启用 `release-dist` feature，
-  常规目标固定 Rust 1.93.1；OHOS 使用容器内固定的官方 OHOS host Rust 1.97.1。riscv64 与 OHOS
+  常规目标固定 Rust 1.93.1；OHOS 固定官方 Harmonybrew core commit 并使用 OHOS host Rust 1.98.0 bottle。riscv64 与 OHOS
   获得与其他 Linux 资产一致的链接硬化。
 - Release 同时发布 `SHA256SUMS`；内置 updater 在解压与执行前强制校验下载归档。每个平台归档还具有
   由官方 workflow OIDC 生成的 GitHub Artifact Attestation，用于独立验证 publisher provenance。

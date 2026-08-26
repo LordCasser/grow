@@ -760,22 +760,25 @@ impl ContainedDirectory {
     }
 
     pub(crate) fn is_same_entity(&self, other: &Self) -> io::Result<bool> {
-        use std::os::windows::fs::MetadataExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
 
-        let left = self.handle.try_clone()?.into_std_file().metadata()?;
-        let right = other.handle.try_clone()?.into_std_file().metadata()?;
-        let Some(left_identity) = left.volume_serial_number().zip(left.file_index()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Windows filesystem did not expose a stable directory identity",
-            ));
+        let identity = |directory: &cap_std::fs::Dir| -> io::Result<(u32, u64)> {
+            let file = directory.try_clone()?.into_std_file();
+            let mut information = BY_HANDLE_FILE_INFORMATION::default();
+            unsafe {
+                GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)
+                    .map_err(io::Error::other)?;
+            }
+            let file_index = (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow);
+            Ok((information.dwVolumeSerialNumber, file_index))
         };
-        let Some(right_identity) = right.volume_serial_number().zip(right.file_index()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Windows filesystem did not expose a stable directory identity",
-            ));
-        };
+        let left_identity = identity(&self.handle)?;
+        let right_identity = identity(&other.handle)?;
         Ok(left_identity == right_identity)
     }
 
@@ -998,7 +1001,10 @@ impl ContainedDirectory {
                 if error.code() == ERROR_ALREADY_EXISTS.to_hresult()
                     || error.code() == ERROR_FILE_EXISTS.to_hresult()
                 {
-                    io::Error::new(io::ErrorKind::AlreadyExists, target_display)
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("rename target already exists: {}", target_display.display()),
+                    )
                 } else {
                     io::Error::other(error)
                 }

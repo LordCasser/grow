@@ -53,7 +53,9 @@ Plan 与 Goal 各自保留必要的专用状态。Workflow Definition/Run 统一
 | Workflow | 主 Agent正常对话与整合 | 普通权限与 Workflow tool | Behavior 是公共 Definition/Run 管理的唯一入口，但不拥有已启动 Run 的生命周期 |
 | Goal | Active 时正常对话并在 idle 后继续；stopped Goal 只是持久目标记录 | 主 Agent 获得 Goal scoped tools | 只有 Active Goal 选择 Goal Behavior；pause/block/budget limit 释放为 Normal，restart 再激活 |
 
-Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 属于统一公共 runtime。`deep-research` 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，作为普通 User workflow 由 Registry 扫描，不拥有额外 scope、Behavior 或运行机制。
+Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 属于统一公共 runtime。`deep-research` 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后作为普通 User workflow 由 Registry 扫描，不拥有额外 scope、Behavior 或运行机制。
+
+Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definition revision 与 active status 为边界。全局 Control revision 仍保护尚无 Goal owner 的创建操作，但 Goal 已激活后，usage、reminder、context reprojection 或 compaction checkpoint 不属于定义变更，不能撤销同一 turn 的 `update_goal` 权限。
 
 ## 切换矩阵
 

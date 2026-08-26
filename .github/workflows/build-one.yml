@@ -227,11 +227,12 @@ jobs:
       # `docker manifest inspect …/harmonybrew/ci-runner:latest`; the SWR
       # registry garbage-collects superseded digests, so an outdated pin
       # fails with "manifest unknown".
-      # The script bootstraps the toolchain and installs the rsproxy cargo
-      # mirror (crates.io/USTC TLS is flaky), then builds with jemalloc off
-      # (its configure does not know the ohos triplet) and WITHOUT a bundled
-      # ripgrep (runtime resolves `rg` from PATH; search tools error with an
-      # install hint when missing). CARGO_TARGET_DIR lives under the mounted
+      # The script pins the official Harmonybrew core commit that owns the
+      # verified Rust bottle, bootstraps the toolchain, and installs the
+      # rsproxy cargo mirror (crates.io/USTC TLS is flaky), then builds with
+      # jemalloc off (its configure does not know the ohos triplet) and WITHOUT
+      # a bundled ripgrep (runtime resolves `rg` from PATH; search tools error
+      # with an install hint when missing). CARGO_TARGET_DIR lives under the mounted
       # workspace so the runner can package the artifact. The binary is built
       # exactly once, stripped with the SDK's llvm-strip, smoke-tested without
       # rebuilding, then self-signed on the Ubuntu host in the next step.

@@ -1,6 +1,6 @@
 //! Built-in files extracted to `~/.grow/` on startup.
 
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 const BUILTIN_FILES: &[(&str, &str)] = &[
@@ -38,19 +38,12 @@ fn extract_builtin_files_transaction(grow_home: &Path) -> io::Result<()> {
 
     // Re-check only after the cross-process lease is held. Different Grow
     // versions may start concurrently against the same home directory.
-    if root
-        .symlink_metadata(marker)
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-        && let Ok(existing) = root.read_to_string(marker)
-        && existing.trim() == version
-    {
-        return Ok(());
-    }
-
     // Clean up cached changelog files from previous version so
     // /release-notes fetches fresh content for the new version.
-    for stale in &["CHANGELOG.json", "CHANGELOG.md"] {
-        let _ = root.remove_file(stale);
+    if !managed_file_matches(&root, marker, version.as_bytes())? {
+        for stale in &["CHANGELOG.json", "CHANGELOG.md"] {
+            let _ = root.remove_file(stale);
+        }
     }
 
     for &(filename, content) in BUILTIN_FILES {
@@ -98,6 +91,29 @@ fn open_managed_lock(root: &cap_std::fs::Dir, path: &Path) -> io::Result<std::fs
     Ok(file.into_std())
 }
 
+fn managed_file_matches(root: &cap_std::fs::Dir, path: &Path, expected: &[u8]) -> io::Result<bool> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = match root.open_with(path, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    let expected_len = u64::try_from(expected.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "managed file is too large"))?;
+    if !metadata.is_file() || metadata.len() != expected_len {
+        return Ok(false);
+    }
+    let mut actual = Vec::with_capacity(expected.len());
+    file.take(expected_len.saturating_add(1))
+        .read_to_end(&mut actual)?;
+    Ok(actual == expected)
+}
+
 fn write_managed_file(root: &cap_std::fs::Dir, path: &Path, content: &[u8]) -> io::Result<()> {
     if path.is_absolute()
         || path
@@ -111,6 +127,9 @@ fn write_managed_file(root: &cap_std::fs::Dir, path: &Path, content: &[u8]) -> i
     }
 
     ensure_real_parent_dirs(root, path.parent().unwrap_or_else(|| Path::new("")))?;
+    if managed_file_matches(root, path, content)? {
+        return Ok(());
+    }
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -235,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn same_version_does_not_restore_missing_or_delete_legacy_skills() {
+    fn same_version_reconciles_managed_files_without_touching_user_skills() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         std::fs::create_dir_all(home.join("skills/check")).unwrap();
@@ -249,6 +268,7 @@ mod tests {
             std::fs::read_to_string(home.join("skills/check/SKILL.md")).unwrap(),
             "custom check"
         );
+        assert!(home.join("workflows/deep-research.rhai").is_file());
     }
 
     #[test]

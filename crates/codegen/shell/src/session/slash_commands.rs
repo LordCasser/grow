@@ -623,18 +623,28 @@ impl<'a> EffectiveCommandCatalog<'a> {
         taken.extend(bare_counts.keys().map(|name| (*name).to_owned()));
         // Existing Runs may keep the management surface available after new
         // Workflow launches are disabled. Definition shortcuts are launch
-        // affordances, so do not leak them through that management-only state.
+        // affordances for saved Project/User Definitions. Session drafts stay
+        // visible in the Workspace, but never shadow or create a named launch
+        // command: they run only through explicit Workspace actions.
         let effective_workflows = if availability.workflow_behavior && availability.workflows {
+            let saved_workflows = workflows
+                .iter()
+                .filter(|workflow| {
+                    workflow.scope
+                        != tools::implementations::grow_build::workflow::WorkflowScope::Session
+                })
+                .collect::<Vec<_>>();
             let mut counts: HashMap<&str, usize> = HashMap::new();
-            for workflow in workflows {
+            for workflow in &saved_workflows {
                 *counts.entry(workflow.name.as_str()).or_default() += 1;
             }
-            workflows
+            saved_workflows
                 .iter()
                 .filter(|workflow| {
                     counts.get(workflow.name.as_str()) == Some(&1)
                         && !taken.contains(workflow.name.as_str())
                 })
+                .copied()
                 .collect()
         } else {
             Vec::new()
@@ -2459,6 +2469,37 @@ mod tests {
             )
             .unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::GoalStatus)
+        ));
+    }
+    #[test]
+    fn session_draft_does_not_shadow_saved_workflow_command() {
+        let saved = listing("review");
+        let mut draft = listing("review");
+        draft.definition_id =
+            tools::implementations::grow_build::workflow::WorkflowDefinitionId::new(
+                "session:review-draft",
+            );
+        draft.scope = tools::implementations::grow_build::workflow::WorkflowScope::Session;
+        draft.source = "session";
+        draft.status = "temporary,dirty".into();
+        let workflows = vec![draft, saved];
+
+        let names = available_commands(&[], all_gated(), &workflows)
+            .into_iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names.iter().filter(|name| *name == "review").count(), 1);
+        assert!(matches!(
+            resolve(
+                vec![text_block("/review inspect the patch")],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+                &workflows,
+            )
+            .unwrap_err(),
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { name, input })
+                if name == "review" && input == "inspect the patch"
         ));
     }
     #[test]

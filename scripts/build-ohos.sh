@@ -143,12 +143,21 @@ if ! command -v brew >/dev/null 2>&1; then
   echo "error: brew not found; this script targets the Harmonybrew ci-runner image" >&2
   exit 1
 fi
+HARMONYBREW_CORE_COMMIT=e3a9ec87f881ce05d563912f5f0cbd6f1693b4f3
+HARMONYBREW_CORE_REMOTE=https://atomgit.com/Harmonybrew/homebrew-core.git
+EXPECTED_OHOS_RUST_VERSION=1.98.0
+CORE_REPO="$(brew --repo homebrew/core)"
+log "Pinning Harmonybrew core ($HARMONYBREW_CORE_COMMIT)"
+git -C "$CORE_REPO" fetch --depth=1 "$HARMONYBREW_CORE_REMOTE" "$HARMONYBREW_CORE_COMMIT"
+git -C "$CORE_REPO" -c advice.detachedHead=false checkout --detach "$HARMONYBREW_CORE_COMMIT"
+
 RUST_PREFIX="$(brew --prefix rust 2>/dev/null || true)"
 # Harmonybrew reports a formula's prospective prefix even when the formula is
 # not installed. Validate the toolchain layout instead of trusting that query.
 if [ -z "$RUST_PREFIX" ] \
   || [ ! -x "$RUST_PREFIX/bin/rustc" ] \
-  || [ ! -d "$RUST_PREFIX/lib/rustlib" ]; then
+  || [ ! -d "$RUST_PREFIX/lib/rustlib" ] \
+  || [ "$("$RUST_PREFIX/bin/rustc" --version | awk '{ print $2 }')" != "$EXPECTED_OHOS_RUST_VERSION" ]; then
   log "Installing rust via Harmonybrew (official OHOS-host dist, rpath-patched)"
   HOMEBREW_NO_AUTO_UPDATE=1 brew install rust
   RUST_PREFIX="$(brew --prefix rust)"
@@ -166,7 +175,6 @@ rustup toolchain link system "$RUST_PREFIX"
 export RUSTUP_TOOLCHAIN=system
 cargo --version
 rustc --version
-EXPECTED_OHOS_RUST_VERSION=1.97.1
 ACTUAL_OHOS_RUST_VERSION="$(rustc --version | awk '{ print $2 }')"
 if [ "$ACTUAL_OHOS_RUST_VERSION" != "$EXPECTED_OHOS_RUST_VERSION" ]; then
   echo "error: OHOS release toolchain must be rustc $EXPECTED_OHOS_RUST_VERSION; found $ACTUAL_OHOS_RUST_VERSION" >&2

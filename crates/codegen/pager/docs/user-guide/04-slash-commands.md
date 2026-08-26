@@ -290,7 +290,7 @@ The session Workspace can keep several temporary drafts and Runs, but it has one
 
 ### `/workflow-run`
 
-A bare `/workflow-run` opens the Workflow selector; it never starts the latest Run implicitly. `/workflow-run <definition-name> [args]` launches that saved Definition directly, as does its dynamic `/<definition-name> [args]` command. Explicit subcommands manage a Run by its session-unique handle. Launching the same Definition twice produces `review-changes`, `review-changes-2`, and so on.
+A bare `/workflow-run` opens the Workflow selector; it never starts the latest Run implicitly. `/workflow-run <definition-name> [args]` launches that saved Project/User Definition directly, as does its dynamic `/<definition-name> [args]` command. A same-name session editing draft remains visible in the Workspace but does not hide or replace the saved Definition's command. Explicit subcommands manage a Run by its session-unique handle. Launching the same Definition twice produces `review-changes`, `review-changes-2`, and so on.
 
 ```
 /workflow-run review-changes compare main

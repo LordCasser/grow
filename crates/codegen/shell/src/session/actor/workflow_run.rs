@@ -167,7 +167,11 @@ impl SessionActor {
             .catalog(cwd)
             .definitions
             .into_iter()
-            .filter(|definition| definition.name == name)
+            .filter(|definition| {
+                definition.name == name
+                    && definition.scope
+                        != tools::implementations::grow_build::workflow::WorkflowScope::Session
+            })
             .collect();
         let definition_id = match candidates.as_slice() {
             [definition] => definition.definition_id.clone(),

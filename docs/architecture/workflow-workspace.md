@@ -9,7 +9,7 @@ Workflow 由四个所有权边界组成，而不是一段“可变的后台脚�
 1. **Workflow Behavior** 是 Workflow 的唯一协作协议。只有 turn 捕获的 Behavior 与
    实时 Behavior 都是 Workflow 时，Grow 才能搜索、创建、编辑、验证、发布、启动或管理
    Workflow。`deep-research` 由 builtin extractor version-managed 到
-   `~/.grow/workflows/deep-research.rhai`，随后按普通 User workflow 由 Registry 扫描；不会
+   `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后按普通 User workflow 由 Registry 扫描；不会
    引入额外的 scope、Behavior 或私有运行机制。
 2. **Workflow Workspace** 归 session 所有，持久化多个草稿、唯一 Definition 焦点、派生
    来源、基线、当前内容哈希、验证哈希、保存提示和发布冲突。它不持有运行中执行器。
@@ -78,6 +78,10 @@ Workflow 外只提供 `/workflow [prompt]` 与 `/behavior workflow` 快速入口
 `/workflows`、`/workflow-run` 和可运行 Definition 的动态命令。`/workflows` 分区显示
 Definitions 与 Runs：前者显示焦点、scope、临时/已保存、dirty、validated、conflicted；
 后者显示句柄、Definition scope/hash、状态、阶段与 Agent 进度。
+
+动态命令只由已保存的 Project/User Definition 生成。Session 草稿属于编辑 Workspace，仍在
+Definitions 分区显示并可通过显式 Run 操作执行，但不会创建同名斜杠命令，也不会遮蔽其来源
+Definition。
 
 有 Active Run 时离开 Workflow 需要重复确认，Run 继续后台执行；重新进入 Workflow 后
 才能管理。暂停、预算受限和未保存草稿不会阻止切换。`deep-research` 与其他 Definition

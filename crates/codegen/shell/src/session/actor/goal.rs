@@ -230,7 +230,6 @@ mod goal_admission_tests {
                         .lock()
                         .revise_goal("rev2 objective".into(), None)
                 );
-                *actor.current_prompt_id.lock().unwrap() = Some("prompt-rev2".into());
 
                 let (respond_to, response) = tokio::sync::oneshot::channel();
                 actor
@@ -252,6 +251,79 @@ mod goal_admission_tests {
                 );
                 assert_eq!(goal.definition_revision, 2);
                 assert_eq!(goal.objective, "rev2 objective");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn goal_bookkeeping_checkpoint_allows_completion_and_stops_the_loop() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::update_goal::{
+                    GoalCommand, GoalMutationAuthority, GoalUpdateStatus, UpdateGoalInput,
+                };
+
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the work".into(),
+                        None,
+                        "2026-08-24T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                *actor.current_prompt_id.lock().unwrap() = Some("prompt-1".into());
+                let authority = GoalMutationAuthority {
+                    prompt_id: "prompt-1".into(),
+                    prompt_index: 1,
+                    control_revision: actor
+                        .control_revision
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    goal: Some(("goal-1".into(), 1)),
+                };
+
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .account_model_tokens("goal-1", 100)
+                );
+                actor.record_control_snapshot();
+
+                let (respond_to, response) = tokio::sync::oneshot::channel();
+                actor
+                    .handle_goal_command(GoalCommand::Update {
+                        input: UpdateGoalInput {
+                            status: GoalUpdateStatus::Complete,
+                            blocker: None,
+                        },
+                        authority,
+                        respond_to,
+                    })
+                    .await;
+
+                assert_eq!(response.await.unwrap().unwrap(), "Goal marked complete.");
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Complete)
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+                assert!(!actor.goal_loop_active());
+                assert!(
+                    actor
+                        .render_goal_continuation(actor.goal_tokens_used())
+                        .is_none()
+                );
             })
             .await;
     }
@@ -839,10 +911,17 @@ impl SessionActor {
             .expect("current_prompt_id mutex poisoned")
             .as_deref()
             == Some(authority.prompt_id.as_str());
-        let control_matches = self
-            .control_revision
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == authority.control_revision;
+        // An active Goal already carries its own immutable identity and
+        // definition revision. Global Control also advances for token usage,
+        // reminder bookkeeping, context reprojection, and compaction; those
+        // checkpoints must not revoke the Goal turn before it can complete.
+        // Goal creation has no such owner yet, so it still uses the global
+        // revision to reject a stale no-Goal authority after a control change.
+        let control_matches = authority.goal.is_some()
+            || self
+                .control_revision
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == authority.control_revision;
         let goal_matches = match (&authority.goal, self.goal_tracker.lock().snapshot()) {
             (None, None) => !require_active_goal,
             (Some((goal_id, definition_revision)), Some(goal)) => {
