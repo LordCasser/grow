@@ -1,6 +1,7 @@
 let meta = #{
     name: "deep-research",
     description: "Research a query with adaptive coverage, evidence-level verification, and a cited long-form report",
+    when_to_use: "Use in Workflow behavior for broad or high-confidence research that benefits from parallel evidence collection, verification, and a cited report",
     phases: [
         #{ title: "Plan", detail: "Choose bounded research axes and domain-appropriate evidence targets" },
         #{ title: "Research", detail: "Collect traceable findings and uncertainty in parallel" },
@@ -161,11 +162,11 @@ fn display_locator(locator) {
 }
 
 if args == () {
-    pause("verification", "No research query was provided. Run /deep-research <query>, or pass args.query.");
+    pause("verification", "No research query was provided. Run /deep-research <query> (or /workflow-run deep-research <query>), or pass args.query through the Workflow tool.");
 }
 let query = if args.query != () { args.query } else { args.objective };
 if query == () || query == "" {
-    pause("verification", "No research query was provided. Run /deep-research <query>, or pass args.query.");
+    pause("verification", "No research query was provided. Run /deep-research <query> (or /workflow-run deep-research <query>), or pass args.query through the Workflow tool.");
 }
 let breadth = 6;
 if args.breadth != () && args.breadth >= 2 && args.breadth <= 6 {

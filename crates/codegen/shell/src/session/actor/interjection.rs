@@ -213,7 +213,7 @@ impl SessionActor {
     ) {
         let model_id = self.current_model_id().await;
         let permission_evidence = match &item {
-            ConversationItem::User(user) => user.permission_evidence,
+            ConversationItem::User(user) => user.permission_evidence.clone(),
             _ => None,
         };
         let mut user_chunk_meta = serde_json::json!({ "modelId": model_id })
@@ -337,6 +337,7 @@ impl SessionActor {
             let sanitized =
                 crate::session::placeholder_images::strip_paths_from_image_placeholders(text);
             let skill_information = self.interjection_skill_information(&sanitized).await;
+            let permission_text = sanitized.clone();
             let mut wrapped = format_interjection(sanitized);
             let images = self
                 .prepare_interjection_images(&mut wrapped, attachments)
@@ -355,7 +356,7 @@ impl SessionActor {
                 }
                 None => wrapped.clone(),
             };
-            let mut item = ConversationItem::interjection(model_text);
+            let mut item = ConversationItem::interjection(model_text, permission_text);
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }

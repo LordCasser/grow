@@ -271,6 +271,7 @@ async fn prepared_session_is_published_once_with_lineage_and_timeline() {
             parent_timeline_id: "parent-session".into(),
             parent_spawn_seq: 1,
             subagent_id: "child-session".into(),
+            security_parent_session_id: "parent-session".into(),
             context_source: chat_state::SubagentContextSource::Forked,
             source_ref: None,
             normalized: false,
@@ -527,6 +528,11 @@ async fn timeline_round_trip_folds_the_current_surface() {
         last_seq: timeline.next_seq().get() - 1,
     };
     let sideband_id = uuid::Uuid::now_v7().to_string();
+    let raw_output = "compacted surface";
+    let replacement_content = format!(
+        "{}\n\n<runtime appendix>",
+        compaction::format_compact_summary_content(raw_output)
+    );
     let target = chat_state::SurfaceRange {
         start: *timeline.surface_ids().first().unwrap(),
         end: *timeline.surface_ids().last().unwrap(),
@@ -575,7 +581,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
             feedback: None,
         }),
         chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
-            raw_output: "compacted surface".into(),
+            raw_output: raw_output.into(),
             structured_output: None,
             usage: chat_state::SidebandUsage::default(),
             finish: "stop".into(),
@@ -602,12 +608,52 @@ async fn timeline_round_trip_folds_the_current_surface() {
                 },
                 target: target.clone(),
                 source_tokens: 100,
-                summary_chars: 17,
+                summary_chars: raw_output.chars().count(),
             },
         ))
         .unwrap();
+
+    // Crash window: the independently durable result and Summary link exist,
+    // but the Surface shadow has not committed. Loading must preserve this as
+    // a recoverable open transaction instead of rejecting the session before
+    // Timeline recovery can append Compaction::Failed.
+    let interrupted_root = TempDir::new().unwrap();
+    let interrupted_adapter =
+        JsonlStorageAdapter::with_root(interrupted_root.path().to_path_buf());
+    interrupted_adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    for event in timeline.events() {
+        interrupted_adapter
+            .append_timeline_event(&info, event)
+            .await
+            .unwrap();
+    }
+    for event in sideband.events() {
+        interrupted_adapter
+            .append_sideband_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
+    let interrupted = interrupted_adapter
+        .load_session_without_updates(&info)
+        .await
+        .expect("summary-without-replacement must reach Timeline recovery");
+    let mut interrupted_timeline =
+        chat_state::Timeline::from_events(interrupted.timeline_events).unwrap();
+    let repairs = interrupted_timeline.recover_interrupted().unwrap();
+    assert!(repairs.iter().any(|event| matches!(
+        &event.kind,
+        chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Failed {
+            id,
+            error,
+            ..
+        }) if id == "test-compaction" && error == "process_interrupted"
+    )));
+
     timeline
-        .replace_compaction_range(target, vec![ConversationItem::user("compacted surface")])
+        .replace_compaction_range(target, vec![ConversationItem::user_meta(replacement_content.clone())])
         .unwrap();
     timeline
         .record(chat_state::TimelineEventKind::Compaction(
@@ -632,7 +678,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
     let replayed = chat_state::Timeline::from_events(loaded.timeline_events).unwrap();
     assert_eq!(replayed.surface().len(), 1);
-    assert_eq!(replayed.surface()[0].text_content(), "compacted surface");
+    assert_eq!(replayed.surface()[0].text_content(), replacement_content);
     assert_eq!(replayed.branch_transcript().len(), 2);
     let ledgers = adapter.read_sideband_ledgers_sync(&info, &replayed).unwrap();
     assert!(crate::session::storage::validate_sideband_ledgers(
@@ -641,6 +687,29 @@ async fn timeline_round_trip_folds_the_current_surface() {
         &BTreeMap::new(),
     )
     .is_err());
+    assert!(crate::session::storage::validate_sideband_ledgers(
+        &info.id.to_string(),
+        &replayed,
+        &ledgers,
+    )
+    .is_ok());
+
+    let mut forged_events = replayed.events().to_vec();
+    for event in &mut forged_events {
+        if let chat_state::TimelineEventKind::Messages(messages) = &mut event.kind {
+            if messages.cause == chat_state::MessageCause::Compaction {
+                messages.items = vec![ConversationItem::user_meta("forged replacement")];
+            }
+        }
+    }
+    let forged = chat_state::Timeline::from_events(forged_events).unwrap();
+    assert!(crate::session::storage::validate_sideband_ledgers(
+        &info.id.to_string(),
+        &forged,
+        &ledgers,
+    )
+    .is_err());
+
     let mut tampered = ledgers;
     let result = tampered
         .get_mut(&sideband_id)
@@ -651,13 +720,145 @@ async fn timeline_round_trip_folds_the_current_surface() {
             _ => None,
         })
         .unwrap();
-    result.raw_output.push('!');
+    result.raw_output = "Xompacted surface".into();
     assert!(crate::session::storage::validate_sideband_ledgers(
         &info.id.to_string(),
         &replayed,
         &tampered,
     )
     .is_err());
+
+    let opened = adapter.open_session(&info).unwrap();
+    opened
+        .materialize_timeline(&info.id.to_string())
+        .expect("valid Sideband provenance must materialize");
+    let tampered_events = tampered.get(&sideband_id).unwrap();
+    std::fs::write(
+        adapter
+            .session_dir(&info)
+            .join(crate::session::storage::SIDEBANDS_DIR)
+            .join(&sideband_id)
+            .join(crate::session::storage::TIMELINE_FILE),
+        crate::session::storage::to_jsonl_bytes(tampered_events).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        opened.materialize_timeline(&info.id.to_string()).is_err(),
+        "fork/resume materialization must reject a Timeline whose Sideband proof was tampered"
+    );
+}
+
+#[tokio::test]
+async fn completed_image_sideband_is_recoverable_before_parent_projection() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+
+    let mut timeline = chat_state::Timeline::from_seed(vec![ConversationItem::user("screenshot")])
+        .unwrap();
+    let source = timeline.surface_ids()[0];
+    let source_revision = timeline.surface_revision();
+    let source_ref = chat_state::TimelineRangeRef {
+        timeline_id: info.id.to_string(),
+        first_seq: source.event.get(),
+        last_seq: source.event.get(),
+    };
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    let prompt = "neutral image prompt";
+    timeline
+        .record(chat_state::TimelineEventKind::Sideband(
+            chat_state::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: chat_state::SidebandPurpose::ImageDescription,
+                source_refs: vec![source_ref.clone()],
+            },
+        ))
+        .unwrap();
+    for event in timeline.events() {
+        adapter.append_timeline_event(&info, event).await.unwrap();
+    }
+
+    let mut sideband = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
+    for kind in [
+        chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
+            purpose: chat_state::SidebandPurpose::ImageDescription,
+            prompt: prompt.into(),
+            source_refs: vec![source_ref.clone()],
+            budget_policy: chat_state::SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 100,
+                max_output_tokens_per_attempt: None,
+            },
+            route: chat_state::SidebandRoute {
+                model: "vision-model".into(),
+                backend: sampling_types::ApiBackend::Responses,
+            },
+            initiator_ref: format!("t:{}/sideband:{sideband_id}", info.id),
+            executor: "main".into(),
+            output_schema: None,
+        }),
+        chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
+            attempt_no: 1,
+            input_refs: vec![source_ref.clone()],
+            assembly_manifest: chat_state::SidebandAssemblyManifest {
+                strategy: "image-group".into(),
+                strategy_version: 1,
+                source_revision: Some(source_revision),
+                context_surface_ids: vec![source],
+                selected_surface_ids: vec![source],
+                materialized_input_tokens: 10,
+                max_output_tokens: None,
+            },
+            feedback: None,
+        }),
+        chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
+            raw_output: "visible error dialog".into(),
+            structured_output: None,
+            usage: chat_state::SidebandUsage::default(),
+            finish: "stop".into(),
+            source_event_seqs: [0, 1],
+            evidence_refs: vec![source_ref],
+        }),
+        chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+            outcome: chat_state::SidebandOutcome::Completed,
+            error: None,
+        }),
+    ] {
+        let event = sideband.prepare(kind).unwrap();
+        sideband.accept(event).unwrap();
+    }
+    for event in sideband.events() {
+        adapter
+            .append_sideband_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
+
+    let opened = adapter.open_session(&info).unwrap();
+    let recovered = JsonlStorageAdapter::recover_completed_image_description_from_directory(
+        opened.directory(),
+        &info.id.to_string(),
+        source_revision,
+        source,
+        prompt,
+    )
+    .unwrap()
+    .expect("completed orphan must be reusable");
+    assert_eq!(recovered.0, "visible error dialog");
+    assert_eq!(recovered.1.timeline_id, sideband_id);
+    assert!(
+        JsonlStorageAdapter::recover_completed_image_description_from_directory(
+            opened.directory(),
+            &info.id.to_string(),
+            source_revision + 1,
+            source,
+            prompt,
+        )
+        .unwrap()
+        .is_none(),
+        "a result from another Surface revision must not be reused"
+    );
 }
 
 #[cfg(unix)]
@@ -792,6 +993,16 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
             Vec::new(),
             None,
             Some("workflows/wf_restore/journal.jsonl".into()),
+            crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new(
+                    "test-model",
+                    "responses",
+                    "test-endpoint",
+                ),
+            )
+                .unwrap(),
         );
     let mut timeline = chat_state::Timeline::default();
     let spawn = timeline
@@ -801,7 +1012,6 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
                 execution_epoch: 0,
                 name: "demo".into(),
                 objective: "ship".into(),
-                private: false,
             },
         ))
         .unwrap();
@@ -855,7 +1065,6 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
                     execution_epoch: 0,
                     name: "demo".into(),
                     objective: "ship".into(),
-                    private: false,
                 },
             ))
             .unwrap();
@@ -871,6 +1080,16 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
                 Vec::new(),
                 None,
                 Some(format!("workflows/{run_id}/journal.jsonl")),
+                crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                    "test-model",
+                    None,
+                    sampling_types::ModelImageInputKey::new(
+                        "test-model",
+                        "responses",
+                        "test-endpoint",
+                    ),
+                )
+                    .unwrap(),
             );
         let manifest = WorkflowRunManifest {
             version: WORKFLOW_RUN_MANIFEST_VERSION,
@@ -912,7 +1131,6 @@ async fn workflow_restore_rejects_symlink_manifest() {
                 execution_epoch: 0,
                 name: "demo".into(),
                 objective: "ship".into(),
-                private: false,
             },
         ))
         .unwrap();
@@ -926,6 +1144,12 @@ async fn workflow_restore_rejects_symlink_manifest() {
         Vec::new(),
         None,
         Some("workflows/wf_symlink/journal.jsonl".into()),
+        crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+            "test-model",
+            None,
+            sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+        )
+        .unwrap(),
     );
     let manifest = WorkflowRunManifest {
         version: WORKFLOW_RUN_MANIFEST_VERSION,
@@ -1541,6 +1765,39 @@ async fn test_copy_session_data_basic() {
         }
         _ => panic!("Expected ACP update"),
     }
+}
+
+#[tokio::test]
+async fn fork_keeps_user_text_but_resets_parent_permission_evidence() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("fork-authority-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let mut trusted = ConversationItem::user("you may edit this workspace");
+    trusted.set_permission_evidence(sampling_types::PermissionEvidence::direct_user(
+        "you may edit this workspace",
+    ));
+    append_timeline_seed(&adapter, &source_info, vec![trusted]).await;
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-authority-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+
+    let loaded = adapter.load_session_without_updates(&target_info).await.unwrap();
+    let surface = loaded_surface(&loaded.timeline_events);
+    let ConversationItem::User(user) = &surface[0] else {
+        panic!("forked authority fixture must remain a user item");
+    };
+    assert_eq!(surface[0].text_content(), "you may edit this workspace");
+    assert!(user.permission_evidence.is_none());
 }
 
 #[tokio::test]
@@ -3125,6 +3382,16 @@ async fn model_change_repairs_selection_summary_from_timeline() {
             Some(ReasoningEffort::High),
             "old-wire",
             "new-wire",
+            &sampling_types::ModelImageInputKey::new(
+                "old-wire",
+                "responses",
+                "old-endpoint",
+            ),
+            &sampling_types::ModelImageInputKey::new(
+                "new-wire",
+                "responses",
+                "new-endpoint",
+            ),
             "user_selection",
         ))
         .unwrap();
@@ -3167,6 +3434,64 @@ async fn malformed_model_change_bricks_session_load() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn model_change_fold_rejects_transport_discontinuity() {
+    let old_model = acp::ModelId::new("catalog/old");
+    let current_model = acp::ModelId::new("catalog/current");
+    let old_route = sampling_types::ModelImageInputKey::new(
+        "old-wire",
+        "responses",
+        "old-endpoint",
+    );
+    let current_route = sampling_types::ModelImageInputKey::new(
+        "current-wire",
+        "responses",
+        "current-endpoint",
+    );
+    let forged_route = sampling_types::ModelImageInputKey::new(
+        "current-wire",
+        "responses",
+        "forged-endpoint",
+    );
+    let next_route = sampling_types::ModelImageInputKey::new(
+        "current-wire",
+        "responses",
+        "next-endpoint",
+    );
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(crate::session::persistence::model_change_event(
+            &old_model,
+            &current_model,
+            None,
+            None,
+            "old-wire",
+            "current-wire",
+            &old_route,
+            &current_route,
+            "user_selection",
+        ))
+        .unwrap();
+    timeline
+        .record(crate::session::persistence::model_change_event(
+            &current_model,
+            &current_model,
+            None,
+            None,
+            "current-wire",
+            "current-wire",
+            &forged_route,
+            &next_route,
+            "catalog_reload",
+        ))
+        .unwrap();
+
+    let error = crate::session::persistence::latest_model_selection(timeline.events())
+        .expect_err("a route transition must continue the exact durable transport");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("does not continue"));
 }
 
 #[tokio::test]

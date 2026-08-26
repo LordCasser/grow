@@ -10,10 +10,12 @@ use std::path::PathBuf;
 pub struct EffectiveRuntimeConfig {
     /// Resolved model ID override (if any).
     pub model: Option<String>,
-    /// Resolved reasoning effort (e.g. "low", "medium", "high").
+    /// Resolved reasoning policy. The outer value records an explicit
+    /// spawn-time/definition policy; its inner `None` explicitly disables
+    /// reasoning instead of inheriting the selected model default.
     // TODO(phase2): consider a typed `ReasoningEffort` enum to prevent typos.
     // The sampling/model boundary currently exposes this value as a string.
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<Option<String>>,
     /// Fully resolved initial capability request. Agent-definition and global
     /// defaults have already been applied; parent confinement is the only
     /// remaining transformation.
@@ -31,10 +33,16 @@ pub struct ResumeSourceData {
     /// Source subagent type (e.g. "general-purpose", "explore").
     /// Used by `validate_resume_identity` to check type match.
     pub subagent_type: String,
-    /// Effective model ID used by the source child session.
-    /// Used by the shell for resume model pinning (model overrides on
-    /// resume are soft-ignored, not identity-gated).
-    pub model_id: Option<String>,
+    /// Effective model ID used by the source child session. Resume ignores a
+    /// caller override and pins this exact catalogue entry.
+    pub model_id: String,
+    /// Exact secret-free provider/model/endpoint identity used by the source.
+    /// Resume fails closed if the catalogue ID now resolves elsewhere.
+    pub model_transport_key: sampling_types::ModelImageInputKey,
+    /// Effective reasoning policy used by the source child. Resume preserves
+    /// this together with the model instead of inheriting a later parent or
+    /// Workflow route.
+    pub reasoning_effort: Option<sampling_types::ReasoningEffort>,
     /// Effective cwd the source child used. Consumed by the shell's
     /// spawn orchestration for raw transcript continuation and worktree reuse.
     pub child_cwd: String,

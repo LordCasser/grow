@@ -45,13 +45,28 @@ impl SessionActor {
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {
             let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            let (body, tail) = split_plan_control_tail(tool_calls, kind_of);
-            if !body.is_empty() {
-                self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
+            let (control, siblings) = split_state_control_barrier(tool_calls, kind_of);
+            if let Some(control) = control {
+                self.execute_tool_calls_batch(
+                    vec![control],
+                    &mut deferred_followups,
+                    &mut final_result,
+                )
+                .await?;
+                // Lifecycle mutations invalidate the sibling calls sampled
+                // against the old state. Reuse the ordinary durable batch
+                // cancellation path, then re-sample under the new Behavior.
+                if !siblings.is_empty() {
+                    final_result.get_or_insert(ToolLoop::Continue);
+                    self.execute_tool_calls_batch(
+                        siblings,
+                        &mut deferred_followups,
+                        &mut final_result,
+                    )
                     .await?;
-            }
-            if !tail.is_empty() {
-                self.execute_tool_calls_batch(tail, &mut deferred_followups, &mut final_result)
+                }
+            } else {
+                self.execute_tool_calls_batch(siblings, &mut deferred_followups, &mut final_result)
                     .await?;
             }
         } else {
@@ -497,7 +512,18 @@ impl SessionActor {
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
-                    ToolLoop::Continue
+                    if !tool_failed
+                        && is_goal_lifecycle_kind(
+                            self.agent
+                                .borrow()
+                                .tool_bridge()
+                                .tool_kind(&prepared.tool_name),
+                        )
+                    {
+                        ToolLoop::ControlBoundary
+                    } else {
+                        ToolLoop::Continue
+                    }
                 }
                 Err(err) => {
                     let consumed_completion_id =
@@ -586,7 +612,9 @@ impl SessionActor {
             }
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
-                ToolLoop::Continue => crate::session::events::ToolOutcome::Success,
+                ToolLoop::Continue | ToolLoop::ControlBoundary => {
+                    crate::session::events::ToolOutcome::Success
+                }
                 ToolLoop::PermissionReject { .. } => {
                     crate::session::events::ToolOutcome::PermissionRejected
                 }
@@ -632,6 +660,11 @@ impl SessionActor {
             )
             .in_scope(|| {});
             match &tool_loop {
+                ToolLoop::ControlBoundary => {
+                    if final_result.is_none() {
+                        *final_result = Some(tool_loop);
+                    }
+                }
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
                 | ToolLoop::PermissionTimedOut { .. }
@@ -648,7 +681,8 @@ impl SessionActor {
     /// Issue the `grow/plan_approval` reverse request and await the user's
     /// decision. Shared by the PlanControl intercept and the resume
     /// re-park. Marks approval transport as pending while the request is
-    /// outstanding and clears it on every exit path via [`AwaitingApprovalGuard`].
+    /// outstanding; the decision branches clear it only as part of their
+    /// phase-transition CAS.
     pub(super) async fn request_plan_approval(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -727,12 +761,59 @@ impl SessionActor {
         Ok(())
     }
 
+    /// Finish Plan only if the pending approval still describes the exact
+    /// state captured before the reverse request. A stale abandon decision
+    /// must not terminate a newer Plan.
+    async fn finish_plan_to_default_if(
+        &self,
+        expected: &crate::session::behavior::BehaviorSnapshot,
+    ) -> Result<bool, String> {
+        let previous_behavior = self.behavior.lock().snapshot();
+        let finished = {
+            let mut behavior = self.behavior.lock();
+            if behavior.snapshot() != *expected {
+                false
+            } else {
+                behavior.finish_plan()
+            }
+        };
+        if !finished {
+            return Ok(false);
+        }
+        self.commit_behavior_mutation_or_restore(previous_behavior)
+            .await?;
+        if self.behavior.lock().snapshot() != crate::session::behavior::BehaviorSnapshot::normal() {
+            return Ok(false);
+        }
+        self.enqueue_current_mode_update(acp::SessionModeId::new(
+            tools::types::BehaviorId::Normal.as_id(),
+        ));
+        self.send_available_commands_update().await;
+        Ok(true)
+    }
+
     /// Validate the parked approval before load-session is acknowledged. A
     /// submitted Plan without its immutable artifact cannot remain in
     /// AwaitingApproval; normalize it to Normal through a durable Control
     /// barrier so the restored actor is always able to accept another turn.
     pub(super) async fn reconcile_restored_plan_approval(&self) -> Result<bool, String> {
-        if !self.behavior.lock().approval_pending() {
+        let snapshot = self.behavior.lock().snapshot();
+        if !snapshot.approval_pending {
+            return Ok(false);
+        }
+        if self
+            .behavior
+            .lock()
+            .pending_plan_approval_snapshot()
+            .is_none()
+        {
+            // A persisted transport bit without an approval-capable phase is
+            // stale state. Clear only the bit while preserving the current
+            // Plan phase, then durably publish that normalization.
+            if !self.behavior.lock().clear_approval_pending_if(&snapshot) {
+                return Ok(false);
+            }
+            self.commit_behavior_mutation_or_restore(snapshot).await?;
             return Ok(false);
         }
         let artifact_hash = self.behavior.lock().plan_artifact_hash().map(str::to_owned);
@@ -748,7 +829,7 @@ impl SessionActor {
         tracing::warn!(
             "plan_control restore: submitted artifact is unavailable; normalizing Plan to Normal"
         );
-        self.finish_plan_to_default().await?;
+        let _ = self.finish_plan_to_default_if(&snapshot).await?;
         Ok(false)
     }
 
@@ -762,9 +843,10 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        if !self.behavior.lock().approval_pending() {
+        let approval_snapshot = self.behavior.lock().pending_plan_approval_snapshot();
+        let Some(approval_snapshot) = approval_snapshot else {
             return;
-        }
+        };
         if crate::session::pending_interaction::has_parked_plan_approval(&self.pending_interactions)
         {
             tracing::debug!("plan_control resume: approval already pending; skip re-park");
@@ -824,26 +906,49 @@ impl SessionActor {
         match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {
             ResumeAction::LeaveOnly => {
                 tracing::info!("plan_control resume: user abandoned Plan");
-                if let Err(error) = self.finish_plan_to_default().await {
-                    tracing::warn!(%error, "failed to persist abandoned Plan on resume");
+                match self.finish_plan_to_default_if(&approval_snapshot).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!("plan_control resume: dropping stale abandon decision")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to persist abandoned Plan on resume")
+                    }
                 }
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("plan_control resume: user requested changes");
                 let previous_behavior = self.behavior.lock().snapshot();
-                self.behavior.lock().reject_submitted_plan();
+                let transitioned = self
+                    .behavior
+                    .lock()
+                    .reject_submitted_plan_if(&approval_snapshot);
+                if !transitioned {
+                    tracing::info!("plan_control resume: dropping stale request-changes decision");
+                    return;
+                }
+                let expected_next = self.behavior.lock().snapshot();
                 if self
                     .commit_behavior_mutation_or_restore(previous_behavior)
                     .await
                     .is_ok()
                 {
-                    self.start_resume_turn(text, completion_tx).await;
+                    self.start_resume_turn(text, completion_tx, expected_next)
+                        .await;
                 }
             }
             ResumeAction::LeaveAndImplement => {
                 tracing::info!("plan_control resume: user approved Plan");
                 let previous_behavior = self.behavior.lock().snapshot();
-                self.behavior.lock().approve_submitted_plan();
+                let transitioned = self
+                    .behavior
+                    .lock()
+                    .approve_submitted_plan_if(&approval_snapshot);
+                if !transitioned {
+                    tracing::info!("plan_control resume: dropping stale approval decision");
+                    return;
+                }
+                let expected_next = self.behavior.lock().snapshot();
                 if self
                     .commit_behavior_mutation_or_restore(previous_behavior)
                     .await
@@ -852,6 +957,7 @@ impl SessionActor {
                     self.start_resume_turn(
                         PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
                         completion_tx,
+                        expected_next,
                     )
                     .await;
                 }
@@ -864,7 +970,12 @@ impl SessionActor {
         self: Arc<Self>,
         text: String,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        expected_behavior: crate::session::behavior::BehaviorSnapshot,
     ) {
+        if self.behavior.lock().snapshot() != expected_behavior {
+            tracing::info!("plan_control resume: state changed before PlanResume admission");
+            return;
+        }
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
@@ -1064,8 +1175,8 @@ mod rwx_projection_tests {
     }
 
     #[test]
-    fn delegation_and_owner_cleanup_are_framework_controls() {
-        let task = ToolInput::Task(TaskToolInput {
+    fn delegation_grant_is_authorized_while_owner_cleanup_is_framework_control() {
+        let inherited = ToolInput::Task(TaskToolInput {
             prompt: "inspect".into(),
             description: "inspect".into(),
             subagent_type: "explore".into(),
@@ -1077,12 +1188,24 @@ mod rwx_projection_tests {
             model: None,
             task_id: None,
         });
+        let read_only = ToolInput::Task(TaskToolInput {
+            capability_mode: Some(tool_types::SubagentCapabilityMode::ReadOnly),
+            ..match inherited.clone() {
+                ToolInput::Task(task) => task,
+                _ => unreachable!(),
+            }
+        });
         let kill = ToolInput::KillTask(KillTaskToolInput {
             task_id: "owned-task".into(),
         });
         assert_eq!(
-            project_call_access(&task, ToolAccess::None, None),
-            ToolAccess::None
+            project_call_access(&inherited, ToolAccess::All, None),
+            ToolAccess::All,
+            "an omitted capability may resolve to an all-capable Agent role"
+        );
+        assert_eq!(
+            project_call_access(&read_only, ToolAccess::All, None),
+            ToolAccess::Read
         );
         assert_eq!(
             project_call_access(&kill, ToolAccess::None, None),
@@ -1091,8 +1214,8 @@ mod rwx_projection_tests {
     }
 }
 #[cfg(test)]
-mod plan_control_tail_predicate_tests {
-    use super::{is_plan_control_kind, split_plan_control_tail};
+mod state_control_tail_predicate_tests {
+    use super::{is_plan_control_kind, is_state_control_kind, split_state_control_barrier};
     use tools::types::ToolInput;
     use tools::types::tool::ToolKind;
     fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
@@ -1106,6 +1229,7 @@ mod plan_control_tail_predicate_tests {
     fn kind_of(name: &str) -> Option<ToolKind> {
         match name {
             "plan_control" | "PlanControl" => Some(ToolKind::PlanControl),
+            "create_goal" | "update_goal" => Some(ToolKind::GoalLifecycleUpdate),
             _ => None,
         }
     }
@@ -1114,13 +1238,12 @@ mod plan_control_tail_predicate_tests {
         assert!(is_plan_control_kind(Some(ToolKind::PlanControl)));
         assert!(!is_plan_control_kind(Some(ToolKind::Edit)));
         assert!(!is_plan_control_kind(None));
-    }
-    fn mixed(calls: Vec<crate::sampling::types::ToolCallResponse>) -> bool {
-        let (body, tail) = split_plan_control_tail(calls, kind_of);
-        !body.is_empty() && !tail.is_empty()
+        assert!(is_state_control_kind(Some(ToolKind::PlanControl)));
+        assert!(is_state_control_kind(Some(ToolKind::GoalLifecycleUpdate)));
+        assert!(!is_state_control_kind(Some(ToolKind::Edit)));
     }
     #[test]
-    fn split_puts_plan_control_in_tail() {
+    fn lifecycle_control_is_the_only_admitted_call_in_a_mixed_batch() {
         let write = call(
             "search_replace",
             r#"{"file_path":"/tmp/plan.md","old_string":"a","new_string":"b"}"#,
@@ -1131,13 +1254,36 @@ mod plan_control_tail_predicate_tests {
             "SubmitProposal",
             r#"{"name":"p","overview":"o","plan":"plan body","todos":[]}"#,
         );
-        assert!(mixed(vec![write.clone(), exit.clone()]));
-        assert!(mixed(vec![exit.clone(), write.clone()]));
-        assert!(!mixed(vec![write.clone(), unknown_alias]));
-        assert!(!mixed(vec![exit.clone()]));
-        assert!(!mixed(vec![write.clone()]));
-        assert!(!mixed(vec![write.clone(), proposal.clone()]));
-        assert!(mixed(vec![write, exit, proposal]));
+        let create_goal = call("create_goal", r#"{"objective":"ship"}"#);
+        for calls in [
+            vec![write.clone(), exit.clone()],
+            vec![exit.clone(), write.clone()],
+            vec![write.clone(), create_goal],
+            vec![write.clone(), exit.clone(), proposal.clone()],
+        ] {
+            let count = calls.len();
+            let (control, siblings) = split_state_control_barrier(calls, kind_of);
+            assert!(control.is_some());
+            assert_eq!(siblings.len(), count - 1);
+        }
+        let (control, siblings) =
+            split_state_control_barrier(vec![write.clone(), unknown_alias], kind_of);
+        assert!(control.is_none());
+        assert_eq!(siblings.len(), 2);
+        let (control, siblings) =
+            split_state_control_barrier(vec![write.clone(), proposal], kind_of);
+        assert!(control.is_none());
+        assert_eq!(siblings.len(), 2);
+
+        let second_control = call("update_goal", r#"{"status":"complete"}"#);
+        let (control, siblings) =
+            split_state_control_barrier(vec![exit, second_control, write], kind_of);
+        assert_eq!(control.unwrap().function.name, "plan_control");
+        assert_eq!(
+            siblings.len(),
+            2,
+            "later lifecycle controls are siblings too"
+        );
     }
 }
 #[cfg(test)]

@@ -54,11 +54,13 @@ fn from_config_uses_only_explicit_provider_models() {
 #[test]
 fn apply_config_preserves_an_existing_session_selection() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
+    let revision = manager.catalog_revision();
     manager.set_current_model_id(acp::ModelId::new("local/beta"));
     manager
         .apply_config(two_model_config("local/alpha"))
         .unwrap();
     assert_eq!(manager.current_model_id().0.as_ref(), "local/beta");
+    assert_eq!(manager.catalog_revision(), revision + 1);
 }
 
 #[test]
@@ -104,6 +106,25 @@ fn task_model_error_lists_provider_qualified_ids() {
     let error = manager.task_model_error("missing").unwrap();
     assert!(error.contains("local/alpha"), "{error}");
     assert!(error.contains("local/beta"), "{error}");
+}
+
+#[test]
+fn task_selectable_projection_matches_task_model_validation() {
+    let mut cfg = two_model_config("local/alpha");
+    cfg.models.allowed_models = Some(vec!["local/alpha".into()]);
+    let manager = ModelsManager::from_config(&cfg).unwrap();
+    let selectable = manager.task_selectable_models();
+    assert_eq!(
+        selectable.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["local/alpha"]
+    );
+    for model_id in manager.models().keys() {
+        assert_eq!(
+            selectable.contains_key(model_id),
+            manager.task_model_error(model_id).is_none(),
+            "projection and Task validator diverged for {model_id}"
+        );
+    }
 }
 
 #[test]

@@ -172,6 +172,26 @@ impl SessionActor {
         prompt_id: String,
         result: PromptTurnResult,
     ) {
+        self.handle_completion_inner(prompt_id, result, true).await;
+    }
+
+    /// Settle client/foreground ownership after a fatal Timeline boundary
+    /// failure without projecting a `TurnCompleted` cache entry. Such a cache
+    /// entry is only valid after the causal terminal is durable.
+    pub(in crate::session::actor) async fn handle_fatal_completion(
+        &self,
+        prompt_id: String,
+        result: PromptTurnResult,
+    ) {
+        self.handle_completion_inner(prompt_id, result, false).await;
+    }
+
+    async fn handle_completion_inner(
+        &self,
+        prompt_id: String,
+        result: PromptTurnResult,
+        project_terminal: bool,
+    ) {
         // Settle the exact foreground owner first. An internal Goal turn is
         // intentionally absent from `pending_inputs`, so FIFO membership can
         // never be used as the ownership test.
@@ -191,7 +211,7 @@ impl SessionActor {
             }
             let task = state
                 .foreground
-                .take_regular()
+                .begin_settling()
                 .expect("running prompt id implies a regular foreground task");
             let turn_origin = task.origin.clone();
             let turn_kind = task.turn_kind;
@@ -242,12 +262,22 @@ impl SessionActor {
             .borrow()
             .tool_bridge()
             .update_resource(
+                tools::implementations::grow_build::update_goal::GoalMutationAuthorityResource::default(),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
                 tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource::default(),
             )
             .await;
         self.set_goal_loop_active(false);
         self.flush_pending_system_reminders().await;
 
+        if !project_terminal {
+            return;
+        }
         let emit_terminal = !matches!(
             result,
             Ok(PromptTurnOk {
@@ -283,7 +313,7 @@ impl SessionActor {
                     _ => None,
                 });
             self.emit_turn_completed(
-                prompt_id,
+                prompt_id.clone(),
                 Some((&turn_origin, turn_kind)),
                 &mapped,
                 usage,
@@ -293,6 +323,16 @@ impl SessionActor {
         }
         // The terminal is durable before clients observe either a new running
         // owner or an idle queue snapshot.
+        let settled = self
+            .state
+            .lock()
+            .await
+            .foreground
+            .finish_settling(&prompt_id);
+        debug_assert!(
+            settled,
+            "settlement must release its exact foreground fence"
+        );
         if broadcast_queue {
             let state = self.state.lock().await;
             self.broadcast_queue_changed(&state);
@@ -400,7 +440,7 @@ impl SessionActor {
         }
     }
 
-    /// `(turn_succeeded, suppress_goal_continuation, goal_pause_message)`.
+    /// `(turn_succeeded, suppress_goal_continuation, goal_stop)`.
     /// Only a Goal-owned internal turn may degrade the Goal lifecycle. The same
     /// provider outcome on an ordinary user turn belongs to that turn alone and
     /// must still let the idle arbiter resume background Goal work.
@@ -427,12 +467,12 @@ impl SessionActor {
             .as_ref()
             .ok()
             .is_some_and(|ok| !turn_cancelled && ok.stop_reason != acp::StopReason::Refusal);
-        let error_pause_message = result
+        let error_stop = result
             .as_ref()
             .err()
             .filter(|_| goal_internal)
             .map(Self::format_turn_error_message);
-        let terminal_pause_message = goal_internal
+        let terminal_stop = goal_internal
             .then(|| result.as_ref().ok())
             .flatten()
             .and_then(|ok| match &ok.completion_kind {
@@ -457,12 +497,13 @@ impl SessionActor {
         (
             turn_succeeded,
             suppress_goal_continuation,
-            error_pause_message.or(terminal_pause_message),
+            error_stop.or(terminal_stop),
         )
     }
 
-    pub(in crate::session::actor) async fn apply_goal_pause_after_turn_err(
+    pub(in crate::session::actor) async fn apply_goal_stop_after_turn(
         &self,
+        prompt_id: &str,
         message: String,
     ) -> bool {
         let slash_detail = match message.strip_prefix("Turn failed: ") {
@@ -470,16 +511,16 @@ impl SessionActor {
             None => message.clone(),
         };
         let paused = self
-            .auto_pause_goal_if_active_with_message(
+            .auto_pause_goal_if_active_with_message_for_prompt(
                 crate::session::goal_tracker::GoalPauseReason::TurnError,
                 message,
+                Some(prompt_id),
             )
             .await;
         if paused {
-            self.send_slash_command_output(&format!(
-                "Goal stopped due to turn error: {slash_detail}. Restart it to retry."
-            ))
-            .await;
+            let summary =
+                format!("Goal stopped due to turn error: {slash_detail}. Restart it to retry.");
+            self.send_slash_command_output(&summary).await;
         }
         paused
     }
@@ -524,10 +565,10 @@ mod goal_degradation_tests {
             goal_id: "goal-1".to_string(),
         };
 
-        let (_, suppress, pause_message) =
+        let (_, suppress, stop) =
             SessionActor::post_turn_goal_degradation_plan(&result, Some(&goal_origin));
         assert!(!suppress);
-        assert!(pause_message.is_some());
+        assert!(stop.is_some());
 
         let (_, _, user_pause_message) = SessionActor::post_turn_goal_degradation_plan(
             &result,

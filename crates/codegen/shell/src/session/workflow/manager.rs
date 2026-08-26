@@ -13,9 +13,9 @@ use super::host_service::{
     DiagnosticHook, HostDrainOutcome, WorkflowHostParams, spawn_workflow_host_service,
 };
 use super::notify::WorkflowNotifySender;
-use super::registry::{ResolvedWorkflow, WorkflowSource};
+use super::registry::ResolvedWorkflow;
 use super::store::WorkflowRunStore;
-use super::tracker::{WorkflowRunState, WorkflowRunStatus, WorkflowTracker};
+use super::tracker::{WorkflowRunState, WorkflowRunStatus, WorkflowRuntimeRoute, WorkflowTracker};
 
 pub(crate) const WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION: usize = 4;
 pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = workflow::DEFAULT_AGENT_BUDGET;
@@ -133,6 +133,9 @@ pub(crate) struct WorkflowManager {
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     timeline: chat_state::ChatStateHandle,
     templates: HashMap<String, String>,
+    /// Route captured by the next newly-created Run. Existing Runs carry
+    /// their own immutable snapshot in `WorkflowRunState`.
+    next_run_route: WorkflowRuntimeRoute,
     active: HashMap<String, ActiveRun>,
 }
 
@@ -171,6 +174,7 @@ impl WorkflowManager {
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
         timeline: chat_state::ChatStateHandle,
         templates: HashMap<String, String>,
+        next_run_route: WorkflowRuntimeRoute,
     ) -> Self {
         Self {
             session_id,
@@ -184,12 +188,54 @@ impl WorkflowManager {
             session_cmd_tx,
             timeline,
             templates,
+            next_run_route,
             active: HashMap::new(),
         }
     }
 
+    /// Update the launch default after a durably committed session model
+    /// transition. Runs already tracked are intentionally unaffected.
+    pub(crate) fn set_next_run_route(&mut self, route: WorkflowRuntimeRoute) {
+        route
+            .validate()
+            .expect("session model selection must provide a valid Workflow route");
+        self.next_run_route = route;
+    }
+
     pub(crate) fn tracker(&self) -> Arc<parking_lot::Mutex<WorkflowTracker>> {
         self.tracker.clone()
+    }
+
+    /// Close a lifecycle boundary that was durably opened but could not reach
+    /// executor admission. The Timeline remains the authoritative execution
+    /// ledger; the manifest is a recoverable projection of the same terminal
+    /// state.
+    async fn interrupt_rejected_launch(&self, run_id: &str, execution_epoch: u64, message: String) {
+        let Some(interrupted) = self.tracker.lock().interrupt(run_id, message.clone()) else {
+            return;
+        };
+        if let Err(error) = self.store.persist_ack(&interrupted).await {
+            tracing::warn!(%run_id, %error, "failed to persist rejected Workflow launch state");
+        }
+        let elapsed = self.tracker.lock().elapsed_ms(run_id);
+        match self
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: run_id.to_owned(),
+                    execution_epoch,
+                    status: chat_state::WorkflowExecutionStatus::Interrupted,
+                    duration_ms: elapsed,
+                    message: interrupted.pause_message.clone(),
+                },
+            ))
+            .await
+        {
+            Ok(_) => self.notify.broadcast(&interrupted, elapsed, 0, true),
+            Err(error) => {
+                tracing::error!(%run_id, %error, "failed to close rejected Workflow launch in Timeline");
+            }
+        }
     }
 
     pub(crate) async fn launch(
@@ -205,8 +251,7 @@ impl WorkflowManager {
         let definition_id = resolved.definition_id.clone();
         let definition_scope = resolved.scope;
         let definition_hash = resolved.content_hash.clone();
-        let definition_private = resolved.private;
-        let allow_fork_context = resolved.source == WorkflowSource::Builtin;
+        let allow_fork_context = false;
         let mut execution_script = resolved.script;
         let (run_id, journal, state, resumed, execution_epoch) = match &spec.resume_run_id {
             Some(run_id) => {
@@ -291,7 +336,14 @@ impl WorkflowManager {
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
                 let journal_rel = format!("workflows/{run_id}/journal.jsonl");
-                let journal = match self.journal_storage(&run_id)? {
+                let journal_storage = match self.journal_storage(&run_id) {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        self.store.remove(&run_id);
+                        return Err(error);
+                    }
+                };
+                let journal = match journal_storage {
                     Some(storage) => Journal::with_storage(storage),
                     None => Journal::memory(),
                 };
@@ -302,6 +354,7 @@ impl WorkflowManager {
                     resolved.meta.phases,
                     Some(agent_budget),
                     self.session_directory.as_ref().map(|_| journal_rel),
+                    self.next_run_route.clone(),
                 );
                 let state = {
                     let mut tracker = self.tracker.lock();
@@ -310,7 +363,6 @@ impl WorkflowManager {
                         definition_id,
                         definition_scope,
                         definition_hash,
-                        definition_private,
                     );
                     tracker
                         .set_max_concurrency(&run_id, max_concurrency)
@@ -330,9 +382,17 @@ impl WorkflowManager {
                 execution_epoch,
                 name: state.name.clone(),
                 objective: state.objective.clone(),
-                private: state.private,
             }
         };
+        if let Err(error) = self.store.validate_persistable(&state) {
+            if !resumed {
+                self.tracker.lock().clear_run(&run_id);
+                self.store.remove(&run_id);
+            }
+            return Err(LaunchError::Store(format!(
+                "workflow state cannot be persisted: {error}"
+            )));
+        }
         if let Err(error) = self
             .timeline
             .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(lifecycle))
@@ -424,32 +484,51 @@ impl WorkflowManager {
         let cancel = CancellationToken::new();
         let scratch_directory = match self.session_directory.as_deref() {
             Some(session) => Arc::new(
-                session
-                    .open_relative(
-                        &std::path::Path::new("workflows")
-                            .join(&run_id)
-                            .join("scratch"),
-                        "Workflow scratch directory",
-                        true,
-                    )
-                    .map_err(|error| LaunchError::Store(error.to_string()))?,
+                match session.open_relative(
+                    &std::path::Path::new("workflows")
+                        .join(&run_id)
+                        .join("scratch"),
+                    "Workflow scratch directory",
+                    true,
+                ) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        let message =
+                            format!("workflow executor resources could not be created: {error}");
+                        self.interrupt_rejected_launch(&run_id, execution_epoch, message.clone())
+                            .await;
+                        return Err(LaunchError::Store(message));
+                    }
+                },
             ),
             None => {
                 let path = std::env::temp_dir().join(format!(
                     "grow-workflow-scratch-{}",
                     uuid::Uuid::now_v7().simple()
                 ));
-                std::fs::create_dir(&path)
-                    .map_err(|error| LaunchError::Store(error.to_string()))?;
-                Arc::new(
-                    crate::session::storage::ContainedDirectory::open(
-                        &path,
-                        std::path::Path::new(""),
-                        "ephemeral Workflow scratch directory",
-                        false,
-                    )
-                    .map_err(|error| LaunchError::Store(error.to_string()))?,
-                )
+                if let Err(error) = std::fs::create_dir(&path) {
+                    let message =
+                        format!("workflow executor resources could not be created: {error}");
+                    self.interrupt_rejected_launch(&run_id, execution_epoch, message.clone())
+                        .await;
+                    return Err(LaunchError::Store(message));
+                }
+                let scratch = match crate::session::storage::ContainedDirectory::open(
+                    &path,
+                    std::path::Path::new(""),
+                    "ephemeral Workflow scratch directory",
+                    false,
+                ) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        let message =
+                            format!("workflow executor resources could not be opened: {error}");
+                        self.interrupt_rejected_launch(&run_id, execution_epoch, message.clone())
+                            .await;
+                        return Err(LaunchError::Store(message));
+                    }
+                };
+                Arc::new(scratch)
             }
         };
 
@@ -469,6 +548,7 @@ impl WorkflowManager {
                 diagnostics: self.diagnostics.clone(),
                 cancel: cancel.clone(),
                 max_concurrency: state.max_concurrency,
+                runtime_route: state.runtime_route.clone(),
             },
             host_rx,
         );
@@ -580,7 +660,6 @@ impl WorkflowManager {
                 if manifest_persisted
                     && state.status
                         == crate::session::workflow::tracker::WorkflowRunStatus::Complete
-                    && !state.private
                     && let (Some(session), Some(definition_id), Some(definition_hash)) = (
                         completion_session_directory.as_deref(),
                         state.definition_id.as_ref(),
@@ -627,7 +706,6 @@ impl WorkflowManager {
                     tokio::spawn(deliver_workflow_completion_acknowledged(
                         session_cmd_tx.clone(),
                         state.clone(),
-                        outcome.clone(),
                     ));
                 }
                 let _ = done_tx.send(Ok(state));
@@ -681,6 +759,7 @@ impl WorkflowManager {
             mpsc::unbounded_channel().0,
             test_timeline(),
             std::collections::HashMap::new(),
+            crate::session::workflow::tracker::test_runtime_route(),
         )));
         (manager, tracker)
     }
@@ -809,7 +888,6 @@ impl WorkflowManager {
                 tokio::spawn(deliver_workflow_completion_acknowledged(
                     self.session_cmd_tx.clone(),
                     state.clone(),
-                    WorkflowOutcome::Cancelled,
                 ));
                 Ok(state)
             }
@@ -916,7 +994,6 @@ impl WorkflowManager {
 async fn deliver_workflow_completion_acknowledged(
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     state: WorkflowRunState,
-    outcome: WorkflowOutcome,
 ) {
     const MAX_ATTEMPTS: usize = 3;
 
@@ -926,7 +1003,6 @@ async fn deliver_workflow_completion_acknowledged(
             .send(
                 crate::session::commands::SessionCommand::WorkflowCompleted {
                     state: state.clone(),
-                    outcome: outcome.clone(),
                     respond_to,
                 },
             )
@@ -1092,6 +1168,7 @@ mod tests {
             mpsc::unbounded_channel().0,
             test_timeline(),
             HashMap::new(),
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         (manager, event_rx, cancels)
     }
@@ -1116,16 +1193,13 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         state.status = WorkflowRunStatus::Complete;
-        let outcome = WorkflowOutcome::Completed {
-            result: serde_json::json!({"ok": true}),
-        };
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(
             cmd_tx,
             state.clone(),
-            outcome,
         ));
 
         let crate::session::commands::SessionCommand::WorkflowCompleted {
@@ -1162,15 +1236,11 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         state.status = WorkflowRunStatus::Complete;
-        let outcome = WorkflowOutcome::Completed {
-            result: serde_json::json!({"ok": true}),
-        };
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(
-            cmd_tx, state, outcome,
-        ));
+        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(cmd_tx, state));
 
         for _ in 0..3 {
             let crate::session::commands::SessionCommand::WorkflowCompleted { respond_to, .. } =
@@ -1253,6 +1323,79 @@ mod tests {
             .unwrap();
         assert_eq!(last.state, "interrupted");
         assert!(!trajectory.open_workflows.contains(&run_id));
+    }
+
+    #[tokio::test]
+    async fn executor_resource_failure_interrupts_the_durable_spawn_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_directory = test_session_directory(Some(dir.path().to_path_buf()));
+        let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
+        let run_root = dir.path().to_path_buf();
+        tokio::spawn(async move {
+            let mut injected = false;
+            while let Some(message) = persist_rx.recv().await {
+                if let PersistenceMsg::WorkflowRunStateAndAck {
+                    manifest,
+                    respond_to,
+                } = message
+                {
+                    if !injected && manifest.state.status == WorkflowRunStatus::Active {
+                        let scratch = run_root
+                            .join("workflows")
+                            .join(&manifest.state.run_id)
+                            .join("scratch");
+                        std::fs::write(scratch, b"not a directory").unwrap();
+                        injected = true;
+                    }
+                    let _ = respond_to.send(Ok(()));
+                }
+            }
+        });
+        let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
+        let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let notify = WorkflowNotifySender::new(
+            agent_client_protocol::SessionId::new("scratch-failure-test"),
+            acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+            persist_tx,
+            store.clone(),
+        );
+        let mut manager = WorkflowManager::new(
+            "scratch-failure-test".into(),
+            session_directory,
+            dir.path().to_path_buf(),
+            tracker.clone(),
+            store,
+            notify,
+            mpsc::unbounded_channel().0,
+            Arc::new(|_, _, _| {}),
+            mpsc::unbounded_channel().0,
+            test_timeline(),
+            HashMap::new(),
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+        )
+        .unwrap();
+
+        let error = manager.launch(resolved, spec()).await.unwrap_err();
+
+        assert!(error.to_string().contains("executor resources"), "{error}");
+        let states = tracker.lock().list();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].status, WorkflowRunStatus::Interrupted);
+        assert!(manager.active.is_empty());
+        let trajectory = manager.timeline.trajectory().await.unwrap();
+        let rows = trajectory
+            .rows
+            .iter()
+            .filter(|row| row.actor == format!("workflow:{}", states[0].run_id))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].state, "running");
+        assert_eq!(rows[1].state, "interrupted");
+        assert!(!trajectory.open_workflows.contains(&states[0].run_id));
     }
 
     #[tokio::test]
@@ -1343,6 +1486,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let (done_tx, done_rx) = oneshot::channel();
         manager.test_insert_active_run(run_id.clone(), done_rx);
@@ -1662,6 +1806,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let (_done_tx, done_rx) = oneshot::channel();
         manager.test_insert_active_run(run_id.clone(), done_rx);
@@ -1684,6 +1829,14 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.set_next_run_route(
+            WorkflowRuntimeRoute::for_test(
+                "test-model",
+                Some(sampling_types::ReasoningEffort::High),
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
+        );
         let resolved = resolve_inline(
             "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\");\n\
@@ -1707,8 +1860,25 @@ mod tests {
         );
         assert_eq!(
             req.runtime_overrides.model_override_provenance,
-            tools::implementations::grow_build::task::types::ModelOverrideProvenance::Tool,
-            "script model overrides are untrusted tool provenance"
+            tools::implementations::grow_build::task::types::ModelOverrideProvenance::Harness,
+            "the Run-owned route is trusted harness provenance"
+        );
+        assert_eq!(req.runtime_overrides.model.as_deref(), Some("test-model"));
+        assert_eq!(
+            req.runtime_overrides.model_transport_key.as_ref(),
+            Some(&sampling_types::ModelImageInputKey::new(
+                "test-model",
+                "responses",
+                "test-endpoint",
+            )),
+            "the child must carry the Run's immutable provider route"
+        );
+        assert_eq!(
+            req.runtime_overrides
+                .reasoning_effort
+                .as_ref()
+                .and_then(|effort| effort.as_deref()),
+            Some("high")
         );
         let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
@@ -1719,6 +1889,190 @@ mod tests {
         });
         let outcome = outcome_rx.await.unwrap();
         assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_snapshots_reasoning_disabled() {
+        use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.set_next_run_route(
+            WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
+        );
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\n\
+             let r = agent(\"work\");\n\
+             complete(r.output);"
+                .into(),
+        )
+        .unwrap();
+        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
+
+        let SubagentEvent::Spawn(request) = subagent_rx.recv().await.expect("spawn event") else {
+            panic!("expected spawn event");
+        };
+        assert_eq!(
+            request.runtime_overrides.reasoning_effort,
+            Some(None),
+            "a Run that disabled reasoning must not inherit a later Agent/model default"
+        );
+        let subagent_id = request.id.clone();
+        let _ = request.result_tx.send(SubagentResult {
+            success: true,
+            output: std::sync::Arc::from("done"),
+            subagent_id,
+            ..Default::default()
+        });
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_route_changes_apply_only_to_future_workflow_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        let first_route = WorkflowRuntimeRoute::for_test(
+            "first-model",
+            Some(sampling_types::ReasoningEffort::Low),
+            sampling_types::ModelImageInputKey::new("first-model", "responses", "test-endpoint"),
+        )
+        .unwrap();
+        manager.set_next_run_route(first_route.clone());
+        let completed = || {
+            resolve_inline(
+                "let meta = #{ name: \"route\", description: \"route snapshot\" };\n\
+                 complete(\"done\");"
+                    .into(),
+            )
+            .unwrap()
+        };
+        let (first_id, first_outcome) = manager.launch(completed(), spec()).await.unwrap();
+
+        let second_route = WorkflowRuntimeRoute::for_test(
+            "second-model",
+            Some(sampling_types::ReasoningEffort::Max),
+            sampling_types::ModelImageInputKey::new("second-model", "responses", "test-endpoint"),
+        )
+        .unwrap();
+        manager.set_next_run_route(second_route.clone());
+        let (second_id, second_outcome) = manager.launch(completed(), spec()).await.unwrap();
+        let _ = first_outcome.await.unwrap();
+        let _ = second_outcome.await.unwrap();
+
+        let tracker = manager.tracker.lock();
+        assert_eq!(tracker.get(&first_id).unwrap().runtime_route, first_route);
+        assert_eq!(tracker.get(&second_id).unwrap().runtime_route, second_route);
+    }
+
+    #[tokio::test]
+    async fn definition_model_override_does_not_inherit_run_effort() {
+        use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        let explicit_transport = sampling_types::ModelImageInputKey::new(
+            "explicit-wire-model",
+            "responses",
+            "explicit-endpoint",
+        );
+        manager.set_next_run_route(
+            WorkflowRuntimeRoute::for_test(
+                "run-model",
+                Some(sampling_types::ReasoningEffort::High),
+                sampling_types::ModelImageInputKey::new("run-model", "responses", "test-endpoint"),
+            )
+            .unwrap()
+            .with_test_model(
+                "explicit-model",
+                Some(sampling_types::ReasoningEffort::Low),
+                explicit_transport.clone(),
+            )
+            .unwrap(),
+        );
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"override\", description: \"explicit model\" };\n\
+             let r = agent(\"work\", #{ model: \"explicit-model\" });\n\
+             complete(r.output);"
+                .into(),
+        )
+        .unwrap();
+        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
+        let SubagentEvent::Spawn(request) = subagent_rx.recv().await.unwrap() else {
+            panic!("expected Workflow subagent spawn");
+        };
+        assert_eq!(
+            request.runtime_overrides.model.as_deref(),
+            Some("explicit-model")
+        );
+        assert_eq!(
+            request.runtime_overrides.model_override_provenance,
+            tools::implementations::grow_build::task::types::ModelOverrideProvenance::Tool,
+        );
+        assert_eq!(
+            request.runtime_overrides.model_transport_key,
+            Some(explicit_transport)
+        );
+        assert_eq!(
+            request
+                .runtime_overrides
+                .reasoning_effort
+                .as_ref()
+                .and_then(|effort| effort.as_deref()),
+            Some("low"),
+            "an explicit model keeps its own snapshotted policy instead of inheriting Run high"
+        );
+        let subagent_id = request.id.clone();
+        let _ = request.result_tx.send(SubagentResult {
+            success: true,
+            output: std::sync::Arc::from("done"),
+            subagent_id,
+            ..Default::default()
+        });
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn definition_model_added_after_launch_is_not_admitted_into_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.set_next_run_route(
+            WorkflowRuntimeRoute::for_test(
+                "run-model",
+                None,
+                sampling_types::ModelImageInputKey::new("run-model", "responses", "run-endpoint"),
+            )
+            .unwrap(),
+        );
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"frozen\", description: \"route snapshot\" };\n\
+             let r = agent(\"work\", #{ model: \"later-model\" });\n\
+             complete(r.output);"
+                .into(),
+        )
+        .unwrap();
+        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
+
+        let outcome = outcome_rx.await.unwrap();
+        assert!(matches!(
+            outcome,
+            WorkflowOutcome::Failed { ref error }
+                if error.contains("was not present in the Workflow Run route snapshot")
+        ));
+        assert!(
+            subagent_rx.try_recv().is_err(),
+            "an out-of-snapshot model must fail before child admission"
+        );
     }
 
     #[tokio::test]

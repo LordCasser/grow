@@ -20,8 +20,8 @@ pub(crate) enum SamplerFailureRecovery {
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
     /// The active runtime explicitly rejected image input. Its negative
-    /// capability and target-model ImageShadows were persisted; the turn
-    /// should rebuild a text-only request projection over canonical history.
+    /// capability and irreversible ImageShadows were persisted; the turn
+    /// should rebuild a text-only request projection over canonical evidence.
     ImageInputUnsupportedAndResubmit,
     /// A BYOK helper or newly available configured key replaced the credential.
     /// `credential` records what the rejected request actually sent so retry
@@ -84,6 +84,10 @@ pub(crate) enum TurnOutcome {
 #[derive(Debug)]
 pub(crate) enum ToolLoop {
     Continue,
+    /// A durable control-plane transition changed the authority or lifecycle
+    /// that admitted this turn. End the turn at this tool-result boundary so
+    /// the next sample is admitted against the new state.
+    ControlBoundary,
     NonExistingTool,
     ToolParsingError,
     /// User clicked "No" on a permission prompt. Carries the rejection reason

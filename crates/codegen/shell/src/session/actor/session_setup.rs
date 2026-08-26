@@ -179,7 +179,7 @@ impl SessionActor {
             .into_iter()
             .map(|td| td.function.name)
             .collect();
-        let has_workflow_runs = self.workflow_tracker().await.lock().has_public_runs();
+        let has_workflow_runs = self.workflow_tracker().await.lock().has_runs();
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
         let behavior_availability = self.behavior_availability_projection().await;
         let (_, workflows, workflow_diagnostics) = self.named_workflow_snapshot();

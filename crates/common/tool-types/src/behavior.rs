@@ -13,7 +13,6 @@ pub enum BehaviorId {
     Clarify,
     Plan,
     Workflow,
-    DeepResearch,
     Goal,
 }
 
@@ -61,7 +60,7 @@ impl BehaviorId {
     /// Behaviors with session-owned runtimes that conflict with public
     /// Workflow runs.
     pub const fn owns_special_runtime(self) -> bool {
-        matches!(self, Self::Plan | Self::DeepResearch | Self::Goal)
+        matches!(self, Self::Plan | Self::Goal)
     }
     pub fn try_from_id(id: &str) -> Option<Self> {
         Some(match id {
@@ -69,7 +68,6 @@ impl BehaviorId {
             "ask" => Self::Clarify,
             "plan" => Self::Plan,
             "workflow" => Self::Workflow,
-            "deep_research" => Self::DeepResearch,
             "goal" => Self::Goal,
             _ => return None,
         })
@@ -81,7 +79,6 @@ impl BehaviorId {
             Self::Clarify => "ask",
             Self::Plan => "plan",
             Self::Workflow => "workflow",
-            Self::DeepResearch => "deep_research",
             Self::Goal => "goal",
         }
     }
@@ -92,7 +89,6 @@ impl BehaviorId {
             Self::Clarify => "Clarify",
             Self::Plan => "Plan",
             Self::Workflow => "Workflow",
-            Self::DeepResearch => "Deep Research",
             Self::Goal => "Goal",
         }
     }

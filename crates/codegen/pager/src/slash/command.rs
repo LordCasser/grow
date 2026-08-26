@@ -115,7 +115,6 @@ pub struct AppCtx<'a> {
     pub agents: &'a [AgentArg],
     pub current_agent: Option<&'a str>,
     pub behavior_mode: tools::types::BehaviorId,
-    pub deep_research_available: bool,
     pub goal_available: bool,
     /// Objective of the unfinished Goal, if any. Used to expose `/goal edit`
     /// with a pre-filled value without coupling slash commands to AgentView.

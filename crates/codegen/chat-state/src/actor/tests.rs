@@ -287,6 +287,12 @@ async fn commit_compaction_range(
     handle: &crate::handle::ChatStateHandle,
     items: Vec<ConversationItem>,
 ) {
+    assert_eq!(
+        items.len(),
+        1,
+        "compaction installs one CompactionMeta item"
+    );
+    let replacement = vec![ConversationItem::user_meta(items[0].text_content())];
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = format!(
         "test-compaction-{}",
@@ -298,7 +304,7 @@ async fn commit_compaction_range(
         .await
         .expect("actor must provide compaction source");
     let prompt_index = handle.get_prompt_index().await;
-    let result_items = items.len();
+    let result_items = replacement.len();
     handle.record_timeline_event(crate::TimelineEventKind::Compaction(
         crate::CompactionEvent::Started {
             id: id.clone(),
@@ -308,7 +314,7 @@ async fn commit_compaction_range(
     ));
     let target = record_compaction_summary(handle, &id).await;
     handle
-        .replace_compaction_range(target, items, source_surface_revision)
+        .replace_compaction_range(target, replacement, source_surface_revision)
         .await
         .unwrap();
     handle.record_timeline_event(crate::TimelineEventKind::Compaction(
@@ -549,7 +555,7 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
         .record(crate::TimelineEventKind::Compaction(summary))
         .unwrap();
     timeline
-        .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+        .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
         .unwrap();
     timeline
         .record(crate::TimelineEventKind::Compaction(
@@ -1003,9 +1009,9 @@ async fn replace_conversation_persists_and_emits_reset() {
 }
 
 #[tokio::test]
-async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_route() {
+async fn image_projection_preserves_raw_events_and_never_restores_images_to_surface() {
     use sampling_types::conversation::{
-        ContentPart, SyntheticReason, UserItem, conversation_image_groups,
+        ContentPart, ToolCall, UserItem, conversation_image_groups,
     };
 
     let user = ConversationItem::User(UserItem {
@@ -1017,7 +1023,7 @@ async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_rout
                 url: "data:image/png;base64,user".into(),
             },
         ],
-        synthetic_reason: Some(SyntheticReason::Interjection),
+        synthetic_reason: None,
         permission_evidence: None,
         prompt_index: Some(7),
         ..Default::default()
@@ -1040,6 +1046,12 @@ async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_rout
     let mut h = TestHarness::new();
     h.handle.begin_turn_capture();
     h.handle.push_user_message(user);
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_7".into(),
+            name: "read_file".to_owned(),
+            arguments: r#"{"target_file":"/secret/original.png"}"#.into(),
+        }]));
     h.handle.push_tool_result(tool_result);
     let materialized = h
         .handle
@@ -1067,59 +1079,74 @@ async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_rout
             replacement: if group.item_index == 0 {
                 "converted user image".to_owned()
             } else {
-                "image description unavailable".to_owned()
+                "converted tool images".to_owned()
             },
-            provenance: if group.item_index == 0 {
-                crate::ImageShadowSource::Description {
-                    result_ref: crate::TimelineRangeRef {
-                        timeline_id: sideband_id.clone(),
-                        first_seq: 2,
-                        last_seq: 2,
-                    },
-                }
-            } else {
-                crate::ImageShadowSource::Unavailable
+            provenance: crate::ImageShadowSource::Description {
+                result_ref: crate::TimelineRangeRef {
+                    timeline_id: sideband_id.clone(),
+                    first_seq: 2,
+                    last_seq: 2,
+                },
             },
         })
         .collect();
+    let tool_group = groups
+        .iter()
+        .find_map(|group| group.tool_call.as_ref())
+        .expect("tool image group must retain typed call provenance");
+    let tool_calls = vec![crate::ImageToolCallShadow {
+        source: materialized.surface_ids[tool_group.item_index],
+        tool_call_ids: vec![tool_group.tool_call_id.clone()],
+        carrier_sources: Vec::new(),
+    }];
 
     let report = h
         .handle
         .record_image_projection_and_ack(crate::ImageProjectionEvent {
-            runtime: sampling_types::model_image_input_key(&test_config()),
+            trigger_runtime: sampling_types::model_image_input_key(&test_config()),
             source_revision: materialized.surface_revision,
             shadows,
+            tool_calls,
         })
         .await
         .unwrap();
-    assert_eq!(report.described_images, 1);
-    assert_eq!(report.unavailable_images, 2);
+    assert_eq!(report.described_images, 3);
 
     let conversation = h.handle.get_conversation().await;
+    assert!(
+        conversation[0]
+            .text_content()
+            .contains("converted user image")
+    );
     let ConversationItem::User(user) = &conversation[0] else {
         panic!("expected user item");
     };
-    assert_eq!(user.synthetic_reason, Some(SyntheticReason::Interjection));
+    assert_eq!(user.synthetic_reason, None);
     assert_eq!(user.prompt_index, Some(7));
     assert!(
         user.content
             .iter()
-            .any(|part| matches!(part, ContentPart::Image { .. }))
+            .all(|part| !matches!(part, ContentPart::Image { .. }))
     );
-
-    let ConversationItem::ToolResult(result) = &conversation[1] else {
+    let ConversationItem::Assistant(assistant) = &conversation[1] else {
+        panic!("expected assistant item");
+    };
+    assert_eq!(assistant.tool_calls[0].id.as_ref(), "call_7");
+    assert!(
+        !assistant.tool_calls[0]
+            .arguments
+            .contains("/secret/original.png")
+    );
+    let ConversationItem::ToolResult(result) = &conversation[2] else {
         panic!("expected tool result");
     };
     assert_eq!(result.tool_call_id, "call_7");
-    assert_eq!(result.content.as_ref(), "Read image file");
-    assert!(matches!(
-        result.images.as_slice(),
-        [ContentPart::Text { text }, ContentPart::Image { .. }, ContentPart::Image { .. }]
-            if text.as_ref() == "keep-me"
-    ));
+    assert!(result.content.contains("converted tool images"));
+    assert!(!result.content.contains("Read image file"));
+    assert!(result.images.is_empty());
     let capture = h.handle.take_turn_messages().await.unwrap();
     assert_eq!(capture.messages.len(), conversation.len());
-    assert_eq!(conversation_image_groups(&capture.messages).len(), 2);
+    assert!(conversation_image_groups(&capture.messages).is_empty());
 
     let projected = h
         .handle
@@ -1133,26 +1160,47 @@ async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_rout
             .contains("converted user image")
     );
     assert!(
-        projected.items[1]
+        projected.items[2]
             .text_content()
-            .contains("image description unavailable")
+            .contains("converted tool images")
+    );
+    let ConversationItem::Assistant(assistant) = &projected.items[1] else {
+        panic!("expected projected assistant item");
+    };
+    assert!(
+        !assistant.tool_calls[0]
+            .arguments
+            .contains("/secret/original.png")
     );
 
     let mut other_route = test_config();
     other_route.model = "vision-model".to_owned();
     h.handle.update_sampling_config(other_route);
-    let restored = h
+    let after_model_change = h
         .handle
         .build_request("test-timeline", vec![], None, None, None)
         .await
         .unwrap();
-    assert_eq!(conversation_image_groups(&restored.items).len(), 2);
-    assert!(h.drain_persistence().iter().any(|record| matches!(
+    assert!(conversation_image_groups(&after_model_change.items).is_empty());
+    assert!(
+        after_model_change.items[0]
+            .text_content()
+            .contains("converted user image")
+    );
+    let records = h.drain_persistence();
+    assert!(records.iter().any(|record| matches!(
         record,
         PersistenceRecord::Timeline(crate::TimelineEvent {
             kind: crate::TimelineEventKind::ImageProjection(_),
             ..
         })
+    )));
+    assert!(records.iter().any(|record| matches!(
+        record,
+        PersistenceRecord::Timeline(crate::TimelineEvent {
+            kind: crate::TimelineEventKind::Messages(crate::MessageEvent { items, .. }),
+            ..
+        }) if !conversation_image_groups(items).is_empty()
     )));
 }
 
@@ -1166,39 +1214,55 @@ async fn image_projection_retries_an_uncertain_persistence_failure() {
         }],
         ..Default::default()
     });
-    let mut h = TestHarness::with_manual_timeline_ack(vec![user.clone()]);
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![user.clone()], 1);
     let materialized = h
         .handle
         .materialize_timeline("test-timeline".into())
         .await
         .unwrap();
     let groups = conversation_image_groups(&materialized.surface);
+    let source = materialized.surface_ids[groups[0].item_index];
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::ImageDescription,
+                source_refs: vec![materialized.input_ref.clone()],
+            },
+        ))
+        .await
+        .unwrap();
     let projection = crate::ImageProjectionEvent {
-        runtime: sampling_types::model_image_input_key(&test_config()),
+        trigger_runtime: sampling_types::model_image_input_key(&test_config()),
         source_revision: materialized.surface_revision,
         shadows: vec![crate::ImageShadow {
-            source: materialized.surface_ids[groups[0].item_index],
+            source,
             fingerprint: groups[0].fingerprint.clone(),
             image_count: groups[0].image_count(),
-            replacement: "image description unavailable".to_owned(),
-            provenance: crate::ImageShadowSource::Unavailable,
+            replacement: "durable description".to_owned(),
+            provenance: crate::ImageShadowSource::Description {
+                result_ref: crate::TimelineRangeRef {
+                    timeline_id: sideband_id,
+                    first_seq: 1,
+                    last_seq: 1,
+                },
+            },
         }],
+        tool_calls: vec![],
     };
     let handle = h.handle.clone();
     let projection_future = async move { handle.record_image_projection_and_ack(projection).await };
     let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
     let (report, ()) = tokio::join!(projection_future, retry);
-    assert_eq!(report.unwrap().unavailable_images, 1);
-    assert_eq!(
-        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
-        serde_json::to_vec(&vec![user]).unwrap(),
-    );
+    assert_eq!(report.unwrap().described_images, 1);
+    assert!(conversation_image_groups(&h.handle.get_conversation().await).is_empty());
     let materialized = h
         .handle
         .materialize_timeline("test-timeline".into())
         .await
         .unwrap();
-    assert_eq!(materialized.active_image_projections.len(), 1);
+    assert!(conversation_image_groups(&materialized.surface).is_empty());
 }
 
 #[tokio::test]

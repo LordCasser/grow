@@ -186,6 +186,7 @@ impl TrajectoryProjector {
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => 0,
+            TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(_),
                 ..
@@ -654,12 +655,12 @@ fn describe(
             "installed",
             None,
             None,
-            Some(projection.runtime.model().to_owned()),
+            Some(projection.trigger_runtime.model().to_owned()),
             None,
             format!(
                 "{} image group(s) projected for {}",
                 projection.shadows.len(),
-                projection.runtime.model()
+                projection.trigger_runtime.model()
             ),
         ),
         TimelineEventKind::Recovery(RecoveryEvent {
@@ -848,6 +849,19 @@ fn describe(
             None,
             format!("{} notification(s)", notification_ids.len()),
         ),
+        TimelineEventKind::Notification(NotificationEvent::Dismissed {
+            notification_ids,
+            reason,
+        }) => tuple(
+            "notification",
+            "dismissed",
+            "resolved",
+            None,
+            None,
+            notification_ids.first().cloned(),
+            None,
+            format!("{} notification(s) · {reason:?}", notification_ids.len()),
+        ),
     }
 }
 
@@ -910,6 +924,11 @@ fn describe_model_transition(data: Option<&serde_json::Value>) -> String {
             from_provider.unwrap_or("?"),
             to_provider.unwrap_or("?")
         );
+    }
+    if data.and_then(|value| value.get("from_model_transport"))
+        != data.and_then(|value| value.get("to_model_transport"))
+    {
+        return format!("{from_model} transport changed");
     }
     format!("model {to_model} selected")
 }
@@ -1016,7 +1035,6 @@ fn control_behavior(snapshot: &serde_json::Value) -> Option<String> {
                     "plan/{}",
                     value.as_str().unwrap_or("unknown").to_lowercase()
                 )),
-                "DeepResearch" => Some("deep_research".into()),
                 other => Some(other.to_lowercase()),
             }
         }
@@ -1338,7 +1356,7 @@ mod tests {
         timeline
             .replace_all(
                 vec![ConversationItem::user("current")],
-                MessageCause::Rewind,
+                MessageCause::ContextRebuild,
             )
             .unwrap();
         let snapshot = timeline.trajectory();
@@ -1524,6 +1542,16 @@ mod tests {
                     "to_reasoning_effort": "high",
                     "from_provider_model": "old-wire",
                     "to_provider_model": "new-wire",
+                    "from_model_transport": {
+                        "model": "old-wire",
+                        "api_backend": "responses",
+                        "endpoint_fingerprint": "old-endpoint"
+                    },
+                    "to_model_transport": {
+                        "model": "new-wire",
+                        "api_backend": "responses",
+                        "endpoint_fingerprint": "new-endpoint"
+                    },
                     "reason": "user_selection",
                 })),
             }))

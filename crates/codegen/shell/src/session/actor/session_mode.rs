@@ -19,7 +19,7 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         .collect()
 }
 impl SessionActor {
-    async fn behavior_capability_support(&self) -> (bool, bool, bool) {
+    pub(super) async fn behavior_capability_support(&self) -> (bool, bool, bool) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let tool_names: Vec<String> = bridge
             .tool_definitions()
@@ -40,7 +40,7 @@ impl SessionActor {
         (plan_supported, workflow_supported, goal_supported)
     }
 
-    fn behavior_availability_from_tracker(
+    pub(super) fn behavior_availability_from_tracker(
         &self,
         workflow_tracker: &crate::session::workflow::tracker::WorkflowTracker,
         (plan_supported, workflow_supported, goal_supported): (bool, bool, bool),
@@ -49,25 +49,10 @@ impl SessionActor {
         use tool_types::{BehaviorAvailability, BehaviorId};
 
         let current = self.behavior.lock().behavior();
-        let unfinished_goal = self
-            .goal_tracker
-            .lock()
-            .status()
-            .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
-        let owned_deep_research_run = self
-            .behavior
-            .lock()
-            .deep_research_run_id()
-            .map(str::to_owned);
-        let public_workflow_active = workflow_tracker.has_active_public_run();
-        let deep_research_active = current == BehaviorId::DeepResearch
-            && owned_deep_research_run.as_deref().is_some_and(|run_id| {
-                workflow_tracker
-                    .get(run_id)
-                    .is_some_and(|run| !run.status.is_terminal())
-            });
+        let goal_status = self.goal_tracker.lock().status();
+        let active_goal = goal_status == Some(crate::session::goal_tracker::GoalStatus::Active);
+        let public_workflow_active = workflow_tracker.has_active_run();
         let source_owned_work_active = current == BehaviorId::Plan
-            || deep_research_active
             || (current == BehaviorId::Workflow && public_workflow_active);
         let controller = self.behavior.lock();
         let choices = [
@@ -75,7 +60,6 @@ impl SessionActor {
             BehaviorId::Clarify,
             BehaviorId::Plan,
             BehaviorId::Workflow,
-            BehaviorId::DeepResearch,
             BehaviorId::Goal,
         ]
         .into_iter()
@@ -88,19 +72,30 @@ impl SessionActor {
                 BehaviorId::Workflow if !workflow_supported => {
                     Some("Workflow behavior is unavailable in this session.".to_string())
                 }
-                BehaviorId::DeepResearch if !self.background_workflows_enabled => Some(
-                    "Deep Research behavior requires the background Workflow runtime.".to_string(),
-                ),
                 BehaviorId::Goal if !goal_supported => {
                     Some("Goal behavior is unavailable in this session.".to_string())
                 }
+                BehaviorId::Goal
+                    if goal_status.is_some_and(|status| {
+                        status != crate::session::goal_tracker::GoalStatus::Active
+                    }) => Some(match goal_status {
+                        Some(crate::session::goal_tracker::GoalStatus::Complete) =>
+                            "The saved Goal is complete. Use /goal edit to reactivate it, or /goal clear before starting another Goal."
+                                .to_string(),
+                        Some(crate::session::goal_tracker::GoalStatus::BudgetLimited) =>
+                            "The saved Goal is budget-limited. Raise or remove its budget, then restart it."
+                                .to_string(),
+                        _ =>
+                            "The saved Goal is stopped. Use /goal restart to reactivate it before selecting Goal Behavior."
+                                .to_string(),
+                    }),
                 _ => None,
             };
             controller.switch_availability(
                 target,
                 &BehaviorSwitchFacts {
                     unavailable_reason,
-                    unfinished_goal,
+                    active_goal,
                     public_workflow_active,
                     source_owned_work_active,
                 },
@@ -130,6 +125,25 @@ impl SessionActor {
     pub(super) async fn request_behavior_change(
         &self,
         session_mode_id: acp::SessionModeId,
+    ) -> BehaviorChangeOutcome {
+        self.request_behavior_change_with_admission(session_mode_id, false)
+            .await
+    }
+
+    /// Goal entry is an out-of-band control operation: from Normal/Clarify it
+    /// may commit while their regular turn is still active, after which the
+    /// command-plane caller cancels that exact foreground turn. The generic
+    /// Behavior picker remains idle-only, and Plan/Workflow ownership rules
+    /// are unchanged.
+    pub(super) async fn request_goal_behavior_entry(&self) -> BehaviorChangeOutcome {
+        self.request_behavior_change_with_admission(acp::SessionModeId::new("goal"), true)
+            .await
+    }
+
+    async fn request_behavior_change_with_admission(
+        &self,
+        session_mode_id: acp::SessionModeId,
+        allow_out_of_band_goal_entry: bool,
     ) -> BehaviorChangeOutcome {
         use crate::session::behavior::{BehaviorEffect, BehaviorSwitchFacts};
         use tool_types::BehaviorAvailabilityDisposition;
@@ -169,7 +183,15 @@ impl SessionActor {
         // an inadmissible request. Reject a busy foreground before touching
         // the coordinator's confirmation latch.
         let foreground_admission = self.state.lock().await;
-        if !matches!(&foreground_admission.foreground, ForegroundState::Idle) {
+        let host_control_turn = foreground_admission
+            .foreground
+            .regular()
+            .is_some_and(|turn| turn.origin == crate::session::PromptOrigin::HostCommand);
+        let goal_control_turn = allow_out_of_band_goal_entry
+            && mode == BehaviorId::Goal
+            && matches!(previous_behavior, BehaviorId::Normal | BehaviorId::Clarify)
+            && foreground_admission.foreground.regular().is_some();
+        if !foreground_admission.foreground.is_idle() && !host_control_turn && !goal_control_turn {
             let message = format!(
                 "Stop the active foreground work before selecting {} Behavior.",
                 mode.display_label()
@@ -180,11 +202,6 @@ impl SessionActor {
             );
             return BehaviorChangeOutcome::Rejected { message };
         }
-        let owned_deep_research_run = self
-            .behavior
-            .lock()
-            .deep_research_run_id()
-            .map(str::to_owned);
         let decision = self.behavior.lock().decide_switch(
             mode,
             BehaviorSwitchFacts {
@@ -195,7 +212,7 @@ impl SessionActor {
                             format!("{} behavior is unavailable.", mode.display_label())
                         })
                     }),
-                unfinished_goal: false,
+                active_goal: false,
                 public_workflow_active: false,
                 source_owned_work_active: choice.disposition
                     == BehaviorAvailabilityDisposition::ConfirmationRequired,
@@ -224,52 +241,6 @@ impl SessionActor {
                 meta,
             );
             return decision.outcome;
-        }
-
-        // A confirmed Deep Research switch first turns the owned run into a
-        // terminal receipt while the source Behavior still owns it. Only
-        // after that durable model context exists may Control transfer to the
-        // target Behavior.
-        if decision
-            .effects
-            .contains(&BehaviorEffect::CancelDeepResearchRun)
-            && let Some(run_id) = owned_deep_research_run.as_deref()
-        {
-            let state = match workflow_admission.cancel(run_id).await {
-                Ok(state) => state,
-                Err(error) => {
-                    let message = format!(
-                        "Deep Research cancellation did not commit its terminal boundary: {error}. Behavior was not changed."
-                    );
-                    self.enqueue_current_mode_update_with_behavior_change(
-                        acp::SessionModeId::new(previous_behavior.as_id()),
-                        serde_json::json!({ "status": "rejected", "message": message }),
-                    );
-                    return BehaviorChangeOutcome::Rejected { message };
-                }
-            };
-            let Some(outcome) = super::workflow_run::deep_research_outcome_from_state(&state)
-            else {
-                let message = format!(
-                    "Deep Research settled as {}, which is not a terminal report; Behavior was not changed.",
-                    state.status.as_str()
-                );
-                self.enqueue_current_mode_update_with_behavior_change(
-                    acp::SessionModeId::new(previous_behavior.as_id()),
-                    serde_json::json!({ "status": "rejected", "message": message }),
-                );
-                return BehaviorChangeOutcome::Rejected { message };
-            };
-            if let Err(error) = self.admit_deep_research_report(&state, outcome).await {
-                let message = format!(
-                    "Deep Research was cancelled, but its terminal report was not durable: {error}. Behavior was not changed."
-                );
-                self.enqueue_current_mode_update_with_behavior_change(
-                    acp::SessionModeId::new(previous_behavior.as_id()),
-                    serde_json::json!({ "status": "rejected", "message": message }),
-                );
-                return BehaviorChangeOutcome::Rejected { message };
-            }
         }
 
         if !decision.effects.is_empty() {
@@ -322,7 +293,6 @@ impl SessionActor {
                         .await;
                     }
                 }
-                BehaviorEffect::CancelDeepResearchRun => {}
                 BehaviorEffect::Select(_) => {}
             }
         }

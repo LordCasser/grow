@@ -4565,7 +4565,7 @@ mod tests {
             name: "fix-ci".to_string(),
             description: "Fix failing CI on the current PR".to_string(),
             when_to_use: Some("when CI is red".to_string()),
-            source: "builtin".to_string(),
+            source: "project".to_string(),
             path: None,
         }]);
         let area = Rect::new(0, 0, 100, 40);
@@ -4589,7 +4589,7 @@ mod tests {
             "the workflow name must render as a row"
         );
         assert_eq!(
-            buffer_count(&buf, "(builtin)"),
+            buffer_count(&buf, "(project)"),
             1,
             "the workflow source must render as the right label"
         );

@@ -7,8 +7,49 @@ use super::commands::SessionCommand;
 use super::persistence::PersistenceMsg;
 use agent_client_protocol as acp;
 use hunk_tracker::HunkTrackerHandle;
-use sampling_types::ReasoningEffort;
 use tokio::sync::{mpsc, oneshot};
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionModelRouteSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) model_id: acp::ModelId,
+    pub(crate) sampling_config: sampler::SamplerConfig,
+}
+
+/// Actor-committed model route shared with read-only session consumers. The
+/// catalog identity and provider-facing sampler configuration always move as
+/// one revision, so UI, reload, and subagent inheritance cannot splice axes
+/// from different model selections.
+#[derive(Clone)]
+pub(crate) struct SessionModelRoute(std::sync::Arc<parking_lot::RwLock<SessionModelRouteSnapshot>>);
+
+impl SessionModelRoute {
+    pub(crate) fn new(model_id: acp::ModelId, sampling_config: sampler::SamplerConfig) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(
+            SessionModelRouteSnapshot {
+                revision: 0,
+                model_id,
+                sampling_config,
+            },
+        )))
+    }
+
+    pub(crate) fn snapshot(&self) -> SessionModelRouteSnapshot {
+        self.0.read().clone()
+    }
+
+    pub(crate) fn replace(
+        &self,
+        model_id: acp::ModelId,
+        sampling_config: sampler::SamplerConfig,
+    ) -> SessionModelRouteSnapshot {
+        let mut route = self.0.write();
+        route.revision = route.revision.saturating_add(1);
+        route.model_id = model_id;
+        route.sampling_config = sampling_config;
+        route.clone()
+    }
+}
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
 /// A grow session has no
@@ -89,11 +130,7 @@ pub struct SessionHandle {
     pub display_cwd: Option<String>,
     /// Session context captured at spawn time so callers can inherit shared runtime state.
     pub tool_context: crate::tools::ToolContext,
-    /// The model this session was created with (or switched to via setModel).
-    /// Per-session tracking prevents cross-client contamination in leader mode
-    /// where `MvpAgent.current_model_id` is shared mutable state.
-    pub model_id: acp::ModelId,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) model_route: SessionModelRoute,
     /// Canonical permission mode for this session.
     pub permission_mode: crate::util::config::PermissionMode,
     /// Explicit origin client metadata captured when the session was created.
@@ -113,6 +150,11 @@ pub struct SessionHandle {
     /// Exposed so the `grow/toggle_plan_mode` handler can toggle plan mode
     /// without going through the session command channel.
     pub behavior: std::sync::Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
+    /// Canonical Workflow Run state, shared with child admission so a
+    /// Workflow-owned Task resolves the Run's frozen sampler route rather
+    /// than the mutable process catalog.
+    pub(crate) workflow_tracker:
+        std::sync::Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers
     /// auto-compaction regardless of context window usage. Consumed (reset to
     /// `false`) atomically on use via `compare_exchange`.

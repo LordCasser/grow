@@ -1789,17 +1789,16 @@ impl SessionTrajectoryCache {
                     run_id,
                     name,
                     objective,
-                    private,
                     ..
                 }) => Some((
                     run_id.clone(),
-                    (event.seq.get(), name.clone(), objective.clone(), *private),
+                    (event.seq.get(), name.clone(), objective.clone()),
                 )),
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
-        for (run_id, (spawn_seq, name, objective, private)) in &spawns {
+        for (run_id, (spawn_seq, name, objective)) in &spawns {
             if !visited.insert(run_id.clone()) {
                 anyhow::bail!(
                     "Workflow identity '{run_id}' is linked more than once in the Trajectory tree"
@@ -1858,7 +1857,6 @@ impl SessionTrajectoryCache {
                 || manifest.state.run_id != *run_id
                 || manifest.state.name != *name
                 || manifest.state.objective != *objective
-                || manifest.state.private != *private
                 || manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
             {
                 anyhow::bail!("Workflow manifest does not match spawn t:{timeline_id}/{spawn_seq}");
@@ -3490,6 +3488,7 @@ mod tests {
         chat_state::SubagentSpawnEvent {
             subagent_id: subagent_id.into(),
             child_session_id: child_session_id.into(),
+            security_parent_session_id: "parent-session".into(),
             subagent_type: "explore".into(),
             description: "inspect architecture".into(),
             prompt: "trace the canonical state".into(),
@@ -3507,6 +3506,12 @@ mod tests {
             child_cwd: child_cwd.into(),
             worktree_path: None,
             effective_model_id: "model".into(),
+            model_transport_key: sampling_types::ModelImageInputKey::new(
+                "model",
+                "responses",
+                "test-endpoint",
+            ),
+            reasoning_effort: None,
         }
     }
 
@@ -3519,6 +3524,7 @@ mod tests {
             parent_timeline_id: parent_timeline_id.into(),
             parent_spawn_seq,
             subagent_id: subagent_id.into(),
+            security_parent_session_id: parent_timeline_id.into(),
             context_source: chat_state::SubagentContextSource::New,
             source_ref: None,
             normalized: false,
@@ -3991,7 +3997,6 @@ mod tests {
                     execution_epoch: 0,
                     name: "debug".into(),
                     objective: "trace host calls".into(),
-                    private: false,
                 },
             ))
             .unwrap();
@@ -4041,6 +4046,12 @@ mod tests {
             Vec::new(),
             Some(4),
             Some("workflows/wf_debug/journal.jsonl".into()),
+            super::super::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
         );
         state = tracker
             .apply_outcome(
@@ -4744,13 +4755,13 @@ mod tests {
                 "root prompt",
             )])
             .unwrap();
+        let mut child_spawn_fact = subagent_spawn("worker", "child-session", "/child");
+        // The seed's security parent is the concrete parent session, not the
+        // generic fixture value used by unrelated trajectory tests.
+        child_spawn_fact.security_parent_session_id = "root-session".into();
         let child_spawn = root
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(subagent_spawn(
-                    "worker",
-                    "child-session",
-                    "/child",
-                )),
+                chat_state::SubagentEvent::Spawned(child_spawn_fact),
             ))
             .unwrap();
         root.append(
@@ -4778,13 +4789,12 @@ mod tests {
                 chat_state::MessageCause::User,
             )
             .unwrap();
+        let mut grandchild_spawn_fact =
+            subagent_spawn("nested-worker", "grandchild-session", "/grandchild");
+        grandchild_spawn_fact.security_parent_session_id = "child-session".into();
         let grandchild_spawn = child
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(subagent_spawn(
-                    "nested-worker",
-                    "grandchild-session",
-                    "/grandchild",
-                )),
+                chat_state::SubagentEvent::Spawned(grandchild_spawn_fact),
             ))
             .unwrap();
         child

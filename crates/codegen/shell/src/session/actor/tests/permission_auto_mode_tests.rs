@@ -71,7 +71,9 @@ async fn child_permission_judgment_branches_primary_context_without_mutation() {
             let mut trusted_user =
                 super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
             trusted_user.set_prompt_index(0);
-            trusted_user.set_permission_evidence(sampling_types::PermissionEvidence::DirectUser);
+            trusted_user.set_permission_evidence(sampling_types::PermissionEvidence::direct_user(
+                format!("implement {PRIMARY_MARKER}"),
+            ));
             replace_test_surface(
                 &actor.chat_state_handle,
                 vec![
@@ -227,7 +229,11 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
             let mut trusted_user =
                 super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
             trusted_user.set_prompt_index(0);
-            trusted_user.set_permission_evidence(sampling_types::PermissionEvidence::DirectUser);
+            trusted_user.set_permission_evidence(
+                sampling_types::PermissionEvidence::direct_user(format!(
+                    "implement {PRIMARY_MARKER}"
+                )),
+            );
             replace_test_surface(
                 &actor.chat_state_handle,
                 vec![
@@ -367,8 +373,11 @@ async fn chat_child_judge_retries_empty_invalid_and_transient_responses_once() {
                 let mut trusted_user =
                     super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
                 trusted_user.set_prompt_index(0);
-                trusted_user
-                    .set_permission_evidence(sampling_types::PermissionEvidence::DirectUser);
+                trusted_user.set_permission_evidence(
+                    sampling_types::PermissionEvidence::direct_user(format!(
+                        "implement {PRIMARY_MARKER}"
+                    )),
+                );
                 replace_test_surface(
                     &actor.chat_state_handle,
                     vec![
@@ -654,13 +663,19 @@ fn neutralize_handles_multibyte_without_panic() {
 
 // ── build_classifier_turns (structured transcript seed) ─────────────────────
 
+fn permission_user(text: &str) -> super::ConversationItem {
+    let mut item = super::ConversationItem::user(text);
+    item.set_permission_evidence(sampling_types::PermissionEvidence::direct_user(text));
+    item
+}
+
 /// The seed captures user text + assistant tool_use (args compacted to JSON) and
 /// EXCLUDES assistant free-text and tool results (auto-mode classifier parity).
 #[test]
 fn build_classifier_turns_captures_tool_use_excludes_text_and_results() {
     use workspace::permission::ClassifierTurn;
     let conv = vec![
-        super::ConversationItem::user("please build"),
+        permission_user("please build"),
         super::ConversationItem::assistant("sure, running it"),
         super::ConversationItem::assistant_tool_calls(vec![
             sampling_types::conversation::ToolCall {
@@ -690,9 +705,9 @@ fn build_classifier_turns_captures_tool_use_excludes_text_and_results() {
 fn build_classifier_turns_respects_recency_window() {
     use workspace::permission::ClassifierTurn;
     let conv = vec![
-        super::ConversationItem::user("old"),
-        super::ConversationItem::user("mid"),
-        super::ConversationItem::user("new"),
+        permission_user("old"),
+        permission_user("mid"),
+        permission_user("new"),
     ];
     let turns = super::build_classifier_turns(&conv, 2);
     assert_eq!(
@@ -714,8 +729,8 @@ fn build_classifier_turns_filters_synthetic_users() {
     let conv = vec![
         super::ConversationItem::project_instructions("AGENTS.md body: be careful"),
         super::ConversationItem::auto_continue("keep going"),
-        super::ConversationItem::user("real prompt"),
-        super::ConversationItem::interjection("also do this"),
+        permission_user("real prompt"),
+        super::ConversationItem::interjection("also do this", "also do this"),
     ];
     let turns = super::build_classifier_turns(&conv, 16);
     assert_eq!(

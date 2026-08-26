@@ -258,6 +258,7 @@ pub(crate) async fn run_monitor_pipeline(
     let mut line_processor = LineProcessor::new();
     let mut last_read_offset: u64 = start_offset;
     let mut last_owner: Option<String> = None;
+    let mut last_goal: Option<String> = None;
 
     loop {
         // Strong handle for this tick only; `None` means the session dropped
@@ -277,6 +278,11 @@ pub(crate) async fn run_monitor_pipeline(
             last_owner.clone_from(&snapshot_owner);
         }
         let owner_session_id = snapshot_owner.or_else(|| last_owner.clone());
+        let snapshot_goal = snapshot.as_ref().and_then(|s| s.goal_id.clone());
+        if snapshot_goal.is_some() {
+            last_goal.clone_from(&snapshot_goal);
+        }
+        let goal_id = snapshot_goal.or_else(|| last_goal.clone());
 
         // Read new output from the file.
         let new_bytes = read_new_bytes(output_file, &mut last_read_offset).await;
@@ -291,6 +297,7 @@ pub(crate) async fn run_monitor_pipeline(
                     &rate_limiter,
                     notification_handle,
                     owner_session_id.as_deref(),
+                    goal_id.as_deref(),
                 )
                 .await;
             }
@@ -306,6 +313,7 @@ pub(crate) async fn run_monitor_pipeline(
                     &rate_limiter,
                     notification_handle,
                     owner_session_id.as_deref(),
+                    goal_id.as_deref(),
                 )
                 .await;
             }
@@ -368,8 +376,10 @@ async fn process_event(
     rate_limiter: &Arc<Mutex<MonitorRateLimiter>>,
     notification_handle: &ToolNotificationHandle,
     owner_session_id: Option<&str>,
+    goal_id: Option<&str>,
 ) {
     let owner = || owner_session_id.map(str::to_string);
+    let goal = || goal_id.map(str::to_string);
     let mut rl = rate_limiter.lock().await;
     match rl.process_event(description) {
         RateLimitOutcome::Allowed { catch_up_notice } => {
@@ -381,6 +391,7 @@ async fn process_event(
                     event_text: wrapped,
                     raw_text: notice,
                     owner_session_id: owner(),
+                    goal_id: goal(),
                 });
             }
             let wrapped = event::wrap_monitor_event(description, event_text, task_id);
@@ -390,6 +401,7 @@ async fn process_event(
                 event_text: wrapped,
                 raw_text: event_text.to_string(),
                 owner_session_id: owner(),
+                goal_id: goal(),
             });
         }
         RateLimitOutcome::Suppressed => {
@@ -403,6 +415,7 @@ async fn process_event(
                 event_text: wrapped,
                 raw_text: message,
                 owner_session_id: owner(),
+                goal_id: goal(),
             });
         }
     }

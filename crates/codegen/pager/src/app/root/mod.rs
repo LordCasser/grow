@@ -7949,7 +7949,6 @@ pub(crate) mod tests {
                 objective: "obj".to_owned(),
                 status: "active".to_owned(),
                 management_available: true,
-                builtin: false,
                 phases: vec![("Research".to_owned(), "active".to_owned())],
                 current_phase: Some("Research".to_owned()),
                 agents: vec![crate::app::session::WorkflowAgentRowView {

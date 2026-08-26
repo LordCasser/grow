@@ -2,10 +2,11 @@
 
 use super::*;
 
-/// Clears the persisted approval transport flag when the
-/// [`SessionActor::request_plan_approval`] await **resolves** (a decision came
-/// back) or is **dropped** (the model turn was cancelled) — so a cancelled
-/// in-session approval can never strand the bit `true`.
+/// Keeps the persisted approval transport flag tied to the exact submitted
+/// Plan snapshot while the [`SessionActor::request_plan_approval`] await is
+/// live. A resolved decision clears it only through the matching phase CAS;
+/// a dropped request rejects the same snapshot so a newer submission cannot
+/// be stranded or changed by an old waiter.
 ///
 /// It is deliberately preserved on the client-disconnect
 /// (quit) path: there the approval is genuinely still pending, so the bit must
@@ -14,16 +15,22 @@ use super::*;
 /// would race the quit and lose the gate.
 pub(super) struct AwaitingApprovalGuard<'a> {
     actor: &'a SessionActor,
+    expected: crate::session::behavior::BehaviorSnapshot,
     armed: bool,
 }
 impl AwaitingApprovalGuard<'_> {
     pub(super) fn new(actor: &SessionActor) -> AwaitingApprovalGuard<'_> {
-        AwaitingApprovalGuard { actor, armed: true }
+        let expected = actor.behavior.lock().snapshot();
+        AwaitingApprovalGuard {
+            actor,
+            expected,
+            armed: true,
+        }
     }
 
-    /// A decision arrived. The caller still owns the phase transition.
+    /// A decision arrived. The caller still owns the phase transition and the
+    /// pending bit remains set until that transition's CAS succeeds.
     pub(super) fn resolve(mut self) {
-        self.actor.behavior.lock().set_approval_pending(false);
         self.armed = false;
     }
 
@@ -38,15 +45,31 @@ impl Drop for AwaitingApprovalGuard<'_> {
             return;
         }
         let mut controller = self.actor.behavior.lock();
-        if !controller.reject_submitted_plan() {
-            controller.set_approval_pending(false);
+        if controller.reject_submitted_plan_if(&self.expected) {
+            drop(controller);
+            self.actor.record_control_snapshot();
         }
-        drop(controller);
-        self.actor.record_control_snapshot();
     }
 }
 pub(super) fn is_plan_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
     matches!(kind, Some(tools::types::tool::ToolKind::PlanControl))
+}
+
+pub(super) fn is_state_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            tools::types::tool::ToolKind::PlanControl
+                | tools::types::tool::ToolKind::GoalLifecycleUpdate
+        )
+    )
+}
+
+pub(super) fn is_goal_lifecycle_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
+    matches!(
+        kind,
+        Some(tools::types::tool::ToolKind::GoalLifecycleUpdate)
+    )
 }
 
 pub(super) fn public_workflow_conflict(
@@ -166,10 +189,17 @@ pub(super) fn project_call_access(
         ToolInput::Write(_) => ToolAccess::Write,
         ToolInput::Bash(input) => shell_required_access(&input.command),
         ToolInput::Monitor(input) => shell_required_access(&input.command),
-        // Delegation and owner-scoped cancellation are exact-identity
-        // framework controls. Reality-facing work performed by a child or a
-        // background command remains independently gated at its origin.
-        ToolInput::KillTask(_) | ToolInput::Task(_) => ToolAccess::None,
+        ToolInput::KillTask(_) => ToolAccess::None,
+        // A Task call is the authority grant for the child's initial RWX.
+        // Model arguments are requests, not authority by themselves; project
+        // them through the parent's ordinary permission gate before the child
+        // gets the corresponding fast-path ceiling.
+        ToolInput::Task(task) => match task.capability_mode {
+            Some(tool_types::SubagentCapabilityMode::ReadOnly) => ToolAccess::Read,
+            Some(tool_types::SubagentCapabilityMode::ReadWrite) => ToolAccess::ReadWrite,
+            Some(tool_types::SubagentCapabilityMode::Execute) => ToolAccess::ReadExecute,
+            Some(tool_types::SubagentCapabilityMode::All) | None => ToolAccess::All,
+        },
         ToolInput::WebFetch(_) => ToolAccess::ReadWrite,
         ToolInput::SchedulerCreate(_) | ToolInput::SchedulerDelete(_) => ToolAccess::WriteExecute,
         ToolInput::CreateGoal(_) | ToolInput::UpdateGoal(_) => ToolAccess::WriteExecute,
@@ -555,17 +585,24 @@ pub(super) fn workflow_run_snapshot_write(
         _ => false,
     }
 }
-/// Run Plan lifecycle transitions after every ordinary call in the batch.
-pub(super) fn split_plan_control_tail(
-    calls: Vec<crate::sampling::types::ToolCallResponse>,
+/// Select the first lifecycle mutation as the batch barrier. Every other call
+/// is a sibling sampled against the pre-transition state and must be durably
+/// cancelled; this applies even when the provider emitted a sibling first.
+pub(super) fn split_state_control_barrier(
+    mut calls: Vec<crate::sampling::types::ToolCallResponse>,
     kind_of: impl Fn(&str) -> Option<tools::types::tool::ToolKind>,
 ) -> (
-    Vec<crate::sampling::types::ToolCallResponse>,
+    Option<crate::sampling::types::ToolCallResponse>,
     Vec<crate::sampling::types::ToolCallResponse>,
 ) {
-    calls
-        .into_iter()
-        .partition(|call| !is_plan_control_kind(kind_of(&call.function.name)))
+    let Some(index) = calls
+        .iter()
+        .position(|call| is_state_control_kind(kind_of(&call.function.name)))
+    else {
+        return (None, calls);
+    };
+    let control = calls.remove(index);
+    (Some(control), calls)
 }
 /// Verdict for a tool call evaluated against the plan-mode edit gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,8 +618,9 @@ pub(super) enum PlanEditGate {
 ///
 /// Every potentially mutating access class is rejected before the normal
 /// permission flow. MCP calls are allowed only when the call's server is
-/// config-declared `max_access = "read_write"`;
-/// unknown MCP calls fail closed while drafting/amending. Plan artifact
+/// config-declared query-only (`read_write`, or the stricter `read` mask);
+/// unknown or write-capable MCP calls fail closed
+/// while drafting/amending. Plan artifact
 /// persistence is performed only by the shell control plane; Behavior
 /// never grants an edit capability and never bypasses session permissions.
 ///
@@ -608,10 +646,22 @@ pub(super) fn plan_mode_edit_gate(
     if tracker.plan_allows_edits() {
         return PlanEditGate::Allow;
     }
+    if let ToolInput::Task(task) = tool_input {
+        return if task.capability_mode.unwrap_or_default()
+            == tool_types::SubagentCapabilityMode::ReadOnly
+        {
+            PlanEditGate::Allow
+        } else {
+            PlanEditGate::RejectEdit
+        };
+    }
     match access_kind {
         AccessKind::Edit(_) | AccessKind::Bash(_) => PlanEditGate::RejectEdit,
         AccessKind::MCPTool { .. } => {
-            if mcp_max_access == Some(tool_protocol::ToolAccess::ReadWrite) {
+            if matches!(
+                mcp_max_access,
+                Some(tool_protocol::ToolAccess::Read | tool_protocol::ToolAccess::ReadWrite,)
+            ) {
                 PlanEditGate::Allow
             } else {
                 PlanEditGate::RejectEdit

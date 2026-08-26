@@ -61,7 +61,6 @@ fn status_name(status: GoalStatus) -> &'static str {
         GoalStatus::Active => "active",
         GoalStatus::Paused => "paused",
         GoalStatus::Blocked => "blocked",
-        GoalStatus::UsageLimited => "usage_limited",
         GoalStatus::BudgetLimited => "budget_limited",
         GoalStatus::Complete => "complete",
     }

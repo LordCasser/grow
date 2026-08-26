@@ -60,6 +60,7 @@ impl SessionActor {
         }
         let sideband_id = uuid::Uuid::now_v7().to_string();
         let mut timeline = chat_state::SidebandTimeline::new(sideband_id)?;
+        let spawn_source_refs = source_refs.clone();
         let request = timeline.prepare(chat_state::SidebandEventKind::Request(
             chat_state::SidebandRequest {
                 purpose,
@@ -86,26 +87,20 @@ impl SessionActor {
             pending: Some(request),
             persistence_poison: None,
         };
-        run.flush_pending().await?;
+        // Parent ownership must become durable before the independent child
+        // ledger can contain a fact. A crash after this boundary may leave an
+        // inert Spawn without a Request, which readers already ignore; the
+        // reverse order leaves an unowned ledger that cannot be authenticated.
         self.chat_state_handle
             .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
                 chat_state::SidebandSpawnEvent {
                     sideband_id: run.timeline.sideband_id().to_owned(),
                     purpose,
-                    source_refs: run
-                        .timeline
-                        .events()
-                        .first()
-                        .and_then(|event| match &event.kind {
-                            chat_state::SidebandEventKind::Request(request) => {
-                                Some(request.source_refs.clone())
-                            }
-                            _ => None,
-                        })
-                        .ok_or(chat_state::SidebandError::InvalidRequestBoundary)?,
+                    source_refs: spawn_source_refs,
                 },
             ))
             .await?;
+        run.flush_pending().await?;
         Ok(run)
     }
 }

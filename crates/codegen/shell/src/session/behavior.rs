@@ -20,7 +20,7 @@ pub enum BehaviorChangeOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BehaviorSwitchFacts {
     pub unavailable_reason: Option<String>,
-    pub unfinished_goal: bool,
+    pub active_goal: bool,
     pub public_workflow_active: bool,
     pub source_owned_work_active: bool,
 }
@@ -28,7 +28,6 @@ pub struct BehaviorSwitchFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviorEffect {
     CancelSourceForeground(BehaviorId),
-    CancelDeepResearchRun,
     Select(BehaviorId),
 }
 
@@ -71,15 +70,14 @@ pub enum PlanPhase {
 }
 
 /// Serialized control projection. The coordinator does not use this enum as
-/// its mutable state machine: Plan and Deep Research keep independent runtime
-/// state and are combined here only for one atomic persistence payload.
+/// its mutable state machine: Plan keeps independent runtime state and is
+/// combined here only for one atomic persistence payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BehaviorState {
     Normal,
     Clarify,
     Plan(PlanPhase),
     Workflow,
-    DeepResearch { run_id: Option<String> },
     Goal,
 }
 
@@ -111,16 +109,9 @@ impl Default for PlanRuntime {
     }
 }
 
-/// Pure Deep Research runtime owned by the Deep Research Behavior.
-#[derive(Debug, Clone, Default)]
-struct DeepResearchRuntime {
-    owned_run_id: Option<String>,
-}
-
 pub struct BehaviorCoordinator {
     selected: BehaviorId,
     plan: PlanRuntime,
-    deep_research: DeepResearchRuntime,
     pending_switch: Option<PendingBehaviorSwitch>,
 }
 
@@ -131,7 +122,7 @@ struct PendingBehaviorSwitch {
     expires_at: std::time::Instant,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BehaviorSnapshot {
     pub state: BehaviorState,
     pub approval_pending: bool,
@@ -153,7 +144,6 @@ impl BehaviorSnapshot {
             BehaviorId::Clarify => BehaviorState::Clarify,
             BehaviorId::Plan => BehaviorState::Plan(PlanPhase::Drafting),
             BehaviorId::Workflow => BehaviorState::Workflow,
-            BehaviorId::DeepResearch => BehaviorState::DeepResearch { run_id: None },
             BehaviorId::Goal => BehaviorState::Goal,
         };
         Self {
@@ -171,7 +161,6 @@ impl BehaviorSnapshot {
             BehaviorState::Clarify => BehaviorId::Clarify,
             BehaviorState::Plan(_) => BehaviorId::Plan,
             BehaviorState::Workflow => BehaviorId::Workflow,
-            BehaviorState::DeepResearch { .. } => BehaviorId::DeepResearch,
             BehaviorState::Goal => BehaviorId::Goal,
         }
     }
@@ -193,21 +182,17 @@ impl BehaviorCoordinator {
         Self {
             selected: BehaviorId::Normal,
             plan: PlanRuntime::default(),
-            deep_research: DeepResearchRuntime::default(),
             pending_switch: None,
         }
     }
 
     pub fn from_snapshot(snapshot: BehaviorSnapshot) -> Self {
-        let (selected, plan_phase, owned_run_id) = match snapshot.state {
-            BehaviorState::Normal => (BehaviorId::Normal, PlanPhase::Drafting, None),
-            BehaviorState::Clarify => (BehaviorId::Clarify, PlanPhase::Drafting, None),
-            BehaviorState::Plan(phase) => (BehaviorId::Plan, phase, None),
-            BehaviorState::Workflow => (BehaviorId::Workflow, PlanPhase::Drafting, None),
-            BehaviorState::DeepResearch { run_id } => {
-                (BehaviorId::DeepResearch, PlanPhase::Drafting, run_id)
-            }
-            BehaviorState::Goal => (BehaviorId::Goal, PlanPhase::Drafting, None),
+        let (selected, plan_phase) = match snapshot.state {
+            BehaviorState::Normal => (BehaviorId::Normal, PlanPhase::Drafting),
+            BehaviorState::Clarify => (BehaviorId::Clarify, PlanPhase::Drafting),
+            BehaviorState::Plan(phase) => (BehaviorId::Plan, phase),
+            BehaviorState::Workflow => (BehaviorId::Workflow, PlanPhase::Drafting),
+            BehaviorState::Goal => (BehaviorId::Goal, PlanPhase::Drafting),
         };
         Self {
             selected,
@@ -218,7 +203,6 @@ impl BehaviorCoordinator {
                 artifact_revision: snapshot.plan_artifact_revision,
                 artifact_hash: snapshot.plan_artifact_hash,
             },
-            deep_research: DeepResearchRuntime { owned_run_id },
             pending_switch: None,
         }
     }
@@ -239,9 +223,6 @@ impl BehaviorCoordinator {
             BehaviorId::Clarify => BehaviorState::Clarify,
             BehaviorId::Plan => BehaviorState::Plan(self.plan.phase),
             BehaviorId::Workflow => BehaviorState::Workflow,
-            BehaviorId::DeepResearch => BehaviorState::DeepResearch {
-                run_id: self.deep_research.owned_run_id.clone(),
-            },
             BehaviorId::Goal => BehaviorState::Goal,
         }
     }
@@ -256,7 +237,6 @@ impl BehaviorCoordinator {
         }
         self.selected = behavior;
         self.plan = PlanRuntime::default();
-        self.deep_research = DeepResearchRuntime::default();
         self.pending_switch = None;
         true
     }
@@ -321,9 +301,6 @@ impl BehaviorCoordinator {
         let mut effects = Vec::new();
         if facts.source_owned_work_active {
             effects.push(BehaviorEffect::CancelSourceForeground(source));
-            if source == BehaviorId::DeepResearch {
-                effects.push(BehaviorEffect::CancelDeepResearchRun);
-            }
         }
         effects.push(BehaviorEffect::Select(target));
         BehaviorDecision {
@@ -349,8 +326,8 @@ impl BehaviorCoordinator {
                 reason: None,
             };
         }
-        let reason = if facts.unfinished_goal && target != BehaviorId::Goal {
-            Some("Goal behavior is exclusive until the Goal completes or is cleared.".to_string())
+        let reason = if facts.active_goal && target != BehaviorId::Goal {
+            Some("An active Goal owns automatic continuation; pause or stop it before selecting another Behavior.".to_string())
         } else if let Some(reason) = facts.unavailable_reason.clone() {
             Some(reason)
         } else if target.owns_special_runtime() && facts.public_workflow_active {
@@ -452,29 +429,6 @@ impl BehaviorCoordinator {
         })
     }
 
-    pub fn deep_research_run_id(&self) -> Option<&str> {
-        if self.selected == BehaviorId::DeepResearch {
-            self.deep_research.owned_run_id.as_deref()
-        } else {
-            None
-        }
-    }
-
-    pub fn attach_deep_research_run(&mut self, run_id: String) -> bool {
-        if self.selected != BehaviorId::DeepResearch || self.deep_research.owned_run_id.is_some() {
-            return false;
-        }
-        self.deep_research.owned_run_id = Some(run_id);
-        true
-    }
-
-    pub fn clear_deep_research_run(&mut self) -> Option<String> {
-        if self.selected != BehaviorId::DeepResearch {
-            return None;
-        }
-        self.deep_research.owned_run_id.take()
-    }
-
     pub fn submit_initial_plan(&mut self) -> bool {
         if !self.is_plan() || self.plan.phase != PlanPhase::Drafting {
             return false;
@@ -542,6 +496,69 @@ impl BehaviorCoordinator {
         self.plan.approval_pending
     }
 
+    /// Capture the exact submitted Plan state that a pending approval is
+    /// allowed to resolve.  The artifact revision/hash are part of the
+    /// snapshot so a decision cannot be applied to a later submission that
+    /// happens to reuse the same phase.
+    pub fn pending_plan_approval_snapshot(&self) -> Option<BehaviorSnapshot> {
+        (self.plan.approval_pending
+            && self.is_plan()
+            && matches!(
+                self.plan.phase,
+                PlanPhase::AwaitingApproval | PlanPhase::Amending
+            ))
+        .then(|| self.snapshot())
+    }
+
+    fn matches_pending_plan_approval(&self, expected: &BehaviorSnapshot) -> bool {
+        self.snapshot() == *expected
+            && expected.approval_pending
+            && matches!(
+                &expected.state,
+                BehaviorState::Plan(PlanPhase::AwaitingApproval | PlanPhase::Amending)
+            )
+    }
+
+    /// Approve only the exact pending submission captured by `expected`.
+    /// This is intentionally a compare-and-swap boundary for restored
+    /// approvals, whose response arrives outside the actor mailbox.
+    pub fn approve_submitted_plan_if(&mut self, expected: &BehaviorSnapshot) -> bool {
+        if !self.matches_pending_plan_approval(expected) {
+            return false;
+        }
+        self.plan.phase = PlanPhase::Executing;
+        self.plan.approval_pending = false;
+        self.plan.reminder_count = 0;
+        true
+    }
+
+    /// Reject only the exact pending submission captured by `expected`.
+    pub fn reject_submitted_plan_if(&mut self, expected: &BehaviorSnapshot) -> bool {
+        if !self.matches_pending_plan_approval(expected) {
+            return false;
+        }
+        self.plan.approval_pending = false;
+        match self.plan.phase {
+            PlanPhase::AwaitingApproval => {
+                self.plan.phase = PlanPhase::Drafting;
+                self.plan.reminder_count = 0;
+            }
+            PlanPhase::Amending => {}
+            _ => unreachable!("pending approval phase was checked above"),
+        }
+        true
+    }
+
+    /// Clear malformed persisted approval transport state only when the
+    /// snapshot being normalized is still current.
+    pub fn clear_approval_pending_if(&mut self, expected: &BehaviorSnapshot) -> bool {
+        if self.snapshot() != *expected || !expected.approval_pending {
+            return false;
+        }
+        self.plan.approval_pending = false;
+        true
+    }
+
     pub fn record_plan_artifact(&mut self, markdown: &str) {
         self.plan.artifact_revision = self.plan.artifact_revision.saturating_add(1);
         self.plan.artifact_hash = Some(blake3::hash(markdown.as_bytes()).to_hex().to_string());
@@ -607,10 +624,6 @@ pub fn workflow_reminder_template() -> &'static str {
     )
 }
 
-pub fn deep_research_reminder_template() -> &'static str {
-    include_str!("../../prompts/behaviors/deep-research.md")
-}
-
 pub fn goal_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/goal.md")
 }
@@ -623,12 +636,11 @@ pub fn goal_reminder_template() -> &'static str {
 pub fn behavior_transition_context(admitted: BehaviorId) -> String {
     let instructions = match admitted {
         BehaviorId::Normal => {
-            "Normal Behavior is now active. Earlier special Behavior protocols are historical and no longer apply. Follow the active Agent role and the current user request without Clarify, Plan, Workflow, Deep Research, or Goal-specific constraints."
+            "Normal Behavior is now active. Earlier special Behavior protocols are historical and no longer apply. Follow the active Agent role and the current user request without Clarify, Plan, Workflow, or Goal-specific constraints."
         }
         BehaviorId::Clarify => clarify_reminder_template(),
         BehaviorId::Plan => plan_behavior_template(),
         BehaviorId::Workflow => workflow_reminder_template(),
-        BehaviorId::DeepResearch => deep_research_reminder_template(),
         BehaviorId::Goal => goal_reminder_template(),
     };
     let escaped = instructions.replace("</behavior-context>", "<\\/behavior-context>");
@@ -701,7 +713,6 @@ mod tests {
             BehaviorId::Clarify,
             BehaviorId::Plan,
             BehaviorId::Workflow,
-            BehaviorId::DeepResearch,
             BehaviorId::Goal,
         ] {
             let context = behavior_transition_context(behavior);
@@ -723,7 +734,6 @@ mod tests {
             BehaviorId::Clarify,
             BehaviorId::Plan,
             BehaviorId::Workflow,
-            BehaviorId::DeepResearch,
             BehaviorId::Goal,
         ] {
             assert!(controller.select_behavior(behavior));
@@ -774,21 +784,37 @@ mod tests {
     }
 
     #[test]
-    fn behavior_selection_and_owned_runtimes_do_not_share_state() {
+    fn approval_cas_rejects_stale_phase_or_artifact() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# first");
+        assert!(controller.submit_initial_plan());
+        let expected = controller.snapshot();
+
+        // A later Plan state must not be resolved by the old decision.
+        assert!(controller.approve_submitted_plan_if(&expected));
+        assert!(controller.submit_plan_amendment());
+        assert!(!controller.approve_submitted_plan_if(&expected));
+        assert_eq!(controller.state(), BehaviorState::Plan(PlanPhase::Amending));
+
+        // Even the same phase is stale when the submitted artifact changed.
+        controller.set_approval_pending(false);
+        controller.record_plan_artifact("# second");
+        assert!(controller.submit_plan_amendment());
+        assert!(!controller.reject_submitted_plan_if(&expected));
+        assert!(controller.approval_pending());
+    }
+
+    #[test]
+    fn behavior_selection_resets_plan_runtime_state() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
         controller.record_plan_artifact("# plan");
         controller.submit_initial_plan();
-        assert!(controller.select_behavior(BehaviorId::DeepResearch));
-        assert!(controller.attach_deep_research_run("research-run".into()));
+        assert!(controller.select_behavior(BehaviorId::Workflow));
 
         let snapshot = controller.snapshot();
-        assert_eq!(
-            snapshot.state,
-            BehaviorState::DeepResearch {
-                run_id: Some("research-run".into()),
-            }
-        );
+        assert_eq!(snapshot.state, BehaviorState::Workflow);
         assert!(snapshot.runtime_fields_match_selection());
         assert_eq!(snapshot.plan_artifact_revision, 0);
         assert!(snapshot.plan_artifact_hash.is_none());
@@ -818,17 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_research_run_is_owned_only_by_deep_research_behavior() {
-        let mut controller = controller();
-        controller.select_behavior(BehaviorId::DeepResearch);
-        assert!(controller.attach_deep_research_run("research-run".into()));
-        assert_eq!(controller.deep_research_run_id(), Some("research-run"));
-        controller.select_behavior(BehaviorId::Workflow);
-        assert_eq!(controller.deep_research_run_id(), None);
-    }
-
-    #[test]
-    fn unfinished_goal_rejects_every_other_behavior_and_reselect_is_idempotent() {
+    fn active_goal_rejects_every_other_behavior_and_reselect_is_idempotent() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Goal);
         for target in [
@@ -836,12 +852,11 @@ mod tests {
             BehaviorId::Clarify,
             BehaviorId::Plan,
             BehaviorId::Workflow,
-            BehaviorId::DeepResearch,
         ] {
             let decision = controller.decide_switch(
                 target,
                 BehaviorSwitchFacts {
-                    unfinished_goal: true,
+                    active_goal: true,
                     ..BehaviorSwitchFacts::default()
                 },
                 std::time::Duration::from_secs(8),
@@ -860,7 +875,7 @@ mod tests {
         let same = controller.decide_switch(
             BehaviorId::Goal,
             BehaviorSwitchFacts {
-                unfinished_goal: true,
+                active_goal: true,
                 ..BehaviorSwitchFacts::default()
             },
             std::time::Duration::from_secs(8),
@@ -914,7 +929,7 @@ mod tests {
 
     #[test]
     fn public_workflow_blocks_only_special_runtime_behaviors() {
-        for target in [BehaviorId::Plan, BehaviorId::Goal, BehaviorId::DeepResearch] {
+        for target in [BehaviorId::Plan, BehaviorId::Goal] {
             let mut controller = controller();
             let decision = controller.decide_switch(
                 target,
@@ -949,7 +964,7 @@ mod tests {
 
     #[test]
     fn active_public_workflow_cannot_enter_another_special_runtime() {
-        for target in [BehaviorId::Plan, BehaviorId::Goal, BehaviorId::DeepResearch] {
+        for target in [BehaviorId::Plan, BehaviorId::Goal] {
             let mut controller = controller();
             controller.select_behavior(BehaviorId::Workflow);
             let decision = controller.decide_switch(
@@ -978,7 +993,6 @@ mod tests {
             BehaviorId::Clarify,
             BehaviorId::Plan,
             BehaviorId::Workflow,
-            BehaviorId::DeepResearch,
             BehaviorId::Goal,
         ];
         for source in behaviors {
@@ -1069,7 +1083,6 @@ mod tests {
         assert!(clarify_reminder_template().contains("primary Agent must integrate"));
         assert!(plan_behavior_template().contains("must not replace the primary Agent's"));
         assert!(goal_reminder_template().contains("do not hand the objective itself"));
-        assert!(deep_research_reminder_template().contains("no worker's output is a final"));
     }
 
     #[test]

@@ -99,7 +99,7 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
             ToolAccess::WriteExecute,
         ),
         // ── Grow orchestration ─────────────────────────────────────────────
-        entry::<grow_build::TaskTool>(ToolKind::Task, ToolAccess::None),
+        entry::<grow_build::TaskTool>(ToolKind::Task, ToolAccess::All),
         entry::<grow_build::WorkflowTool>(ToolKind::Workflow, ToolAccess::All),
         entry::<grow_build::WebFetchTool>(ToolKind::WebFetch, ToolAccess::ReadWrite),
         entry::<grow_build::LspTool>(ToolKind::Lsp, ToolAccess::Read),

@@ -68,10 +68,12 @@ pub struct TimelineMaterialization {
     pub surface_revision: u64,
     pub surface: Vec<ConversationItem>,
     pub surface_ids: Vec<crate::SurfaceId>,
-    pub active_image_projections: std::collections::BTreeMap<
-        sampling_types::ModelImageInputKey,
-        std::collections::BTreeMap<crate::SurfaceId, crate::ImageShadow>,
-    >,
+    /// Branch-selected sanitized first-party authority. Derived Surface text
+    /// (including image transcriptions) can never enter it.
+    pub direct_user_inputs: Vec<ConversationItem>,
+    /// Branch-ordered main Auto permission context: typed authority plus
+    /// assistant tool-use, without projected user text or model prose.
+    pub permission_context: Vec<ConversationItem>,
     pub active_control_contexts:
         std::collections::BTreeMap<crate::ControlContextLayer, crate::ActiveControlContext>,
 }
@@ -735,6 +737,9 @@ fn surface_id_exists(parent: &crate::Timeline, id: crate::SurfaceId) -> bool {
                 crate::TimelineEventKind::Messages(messages) => usize::try_from(id.item)
                     .ok()
                     .is_some_and(|item| item < messages.items.len()),
+                crate::TimelineEventKind::ImageProjection(projection) => usize::try_from(id.item)
+                    .ok()
+                    .is_some_and(|item| item < projection.shadows.len()),
                 // Control transitions and re-projections are first-class
                 // Surface facts. Their model context is one synthetic item
                 // anchored at item 0, including when a transition was held

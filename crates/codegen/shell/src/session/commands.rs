@@ -9,7 +9,7 @@ use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
 /// Structured context for a cancelled turn, replacing stringly-typed JSON.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct CancellationContext {
     pub tool_name: Option<String>,
     pub reason: Option<String>,
@@ -77,6 +77,27 @@ pub struct PromptTurnOk {
 /// Result of a prompt turn, containing the stop reason, accumulated token count,
 /// and an optional turn-end signals snapshot (for trace metadata enrichment).
 pub type PromptTurnResult = Result<PromptTurnOk, acp::Error>;
+
+const TURN_BOUNDARY_FAILURE_KIND: &str = "turn_boundary_persistence_failed";
+
+pub(crate) fn fatal_turn_boundary_error(phase: &str, detail: impl Into<String>) -> acp::Error {
+    let detail = detail.into();
+    acp::Error::internal_error().data(serde_json::json!({
+        "message": format!("turn {phase} was not durably recorded: {detail}"),
+        "error_kind": TURN_BOUNDARY_FAILURE_KIND,
+        "phase": phase,
+    }))
+}
+
+pub(crate) fn is_fatal_turn_boundary_error(error: &acp::Error) -> bool {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("error_kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some(TURN_BOUNDARY_FAILURE_KIND)
+}
+
 /// Convenience: successful end-of-turn result.
 pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> PromptTurnResult {
     Ok(PromptTurnOk {
@@ -87,6 +108,28 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         structured_output: None,
         usage: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_boundary_failure_is_a_typed_session_fatal_error() {
+        let error = fatal_turn_boundary_error("terminal", "disk rejected append");
+        assert!(is_fatal_turn_boundary_error(&error));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(serde_json::Value::as_str),
+            Some("terminal")
+        );
+        assert!(!is_fatal_turn_boundary_error(
+            &acp::Error::internal_error().data("ordinary turn error")
+        ));
+    }
 }
 pub enum SessionCommand {
     /// Install an immutable Goal snapshot before a delegated child turn is
@@ -162,6 +205,12 @@ pub enum SessionCommand {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,
     },
+    /// Serialize model-initiated Goal lifecycle changes with every other
+    /// session control mutation. The tool-facing channel is only an ingress
+    /// adapter; this mailbox remains the sole control-plane writer.
+    GoalControl {
+        command: tools::implementations::grow_build::update_goal::GoalCommand,
+    },
     SetSessionModel {
         /// Stable `provider/model` catalog identity used by the UI and
         /// persistence. This is intentionally distinct from
@@ -199,29 +248,6 @@ pub enum SessionCommand {
     RebuildAgentForDefinition {
         definition: agent::AgentDefinition,
         responds_to: oneshot::Sender<Result<(), acp::Error>>,
-    },
-    /// Override the model name and optionally inject extra HTTP headers
-    /// into the session's sampling config.
-    ///
-    /// Unlike `SetSessionModel` (which requires a fully resolved `ModelEntry`
-    /// and does NOT update `primaryModelId` in signals — the resolved model
-    /// is already tracked via inference responses), this command also calls
-    /// `set_primary_model()` so that signals report the override model
-    /// rather than the agent-level default (e.g. `grow-4.5`).
-    ///
-    /// Keeps the existing base_url, api_key, and other config — only changes
-    /// the request `model` field and merges any explicitly configured headers.
-    ///
-    /// Used to set model IDs (e.g. opaque third-party routing names) that are
-    /// routing hints for the backend and don't need to exist in the
-    /// agent's local model registry.
-    OverrideModelName {
-        model_name: String,
-        extra_headers: indexmap::IndexMap<String, String>,
-        /// Override the context window size for the new model. Without this,
-        /// forked sessions inherit the source session's context window, causing
-        /// auto-compact and context-usage signals to use the wrong threshold.
-        context_window: Option<std::num::NonZeroU64>,
     },
     GetCurrentModel {
         responds_to: oneshot::Sender<String>,
@@ -625,7 +651,6 @@ pub enum SessionCommand {
     /// command can never render a later retry as this completion.
     WorkflowCompleted {
         state: crate::session::workflow::tracker::WorkflowRunState,
-        outcome: workflow::WorkflowOutcome,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).

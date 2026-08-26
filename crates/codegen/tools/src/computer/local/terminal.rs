@@ -2118,7 +2118,7 @@ impl LocalTerminalActor {
                     },
                     output_file: process.output_file.clone(),
                     task_id: task_id.clone(),
-                    goal_id: None,
+                    goal_id: process.goal_id.clone(),
                     monitor_description: recovered_monitor_description,
                     description: effective_description.clone(),
                 });

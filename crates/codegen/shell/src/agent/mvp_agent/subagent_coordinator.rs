@@ -22,6 +22,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         Box::pin(async move {
             let tools::implementations::grow_build::task::coordinator::ChildRunRequest {
                 request,
+                security_parent_session_id,
                 security_parent,
                 cancellation,
                 reporter,
@@ -48,18 +49,26 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                     completion_data: Default::default(),
                 };
             };
-            let parent_handle = {
-                let parent_sid = acp::SessionId::new(parent_sid);
-                this.sessions.borrow().get(&parent_sid).cloned()
+            let delegation_handle = match security_parent {
+                Some(handle) => handle,
+                None if security_parent_session_id == parent_sid => {
+                    let parent_sid = acp::SessionId::new(parent_sid.clone());
+                    let Some(handle) = this.sessions.borrow().get(&parent_sid).cloned() else {
+                        return missing_delegation_parent_output(request);
+                    };
+                    handle
+                }
+                None => return missing_delegation_parent_output(request),
             };
-            // Nested lifecycle is reparented to the root coordinator session,
-            // but security inheritance must follow the immediate spawning
-            // child's live authority.
-            if let Some(handle) = security_parent.or(parent_handle) {
-                ctx.parent_capability_ceiling = handle.delegable_capability_ceiling.clone();
-                ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
-                ctx.client_hooks = handle.snapshot_client_hooks().await;
-            }
+            // Lifecycle remains rooted at `parent_sid`; every authority and
+            // workspace-bearing field is instead inherited from the session
+            // that directly delegated this child.
+            this.apply_immediate_delegation_context(
+                &mut ctx,
+                security_parent_session_id,
+                &delegation_handle,
+            )
+            .await;
             crate::agent::subagent::run_shell_child(
                 request,
                 ctx,
@@ -132,6 +141,28 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         .map(std::sync::Arc::from)
     }
 }
+
+fn missing_delegation_parent_output(
+    request: tools::implementations::grow_build::task::types::SubagentRequest,
+) -> tools::implementations::grow_build::task::coordinator::ChildRunOutput<
+    crate::agent::subagent::ShellCompletionData,
+> {
+    tracing::warn!(
+        subagent_id = %request.id,
+        "Spawn security parent is unavailable; rejecting nested delegation"
+    );
+    tools::implementations::grow_build::task::coordinator::ChildRunOutput {
+        result: tools::implementations::grow_build::task::types::SubagentResult {
+            success: false,
+            error: Some("Immediate delegation parent is unavailable; cannot spawn subagent.".to_owned()),
+            subagent_id: request.id.clone(),
+            child_session_id: request.id,
+            ..Default::default()
+        },
+        completion_data: Default::default(),
+    }
+}
+
 impl MvpAgent {
     /// Start the shared subagent coordinator actor.
     ///
@@ -222,8 +253,21 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> Option<crate::agent::subagent::SubagentSpawnContext> {
         let parent_sid = acp::SessionId::new(parent_session_id);
+        let parent_route = self
+            .sessions
+            .borrow()
+            .get(&parent_sid)
+            .map(|handle| handle.model_route.snapshot());
+        let (parent_model_id, parent_sampling_config) = parent_route.map_or_else(
+            || {
+                (
+                    self.models_manager.current_model_id(),
+                    self.sampling_config.borrow().clone(),
+                )
+            },
+            |route| (route.model_id, route.sampling_config),
+        );
         let (
-            parent_model_id,
             parent_chat_state,
             parent_cmd_tx,
             parent_cwd,
@@ -240,8 +284,6 @@ impl MvpAgent {
             let sessions = self.sessions.borrow();
             let ps = sessions.get(&parent_sid);
             (
-                ps.map(|h| h.model_id.clone())
-                    .unwrap_or_else(|| self.models_manager.current_model_id()),
                 ps.map(|h| h.chat_state_handle.clone()),
                 ps.map(|h| h.cmd_tx.clone()),
                 ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
@@ -343,7 +385,7 @@ impl MvpAgent {
             lsp: parent_lsp,
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
-            sampling_config: self.sampling_config.borrow().clone(),
+            sampling_config: parent_sampling_config,
             alpha_test_key: self.alpha_test_key(),
             auth_method_id: self
                 .auth_method_id
@@ -354,6 +396,7 @@ impl MvpAgent {
             model_id: parent_model_id,
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
+            security_parent_session_id: parent_session_id.to_string(),
             permission_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
             parent_depth,
@@ -386,7 +429,28 @@ impl MvpAgent {
                         cwd: h.info.cwd.clone(),
                     })
             },
+            delegation_session_info: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|handle| crate::session::info::Info {
+                        id: parent_sid.clone(),
+                        cwd: handle.info.cwd.clone(),
+                    })
+            },
             parent_chat_state,
+            workflow_tracker: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|handle| handle.workflow_tracker.clone())
+            },
+            delegation_chat_state: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|handle| handle.chat_state_handle.clone())
+            },
             parent_max_turns,
             available_models,
             subagent_model_overrides,
@@ -430,9 +494,7 @@ impl MvpAgent {
                 sessions
                     .get(&parent_sid)
                     .map(|h| h.tool_context.task_output_tool_name.clone())
-                    .unwrap_or_else(|| {
-                        tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
-                    })
+                    .unwrap_or(None)
             },
             goal_loop_active: {
                 let sessions = self.sessions.borrow();
@@ -447,5 +509,60 @@ impl MvpAgent {
             parent_notification_handle: parent_notification_handle.clone(),
             parent_scheduler_handle: parent_scheduler_handle.clone(),
         })
+    }
+
+    /// Overlay the lifecycle-root spawn context with the authority and
+    /// workspace of the session that directly delegated this child.
+    pub(super) async fn apply_immediate_delegation_context(
+        &self,
+        ctx: &mut crate::agent::subagent::SubagentSpawnContext,
+        security_parent_session_id: String,
+        handle: &crate::session::SessionHandle,
+    ) {
+        let route = handle.model_route.snapshot();
+        ctx.security_parent_session_id = security_parent_session_id;
+        ctx.model_id = route.model_id;
+        ctx.sampling_config = route.sampling_config;
+        ctx.parent_cwd = std::path::PathBuf::from(&handle.info.cwd);
+        ctx.delegation_chat_state = Some(handle.chat_state_handle.clone());
+        ctx.delegation_session_info = Some(handle.info.clone());
+        ctx.permission_mode = handle.permission_mode;
+        ctx.parent_depth = handle.tool_context.subagent_depth;
+        ctx.hunk_tracker_handle = handle.tool_context.hunk_tracker_handle.clone();
+        ctx.hunk_tracking_enabled = handle.tool_context.hunk_tracking_enabled;
+        ctx.fs = handle.tool_context.fs.inner().clone();
+        ctx.terminal = handle.tool_context.terminal.clone();
+        ctx.session_env = handle.tool_context.session_env.clone();
+        ctx.lsp = handle.tool_context.lsp.clone();
+        ctx.parent_agent_name = Some(handle.agent_name.clone());
+        ctx.subagent_filter = handle.subagent_filter.clone();
+        ctx.parent_max_turns = handle.max_turns;
+        ctx.permission_prompt_timeout = handle.permission_prompt_timeout;
+        ctx.ask_user_question_enabled = handle.ask_user_question_enabled;
+        ctx.parent_capability_ceiling = handle.delegable_capability_ceiling.clone();
+        ctx.hook_registry = handle.hook_registry.clone();
+        ctx.permission_handle = Some(handle.permission_handle.clone());
+        ctx.workspace_ops = handle.workspace_ops.clone();
+        ctx.task_output_tool_name = handle.tool_context.task_output_tool_name.clone();
+        ctx.goal_loop_active = handle.tool_context.goal_loop_active_gate.clone();
+        ctx.parent_terminal_backend = handle.terminal_backend.clone();
+        ctx.parent_notification_handle = handle.tools_notification_handle.clone();
+        ctx.parent_scheduler_handle = handle.scheduler_handle.clone();
+
+        let per_model = config::find_model_by_catalog_id(
+            &ctx.available_models,
+            ctx.model_id.0.as_ref(),
+        )
+        .and_then(|entry| entry.info.inference_idle_timeout_secs);
+        let remote = self
+            .cfg
+            .borrow()
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.inference_idle_timeout_secs);
+        ctx.inference_idle_timeout_secs = per_model.or(remote).unwrap_or(600).max(10);
+
+        ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
+        ctx.client_hooks = handle.snapshot_client_hooks().await;
     }
 }

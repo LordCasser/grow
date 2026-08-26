@@ -198,7 +198,6 @@ async fn emit_current_mode_update(
                         tool_types::BehaviorId::Clarify => "clarify",
                         tool_types::BehaviorId::Plan => "plan",
                         tool_types::BehaviorId::Workflow => "workflow",
-                        tool_types::BehaviorId::DeepResearch => "deep_research",
                         tool_types::BehaviorId::Goal => "goal",
                     },
                     "grow/planPhase": config.behavior.lock().plan_phase_label(),
@@ -573,7 +572,10 @@ async fn handle_notification_with_ack(
                 .send(SessionCommand::ReceiveNotification {
                     source: chat_state::NotificationSource::MonitorProgress {
                         task_id: event.task_id.clone(),
-                        owner: chat_state::NotificationOwner::Session,
+                        owner: event
+                            .goal_id
+                            .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
+                            .unwrap_or(chat_state::NotificationOwner::Session),
                     },
                     source_version: chat_state::NotificationSourceVersion::Opaque {
                         value: uuid::Uuid::now_v7().to_string(),
@@ -1035,6 +1037,7 @@ mod tests {
                 event_text: "<monitor-event>done</monitor-event>".into(),
                 raw_text: "done".into(),
                 owner_session_id: Some("test-session".into()),
+                goal_id: None,
             }),
             &mut offsets,
         )
@@ -1375,7 +1378,37 @@ mod tests {
             event_text: format!("<monitor-event task_id=\"{task_id}\">boom</monitor-event>"),
             raw_text: "boom".into(),
             owner_session_id: owner.map(str::to_string),
+            goal_id: None,
         })
+    }
+
+    #[tokio::test]
+    async fn monitor_progress_keeps_the_task_goal_owner() {
+        let (config, mut cmd_rx) = make_test_config();
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            ToolNotification::MonitorEvent(tools::notification::types::MonitorEvent {
+                task_id: "goal-monitor".into(),
+                description: "watch release".into(),
+                event_text: "<monitor-event>ready</monitor-event>".into(),
+                raw_text: "ready".into(),
+                owner_session_id: Some("test-session".into()),
+                goal_id: Some("goal-1".into()),
+            }),
+            &mut offsets,
+        )
+        .await;
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::ReceiveNotification {
+                source: chat_state::NotificationSource::MonitorProgress {
+                    task_id,
+                    owner: chat_state::NotificationOwner::Goal { goal_id },
+                },
+                ..
+            }) if task_id == "goal-monitor" && goal_id == "goal-1"
+        ));
     }
     #[tokio::test]
     async fn cross_session_monitor_event_is_dropped() {

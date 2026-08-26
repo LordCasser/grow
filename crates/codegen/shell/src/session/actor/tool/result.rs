@@ -74,7 +74,7 @@ pub(super) fn consumed_completion_id_from_tool_error(
 
 pub(super) fn undispatched_tool_outcome(action: &ToolLoop) -> &'static str {
     match action {
-        ToolLoop::Continue => "not_dispatched",
+        ToolLoop::Continue | ToolLoop::ControlBoundary => "not_dispatched",
         ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => "invalid_tool",
         ToolLoop::PermissionReject { .. } => "permission_rejected",
         ToolLoop::Cancelled => "permission_cancelled",
@@ -419,21 +419,15 @@ impl SessionActor {
         if let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
             result.output
         {
-            let path = tool_parsed_args
-                .get("target_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
             use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
             match inline_attach_verdict(&image_content.data) {
                 InlineAttachVerdict::TooSmall => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: too small for vision models]"
-                    );
+                    prompt_text =
+                        "[Image was not attached: too small for vision models]".to_owned();
                 }
                 InlineAttachVerdict::Unreadable => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: invalid or unreadable image data]"
-                    );
+                    prompt_text =
+                        "[Image was not attached: invalid or unreadable image data]".to_owned();
                 }
                 InlineAttachVerdict::Attach => {
                     let url = format!(
@@ -443,7 +437,7 @@ impl SessionActor {
                     inline_images.push(ContentPart::Image {
                         url: std::sync::Arc::<str>::from(url),
                     });
-                    prompt_text = format!("Read image file: {path}");
+                    prompt_text = "Read image file.".to_owned();
                 }
             }
         }

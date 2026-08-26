@@ -39,7 +39,6 @@ pub enum WorkflowScope {
     Session,
     Project,
     User,
-    Builtin,
 }
 
 impl WorkflowScope {
@@ -48,7 +47,6 @@ impl WorkflowScope {
             Self::Session => "session",
             Self::Project => "project",
             Self::User => "user",
-            Self::Builtin => "builtin",
         }
     }
 }
@@ -243,12 +241,12 @@ fn validate_definition_id(id: &WorkflowDefinitionId) -> Result<(), String> {
     let Some((scope, local_id)) = id.0.split_once(':') else {
         return Err("`definition_id` must be a stable scoped id such as `project:review`".into());
     };
-    if !matches!(scope, "session" | "project" | "user" | "builtin")
+    if !matches!(scope, "session" | "project" | "user")
         || local_id.is_empty()
         || local_id.contains(':')
     {
         return Err(
-            "`definition_id` must use session, project, user, or builtin scope and a non-empty local id"
+            "`definition_id` must use session, project, or user scope and a non-empty local id"
                 .into(),
         );
     }
@@ -408,7 +406,7 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     }
 
     fn description_template(&self) -> &str {
-        r##"Manage public Workflow Definitions and immutable Runs inside Workflow Behavior. Use `search` before assuming the focused Definition is relevant; `inspect` loads candidate details; `draft` creates or derives one session draft and focuses it; `validate` smoke-checks representative args; `run` starts a Definition snapshot and automatically preflights an unvalidated hash; `publish` atomically saves a draft to the required project or user scope; `discard` removes only a session draft; `control_run` pauses, resumes, or stops a specific Run. Definitions use stable scoped ids such as `session:<id>`, `project:<name>`, `user:<name>`, or `builtin:<name>`. A Run keeps its Definition id, scope, source hash, script, and args immutable. Changes affect only later Runs."##
+        r##"Manage public Workflow Definitions and immutable Runs inside Workflow Behavior. Use `search` before assuming the focused Definition is relevant; `inspect` loads candidate details; `draft` creates or derives one session draft and focuses it; `validate` smoke-checks representative args; `run` starts a Definition snapshot and automatically preflights an unvalidated hash; `publish` atomically saves a draft to the required project or user scope; `discard` removes only a session draft; `control_run` pauses, resumes, or stops a specific Run. Definitions use stable scoped ids such as `session:<id>`, `project:<name>`, or `user:<name>`. A Run keeps its Definition id, scope, source hash, script, and args immutable. Changes affect only later Runs."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -556,6 +554,30 @@ mod tests {
             .validate()
             .is_err()
         );
+        assert!(
+            WorkflowToolInput::Inspect {
+                definition_id: WorkflowDefinitionId::new("builtin:deep-research"),
+                include_source: false,
+            }
+            .validate()
+            .is_err(),
+            "removed Builtin scope must not remain accepted as a compatibility id"
+        );
+    }
+
+    #[test]
+    fn description_advertises_only_real_definition_scopes() {
+        let description =
+            <WorkflowTool as crate::types::tool_metadata::ToolMetadata>::description_template(
+                &WorkflowTool,
+            );
+        for scope in ["session:<id>", "project:<name>", "user:<name>"] {
+            assert!(
+                description.contains(scope),
+                "missing {scope} in {description}"
+            );
+        }
+        assert!(!description.contains("builtin:"), "{description}");
     }
 
     #[test]

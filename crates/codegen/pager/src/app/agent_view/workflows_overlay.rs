@@ -441,7 +441,6 @@ mod workflows_overlay_key_tests {
             objective: "obj".to_string(),
             status: "active".to_string(),
             management_available: true,
-            builtin: false,
             phases: Vec::new(),
             current_phase: None,
             agents: Vec::new(),

@@ -144,7 +144,7 @@ fn count_wire_images(value: &serde_json::Value) -> usize {
 }
 
 #[test]
-fn explicit_image_400_retries_once_without_images_and_completes_turn() {
+fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -189,21 +189,22 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
             )
             .await
             .expect("recovery must not loop");
-            result.expect("turn must complete after the text-only resubmission");
+            let error = result.expect_err("missing description route must fail closed");
+            assert!(format!("{error:?}").contains("untranslated"), "{error:?}");
 
             let requests: Vec<_> = server
                 .requests()
                 .into_iter()
                 .filter(|request| request.path == "/v1/messages")
                 .collect();
-            assert_eq!(requests.len(), 2);
+            assert_eq!(requests.len(), 1);
             assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
-            assert_eq!(count_wire_images(requests[1].body.as_ref().unwrap()), 0);
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(conversation.iter().any(|item| {
-                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. })))
-            }));
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1
+            );
             assert!(actor.unsupported_current_model_for_images().await.is_some());
 
             let mut image_projected_count = 0;
@@ -229,13 +230,9 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
                     _ => {}
                 }
             }
-            assert_eq!(image_projected_count, 1);
-            assert!(
-                image_projected_notes
-                    .iter()
-                    .any(|note| note.contains("当前模型投影省略了 1 张图片"))
-            );
-            assert!(!terminal_retry_failure);
+            assert_eq!(image_projected_count, 0);
+            assert!(image_projected_notes.is_empty());
+            assert!(terminal_retry_failure);
         }));
     });
 }
@@ -303,17 +300,24 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
             assert!(count_wire_images(requests[1].body.as_ref().unwrap()) > 0);
             assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
-            assert!(requests[2]
-                .body
-                .as_ref()
-                .unwrap()
-                .to_string()
-                .contains("code E42"));
+            assert!(
+                requests[2]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("code E42")
+            );
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(conversation.iter().any(|item| {
-                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. })))
-            }));
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            );
+            assert!(
+                conversation
+                    .iter()
+                    .any(|item| item.text_content().contains("code E42"))
+            );
 
             let mut notes = Vec::new();
             let mut terminal_retry_failure = false;
@@ -334,14 +338,18 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                     _ => {}
                 }
             }
-            assert!(notes.iter().any(|note| note.contains("用辅助描述替代 1 张图片")));
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("用辅助描述永久替代模型上下文中的 1 张图片"))
+            );
             assert!(!terminal_retry_failure);
         }));
     });
 }
 
 #[test]
-fn auxiliary_image_400_is_cached_for_aux_runtime_while_original_images_remain() {
+fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -389,15 +397,14 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_while_original_images_remain() 
                     None,
                 )
                 .await
-                .expect("auxiliary rejection must degrade to removal and continue");
+                .expect_err("auxiliary rejection must leave the image view intact");
 
             let requests: Vec<_> = server
                 .requests()
                 .into_iter()
                 .filter(|request| request.path == "/v1/messages")
                 .collect();
-            assert_eq!(requests.len(), 3);
-            assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
+            assert_eq!(requests.len(), 2);
             assert_eq!(
                 sampling_types::conversation::conversation_image_groups(
                     &actor.chat_state_handle.get_conversation().await
@@ -433,11 +440,7 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_while_original_images_remain() 
                     notes.extend(current);
                 }
             }
-            assert!(
-                notes
-                    .iter()
-                    .any(|note| note.contains("当前模型投影省略了 1 张图片"))
-            );
+            assert!(notes.is_empty());
         }));
     });
 }

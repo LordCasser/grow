@@ -542,17 +542,6 @@ impl SessionActor {
         let saved_workflow_write = saved_workflow_definition_write(&access_kind, cwd, display_cwd);
         let workflow_draft_write =
             session_workflow_definition_write(&access_kind, &session_dir, cwd, display_cwd);
-        if admitted_behavior == tool_types::BehaviorId::DeepResearch
-            && required_access != tool_protocol::ToolAccess::Read
-            && tool_kind != Some(tools::types::tool::ToolKind::WebFetch)
-            && !(matches!(&access_kind, AccessKind::MCPTool { .. })
-                && mcp_max_access == Some(tool_protocol::ToolAccess::ReadWrite))
-        {
-            let message = "Rejected: Deep Research foreground turns are read-only.".to_string();
-            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                .await?;
-            return Ok(Err(ToolLoop::Continue));
-        }
         let current_behavior = self.behavior.lock().behavior();
         if let Some(conflict) = matches!(tool_input, ToolInput::Workflow(_))
             .then(|| public_workflow_conflict(admitted_behavior, current_behavior))
@@ -792,8 +781,16 @@ impl SessionActor {
                 == workspace::permission::types::EffectivePermissionMode::Auto
                 && !within_capability_fence
             {
-                let conv = self.chat_state_handle.get_conversation().await;
-                let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
+                let authority_context = self
+                    .chat_state_handle
+                    .materialize_timeline(self.session_info.id.to_string())
+                    .await
+                    .map(|materialized| materialized.permission_context)
+                    .unwrap_or_default();
+                let turns = super::build_classifier_turns(
+                    &authority_context,
+                    super::CLASSIFIER_REFRESH_TURNS,
+                );
                 Some(turns)
             } else {
                 None
@@ -1049,10 +1046,13 @@ impl SessionActor {
                 let valid = match input.action {
                     PlanControlAction::Submit => self.behavior.lock().is_drafting_plan(),
                     PlanControlAction::Amend => {
-                        self.behavior.lock().state()
-                            == crate::session::behavior::BehaviorState::Plan(
-                                crate::session::behavior::PlanPhase::Executing,
+                        matches!(
+                            self.behavior.lock().state(),
+                            crate::session::behavior::BehaviorState::Plan(
+                                crate::session::behavior::PlanPhase::Executing
+                                    | crate::session::behavior::PlanPhase::Amending
                             )
+                        )
                     }
                     PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
                 };
@@ -1132,6 +1132,7 @@ impl SessionActor {
                         .await?;
                     return Ok(Err(ToolLoop::Continue));
                 }
+                let approval_snapshot = self.behavior.lock().snapshot();
 
                 tracing::info!(
                     tool_call_id = %tool_call_id,
@@ -1144,10 +1145,23 @@ impl SessionActor {
                     Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
                         PlanApprovalOutcome::Abandoned => {
                             tracing::info!("plan_control: user abandoned Plan");
-                            if let Err(message) = self.finish_plan_to_default().await {
-                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                            match self.finish_plan_to_default_if(&approval_snapshot).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::info!("plan_control: dropping stale abandon decision");
+                                    self.handle_tool_not_executed(
+                                        &call.id,
+                                        &tool_call_id,
+                                        "Plan approval was stale and was discarded.".to_owned(),
+                                    )
                                     .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                    return Ok(Err(ToolLoop::Continue));
+                                }
+                                Err(message) => {
+                                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                        .await?;
+                                    return Ok(Err(ToolLoop::Continue));
+                                }
                             }
                             let message = format!(
                                 "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
@@ -1171,7 +1185,22 @@ impl SessionActor {
                         }
                         PlanApprovalOutcome::Cancelled => {
                             let previous_behavior = self.behavior.lock().snapshot();
-                            self.behavior.lock().reject_submitted_plan();
+                            if !self
+                                .behavior
+                                .lock()
+                                .reject_submitted_plan_if(&approval_snapshot)
+                            {
+                                tracing::info!(
+                                    "plan_control: dropping stale request-changes decision"
+                                );
+                                self.handle_tool_not_executed(
+                                    &call.id,
+                                    &tool_call_id,
+                                    "Plan approval was stale and was discarded.".to_owned(),
+                                )
+                                .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             if let Err(message) = self
                                 .commit_behavior_mutation_or_restore(previous_behavior)
                                 .await
@@ -1200,7 +1229,11 @@ impl SessionActor {
                         }
                         PlanApprovalOutcome::Approved => {
                             let previous_behavior = self.behavior.lock().snapshot();
-                            if !self.behavior.lock().approve_submitted_plan() {
+                            if !self
+                                .behavior
+                                .lock()
+                                .approve_submitted_plan_if(&approval_snapshot)
+                            {
                                 self.handle_tool_not_executed(
                                     &call.id,
                                     &tool_call_id,
@@ -1227,7 +1260,20 @@ impl SessionActor {
                         if ext_method_no_client(&err) {
                             tracing::warn!(%err, "plan_control: no approval client; failing closed");
                             let previous_behavior = self.behavior.lock().snapshot();
-                            self.behavior.lock().reject_submitted_plan();
+                            if !self
+                                .behavior
+                                .lock()
+                                .reject_submitted_plan_if(&approval_snapshot)
+                            {
+                                tracing::info!("plan_control: dropping stale no-client decision");
+                                self.handle_tool_not_executed(
+                                    &call.id,
+                                    &tool_call_id,
+                                    "Plan approval was stale and was discarded.".to_owned(),
+                                )
+                                .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             if let Err(message) = self
                                 .commit_behavior_mutation_or_restore(previous_behavior)
                                 .await

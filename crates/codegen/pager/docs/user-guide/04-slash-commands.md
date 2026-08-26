@@ -144,9 +144,9 @@ Set reasoning effort on the **current** model without reselecting it. The accept
 
 Choose the current session's Permission policy. `/ask`, `/auto`, and `/always-approve` are idempotent one-step selections, identified in completion by a `[permission]` prefix. `/auto` is hidden when classifier-based permission is unavailable.
 
-### `/behavior [normal|clarify|plan|workflow|deep-research|goal]`
+### `/behavior [normal|clarify|plan|workflow|goal]`
 
-Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Leaving unfinished Plan, active Deep Research, or Workflow with an Active public Run shows an interruption warning; select the same target Behavior again within the displayed window to confirm. Paused and budget-limited public Runs do not require confirmation. Ordinary Enter/Esc input never confirms a Behavior transition. An unfinished Goal remains exclusive until completion or `/goal clear`.
+Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Leaving unfinished Plan or Workflow with an Active Run shows an interruption warning; select the same target Behavior again within the displayed window to confirm. Paused and budget-limited Runs do not require confirmation. Ordinary Enter/Esc input never confirms a Behavior transition. Active Goal must first be paused, completed, or cleared; a stopped Goal may coexist with another Behavior until restarted.
 
 These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 
@@ -264,7 +264,7 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Enter Goal Behavior or manage one long-lived objective. A bare `/goal` selects Goal Behavior; use `/goal restart` to restart a paused, blocked, or usage-limited Goal. A budget-limited Goal must be re-budgeted first. When no Goal exists, the next non-empty user message becomes the objective. Outside Goal Behavior, `/goal set <objective>` selects Goal and creates it. While a Goal is unfinished, `set` is hidden and rejected; use `/goal edit <objective>` to revise and reactivate the same Goal. Tab completion after `/goal edit` pre-fills the full objective.
+Enter Goal Behavior or manage one long-lived objective. A bare `/goal` selects Goal Behavior only when no stopped Goal blocks activation; use `/goal restart` to reactivate a paused or blocked Goal. A budget-limited Goal must first receive a new budget or `/goal budget unlimited`, then be restarted. When no Goal exists, the next non-empty user message becomes the objective. `/goal set <objective>` atomically creates and activates it. While a Goal is unfinished, `set` is hidden and rejected; use `/goal edit <objective>` to revise the same Goal. Editing Paused/Blocked state does not restart it; editing BudgetLimited/Complete establishes an active revised definition. Tab completion after `/goal edit` pre-fills the full objective.
 
 An active Goal requests another turn whenever the session becomes idle. Every continuation first audits the entire objective against concrete evidence. If work remains, the Agent uses ordinary short-lived `todo_write` steps and `task` subagents for the next verifiable slice; those tasks are execution context, not a second persistent plan or Goal state. Later user messages take priority and add constraints or evidence without silently replacing the objective.
 
@@ -273,23 +273,14 @@ An active Goal requests another turn whenever the session becomes idle. Every co
 /goal set Migrate the auth module to the new API --budget 500000
 /goal edit Migrate the auth module to the new API and remove the legacy API
 /goal budget 800000
+/goal budget unlimited
 /goal status
 /goal pause
 /goal restart
 /goal clear
 ```
 
-Arguments are `set <objective> [--budget <tokens>]`, `edit <objective> [--budget <tokens>]`, `budget <tokens>`, or one of `status`, `pause`, `restart`, `clear`. `set` is valid only when no unfinished Goal exists. `edit` preserves accumulated usage, updates the objective, and reactivates automatic continuation. The `--budget` value is a **token** budget for the whole Goal, separate from workflow child-call budgets. `/goal budget <tokens>` changes that budget; if the old budget was exhausted, run `/goal restart` afterwards. `/goal pause` keeps Goal Behavior selected without automatic continuation. `/goal clear` deletes the Goal and returns to Normal. Goal is offered only when `create_goal`, `get_goal`, and `update_goal` are available.
-
-### `/deep-research [query]`
-
-Enter Deep Research Behavior. With no query it waits for the next non-empty message; with a query it immediately starts the private research run. It plans bounded, domain-adaptive research axes, gathers traceable source evidence, and checks source support, independent corroboration, and material conflicts per finding. Its evidence strategy and report structure follow the research goal instead of a fixed paper template.
-
-```
-/deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
-```
-
-The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Live progress is visible in the transcript (a workflow progress block) and in the tasks pane as a `Deep Research` status row; neither surface offers management actions for the run. Natural completion prints the investigation and verification summary, core conclusions, limitations, and the absolute path to a complete Markdown report. That artifact is coverage-driven rather than length- or section-driven, may use cited tables, Mermaid diagrams, or verified external images when useful, and includes the sources actually used. Cancellation, budget exhaustion, interruption, and runtime failure still produce a terminal report. Natural completion returns the session to Normal. Deep Research is private: it is not listed or managed by `/workflows` or `/workflow-run` and cannot be launched through the public Workflow tool.
+Arguments are `set <objective> [--budget <tokens>]`, `edit <objective> [--budget <tokens>]`, `budget <tokens|unlimited>`, or one of `status`, `pause`, `restart`, `clear`. `set` is valid only when no unfinished Goal exists. `edit` preserves accumulated usage and updates the objective; Paused/Blocked remain stopped so edit and restart are independent controls. The budget is for the whole Goal, separate from Workflow child-call budgets. Changing an exhausted budget moves the Goal to Paused; run `/goal restart` afterwards. `/goal pause` stops continuation and returns the active Behavior to Normal. `/goal clear` deletes only Goal state and preserves another Behavior already selected while the Goal was stopped. Goal is offered only when `create_goal`, `get_goal`, `update_goal`, and `todo_write` are available; `task` remains optional bounded delegation.
 
 ### `/workflow [prompt]`
 
@@ -299,9 +290,10 @@ The session Workspace can keep several temporary drafts and Runs, but it has one
 
 ### `/workflow-run`
 
-A bare `/workflow-run` opens the Workflow selector; it never starts the latest Run implicitly. Explicit subcommands manage a Run by its session-unique handle. Launching the same Definition twice produces `review-changes`, `review-changes-2`, and so on.
+A bare `/workflow-run` opens the Workflow selector; it never starts the latest Run implicitly. `/workflow-run <definition-name> [args]` launches that saved Definition directly, as does its dynamic `/<definition-name> [args]` command. Explicit subcommands manage a Run by its session-unique handle. Launching the same Definition twice produces `review-changes`, `review-changes-2`, and so on.
 
 ```
+/workflow-run review-changes compare main
 /workflow-run pause review-changes
 /workflow-run resume review-changes
 /workflow-run stop review-changes-2

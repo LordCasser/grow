@@ -97,8 +97,10 @@ pub fn goal_instruction(objective: &str) -> String {
          persistent Goal state, and must never replace or narrow the objective.\n\n\
          Do not stop because a turn or local task list ended. Call update_goal \
          with status=complete only when the full objective is achieved. Call \
-         update_goal with status=blocked only at a genuine impasse; otherwise \
-         leave the Goal active for the next idle continuation. User messages \
+         update_goal with status=blocked only after the same genuine impasse \
+         recurs for three consecutive Goal turns. After restarting a blocked \
+         Goal, count those turns afresh from the resumed run; otherwise leave \
+         the Goal active for the next idle continuation. User messages \
          always take priority.\n\n\
          Start now."
     )

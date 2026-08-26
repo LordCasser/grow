@@ -230,6 +230,7 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
+        let catalog_transaction = self.model_reload_lock.lock().await;
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         let init = self
             .initialize_request
@@ -470,6 +471,7 @@ impl acp::Agent for MvpAgent {
             let _ = crate::timed!(log: "new_session: set_session_model", {
                 crate::agent::handlers::model_switch::apply(
                     self,
+                    &catalog_transaction,
                     acp::SetSessionModelRequest::new(session_id.clone(), acp::ModelId::new(model_id)),
                 )
                 .await
@@ -553,6 +555,7 @@ impl acp::Agent for MvpAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let _load_guard = self.begin_session_load(&arguments.session_id);
+        let catalog_transaction = self.model_reload_lock.lock().await;
         self.sweep_dead_sessions();
         self.drain_old_session_thread(&arguments.session_id).await;
         tracing::debug!("Received load session request {arguments:?}");
@@ -777,9 +780,6 @@ impl acp::Agent for MvpAgent {
             }
             Some(crate::session::behavior::BehaviorState::Workflow) => {
                 (tool_types::BehaviorId::Workflow, None)
-            }
-            Some(crate::session::behavior::BehaviorState::DeepResearch { .. }) => {
-                (tool_types::BehaviorId::DeepResearch, None)
             }
             Some(crate::session::behavior::BehaviorState::Goal) => {
                 (tool_types::BehaviorId::Goal, None)
@@ -1112,8 +1112,9 @@ impl acp::Agent for MvpAgent {
                     map
                 });
             let _ = crate::agent::handlers::model_switch::apply(
-                    self,
-                    acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
+                self,
+                &catalog_transaction,
+                acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
                         .meta(restore_meta),
                 )
                 .await;
@@ -1264,13 +1265,14 @@ impl acp::Agent for MvpAgent {
             .and_then(|v| v.as_str())
             .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let blocked_model_id = handle.model_route.snapshot().model_id;
         let blocked_prompt_response = || {
             acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
                 build_prompt_response_meta(PromptResponseMetaArgs {
                     session_id: &arguments.session_id.to_string(),
                     prompt_id: &prompt_id,
                     total_tokens: 0,
-                    model_id: handle.model_id.0.as_ref(),
+                    model_id: blocked_model_id.0.as_ref(),
                     last_turn_usage: None,
                     prompt_usage: None,
                     cancellation_category: None,
@@ -1281,6 +1283,7 @@ impl acp::Agent for MvpAgent {
                 .cloned(),
             )
         };
+        let catalog_transaction = self.model_reload_lock.lock().await;
         if self.models_manager.allowlist_excludes_all() {
             self.send_model_auto_switched(
                     &arguments.session_id,
@@ -1326,6 +1329,7 @@ impl acp::Agent for MvpAgent {
                     .remove(arguments.session_id.0.as_ref());
                 if let Err(e) = crate::agent::handlers::model_switch::apply(
                         self,
+                        &catalog_transaction,
                         acp::SetSessionModelRequest::new(
                             arguments.session_id.clone(),
                             restore_model_id.clone(),
@@ -1369,6 +1373,7 @@ impl acp::Agent for MvpAgent {
                 return Ok(blocked_prompt_response());
             }
         }
+        drop(catalog_transaction);
         let dispatch_lock = self.dispatch_lock(&arguments.session_id);
         let dispatch_guard = dispatch_lock.lock().await;
         let turn_number = self.allocate_turn_number(&arguments.session_id);
@@ -1662,6 +1667,7 @@ impl acp::Agent for MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        let catalog_transaction = self.model_reload_lock.lock().await;
         let model = self.resolve_model_id(&args.model_id)?;
         if !model.info.user_selectable {
             return Err(
@@ -1669,8 +1675,28 @@ impl acp::Agent for MvpAgent {
                     .data("This model isn't allowed by your allowed_models setting."),
             );
         }
+        if args
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.contains_key(REASONING_EFFORT_META_KEY))
+        {
+            let Some(effort) = sampling_types::parse_reasoning_effort_meta(args.meta.as_ref()) else {
+                return Err(acp::Error::invalid_params()
+                    .data("reasoningEffort must be a canonical string offered by the selected model"));
+            };
+            if !self
+                .models_manager
+                .model_offers_reasoning_effort(args.model_id.0.as_ref(), effort)
+            {
+                return Err(acp::Error::invalid_params().data(format!(
+                    "reasoning effort `{effort}` is not offered by model `{}`",
+                    args.model_id.0
+                )));
+            }
+        }
         let session_id = args.session_id.clone();
-        let res = crate::agent::handlers::model_switch::apply(self, args).await;
+        let res =
+            crate::agent::handlers::model_switch::apply(self, &catalog_transaction, args).await;
         if res.is_ok()
             && let Some(unavailable) = self
                 .model_unavailable_sessions

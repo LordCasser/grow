@@ -48,11 +48,15 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     completed: HashMap<String, CompletedChild>,
     completed_order: VecDeque<String>,
     waiters: HashMap<String, Vec<BlockingWaiter>>,
+    goal_cancel_waiters: Vec<GoalCancelWaiter>,
     workflow_cancel_waiters: HashMap<String, Vec<oneshot::Sender<SubagentCancelOutcome>>>,
     /// Parent sessions that received `ParentSession` cancel. Non-workflow spawns
     /// are rejected until [`SubagentEvent::OpenSpawnAdmission`] (next turn) or
     /// teardown, so a detached late `TaskTool` spawn cannot outrun Stop.
     spawn_blocked_sessions: HashSet<String>,
+    /// Prompt scopes that have been cancelled. A late spawn from either the
+    /// lifecycle root or its immediate parent is rejected until session teardown.
+    cancelled_prompt_scopes: HashSet<PromptScope>,
     usage_not_applied_prompts: HashSet<PromptScope>,
     runs: FuturesUnordered<
         TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
@@ -67,6 +71,14 @@ pub struct SubagentCoordinator<R: ChildRunner> {
 struct PromptScope {
     parent_session_id: String,
     prompt_id: String,
+}
+
+struct GoalCancelWaiter {
+    /// Exact children that existed at cancellation admission. Later work for
+    /// the same long-lived Goal is a new lifecycle generation and must not
+    /// extend this barrier.
+    remaining_ids: HashSet<String>,
+    respond_to: oneshot::Sender<SubagentCancelOutcome>,
 }
 
 impl PromptScope {
@@ -96,8 +108,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             completed: HashMap::new(),
             completed_order: VecDeque::new(),
             waiters: HashMap::new(),
+            goal_cancel_waiters: Vec::new(),
             workflow_cancel_waiters: HashMap::new(),
             spawn_blocked_sessions: HashSet::new(),
+            cancelled_prompt_scopes: HashSet::new(),
             usage_not_applied_prompts: HashSet::new(),
             runs: FuturesUnordered::new(),
             validations: FuturesUnordered::new(),
@@ -160,6 +174,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         match command {
             SubagentEvent::Spawn(command) => {
                 let mut request = *command.request;
+                let immediate_parent_session_id = request.parent_session_id.clone();
                 let mut security_parent = None;
                 if let Some((
                     root_parent,
@@ -209,11 +224,26 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         request.runtime_overrides.loop_task_id = loop_task_id;
                     }
                 }
+                if self.prompt_scope_cancelled(&request, &immediate_parent_session_id) {
+                    let id = request.id.clone();
+                    let _ = command.result_tx.send(SubagentResult {
+                        success: false,
+                        cancelled: true,
+                        error: Some("parent prompt is cancelled".to_owned()),
+                        subagent_id: id.clone(),
+                        child_session_id: id,
+                        ..Default::default()
+                    });
+                    return;
+                }
                 // Late Task spawn after user Stop (detached TaskTool background).
                 if !request.owner.is_workflow()
-                    && self
+                    && (self
                         .spawn_blocked_sessions
                         .contains(&request.parent_session_id)
+                        || self
+                            .spawn_blocked_sessions
+                            .contains(&immediate_parent_session_id))
                 {
                     let id = request.id.clone();
                     let _ = command.result_tx.send(SubagentResult {
@@ -249,6 +279,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     id.clone(),
                     PendingChild {
                         request: request.clone(),
+                        immediate_parent_session_id: immediate_parent_session_id.clone(),
                         started_at: std::time::Instant::now(),
                         cancellation: cancellation.clone(),
                         spawn_reply: Some(command.result_tx),
@@ -267,6 +298,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     future: Box::pin(
                         std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
                             request,
+                            security_parent_session_id: immediate_parent_session_id,
                             security_parent,
                             cancellation,
                             reporter,
@@ -297,6 +329,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let outcome = self.cancel_parent_session(request.parent_session_id.as_deref());
                     let _ = request.respond_to.send(outcome);
                 }
+                SubagentCancelTarget::GoalId(goal_id) => {
+                    let remaining_ids =
+                        self.goal_child_ids(&goal_id, request.parent_session_id.as_deref());
+                    self.cancel_goal_children(&goal_id, request.parent_session_id.as_deref());
+                    if remaining_ids.is_empty() {
+                        let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
+                    } else {
+                        self.goal_cancel_waiters.push(GoalCancelWaiter {
+                            remaining_ids,
+                            respond_to: request.respond_to,
+                        });
+                    }
+                }
                 SubagentCancelTarget::WorkflowRunId(run_id) => {
                     self.cancel_workflow_children(&run_id, request.parent_session_id.as_deref());
                     if workflow_outstanding(&self.pending, &self.active, &run_id) == 0 {
@@ -314,8 +359,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .active
                     .values()
                     .filter(|child| {
-                        child.request.parent_session_id == request.parent_session_id
-                            && !child.request.owner.is_workflow()
+                        belongs_to_session(
+                            &child.request,
+                            &child.immediate_parent_session_id,
+                            Some(&request.parent_session_id),
+                        ) && !child.request.owner.is_workflow()
                     })
                     .map(active_summary)
                     .collect();
@@ -326,6 +374,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::TeardownSession { parent_session_id } => {
                 self.spawn_blocked_sessions.remove(&parent_session_id);
+                self.cancelled_prompt_scopes
+                    .retain(|scope| scope.parent_session_id != parent_session_id);
                 self.teardown_session_children(&parent_session_id);
             }
             SubagentEvent::OpenSpawnAdmission { parent_session_id } => {
@@ -339,8 +389,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .pending
                     .values()
                     .filter(|child| {
-                        child.request.parent_session_id == request.parent_session_id
-                            && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
+                        belongs_to_session(
+                            &child.request,
+                            &child.immediate_parent_session_id,
+                            Some(&request.parent_session_id),
+                        ) && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
                             && !child.request.owner.is_workflow()
                             && !child.handle_only
                     })
@@ -349,7 +402,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         self.active
                             .values()
                             .filter(|child| {
-                                child.request.parent_session_id == request.parent_session_id
+                                belongs_to_session(
+                                    &child.request,
+                                    &child.immediate_parent_session_id,
+                                    Some(&request.parent_session_id),
+                                )
                                     && child.request.parent_prompt_id.as_deref()
                                         == Some(&request.prompt_id)
                                     && !child.request.owner.is_workflow()
@@ -364,13 +421,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .collect();
                 live_ids.sort();
                 let background_live = self.pending.values().any(|child| {
-                    child.request.parent_session_id == request.parent_session_id
-                        && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
+                    belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        Some(&request.parent_session_id),
+                    ) && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
                         && !child.request.owner.is_workflow()
                         && child.handle_only
                 }) || self.active.values().any(|child| {
-                    child.request.parent_session_id == request.parent_session_id
-                        && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
+                    belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        Some(&request.parent_session_id),
+                    ) && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
                         && !child.request.owner.is_workflow()
                         && (child.handle_only || child.definition_background)
                 });
@@ -414,8 +477,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .active
                     .values()
                     .filter(|child| {
-                        child.request.parent_session_id == request.parent_session_id
-                            && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
+                        belongs_to_session(
+                            &child.request,
+                            &child.immediate_parent_session_id,
+                            Some(&request.parent_session_id),
+                        ) && child.request.parent_prompt_id.as_deref() == Some(&request.prompt_id)
                     })
                     .map(|child| SpawnedSubagentRef {
                         subagent_id: child.request.id.clone(),
@@ -428,9 +494,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         self.completed
                             .values()
                             .filter(|child| {
-                                child.request.parent_session_id == request.parent_session_id
-                                    && child.request.parent_prompt_id.as_deref()
-                                        == Some(&request.prompt_id)
+                                belongs_to_session(
+                                    &child.request,
+                                    &child.immediate_parent_session_id,
+                                    Some(&request.parent_session_id),
+                                ) && child.request.parent_prompt_id.as_deref()
+                                    == Some(&request.prompt_id)
                             })
                             .map(|child| SpawnedSubagentRef {
                                 subagent_id: child.request.id.clone(),
@@ -486,6 +555,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     subagent_id,
                     ActiveChild {
                         request: pending.request,
+                        immediate_parent_session_id: pending.immediate_parent_session_id,
                         started_at: pending.started_at,
                         cancellation: pending.cancellation,
                         spawn_reply: pending.spawn_reply,
@@ -505,13 +575,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 respond_to,
             } => {
-                let source_is_active =
-                    self.pending
-                        .get(&source_id)
-                        .is_some_and(|child| child.request.parent_session_id == parent_session_id)
-                        || self.active.get(&source_id).is_some_and(|child| {
-                            child.request.parent_session_id == parent_session_id
-                        });
+                let source_is_active = self.pending.get(&source_id).is_some_and(|child| {
+                    belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        Some(&parent_session_id),
+                    )
+                }) || self.active.get(&source_id).is_some_and(|child| {
+                    belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        Some(&parent_session_id),
+                    )
+                });
                 let _ = respond_to.send(source_is_active);
             }
         }
@@ -528,6 +604,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
         let request = record.request().clone();
         let explicitly_killed = record.explicitly_killed();
+        let immediate_parent_session_id = record.immediate_parent_session_id().to_owned();
         let (started_at, child_session_id, resumed_from, mut spawn_reply, mut handle_only) =
             match record {
                 ChildRecord::Pending(child) => (
@@ -559,6 +636,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
         let mut completed = CompletedChild {
             request: request.clone(),
+            immediate_parent_session_id,
             started_at,
             child_session_id,
             resumed_from,
@@ -609,6 +687,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             completion_data: output.completion_data,
             disposition,
         });
+        self.resolve_goal_cancel_waiters(id);
         if let Some(run_id) = workflow_run_id {
             self.resolve_workflow_cancel_waiters(&run_id);
         }
@@ -646,7 +725,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         explicit: bool,
     ) -> SubagentCancelOutcome {
         if let Some(child) = self.active.get_mut(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && !child.request.owner.is_workflow()
+            && belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id,
+            )
         {
             child.explicitly_killed |= explicit;
             child.cancellation.cancel();
@@ -654,14 +738,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return SubagentCancelOutcome::Cancelled;
         }
         if let Some(child) = self.pending.get_mut(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && !child.request.owner.is_workflow()
+            && belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id,
+            )
         {
             child.explicitly_killed |= explicit;
             child.cancellation.cancel();
             return SubagentCancelOutcome::Cancelled;
         }
         if let Some(child) = self.completed.get(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && !child.request.owner.is_workflow()
+            && belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id,
+            )
         {
             return SubagentCancelOutcome::AlreadyFinished {
                 status: child.result.status().to_owned(),
@@ -671,9 +765,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn cancel_parent_prompt(&mut self, parent_prompt_id: &str, parent_session_id: Option<&str>) {
+        if let Some(parent_session_id) = parent_session_id {
+            self.cancelled_prompt_scopes.insert(PromptScope::new(
+                parent_session_id.to_owned(),
+                parent_prompt_id.to_owned(),
+            ));
+        }
         for child in self.active.values() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
             {
                 child.cancellation.cancel();
                 child.control.cancel();
@@ -681,11 +785,32 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.pending.values() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
             {
                 child.cancellation.cancel();
             }
         }
+    }
+
+    fn prompt_scope_cancelled(
+        &self,
+        request: &SubagentRequest,
+        immediate_parent_session_id: &str,
+    ) -> bool {
+        let Some(parent_prompt_id) = request.parent_prompt_id.as_deref() else {
+            return false;
+        };
+        self.cancelled_prompt_scopes.contains(&PromptScope::new(
+            request.parent_session_id.clone(),
+            parent_prompt_id.to_owned(),
+        )) || self.cancelled_prompt_scopes.contains(&PromptScope::new(
+            immediate_parent_session_id.to_owned(),
+            parent_prompt_id.to_owned(),
+        ))
     }
 
     fn teardown_session_children(&mut self, parent_session_id: &str) {
@@ -727,16 +852,22 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.spawn_blocked_sessions
             .insert(parent_session_id.to_owned());
         for child in self.active.values() {
-            if child.request.parent_session_id == parent_session_id
-                && !child.request.owner.is_workflow()
+            if belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                Some(parent_session_id),
+            ) && !child.request.owner.is_workflow()
             {
                 child.cancellation.cancel();
                 child.control.cancel();
             }
         }
         for child in self.pending.values() {
-            if child.request.parent_session_id == parent_session_id
-                && !child.request.owner.is_workflow()
+            if belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                Some(parent_session_id),
+            ) && !child.request.owner.is_workflow()
             {
                 child.cancellation.cancel();
             }
@@ -747,7 +878,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn cancel_workflow_children(&mut self, run_id: &str, parent_session_id: Option<&str>) {
         for child in self.active.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
             {
                 child.cancellation.cancel();
                 child.control.cancel();
@@ -755,11 +890,82 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.pending.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
             {
                 child.cancellation.cancel();
             }
         }
+    }
+
+    fn cancel_goal_children(&mut self, goal_id: &str, parent_session_id: Option<&str>) {
+        for child in self.active.values() {
+            if child.request.owner.goal_id() == Some(goal_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
+            {
+                child.cancellation.cancel();
+                child.control.cancel();
+            }
+        }
+        for child in self.pending.values() {
+            if child.request.owner.goal_id() == Some(goal_id)
+                && belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    parent_session_id,
+                )
+            {
+                child.cancellation.cancel();
+            }
+        }
+    }
+
+    fn resolve_goal_cancel_waiters(&mut self, finished_id: &str) {
+        let mut pending = Vec::with_capacity(self.goal_cancel_waiters.len());
+        for mut waiter in std::mem::take(&mut self.goal_cancel_waiters) {
+            waiter.remaining_ids.remove(finished_id);
+            if waiter.remaining_ids.is_empty() {
+                let _ = waiter.respond_to.send(SubagentCancelOutcome::Cancelled);
+            } else {
+                pending.push(waiter);
+            }
+        }
+        self.goal_cancel_waiters = pending;
+    }
+
+    fn goal_child_ids(&self, goal_id: &str, parent_session_id: Option<&str>) -> HashSet<String> {
+        self.pending
+            .values()
+            .filter(|child| {
+                child.request.owner.goal_id() == Some(goal_id)
+                    && belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        parent_session_id,
+                    )
+            })
+            .map(|child| child.request.id.clone())
+            .chain(
+                self.active
+                    .values()
+                    .filter(|child| {
+                        child.request.owner.goal_id() == Some(goal_id)
+                            && belongs_to_session(
+                                &child.request,
+                                &child.immediate_parent_session_id,
+                                parent_session_id,
+                            )
+                    })
+                    .map(|child| child.request.id.clone()),
+            )
+            .collect()
     }
 
     fn resolve_workflow_cancel_waiters(&mut self, run_id: &str) {
@@ -850,8 +1056,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 }
 
-fn belongs_to_session(request: &SubagentRequest, parent_session_id: Option<&str>) -> bool {
-    parent_session_id.is_none_or(|id| request.parent_session_id == id)
+fn belongs_to_session(
+    request: &SubagentRequest,
+    immediate_parent_session_id: &str,
+    parent_session_id: Option<&str>,
+) -> bool {
+    // Nested requests retain the lifecycle root in the request for teardown
+    // and completion routing, while session-scoped APIs arrive from the
+    // immediate parent session. Both are authorized owners of the child.
+    parent_session_id
+        .is_none_or(|id| request.parent_session_id == id || immediate_parent_session_id == id)
 }
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {

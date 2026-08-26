@@ -61,6 +61,7 @@ async fn anchors_projected_context_from_response_usage() {
                 &response_with_usage(150_000),
                 None,
                 Some("provider/model".into()),
+                None,
             );
 
             assert_eq!(
@@ -121,7 +122,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 700,
                 cache_creation_prompt_tokens: 0,
             });
-            actor.record_response_token_usage(&first, None, None);
+            actor.record_response_token_usage(&first, None, None, Some("goal-1"));
             assert_eq!(actor.goal_tokens_used(), 380);
 
             let mut after_compaction = response_with_usage(400);
@@ -133,7 +134,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 300,
                 cache_creation_prompt_tokens: 0,
             });
-            actor.record_response_token_usage(&after_compaction, None, None);
+            actor.record_response_token_usage(&after_compaction, None, None, Some("goal-1"));
 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 400);
             assert_eq!(actor.goal_tokens_used(), 480);
@@ -152,7 +153,7 @@ async fn preserves_projection_when_response_has_no_usage() {
             let actor = create_test_actor(99_999, 256_000, 85, gateway_tx, persistence_tx).await;
             let _sync = actor.chat_state_handle.get_projected_tokens().await;
 
-            actor.record_response_token_usage(&response_without_usage(), None, None);
+            actor.record_response_token_usage(&response_without_usage(), None, None, None);
 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 99_999);
         })
@@ -230,7 +231,7 @@ async fn build_session_info_used_reflects_recorded_response() {
                 .await
                 .unwrap();
 
-            actor.record_response_token_usage(&response_with_usage(120_000), None, None);
+            actor.record_response_token_usage(&response_with_usage(120_000), None, None, None);
 
             let info = actor.build_session_info().await;
             assert_eq!(info.context.used, 120_000);
@@ -320,7 +321,7 @@ async fn stashes_per_turn_usage_in_chat_state() {
             );
 
             // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
-            actor.record_response_token_usage(&response_with_usage(200_000), None, None);
+            actor.record_response_token_usage(&response_with_usage(200_000), None, None, None);
 
             let stashed = actor
                 .chat_state_handle

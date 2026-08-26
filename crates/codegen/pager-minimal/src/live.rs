@@ -639,7 +639,6 @@ fn render_prompt_info(
                 _ => "plan · drafting",
             },
             minimal_api::BehaviorId::Workflow => "workflow",
-            minimal_api::BehaviorId::DeepResearch => "deep-research",
             minimal_api::BehaviorId::Goal => "goal",
         };
         let behavior_color = if behavior == minimal_api::BehaviorId::Plan {

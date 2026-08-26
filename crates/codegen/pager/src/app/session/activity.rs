@@ -53,14 +53,7 @@ impl AgentActivityProjection {
                 .subagent_sessions
                 .values()
                 .any(|info| !info.finished && info.workflow_run_id.is_none()),
-            // Active private runs (deep research) share the `workflows` flag:
-            // this projection only drives motion/working chrome, never any
-            // management surface (those iterate `workflow_runs` directly).
-            workflows: session.workflow_runs.iter().any(|run| run.is_active())
-                || session
-                    .private_workflow_runs
-                    .iter()
-                    .any(|run| run.is_active()),
+            workflows: session.workflow_runs.iter().any(|run| run.is_active()),
             goal_active: session
                 .goal_state
                 .as_ref()
@@ -134,21 +127,20 @@ mod tests {
     }
 
     #[test]
-    fn active_private_workflow_projects_work_and_motion() {
-        let mut agent = test_agent_view(Some("private-wf-session"), "/tmp".into());
+    fn active_workflow_projects_work_and_motion() {
+        let mut agent = test_agent_view(Some("workflow-session"), "/tmp".into());
         agent
             .session
-            .private_workflow_runs
+            .workflow_runs
             .push(crate::app::session::WorkflowRunSnapshot {
-                run_id: "wf_private".into(),
+                run_id: "wf_workflow".into(),
                 definition_id: None,
                 definition_scope: None,
                 definition_hash: None,
                 name: "deep-research".into(),
                 objective: "investigate".into(),
                 status: "active".into(),
-                management_available: false,
-                builtin: false,
+                management_available: true,
                 phases: vec![("Research".into(), "active".into())],
                 current_phase: Some("Research".into()),
                 agents: vec![crate::app::session::WorkflowAgentRowView {
@@ -173,32 +165,28 @@ mod tests {
         let projection = projection(&agent);
         assert!(
             projection.workflows,
-            "an active private run must set the workflows projection flag"
+            "an active run must set the workflows projection flag"
         );
         assert!(projection.working());
         assert!(projection.animates());
-        assert!(
-            agent.session.workflow_runs.is_empty(),
-            "the private run must stay out of the public workflow_runs list"
-        );
+        assert_eq!(agent.session.workflow_runs.len(), 1);
     }
 
     #[test]
-    fn settled_private_workflow_does_not_project_work() {
-        let mut agent = test_agent_view(Some("settled-wf-session"), "/tmp".into());
+    fn settled_workflow_does_not_project_work() {
+        let mut agent = test_agent_view(Some("settled-workflow-session"), "/tmp".into());
         agent
             .session
-            .private_workflow_runs
+            .workflow_runs
             .push(crate::app::session::WorkflowRunSnapshot {
-                run_id: "wf_private".into(),
+                run_id: "wf_workflow".into(),
                 definition_id: None,
                 definition_scope: None,
                 definition_hash: None,
                 name: "deep-research".into(),
                 objective: "investigate".into(),
                 status: "complete".into(),
-                management_available: false,
-                builtin: false,
+                management_available: true,
                 phases: Vec::new(),
                 current_phase: None,
                 agents: Vec::new(),

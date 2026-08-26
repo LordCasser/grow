@@ -24,11 +24,17 @@ pub(super) fn spawn_manual_compaction(
                 ))
                 .await;
         }
-        session.state.lock().await.foreground = ForegroundState::Idle;
-        SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
-        SessionActor::maybe_drain_notifications(session.clone(), completion_tx).await;
-        session.emit_session_idle_if_idle().await;
+        resume_after_manual_compaction(session, completion_tx).await;
     });
+}
+
+async fn resume_after_manual_compaction(
+    session: std::sync::Arc<SessionActor>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+) {
+    session.state.lock().await.foreground = ForegroundState::Idle;
+    arbitrate_idle_wake(session.clone(), completion_tx).await;
+    session.emit_session_idle_if_idle().await;
 }
 
 pub(super) async fn maybe_start_pending_manual_compaction(
@@ -57,12 +63,13 @@ pub(super) async fn arbitrate_idle_wake(
     session: std::sync::Arc<SessionActor>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
+    session.apply_pending_model_reload_if_idle().await;
     if !maybe_start_pending_manual_compaction(session.clone(), completion_tx.clone()).await {
         SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
     }
     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
     if session.state.lock().await.foreground.is_idle() {
-        session.drive_goal_on_idle(completion_tx).await;
+        session.schedule_goal_on_idle(completion_tx);
     }
 }
 
@@ -159,6 +166,90 @@ mod idle_admission_tests {
                     Some(crate::session::PromptOrigin::TaskCompleted { task_id })
                         if task_id == "outside-goal"
                 ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn active_goal_continues_after_manual_compaction_releases_the_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the architecture migration".into(),
+                        None,
+                        "2026-08-24T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                resume_after_manual_compaction(actor.clone(), completion_tx).await;
+
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        let admitted = {
+                            let state = actor.state.lock().await;
+                            matches!(
+                                state.foreground.regular().map(|task| &task.origin),
+                                Some(crate::session::PromptOrigin::GoalContinuation { goal_id })
+                                    if goal_id == "goal-1"
+                            )
+                        };
+                        if admitted {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("Goal continuation should be admitted after compaction");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn user_input_arriving_before_async_goal_admission_keeps_priority() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the architecture migration".into(),
+                        None,
+                        "2026-08-24T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                actor.schedule_goal_on_idle(completion_tx);
+                actor.state.lock().await.pending_inputs.push_back(
+                    crate::session::actor::tests::support::user_item("user-wins", "test-client"),
+                );
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+
+                let state = actor.state.lock().await;
+                assert!(state.foreground.is_idle());
+                assert_eq!(state.pending_inputs.front().unwrap().prompt_id, "user-wins");
             })
             .await;
     }

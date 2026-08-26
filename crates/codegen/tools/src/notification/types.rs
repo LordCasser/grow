@@ -338,6 +338,11 @@ pub struct MonitorEvent {
     /// terminal backends may leave it unset; session bridges reject such events.
     #[cfg_attr(feature = "serde", serde(default))]
     pub owner_session_id: Option<String>,
+    /// Stable Goal owner captured when the monitor was admitted. Progress and
+    /// terminal receipts must use the same owner instead of re-sampling the
+    /// session's current Goal when an event happens to arrive.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub goal_id: Option<String>,
 }
 
 /// A notification emitted by a tool during or after execution.

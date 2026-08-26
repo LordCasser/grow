@@ -374,6 +374,7 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// in-place. Prefetched (API) and default models are NOT re-fetched -- only
 /// BYOK entries from config are updated.
 async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
+    let catalog_transaction = agent.model_reload_lock.lock().await;
     let disk_config = crate::config::load_effective_config()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
@@ -403,104 +404,151 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         .apply_config(merged_config.clone())
         .map_err(|error| acp::Error::invalid_request().data(error))?;
     *agent.cfg.borrow_mut() = merged_config.clone();
+    let published_revision = agent.models_manager.catalog_revision();
 
     // Existing sessions adopt the same validated provider snapshot at their
     // actor mailbox boundary. A removed selection falls back to the newly
     // resolved default; explicit per-session reasoning effort remains intact.
+    // Every command is enqueued while the publication transaction is held, so
+    // later model producers are ordered after this generation. Acknowledgement
+    // is deliberately outside the global lock: a busy foreground may defer its
+    // own adoption, but must not freeze unrelated sessions.
     let fallback_model = agent.models_manager.current_model_id();
     let live_catalog = agent.models_manager.models();
-    let (reloads, mut reload_error) = {
-        let mut sessions = agent.sessions.borrow_mut();
-        let mut reloads = Vec::with_capacity(sessions.len());
-        let mut reload_error = None;
-        for (session_id, handle) in sessions.iter_mut() {
-            let selected = if agent
-                .models_manager
-                .model_in_catalog(handle.model_id.0.as_ref())
-            {
-                handle.model_id.clone()
+    let session_ids = agent.sessions.borrow().keys().cloned().collect::<Vec<_>>();
+    let mut failed_sessions = Vec::<(acp::SessionId, String)>::new();
+    let mut convergence = Vec::new();
+    for session_id in session_ids {
+        let Some((cmd_tx, route)) = agent
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .map(|handle| (handle.cmd_tx.clone(), handle.model_route.snapshot()))
+        else {
+            continue;
+        };
+        let selected = if live_catalog.contains_key(route.model_id.0.as_ref()) {
+            route.model_id
+        } else {
+            fallback_model.clone()
+        };
+        let Some(mut sampling_config) = agent
+            .models_manager
+            .sampling_config_for_model(selected.0.as_ref())
+        else {
+            failed_sessions.push((
+                session_id.clone(),
+                format!(
+                    "session {} has no routable model after catalog reload",
+                    session_id.0
+                ),
+            ));
+            continue;
+        };
+        let selected_entry =
+            crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref());
+        if let Some(effort) = route.sampling_config.reasoning_effort {
+            if selected_entry.is_some_and(|entry| {
+                entry
+                    .info()
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.value == effort)
+            }) {
+                sampling_config.reasoning_effort = Some(effort);
             } else {
-                fallback_model.clone()
-            };
-            let Some(mut sampling_config) = agent
-                .models_manager
-                .sampling_config_for_model(selected.0.as_ref())
-            else {
-                continue;
-            };
-            let inference_idle_timeout = {
-                let per_model = crate::agent::config::find_model_by_catalog_id(
-                    &live_catalog,
-                    selected.0.as_ref(),
-                )
-                .and_then(|entry| entry.info.inference_idle_timeout_secs);
-                let remote = merged_config
-                    .remote_settings
-                    .as_ref()
-                    .and_then(|settings| settings.inference_idle_timeout_secs);
-                std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
-            };
-            let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
-            let auto_compact_threshold_percent =
-                crate::util::config::resolve_auto_compact_threshold_percent(
-                    &merged_config,
-                    selected.0.as_ref(),
-                    crate::agent::config::find_model_by_catalog_id(
-                        &live_catalog,
-                        selected.0.as_ref(),
-                    )
-                    .map(|entry| &entry.info),
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    model_id = %selected.0,
+                    %effort,
+                    "catalog reload discarded a reasoning effort unsupported by the refreshed model"
                 );
-            if handle.reasoning_effort.is_some() {
-                sampling_config.reasoning_effort = handle.reasoning_effort;
             }
-            let (responds_to, response) = tokio::sync::oneshot::channel();
-            let command = crate::session::commands::SessionCommand::ReloadModelConfig {
-                model_id: selected.clone(),
-                sampling_config,
-                image_description_model: merged_config.image_description_model.clone(),
-                inference_idle_timeout,
-                max_retries,
-                auto_compact_threshold_percent,
-                responds_to,
-            };
-            if handle.cmd_tx.send(command).is_err() {
-                reload_error.get_or_insert_with(|| {
-                    acp::Error::internal_error().data(format!(
-                        "session {} rejected the catalog reload command",
-                        session_id.0
-                    ))
-                });
-            } else {
-                reloads.push((session_id.clone(), selected, response));
-            }
+        } else {
+            sampling_config.reasoning_effort = None;
         }
-        (reloads, reload_error)
-    };
-    for (session_id, selected, response) in reloads {
-        let result = response.await.unwrap_or_else(|_| {
+        let inference_idle_timeout = {
+            let per_model = selected_entry.and_then(|entry| entry.info.inference_idle_timeout_secs);
+            let remote = merged_config
+                .remote_settings
+                .as_ref()
+                .and_then(|settings| settings.inference_idle_timeout_secs);
+            std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
+        };
+        let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
+        let auto_compact_threshold_percent =
+            crate::util::config::resolve_auto_compact_threshold_percent(
+                &merged_config,
+                selected.0.as_ref(),
+                selected_entry.map(|entry| &entry.info),
+            );
+        let (responds_to, response) = tokio::sync::oneshot::channel();
+        if cmd_tx
+            .send(
+                crate::session::commands::SessionCommand::ReloadModelConfig {
+                    model_id: selected,
+                    sampling_config,
+                    image_description_model: merged_config.image_description_model.clone(),
+                    inference_idle_timeout,
+                    max_retries,
+                    auto_compact_threshold_percent,
+                    responds_to,
+                },
+            )
+            .is_err()
+        {
+            failed_sessions.push((
+                session_id.clone(),
+                format!(
+                    "session {} rejected the catalog reload command",
+                    session_id.0
+                ),
+            ));
+            continue;
+        }
+        convergence.push((session_id, response));
+    }
+    drop(catalog_transaction);
+
+    for (session_id, response) in convergence {
+        match response.await.unwrap_or_else(|_| {
             Err(acp::Error::internal_error().data(format!(
                 "session {} dropped the catalog reload acknowledgement",
                 session_id.0
             )))
-        });
-        match result {
-            Ok(()) => {
-                if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
-                    handle.model_id = selected;
-                }
-            }
-            Err(error) => {
-                reload_error.get_or_insert(error);
-            }
+        }) {
+            Ok(()) => {}
+            Err(error) => failed_sessions.push((session_id, format!("{error:?}"))),
         }
     }
-    if let Some(error) = reload_error {
-        return Err(error);
+    // A session that cannot durably adopt the published catalog is no longer
+    // a healthy resident. Evict it instead of leaving a split-brain route in
+    // memory. A newer publication supersedes this result and owns convergence,
+    // so an older handler must never evict against that newer generation.
+    let generation_is_current = agent.models_manager.catalog_revision() == published_revision;
+    if generation_is_current {
+        for (session_id, error) in &failed_sessions {
+            tracing::error!(
+                session_id = %session_id.0,
+                catalog_revision = published_revision,
+                %error,
+                "evicting session that could not converge on the reloaded model catalog"
+            );
+            agent.evict_catalog_diverged_session(session_id);
+        }
+    } else if !failed_sessions.is_empty() {
+        tracing::info!(
+            catalog_revision = published_revision,
+            failures = failed_sessions.len(),
+            "ignoring convergence failures from a superseded model catalog"
+        );
     }
     let count = agent.models_manager.models().len();
-    tracing::info!(count, "model list reloaded from config.toml");
-    ExtMethodResult::success(serde_json::json!({ "models": count }))
+    let evicted = generation_is_current
+        .then_some(failed_sessions.len())
+        .unwrap_or(0);
+    tracing::info!(count, evicted, "model list reloaded from config.toml");
+    ExtMethodResult::success(serde_json::json!({ "models": count, "evictedSessions": evicted }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

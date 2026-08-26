@@ -12,6 +12,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            begin_test_active_causal_turn(&actor).await;
 
             const TOOL_RESULT_CONTENT: &str = "file contents: fn main() {}";
             actor
@@ -80,6 +81,7 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            begin_test_active_causal_turn(&actor).await;
 
             const TOOL_RESULT_CONTENT: &str = "tool output";
             actor
@@ -279,6 +281,7 @@ async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            begin_test_active_causal_turn(&actor).await;
             actor.pending_interjections.push(PendingInterjection {
                 text: "steer me".to_string(),
                 attachments: vec![],

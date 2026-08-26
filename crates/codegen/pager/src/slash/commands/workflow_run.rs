@@ -16,7 +16,7 @@ impl SlashCommand for WorkflowRunCommand {
     }
 
     fn usage(&self) -> &str {
-        "/workflow-run [pause|resume|stop <run>]"
+        "/workflow-run [<name> [args] | pause|resume|stop [<run>]]"
     }
 
     fn takes_args(&self) -> bool {
@@ -75,5 +75,14 @@ mod tests {
             WorkflowRunCommand.run(&mut ctx, "pause review-2"),
             CommandResult::HostCommand(command) if command == "/workflow-run pause review-2"
         ));
+        assert!(matches!(
+            WorkflowRunCommand.run(&mut ctx, "deep-research compiler design"),
+            CommandResult::HostCommand(command)
+                if command == "/workflow-run deep-research compiler design"
+        ));
+        assert_eq!(
+            WorkflowRunCommand.usage(),
+            "/workflow-run [<name> [args] | pause|resume|stop [<run>]]"
+        );
     }
 }

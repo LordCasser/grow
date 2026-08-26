@@ -1066,6 +1066,7 @@ pub(super) fn write_subagent_spawn_timeline(
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.into(),
                 child_session_id: subagent_id.into(),
+                security_parent_session_id: parent_sid.into(),
                 subagent_type: "general-purpose".into(),
                 description: "task".into(),
                 prompt: prompt.into(),
@@ -1083,6 +1084,12 @@ pub(super) fn write_subagent_spawn_timeline(
                 child_cwd: "/tmp".into(),
                 worktree_path: None,
                 effective_model_id: "grow-3".into(),
+                model_transport_key: tools::types::resources::ModelImageInputKey::new(
+                    "grow-3",
+                    "responses",
+                    "test-endpoint",
+                ),
+                reasoning_effort: None,
             }),
         ))
         .unwrap();

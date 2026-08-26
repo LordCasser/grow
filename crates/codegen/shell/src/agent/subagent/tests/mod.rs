@@ -11,6 +11,15 @@ use tools::implementations::grow_build::task::coordinator::{
 };
 
 #[test]
+fn resume_authority_follows_immediate_security_parent() {
+    assert!(resume_security_parent_allows("root", "root", "child-a"));
+    assert!(resume_security_parent_allows("root", "child-a", "child-a"));
+    assert!(!resume_security_parent_allows(
+        "root", "child-b", "child-a"
+    ));
+}
+
+#[test]
 fn normalized_child_seeds_its_system_head_before_timeline_creation() {
     let mut conversation = vec![
         ConversationItem::system("parent head"),
@@ -717,6 +726,7 @@ fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::Suba
     chat_state::SubagentSpawnEvent {
         subagent_id: subagent_id.into(),
         child_session_id: child_session_id.into(),
+        security_parent_session_id: "parent-session".into(),
         subagent_type: "review".into(),
         description: "recover child".into(),
         prompt: "finish".into(),
@@ -734,6 +744,12 @@ fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::Suba
         child_cwd: "/workspace".into(),
         worktree_path: None,
         effective_model_id: "model".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "model",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     }
 }
 
@@ -761,6 +777,7 @@ fn write_recovery_child(
                 parent_timeline_id: parent_timeline_id.into(),
                 parent_spawn_seq: spawn_seq.get(),
                 subagent_id: spawn.subagent_id.clone(),
+                security_parent_session_id: spawn.security_parent_session_id.clone(),
                 context_source: spawn.context_source,
                 source_ref: spawn.source_ref.clone(),
                 normalized: spawn.context_normalized,
@@ -1796,6 +1813,8 @@ async fn bootstrap_fork_without_parent_fails_closed() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.parent_chat_state = None;
     ctx.parent_session_info = None;
+    ctx.delegation_chat_state = None;
+    ctx.delegation_session_info = None;
     let out = bootstrap_initial_context(&req, None, &ctx, 128_000).await;
     match out {
         BootstrapInitialContext::Ready(_) => panic!("fork must not silently become a new child"),
@@ -1825,8 +1844,10 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
     )
     .await
     .unwrap();
-    ctx.parent_chat_state = Some(chat);
+    ctx.parent_chat_state = Some(chat.clone());
+    ctx.delegation_chat_state = Some(chat);
     ctx.parent_session_info = None;
+    ctx.delegation_session_info = None;
     let out = bootstrap_initial_context(&req, None, &ctx, 128_000).await;
     match out {
         BootstrapInitialContext::Ready(ic) => {
@@ -2381,7 +2402,7 @@ fn resumed_tool_model_override_is_ignored() {
         );
 }
 #[test]
-fn harness_model_override_keeps_internal_fallback_behavior() {
+fn harness_model_override_defers_to_runtime_catalog_resolution() {
     let empty = indexmap::IndexMap::new();
     assert!(
             super::handle_request::task_model_override_error(
@@ -2392,7 +2413,7 @@ fn harness_model_override_keeps_internal_fallback_behavior() {
                 false,
             )
             .is_none(),
-            "internal role/config pins must retain downstream soft fallback"
+            "internal routes bypass the model-facing Task validator and are resolved by the strict runtime catalogue boundary"
         );
 }
 #[test]

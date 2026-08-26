@@ -13,7 +13,7 @@ Start here. These guides cover what you need on your first day.
 | 1 | [Getting Started](01-getting-started.md) | Installation, first launch, authentication, basic interaction, and key concepts |
 | 2 | [Authentication](02-authentication.md) | Provider-scoped API keys, environment variables, and local key helpers |
 | 3 | [Keyboard Shortcuts](03-keyboard-shortcuts.md) | Reference for every key binding and mouse action in the TUI |
-| 4 | [Slash Commands](04-slash-commands.md) | Every `/` command, including goals, deep research, and workflow run management |
+| 4 | [Slash Commands](04-slash-commands.md) | Every `/` command, including goals and workflow run management |
 | 5 | [Configuration](05-configuration.md) | `config.toml`, `pager.toml`, environment variables, and file locations |
 
 ---

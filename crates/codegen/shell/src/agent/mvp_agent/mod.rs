@@ -103,7 +103,11 @@ fn lookup_session_model(
     default_model_id: &acp::ModelId,
 ) -> acp::ModelId {
     session_id
-        .and_then(|id| sessions.get(id).map(|handle| handle.model_id.clone()))
+        .and_then(|id| {
+            sessions
+                .get(id)
+                .map(|handle| handle.model_route.snapshot().model_id)
+        })
         .unwrap_or_else(|| default_model_id.clone())
 }
 
@@ -425,6 +429,10 @@ pub struct MvpAgent {
     /// is resolved at session creation time in `new_session` / `load_session`.
     pub(crate) sampling_config: RefCell<SamplingConfig>,
     pub(crate) models_manager: crate::agent::models::ModelsManager,
+    /// Serializes atomic catalog publication and enqueueing of its per-session
+    /// adoption commands. Actor acknowledgements happen after this lock is
+    /// released so a busy session cannot freeze unrelated model producers.
+    pub(crate) model_reload_lock: tokio::sync::Mutex<()>,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from
     /// `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     ///

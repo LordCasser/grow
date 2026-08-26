@@ -57,6 +57,9 @@ pub struct StartedChild<C> {
 /// Input to one runtime-specific child run.
 pub struct ChildRunRequest<C: ChildControl> {
     pub request: SubagentRequest,
+    /// Session that directly requested this child. This security lineage is
+    /// immutable even when lifecycle ownership is reparented to the root.
+    pub security_parent_session_id: String,
     /// Immediate spawning child's context, independent of lifecycle reparent.
     pub security_parent: Option<<C as ChildControl>::SecurityContext>,
     pub cancellation: CancellationToken,
@@ -213,6 +216,9 @@ pub(super) enum InternalEvent<C> {
 
 pub(super) struct PendingChild {
     pub(super) request: SubagentRequest,
+    /// Session that directly spawned this child. `request.parent_session_id`
+    /// may be reparented to the lifecycle root for nested children.
+    pub(super) immediate_parent_session_id: String,
     pub(super) started_at: std::time::Instant,
     pub(super) cancellation: CancellationToken,
     pub(super) spawn_reply: Option<oneshot::Sender<SubagentResult>>,
@@ -223,6 +229,9 @@ pub(super) struct PendingChild {
 
 pub(super) struct ActiveChild<C> {
     pub(super) request: SubagentRequest,
+    /// Session that directly spawned this child. `request.parent_session_id`
+    /// may be reparented to the lifecycle root for nested children.
+    pub(super) immediate_parent_session_id: String,
     pub(super) started_at: std::time::Instant,
     pub(super) cancellation: CancellationToken,
     pub(super) spawn_reply: Option<oneshot::Sender<SubagentResult>>,
@@ -239,6 +248,9 @@ pub(super) struct ActiveChild<C> {
 
 pub(super) struct CompletedChild {
     pub(super) request: SubagentRequest,
+    /// Session that directly spawned this child. `request.parent_session_id`
+    /// may be reparented to the lifecycle root for nested children.
+    pub(super) immediate_parent_session_id: String,
     pub(super) started_at: std::time::Instant,
     pub(super) child_session_id: String,
     pub(super) resumed_from: Option<String>,
@@ -361,6 +373,13 @@ impl<C> ChildRecord<C> {
         match self {
             Self::Pending(child) => child.explicitly_killed,
             Self::Active(child) => child.explicitly_killed,
+        }
+    }
+
+    pub(super) fn immediate_parent_session_id(&self) -> &str {
+        match self {
+            Self::Pending(child) => &child.immediate_parent_session_id,
+            Self::Active(child) => &child.immediate_parent_session_id,
         }
     }
 }

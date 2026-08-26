@@ -88,20 +88,11 @@ impl WorkflowRunStore {
                 let expected_journal = format!("workflows/{run_id}/journal.jsonl");
                 if run.manifest.state.name != lifecycle.name
                     || run.manifest.state.objective != lifecycle.objective
-                    || run.manifest.state.private != lifecycle.private
                     || run.manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
                 {
                     tracing::warn!(%run_id, "ignoring Workflow manifest that does not match its Timeline spawn fact");
                     continue;
                 }
-                sources.insert(
-                    run_id.clone(),
-                    RunSource {
-                        script: run.script,
-                        args: run.args,
-                        revision: run.manifest.script_revision,
-                    },
-                );
                 let mut state = run.manifest.state;
                 let (status, message, execution_was_open) = if lifecycle.open {
                     (
@@ -119,12 +110,25 @@ impl WorkflowRunStore {
                         false,
                     )
                 };
-                if state.reconcile_lifecycle_after_restore(
+                let was_repaired = state.reconcile_lifecycle_after_restore(
                     lifecycle.execution_epoch,
                     status,
                     message,
                     execution_was_open,
-                ) {
+                );
+                if let Err(error) = state.validate_restored_projection() {
+                    tracing::warn!(%run_id, %error, "ignoring semantically invalid Workflow manifest");
+                    continue;
+                }
+                sources.insert(
+                    run_id.clone(),
+                    RunSource {
+                        script: run.script,
+                        args: run.args,
+                        revision: run.manifest.script_revision,
+                    },
+                );
+                if was_repaired {
                     repaired.push(state.clone());
                 }
                 states.push(state);
@@ -158,7 +162,6 @@ impl WorkflowRunStore {
         let expected_journal = format!("workflows/{}/journal.jsonl", state.run_id);
         state.name == lifecycle.name
             && state.objective == lifecycle.objective
-            && state.private == lifecycle.private
             && state.journal_path.as_deref() == Some(expected_journal.as_str())
     }
 
@@ -239,6 +242,20 @@ impl WorkflowRunStore {
             state: state.clone(),
             script_revision: revision,
         })
+    }
+
+    /// Validate the exact durable projection before its Timeline lifecycle is
+    /// opened. The persistence writer calls the same encoder, so a Run cannot
+    /// publish `Workflow::Spawned` and only then discover that its manifest is
+    /// structurally too large to exist.
+    pub(crate) fn validate_persistable(&self, state: &WorkflowRunState) -> io::Result<()> {
+        let manifest = self.manifest_for(state).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "workflow state has no registered resume source",
+            )
+        })?;
+        encode_workflow_manifest(&manifest).map(|_| ())
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -330,6 +347,17 @@ pub(crate) fn script_revision_path(run_dir: &Path, revision: u32) -> PathBuf {
     run_dir.join("scripts").join(format!("{revision:04}.rhai"))
 }
 
+fn encode_workflow_manifest(manifest: &WorkflowRunManifest) -> io::Result<Vec<u8>> {
+    let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
+    if json.len() as u64 > MAX_WORKFLOW_MANIFEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
+        ));
+    }
+    Ok(json)
+}
+
 #[cfg(test)]
 pub(crate) fn write_workflow_run_manifest(
     session_dir: &Path,
@@ -410,13 +438,7 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
-    if json.len() as u64 > MAX_WORKFLOW_MANIFEST_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
-        ));
-    }
+    let json = encode_workflow_manifest(manifest)?;
     #[cfg(any(unix, windows))]
     let result = run_dir.write_atomic(std::ffi::OsStr::new("state.json"), &json, true, true);
     #[cfg(any(unix, windows))]
@@ -526,7 +548,6 @@ mod tests {
                     execution_epoch: 0,
                     name: name.into(),
                     objective: objective.into(),
-                    private: false,
                 },
             ))
             .unwrap();
@@ -589,6 +610,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let writer = tokio::spawn(async move {
             let Some(PersistenceMsg::WorkflowRunStateAndAck { respond_to, .. }) = rx.recv().await
@@ -605,6 +627,28 @@ mod tests {
         writer.await.unwrap();
     }
 
+    #[test]
+    fn admission_uses_the_writer_manifest_size_limit() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let store = WorkflowRunStore::new(None, tx);
+        store
+            .register("wf_large", "complete(1);", &serde_json::json!({}))
+            .unwrap();
+        let state = WorkflowTracker::default().start_run(
+            "wf_large".into(),
+            "demo".into(),
+            "x".repeat(MAX_WORKFLOW_MANIFEST_BYTES as usize),
+            Vec::new(),
+            None,
+            None,
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+
+        let error = store.validate_persistable(&state).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Workflow manifest exceeds"));
+    }
+
     fn manifest(run_id: &str, revision: u64) -> WorkflowRunManifest {
         let mut state = WorkflowTracker::default().start_run(
             run_id.into(),
@@ -613,6 +657,7 @@ mod tests {
             Vec::new(),
             Some(8),
             Some(format!("workflows/{run_id}/journal.jsonl")),
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         state.revision = revision;
         WorkflowRunManifest {
@@ -711,6 +756,7 @@ mod tests {
             Vec::new(),
             Some(8),
             Some("workflows/wf_active/journal.jsonl".into()),
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let original_revision = state.revision;
         let restored = RestoredWorkflowRun {
@@ -751,6 +797,7 @@ mod tests {
             Vec::new(),
             Some(8),
             Some("workflows/wf_resume/journal.jsonl".into()),
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let restored = RestoredWorkflowRun {
             manifest: WorkflowRunManifest {
@@ -792,6 +839,55 @@ mod tests {
     }
 
     #[test]
+    fn semantically_invalid_manifest_is_isolated_from_other_restored_runs() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut invalid_manifest_json = serde_json::to_value(manifest("wf_invalid", 1)).unwrap();
+        *invalid_manifest_json
+            .pointer_mut("/state/runtime_route/samplers/test-model/contract_fingerprint")
+            .expect("test manifest contains its sampler fingerprint") = serde_json::json!("");
+        let invalid_manifest = serde_json::from_value(invalid_manifest_json)
+            .expect("semantic damage remains valid serialized structure");
+        let invalid = RestoredWorkflowRun {
+            manifest: invalid_manifest,
+            script: "complete(0);".into(),
+            args: serde_json::json!({"invalid": true}),
+        };
+        let valid = RestoredWorkflowRun {
+            manifest: manifest("wf_valid", 1),
+            script: "complete(1);".into(),
+            args: serde_json::json!({"valid": true}),
+        };
+        let mut timeline = timeline_with_workflow("wf_invalid", "demo", "objective");
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: "wf_valid".into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "objective".into(),
+                },
+            ))
+            .unwrap();
+
+        let (store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![invalid, valid], Some(&timeline));
+
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wf_valid"]
+        );
+        assert!(store.script_for("wf_invalid").is_none());
+        assert_eq!(
+            store.script_for("wf_valid").as_deref(),
+            Some("complete(1);")
+        );
+        assert!(WorkflowTracker::from_snapshot(states).is_ok());
+    }
+
+    #[test]
     fn unsupported_manifest_is_not_restored() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let state = WorkflowTracker::default().start_run(
@@ -801,6 +897,7 @@ mod tests {
             Vec::new(),
             Some(1_000),
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let restored = RestoredWorkflowRun {
             manifest: WorkflowRunManifest {

@@ -166,9 +166,9 @@ fn format_elapsed_compact(ms: u64) -> String {
 
 fn goal_phase_label(goal: &GoalDisplayState) -> String {
     match goal.status {
-        GoalDisplayStatus::Paused
-        | GoalDisplayStatus::Blocked
-        | GoalDisplayStatus::UsageLimited => goal.status.stopped_label().into(),
+        GoalDisplayStatus::Paused | GoalDisplayStatus::Blocked => {
+            goal.status.stopped_label().into()
+        }
         GoalDisplayStatus::BudgetLimited => "Budget".into(),
         GoalDisplayStatus::Complete => "Done".into(),
         GoalDisplayStatus::Active => "Active".into(),

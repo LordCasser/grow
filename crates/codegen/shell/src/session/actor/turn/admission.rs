@@ -3,6 +3,17 @@ use super::*;
 use crate::session::TurnKind;
 use crate::session::behavior::BehaviorChangeOutcome;
 
+/// Successful execution behind one durably admitted turn.
+///
+/// Host routes already produce the public prompt response, while the model
+/// route retains its richer internal outcome until post-turn bookkeeping is
+/// complete.  Both variants deliberately share the same outer Timeline
+/// terminal owner in `handle_prompt`.
+enum AdmittedTurnSuccess {
+    Host(crate::session::commands::PromptTurnOk),
+    Model(TurnOutcome),
+}
+
 pub(in crate::session::actor) fn should_capture_implicit_goal_objective(
     origin: &crate::session::PromptOrigin,
     goal_behavior_selected: bool,
@@ -11,8 +22,7 @@ pub(in crate::session::actor) fn should_capture_implicit_goal_objective(
 ) -> bool {
     matches!(origin, crate::session::PromptOrigin::User)
         && goal_behavior_selected
-        && goal_status
-            .is_none_or(|status| status == crate::session::goal_tracker::GoalStatus::Complete)
+        && goal_status.is_none()
         && !text.trim_start().starts_with('/')
         && !text.trim().is_empty()
 }
@@ -232,7 +242,8 @@ impl SessionActor {
         } else {
             chat_state::TurnInputKind::Prompt
         };
-        self.events
+        if let Err(error) = self
+            .events
             .start_turn(crate::session::events::Event::TurnStarted {
                 session_id: self.session_id_string(),
                 turn_number,
@@ -248,519 +259,530 @@ impl SessionActor {
                 redirect_kind,
             })
             .await
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("turn start was not durably recorded: {error}"))
-            })?;
-        let implicit_goal_set = should_capture_implicit_goal_objective(
-            &origin,
-            admitted_behavior == tool_types::BehaviorId::Goal,
-            self.goal_tracker.lock().status(),
-            &original_prompt_text,
-        );
-        if implicit_goal_set {
-            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-            if let Err(message) = self
-                .initialize_goal_runtime(original_prompt_text.trim(), None)
-                .await
-            {
-                self.send_host_turn_slash_command_output(&message).await;
-            }
-            return ok_end_turn(0, None);
-        }
-        if admitted_behavior == tool_types::BehaviorId::DeepResearch
-            && !original_prompt_text.trim_start().starts_with('/')
-            && self.behavior.lock().deep_research_run_id().is_none()
         {
-            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-            match self
-                .launch_deep_research(original_prompt_text.trim().to_string())
-                .await
-            {
-                Ok(run_id) => {
-                    self.send_host_turn_slash_command_output(&format!(
-                        "Deep Research started in the background ({run_id}). A terminal report will be delivered here."
-                    ))
-                    .await;
-                }
-                Err(message) => self.send_host_turn_slash_command_output(&message).await,
+            if let Some(extension) = &self.idle_prompt_extension {
+                extension.on_turn_failed();
             }
-            return ok_end_turn(0, None);
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "start",
+                error.to_string(),
+            ));
         }
-        if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
-            return self
-                .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
-                .await;
-        }
-        let slash_skills = self.slash_skills_for_resolve().await;
-        let skill_rewrite = slash_commands::SkillSlashRewrite::RewriteToRun;
-        let availability = self.command_availability().await;
-        let mut pending_skill_information: Option<String> = None;
-        let (_, named_workflows, _) = self.named_workflow_snapshot();
-        let prompt_blocks = match slash_commands::resolve(
-            prompt_blocks,
-            &slash_skills,
-            availability,
-            skill_rewrite,
-            &named_workflows,
-        ) {
-            Ok(blocks) => blocks,
-            Err(SlashCommandOutcome::Builtin(action)) => {
-                let slash_used = ::diagnostics::events::SlashCommandUsed {
-                    command: action.command_name().to_string(),
-                    args_provided: action.args_provided(),
-                };
+        let mut model_path_started = false;
+        // `turn_number` is the coordinate admitted for this turn. Recording the
+        // durable Turn::Started advances Timeline's *next* prompt index, so it
+        // must not be queried again for facts that belong to this turn.
+        let current_prompt_index = turn_number as usize;
+        let mut turn_scope_guard = None;
+        let mut turn_model_id = None;
+        let mut turn_timer = None;
+        let mut timeline_error_override = None;
+        let execution: Result<AdmittedTurnSuccess, acp::Error> = async {
+            let implicit_goal_set = should_capture_implicit_goal_objective(
+                &origin,
+                admitted_behavior == tool_types::BehaviorId::Goal,
+                self.goal_tracker.lock().status(),
+                &original_prompt_text,
+            );
+            if implicit_goal_set {
+                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                if let Err(message) = self
+                    .initialize_goal_runtime(original_prompt_text.trim(), None)
+                    .await
                 {
-                    let span = tracing::Span::current();
-                    span.record("command_name", action.command_name());
-                    span.record("command_source", "builtin");
+                    self.send_host_turn_slash_command_output(&message).await;
                 }
-                match action {
-                    action @ (BuiltinAction::GoalSet { .. }
-                    | BuiltinAction::GoalEdit { .. }
-                    | BuiltinAction::GoalEnter
-                    | BuiltinAction::GoalUsage
-                    | BuiltinAction::GoalStatus
-                    | BuiltinAction::GoalPause
-                    | BuiltinAction::GoalRestart
-                    | BuiltinAction::GoalClear
-                    | BuiltinAction::GoalBudget { .. }) => {
-                        ::diagnostics::session_ctx::log_event(slash_used);
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        return self.execute_builtin_slash_command(action).await;
-                    }
-                    BuiltinAction::WorkflowLaunch { name, input } => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let msg = self.launch_named_workflow(&name, &input).await;
-                        self.send_host_turn_slash_command_output(&msg).await;
-                        return ok_end_turn(0, None);
-                    }
-                    _ => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        return self.execute_builtin_slash_command(action).await;
-                    }
-                }
+                return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
             }
-            Err(SlashCommandOutcome::InvokeSkill {
-                blocks: original_blocks,
-                skills: parsed_skills,
-            }) => {
-                if let Some(first) = parsed_skills.first() {
-                    *self.active_skill.lock() = Some(first.name.clone());
-                    let span = tracing::Span::current();
-                    span.record("command_name", first.name.as_str());
-                    span.record(
-                        "command_source",
-                        if first.plugin_name.is_some() {
+            if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
+                return self
+                    .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
+                    .await
+                    .map(AdmittedTurnSuccess::Host);
+            }
+            let slash_skills = self.slash_skills_for_resolve().await;
+            let skill_rewrite = slash_commands::SkillSlashRewrite::RewriteToRun;
+            let availability = self.command_availability().await;
+            let mut pending_skill_information: Option<String> = None;
+            let (_, named_workflows, _) = self.named_workflow_snapshot();
+            let prompt_blocks = match slash_commands::resolve(
+                prompt_blocks,
+                &slash_skills,
+                availability,
+                skill_rewrite,
+                &named_workflows,
+            ) {
+                Ok(blocks) => blocks,
+                Err(SlashCommandOutcome::Builtin(action)) => {
+                    let slash_used = ::diagnostics::events::SlashCommandUsed {
+                        command: action.command_name().to_string(),
+                        args_provided: action.args_provided(),
+                    };
+                    {
+                        let span = tracing::Span::current();
+                        span.record("command_name", action.command_name());
+                        span.record("command_source", "builtin");
+                    }
+                    match action {
+                        action @ (BuiltinAction::GoalSet { .. }
+                        | BuiltinAction::GoalEdit { .. }
+                        | BuiltinAction::GoalEnter
+                        | BuiltinAction::GoalUsage
+                        | BuiltinAction::GoalStatus
+                        | BuiltinAction::GoalPause
+                        | BuiltinAction::GoalRestart
+                        | BuiltinAction::GoalClear
+                        | BuiltinAction::GoalBudget { .. }) => {
+                            ::diagnostics::session_ctx::log_event(slash_used);
+                            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                            return self
+                                .execute_builtin_slash_command(action)
+                                .await
+                                .map(AdmittedTurnSuccess::Host);
+                        }
+                        BuiltinAction::WorkflowLaunch { name, input } => {
+                            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                            let msg = self.launch_named_workflow(&name, &input).await;
+                            self.send_host_turn_slash_command_output(&msg).await;
+                            return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
+                        }
+                        _ => {
+                            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                            return self
+                                .execute_builtin_slash_command(action)
+                                .await
+                                .map(AdmittedTurnSuccess::Host);
+                        }
+                    }
+                }
+                Err(SlashCommandOutcome::InvokeSkill {
+                    blocks: original_blocks,
+                    skills: parsed_skills,
+                }) => {
+                    if let Some(first) = parsed_skills.first() {
+                        *self.active_skill.lock() = Some(first.name.clone());
+                        let span = tracing::Span::current();
+                        span.record("command_name", first.name.as_str());
+                        span.record(
+                            "command_source",
+                            if first.plugin_name.is_some() {
+                                "plugin"
+                            } else {
+                                "skill"
+                            },
+                        );
+                    }
+                    for sk in &parsed_skills {
+                        ::diagnostics::session_ctx::log_event(
+                            ::diagnostics::events::SlashCommandUsed {
+                                command: sk.name.clone(),
+                                args_provided: !sk.args.is_empty(),
+                            },
+                        );
+                        ::diagnostics::session_ctx::log_event(
+                            ::diagnostics::events::SkillDispatched {
+                                skill_name: sk.name.clone(),
+                                plugin_source: sk.plugin_name.clone(),
+                            },
+                        );
+                        let skill_source = if sk.plugin_name.is_some() {
                             "plugin"
                         } else {
-                            "skill"
-                        },
-                    );
-                }
-                for sk in &parsed_skills {
-                    ::diagnostics::session_ctx::log_event(
-                        ::diagnostics::events::SlashCommandUsed {
-                            command: sk.name.clone(),
-                            args_provided: !sk.args.is_empty(),
-                        },
-                    );
-                    ::diagnostics::session_ctx::log_event(::diagnostics::events::SkillDispatched {
-                        skill_name: sk.name.clone(),
-                        plugin_source: sk.plugin_name.clone(),
-                    });
-                    let skill_source = if sk.plugin_name.is_some() {
-                        "plugin"
-                    } else {
-                        crate::session::diagnostics::skill_source_label(
-                            &sk.skill_path,
-                            self.session_info.cwd.as_str(),
-                        )
-                    };
-                    tracing::info_span!(
-                        "skill.activated",
-                        skill_name = %sk.name,
-                        invocation_trigger = "slash_command",
-                        skill_source = skill_source,
-                    )
-                    .in_scope(|| {});
-                    if let Some(ref pname) = sk.plugin_name {
-                        ::diagnostics::session_ctx::log_event(::diagnostics::events::PluginUsed {
-                            plugin_id: pname.clone(),
-                            plugin_name: pname.clone(),
-                            skill_name: Some(sk.name.clone()),
-                            hook_event: None,
-                            success: true,
-                        });
+                            crate::session::diagnostics::skill_source_label(
+                                &sk.skill_path,
+                                self.session_info.cwd.as_str(),
+                            )
+                        };
                         tracing::info_span!(
-                            "plugin.used",
-                            plugin_name = %pname,
+                            "skill.activated",
                             skill_name = %sk.name,
+                            invocation_trigger = "slash_command",
+                            skill_source = skill_source,
                         )
                         .in_scope(|| {});
+                        if let Some(ref pname) = sk.plugin_name {
+                            ::diagnostics::session_ctx::log_event(
+                                ::diagnostics::events::PluginUsed {
+                                    plugin_id: pname.clone(),
+                                    plugin_name: pname.clone(),
+                                    skill_name: Some(sk.name.clone()),
+                                    hook_event: None,
+                                    success: true,
+                                },
+                            );
+                            tracing::info_span!(
+                                "plugin.used",
+                                plugin_name = %pname,
+                                skill_name = %sk.name,
+                            )
+                            .in_scope(|| {});
+                        }
                     }
-                }
-                pending_skill_information = slash_commands::build_skill_information_for_refs(
-                    &parsed_skills,
-                    &slash_skills,
-                    &self.session_id_string(),
-                )
-                .await;
-                original_blocks
-            }
-        };
-        self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
-            turn_number: self.chat_state_handle.get_prompt_index().await as u64,
-            model_id: model_id.clone(),
-            conversation_message_count: msg_count,
-            session_relationship: tool_protocol::turn_hook::DEFAULT_SESSION_RELATIONSHIP
-                .to_string(),
-            schema_version: crate::session::events::EVENT_SCHEMA_VERSION.to_string(),
-        })
-        .await;
-        let turn_idx = self.chat_state_handle.get_prompt_index().await as u64;
-        ::diagnostics::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
-            session_id: self.session_info.id.0.to_string(),
-            turn_number: turn_idx,
-        });
-        let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
-        ::diagnostics::session_ctx::begin_prompt_id();
-        let mut chunk_meta = serde_json::Map::new();
-        chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
-        chunk_meta.insert(
-            "promptIndex".into(),
-            serde_json::json!(current_prompt_index),
-        );
-        chunk_meta.insert("messageId".into(), serde_json::json!(prompt_id));
-        if matches!(origin, super::super::PromptOrigin::User) {
-            chunk_meta.insert(
-                "permissionEvidence".into(),
-                serde_json::json!("direct_user"),
-            );
-        }
-        if origin.hide_user_echo_from_scrollback() {
-            chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
-        }
-        let user_chunk_meta = Some(chunk_meta);
-        *self.tool_context.prompt_index.lock().await = current_prompt_index;
-        self.file_state_tracker
-            .begin_prompt(current_prompt_index)
-            .await;
-        let echo_mode = user_echo_mode(&origin);
-        for block in prompt_blocks.iter() {
-            let update = acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-            );
-            let notification_meta = self.build_notification_meta();
-            let notification = acp::SessionNotification::new(self.session_info.id.clone(), update)
-                .meta(notification_meta.as_object().cloned());
-            if echo_mode == UserEchoMode::PersistOnly {
-                let _ = self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
-                    ));
-            } else {
-                self.emit_notification_direct(notification).await;
-            }
-        }
-        let crate::session::prompt_parser::ParsedPrompt {
-            mut context,
-            query,
-            skill_information: skill_info,
-            images: mut raw_images,
-        } = match parse_prompt_with_skills(
-            &prompt_blocks,
-            self.tool_context.cwd.to_path_buf(),
-            &self.session_info,
-            verbatim,
-            pending_skill_information.take().unwrap_or_default(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!("Invalid prompt: {}", err.message);
-                return Err(err);
-            }
-        };
-        let recovered = crate::session::placeholder_images::recover_orphan_placeholders(
-            &query,
-            &mut raw_images,
-            std::path::Path::new(&self.session_info.cwd),
-        );
-        if recovered > 0 {
-            tracing::info!(
-                session_id = %self.session_info.id,
-                recovered,
-                "server-side placeholder fallback: loaded orphan image(s) from disk",
-            );
-        }
-        let query = crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
-        let user_images = self
-            .normalize_images_with_notices(&mut context, raw_images)
-            .await;
-        let extraction = tools::util::base64_images::extract_base64_images(query);
-        let (query, extra_images) = if extraction.images.is_empty() {
-            (extraction.text, Vec::new())
-        } else {
-            let cleaned_text = extraction.text;
-            let count = extraction.images.len();
-            tracing::info!(
-                session_id = %self.session_info.id,
-                count,
-                "base64 images extracted from user query",
-            );
-            let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
-                .images
-                .into_iter()
-                .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
-                .collect();
-            let nr = crate::session::image_normalize::normalize_images(acp_imgs).await;
-            if !nr.re_encode_fallbacks.is_empty() {
-                tracing::warn!(
-                    session_id = %self.session_info.id,
-                    notes = %nr.re_encode_fallbacks.join(" "),
-                    "Extracted user query image kept original after re-encode failure",
-                );
-            }
-            (cleaned_text, nr.images)
-        };
-        let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
-            &context,
-            &query,
-            &skill_info,
-        );
-        let user_message = if verbatim {
-            assembled
-        } else {
-            self.maybe_truncate_large_prompt_with_skills(context, query, skill_info)
-                .await
-        };
-        let model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
-        {
-            let effective_client_identifier =
-                prompt_client_identifier.or_else(|| self.client_identifier.clone());
-            let ev = ::diagnostics::events::PromptSubmitted {
-                prompt_length: user_message.len(),
-                model_id,
-                client_identifier: effective_client_identifier,
-                screen_mode: prompt_screen_mode,
-            };
-            ::diagnostics::session_ctx::log_event(ev);
-        }
-        self.maybe_inject_mcp_reminder().await;
-        self.maybe_inject_mcp_connecting_reminder().await;
-        self.maybe_inject_date_rollover_reminder().await;
-        self.inject_behavior_reminders().await?;
-        if matches!(&origin, super::super::PromptOrigin::User) {
-            self.inject_stopped_goal_interaction_directive().await;
-        }
-        // A real user turn may absorb notifications that were already pending
-        // at admission. An autonomous notification turn must first commit its
-        // queued primary receipt; later arrivals belong after it in Surface.
-        if notification_ids.is_empty() {
-            self.drain_active_notifications().await;
-        }
-        if matches!(&origin, super::super::PromptOrigin::User) {
-            ::diagnostics::unified_log::info(
-                "shell.task_wake.gate_cleared",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
-            );
-        }
-        self.inject_workflow_status_reminder().await;
-        let user_message = if user_images.is_empty() {
-            user_message
-        } else {
-            crate::session::image_describe::persist_and_prepend_image_files(
-                &self.session_directory,
-                &user_images,
-                &user_message,
-            )
-            .map_err(|e| {
-                acp::Error::internal_error()
-                    .data(format!("failed to save user images to assets dir: {e}"))
-            })?
-        };
-        let prompt_text_for_hook = user_message.clone();
-        {
-            if matches!(origin, super::super::PromptOrigin::User) {
-                self.maybe_inject_interrupt_reminder().await;
-            }
-            let mut user_chat = match &origin {
-                super::super::PromptOrigin::TaskCompleted { .. } => {
-                    ConversationItem::task_completed(user_message)
-                }
-                super::super::PromptOrigin::SubagentCompleted { .. } => {
-                    ConversationItem::subagent_completed(user_message)
-                }
-                super::super::PromptOrigin::WorkflowCompleted { .. } => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::NotificationDrain => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::HostCommand => {
-                    ConversationItem::system_reminder(user_message)
-                }
-                super::super::PromptOrigin::GoalContinuation { .. } => self.goal_directive_item(
-                    user_message,
-                    sampling_types::SyntheticReason::SystemReminder,
-                ),
-                super::super::PromptOrigin::PlanResume => {
-                    ConversationItem::system_reminder(user_message)
-                }
-                super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(user_message);
-                    item.set_permission_evidence(sampling_types::PermissionEvidence::DirectUser);
-                    if let Some(interrupt) = self
-                        .events
-                        .take_prior_interrupt_category()
-                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
-                    {
-                        item.set_prior_turn_interrupt(interrupt);
-                    }
-                    item
-                }
-            };
-            user_chat.set_prompt_index(current_prompt_index);
-            for image in &user_images {
-                user_chat.add_image(pick_user_image_url(image));
-            }
-            for image in &extra_images {
-                user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
-            }
-            let input_commit = if notification_ids.is_empty() {
-                self.chat_state_handle
-                    .push_user_message_durably(user_chat)
-                    .await
-            } else {
-                let turn = self.events.current_turn().ok_or_else(|| {
-                    chat_state::TimelineWriteError::Invalid(
-                        chat_state::TimelineError::InvalidNotification,
-                    )
-                });
-                match turn {
-                    Ok(turn) => self
-                        .consume_notifications_durably(
-                            notification_ids.clone(),
-                            turn,
-                            Some(user_chat),
-                        )
-                        .await
-                        .map(|_| ()),
-                    Err(error) => Err(error),
-                }
-            };
-            if let Err(error) = input_commit {
-                tracing::error!(
-                    session_id = %self.session_info.id.0,
-                    prompt_id = %prompt_id,
-                    %error,
-                    "aborting turn: user-message Timeline commit failed"
-                );
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Error,
-                    chat_state::TurnTerminal {
-                        stop_reason: "error".into(),
-                        completion_kind: "user_message_persistence_failed".into(),
-                    },
-                    None,
-                    Some(serde_json::json!({
-                        "reason": "user_message_persistence_failed",
-                        "error": error.to_string(),
-                    })),
-                )
-                .await?;
-                return Err(acp::Error::internal_error()
-                    .data(format!("user message was not durably recorded: {error}")));
-            }
-            if !notification_ids.is_empty() {
-                self.drain_active_notifications().await;
-            }
-            if !admitted_notification_task_ids.is_empty() {
-                let ids = admitted_notification_task_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                self.completion_delivery.consume(&ids);
-            }
-            if let Some(ack) = persist_ack {
-                let _ = ack.send(());
-            }
-        }
-        if matches!(origin, super::super::PromptOrigin::User) {
-            self.schedule_session_title(original_prompt_text.clone())
-                .await;
-        }
-        if !matches!(origin, super::super::PromptOrigin::HostCommand) {
-            self.dispatch_hook(
-                ::hooks::event::HookEventName::UserPromptSubmit,
-                ::hooks::event::HookPayload::UserPromptSubmit {
-                    prompt: Some(prompt_text_for_hook),
-                },
-                Some(prompt_id),
-                None,
-            )
-            .await;
-        }
-        let turn_scope_guard =
-            TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
-        self.open_subagent_spawn_admission();
-        let turn_model_id = self.current_model_id().await;
-        let doom_event_model = turn_model_id.clone();
-        let turn_timer = std::time::Instant::now();
-        let result = {
-            let mut stop_continuations_this_turn: u32 = 0;
-            loop {
-                if self.goal_runtime_available() {
-                    let goal_loop_active = self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    self.set_goal_loop_active(goal_loop_active);
-                }
-                let round = self
-                    .process_conversation_turn_with_recovery(
-                        prompt_id,
-                        origin.clone(),
-                        json_schema.clone(),
+                    pending_skill_information = slash_commands::build_skill_information_for_refs(
+                        &parsed_skills,
+                        &slash_skills,
+                        &self.session_id_string(),
                     )
                     .await;
-                if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                    break round;
+                    original_blocks
                 }
-                if matches!(
-                    round,
-                    Ok(TurnOutcome::Completed {
-                        refusal: Some(_),
-                        ..
-                    })
-                ) {
-                    break round;
-                }
-                if matches!(origin, super::super::PromptOrigin::GoalContinuation { .. }) {
-                    break round;
-                }
-                match self
-                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                    .await
-                {
-                    StopGateDecision::AllowStop => break round,
-                    StopGateDecision::KeepWorking { feedback } => {
-                        stop_continuations_this_turn += 1;
-                        self.chat_state_handle
-                            .push_user_message(ConversationItem::stop_hook_feedback(feedback));
-                    }
+            };
+            model_path_started = true;
+            self.publish_goal_mutation_authority(prompt_id, current_prompt_index as u64)
+                .await;
+            self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
+                turn_number: current_prompt_index as u64,
+                model_id: model_id.clone(),
+                conversation_message_count: msg_count,
+                session_relationship: tool_protocol::turn_hook::DEFAULT_SESSION_RELATIONSHIP
+                    .to_string(),
+                schema_version: crate::session::events::EVENT_SCHEMA_VERSION.to_string(),
+            })
+            .await;
+            ::diagnostics::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
+                session_id: self.session_info.id.0.to_string(),
+                turn_number: current_prompt_index as u64,
+            });
+            ::diagnostics::session_ctx::begin_prompt_id();
+            let mut chunk_meta = serde_json::Map::new();
+            chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
+            chunk_meta.insert(
+                "promptIndex".into(),
+                serde_json::json!(current_prompt_index),
+            );
+            chunk_meta.insert("messageId".into(), serde_json::json!(prompt_id));
+            if matches!(origin, super::super::PromptOrigin::User) {
+                chunk_meta.insert(
+                    "permissionEvidence".into(),
+                    serde_json::json!("direct_user"),
+                );
+            }
+            if origin.hide_user_echo_from_scrollback() {
+                chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
+            }
+            let user_chunk_meta = Some(chunk_meta);
+            *self.tool_context.prompt_index.lock().await = current_prompt_index;
+            self.file_state_tracker
+                .begin_prompt(current_prompt_index)
+                .await;
+            let echo_mode = user_echo_mode(&origin);
+            for block in prompt_blocks.iter() {
+                let update = acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
+                );
+                let notification_meta = self.build_notification_meta();
+                let notification =
+                    acp::SessionNotification::new(self.session_info.id.clone(), update)
+                        .meta(notification_meta.as_object().cloned());
+                if echo_mode == UserEchoMode::PersistOnly {
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+                        ));
+                } else {
+                    self.emit_notification_direct(notification).await;
                 }
             }
-        };
-        let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
+            let crate::session::prompt_parser::ParsedPrompt {
+                mut context,
+                query,
+                skill_information: skill_info,
+                images: mut raw_images,
+            } = match parse_prompt_with_skills(
+                &prompt_blocks,
+                self.tool_context.cwd.to_path_buf(),
+                &self.session_info,
+                verbatim,
+                pending_skill_information.take().unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("Invalid prompt: {}", err.message);
+                    return Err(err);
+                }
+            };
+            let recovered = crate::session::placeholder_images::recover_orphan_placeholders(
+                &query,
+                &mut raw_images,
+                std::path::Path::new(&self.session_info.cwd),
+            );
+            if recovered > 0 {
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    recovered,
+                    "server-side placeholder fallback: loaded orphan image(s) from disk",
+                );
+            }
+            let query =
+                crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
+            let user_images = self
+                .normalize_images_with_notices(&mut context, raw_images)
+                .await;
+            let extraction = tools::util::base64_images::extract_base64_images(query);
+            let (query, extra_images) = if extraction.images.is_empty() {
+                (extraction.text, Vec::new())
+            } else {
+                let cleaned_text = extraction.text;
+                let count = extraction.images.len();
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    count,
+                    "base64 images extracted from user query",
+                );
+                let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
+                    .images
+                    .into_iter()
+                    .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
+                    .collect();
+                let nr = crate::session::image_normalize::normalize_images(acp_imgs).await;
+                if !nr.re_encode_fallbacks.is_empty() {
+                    tracing::warn!(
+                        session_id = %self.session_info.id,
+                        notes = %nr.re_encode_fallbacks.join(" "),
+                        "Extracted user query image kept original after re-encode failure",
+                    );
+                }
+                (cleaned_text, nr.images)
+            };
+            let permission_text = query.trim().to_owned();
+            let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
+                &context,
+                &query,
+                &skill_info,
+            );
+            let user_message = if verbatim {
+                assembled
+            } else {
+                self.maybe_truncate_large_prompt_with_skills(context, query, skill_info)
+                    .await
+            };
+            let model_id = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.model)
+                .unwrap_or_default();
+            {
+                let effective_client_identifier =
+                    prompt_client_identifier.or_else(|| self.client_identifier.clone());
+                let ev = ::diagnostics::events::PromptSubmitted {
+                    prompt_length: user_message.len(),
+                    model_id,
+                    client_identifier: effective_client_identifier,
+                    screen_mode: prompt_screen_mode,
+                };
+                ::diagnostics::session_ctx::log_event(ev);
+            }
+            self.maybe_inject_mcp_reminder().await;
+            self.maybe_inject_mcp_connecting_reminder().await;
+            self.maybe_inject_date_rollover_reminder().await;
+            self.inject_behavior_reminders().await?;
+            // A real user turn may absorb notifications that were already pending
+            // at admission. An autonomous notification turn must first commit its
+            // queued primary receipt; later arrivals belong after it in Surface.
+            if notification_ids.is_empty() {
+                self.drain_active_notifications().await;
+            }
+            if matches!(&origin, super::super::PromptOrigin::User) {
+                ::diagnostics::unified_log::info(
+                    "shell.task_wake.gate_cleared",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
+                );
+            }
+            self.inject_workflow_status_reminder().await;
+            let user_message = if user_images.is_empty() {
+                user_message
+            } else {
+                crate::session::image_describe::persist_and_prepend_image_files(
+                    &self.session_directory,
+                    &user_images,
+                    &user_message,
+                )
+                .map_err(|e| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to save user images to assets dir: {e}"))
+                })?
+            };
+            let prompt_text_for_hook = user_message.clone();
+            {
+                if matches!(origin, super::super::PromptOrigin::User) {
+                    self.maybe_inject_interrupt_reminder().await;
+                }
+                let mut user_chat = match &origin {
+                    super::super::PromptOrigin::TaskCompleted { .. } => {
+                        ConversationItem::task_completed(user_message)
+                    }
+                    super::super::PromptOrigin::SubagentCompleted { .. } => {
+                        ConversationItem::subagent_completed(user_message)
+                    }
+                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::NotificationDrain => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::HostCommand => {
+                        ConversationItem::system_reminder(user_message)
+                    }
+                    super::super::PromptOrigin::GoalContinuation { .. } => self
+                        .goal_directive_item(
+                            user_message,
+                            sampling_types::SyntheticReason::SystemReminder,
+                        ),
+                    super::super::PromptOrigin::PlanResume => {
+                        ConversationItem::system_reminder(user_message)
+                    }
+                    super::super::PromptOrigin::User => {
+                        let mut item = ConversationItem::user(user_message);
+                        item.set_permission_evidence(
+                            sampling_types::PermissionEvidence::direct_user(permission_text),
+                        );
+                        if let Some(interrupt) =
+                            self.events.take_prior_interrupt_category().and_then(
+                                crate::session::events::prior_turn_interrupt_from_cancellation,
+                            )
+                        {
+                            item.set_prior_turn_interrupt(interrupt);
+                        }
+                        item
+                    }
+                };
+                user_chat.set_prompt_index(current_prompt_index);
+                for image in &user_images {
+                    user_chat.add_image(pick_user_image_url(image));
+                }
+                for image in &extra_images {
+                    user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
+                }
+                let input_commit = if notification_ids.is_empty() {
+                    self.chat_state_handle
+                        .push_user_message_durably(user_chat)
+                        .await
+                } else {
+                    let turn = self.events.current_turn().ok_or_else(|| {
+                        chat_state::TimelineWriteError::Invalid(
+                            chat_state::TimelineError::InvalidNotification,
+                        )
+                    });
+                    match turn {
+                        Ok(turn) => self
+                            .consume_notifications_durably(
+                                notification_ids.clone(),
+                                turn,
+                                Some(user_chat),
+                            )
+                            .await
+                            .map(|_| ()),
+                        Err(error) => Err(error),
+                    }
+                };
+                if let Err(error) = input_commit {
+                    tracing::error!(
+                        session_id = %self.session_info.id.0,
+                        prompt_id = %prompt_id,
+                        %error,
+                        "aborting turn: user-message Timeline commit failed"
+                    );
+                    timeline_error_override = Some((
+                        "user_message_persistence_failed",
+                        serde_json::json!({
+                            "reason": "user_message_persistence_failed",
+                            "error": error.to_string(),
+                        }),
+                    ));
+                    return Err(acp::Error::internal_error()
+                        .data(format!("user message was not durably recorded: {error}")));
+                }
+                if !notification_ids.is_empty() {
+                    self.drain_active_notifications().await;
+                }
+                if !admitted_notification_task_ids.is_empty() {
+                    let ids = admitted_notification_task_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    self.completion_delivery.consume(&ids);
+                }
+                if let Some(ack) = persist_ack {
+                    let _ = ack.send(());
+                }
+            }
+            if matches!(origin, super::super::PromptOrigin::User) {
+                self.schedule_session_title(original_prompt_text.clone())
+                    .await;
+            }
+            if !matches!(origin, super::super::PromptOrigin::HostCommand) {
+                self.dispatch_hook(
+                    ::hooks::event::HookEventName::UserPromptSubmit,
+                    ::hooks::event::HookPayload::UserPromptSubmit {
+                        prompt: Some(prompt_text_for_hook),
+                    },
+                    Some(prompt_id),
+                    None,
+                )
+                .await;
+            }
+            turn_scope_guard = Some(TurnSubagentScopeGuard::new(
+                self.current_prompt_id.clone(),
+                prompt_id.to_string(),
+            ));
+            self.open_subagent_spawn_admission();
+            turn_model_id = Some(self.current_model_id().await);
+            turn_timer = Some(std::time::Instant::now());
+            let result = {
+                let mut stop_continuations_this_turn: u32 = 0;
+                loop {
+                    if self.goal_runtime_available() {
+                        let goal_loop_active = self.goal_tracker.lock().status()
+                            == Some(crate::session::goal_tracker::GoalStatus::Active);
+                        self.set_goal_loop_active(goal_loop_active);
+                    }
+                    let round = self
+                        .process_conversation_turn_with_recovery(
+                            prompt_id,
+                            origin.clone(),
+                            json_schema.clone(),
+                        )
+                        .await;
+                    if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                        break round;
+                    }
+                    if matches!(
+                        round,
+                        Ok(TurnOutcome::Completed {
+                            refusal: Some(_),
+                            ..
+                        })
+                    ) {
+                        break round;
+                    }
+                    if matches!(origin, super::super::PromptOrigin::GoalContinuation { .. }) {
+                        break round;
+                    }
+                    match self
+                        .run_stop_gate(prompt_id, stop_continuations_this_turn)
+                        .await
+                    {
+                        StopGateDecision::AllowStop => break round,
+                        StopGateDecision::KeepWorking { feedback } => {
+                            stop_continuations_this_turn += 1;
+                            self.chat_state_handle
+                                .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                        }
+                    }
+                }
+            };
+            result.map(AdmittedTurnSuccess::Model)
+        }
+        .await;
+        let turn_duration_ms = turn_timer
+            .map(|timer| timer.elapsed().as_millis() as u64)
+            .unwrap_or_default();
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
         ::diagnostics::unified_log::info(
             "shell.handle_prompt.done",
@@ -770,13 +792,65 @@ impl SessionActor {
                 "total_elapsed_ms": handle_prompt_elapsed_ms,
                 "turn_elapsed_ms": turn_duration_ms,
                 "pre_turn_ms": handle_prompt_elapsed_ms.saturating_sub(turn_duration_ms),
-                "ok": result.is_ok(),
+                "ok": execution.is_ok(),
             })),
         );
         let turn_tool_count = self.events.tool_count_this_turn();
         let (timeline_outcome, timeline_terminal, timeline_category, timeline_context) =
-            match &result {
-                Ok(TurnOutcome::Completed { refusal, .. }) => (
+            match &execution {
+                Ok(AdmittedTurnSuccess::Host(ok)) => match &ok.completion_kind {
+                    PromptCompletionKind::Completed => (
+                        crate::session::events::TurnOutcomeLabel::Completed,
+                        chat_state::TurnTerminal {
+                            stop_reason: "end_turn".into(),
+                            completion_kind: "completed".into(),
+                        },
+                        None,
+                        None,
+                    ),
+                    PromptCompletionKind::StationarityEnded => (
+                        crate::session::events::TurnOutcomeLabel::Completed,
+                        chat_state::TurnTerminal {
+                            stop_reason: "end_turn".into(),
+                            completion_kind: "stationarity_ended".into(),
+                        },
+                        None,
+                        None,
+                    ),
+                    PromptCompletionKind::Cancelled { category, context } => (
+                        crate::session::events::TurnOutcomeLabel::Cancelled,
+                        chat_state::TurnTerminal {
+                            stop_reason: "cancelled".into(),
+                            completion_kind: "cancelled".into(),
+                        },
+                        *category,
+                        context
+                            .as_ref()
+                            .and_then(|context| serde_json::to_value(context).ok()),
+                    ),
+                    PromptCompletionKind::MaxTurnsReached { limit } => (
+                        crate::session::events::TurnOutcomeLabel::Cancelled,
+                        chat_state::TurnTerminal {
+                            stop_reason: "cancelled".into(),
+                            completion_kind: "max_turns_reached".into(),
+                        },
+                        None,
+                        Some(serde_json::json!({
+                            "reason": "max_turns_reached",
+                            "limit": limit,
+                        })),
+                    ),
+                    PromptCompletionKind::Rewound | PromptCompletionKind::RemovedFromQueue => (
+                        crate::session::events::TurnOutcomeLabel::Error,
+                        chat_state::TurnTerminal {
+                            stop_reason: "error".into(),
+                            completion_kind: "invalid_admitted_completion".into(),
+                        },
+                        None,
+                        None,
+                    ),
+                },
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::Completed { refusal, .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
                         stop_reason: if refusal.is_some() {
@@ -790,7 +864,7 @@ impl SessionActor {
                     None,
                     None,
                 ),
-                Ok(TurnOutcome::StationarityEnded { .. }) => (
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::StationarityEnded { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
                         stop_reason: "end_turn".into(),
@@ -799,7 +873,7 @@ impl SessionActor {
                     None,
                     None,
                 ),
-                Ok(TurnOutcome::Cancelled { category, context }) => (
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::Cancelled { category, context })) => (
                     crate::session::events::TurnOutcomeLabel::Cancelled,
                     chat_state::TurnTerminal {
                         stop_reason: "cancelled".into(),
@@ -808,7 +882,7 @@ impl SessionActor {
                     *category,
                     context.clone(),
                 ),
-                Ok(TurnOutcome::MaxTurnsReached { limit }) => (
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::MaxTurnsReached { limit })) => (
                     crate::session::events::TurnOutcomeLabel::Cancelled,
                     chat_state::TurnTerminal {
                         stop_reason: "cancelled".into(),
@@ -824,19 +898,74 @@ impl SessionActor {
                     crate::session::events::TurnOutcomeLabel::Error,
                     chat_state::TurnTerminal {
                         stop_reason: "error".into(),
-                        completion_kind: "error".into(),
+                        completion_kind: timeline_error_override
+                            .as_ref()
+                            .map(|(kind, _)| *kind)
+                            .unwrap_or("error")
+                            .into(),
                     },
                     None,
-                    None,
+                    timeline_error_override
+                        .as_ref()
+                        .map(|(_, context)| context.clone()),
                 ),
             };
-        self.emit_turn_ended(
-            timeline_outcome,
-            timeline_terminal,
-            timeline_category,
-            timeline_context,
-        )
-        .await?;
+        if let Err(error) = self
+            .emit_turn_ended(
+                timeline_outcome,
+                timeline_terminal,
+                timeline_category,
+                timeline_context,
+            )
+            .await
+        {
+            if let Some(extension) = &self.idle_prompt_extension {
+                extension.on_turn_failed();
+            }
+            self.cancel_running_turn_subagents(prompt_id);
+            self.flush_to_disk().await;
+            if model_path_started {
+                self.file_state_tracker
+                    .end_prompt(&self.tool_context.fs, current_prompt_index)
+                    .await;
+                if let Some(rewind_point) = self
+                    .file_state_tracker
+                    .get_rewind_point(current_prompt_index)
+                    .await
+                {
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::RewindPoint(rewind_point));
+                }
+            }
+            let usage = if model_path_started {
+                self.freeze_prompt_usage_bounded(prompt_id, std::time::Duration::ZERO)
+                    .await
+            } else {
+                None
+            };
+            drop(turn_scope_guard);
+            let boundary_error =
+                crate::session::commands::fatal_turn_boundary_error("terminal", error.to_string());
+            return Err(crate::sampling::error::attach_prompt_usage(
+                boundary_error,
+                usage,
+            ));
+        }
+        let result = match execution {
+            Ok(AdmittedTurnSuccess::Host(ok)) => {
+                if let Some(extension) = &self.idle_prompt_extension {
+                    extension.on_turn_failed();
+                }
+                return Ok(ok);
+            }
+            Ok(AdmittedTurnSuccess::Model(outcome)) => Ok(outcome),
+            Err(error) if !model_path_started => return Err(error),
+            Err(error) => Err(error),
+        };
+        let turn_model_id = turn_model_id.unwrap_or(model_id);
+        let doom_event_model = turn_model_id.clone();
         match &result {
             Ok(TurnOutcome::Completed { refusal, .. }) => {
                 if let Some(explanation) = refusal {

@@ -341,7 +341,6 @@ pub enum GoalDisplayStatus {
     Active,
     Paused,
     Blocked,
-    UsageLimited,
     BudgetLimited,
     Complete,
 }
@@ -351,7 +350,6 @@ impl GoalDisplayStatus {
             "active" => Self::Active,
             "paused" => Self::Paused,
             "blocked" => Self::Blocked,
-            "usage_limited" => Self::UsageLimited,
             "budget_limited" => Self::BudgetLimited,
             "complete" => Self::Complete,
             _ => return None,
@@ -362,13 +360,12 @@ impl GoalDisplayStatus {
         match self {
             Self::Paused => "Paused",
             Self::Blocked => "Blocked",
-            Self::UsageLimited => "Usage limited",
             Self::Active | Self::BudgetLimited | Self::Complete => "",
         }
     }
 
     pub fn uses_warning_chip(&self) -> bool {
-        matches!(self, Self::Paused | Self::Blocked | Self::UsageLimited)
+        matches!(self, Self::Paused | Self::Blocked)
     }
 }
 /// Display projection of the durable Goal snapshot.
@@ -558,7 +555,6 @@ pub struct WorkflowRunSnapshot {
     pub objective: String,
     pub status: String,
     pub management_available: bool,
-    pub builtin: bool,
     pub phases: Vec<(String, String)>,
     pub current_phase: Option<String>,
     pub agents: Vec<WorkflowAgentRowView>,
@@ -668,9 +664,6 @@ pub struct AgentSession {
     pub(crate) last_cleared_goal_id: Option<String>,
     /// Public workflow runs projected from ACP/Grow notifications.
     pub(crate) workflow_runs: Vec<WorkflowRunSnapshot>,
-    /// Private workflow runs retained for activity and task-pane projections;
-    /// they never enter public workflow management surfaces.
-    pub(crate) private_workflow_runs: Vec<WorkflowRunSnapshot>,
     /// Highest accepted revision per workflow run.
     pub(crate) workflow_run_revisions: HashMap<String, u64>,
     /// Tombstones for workflow runs explicitly cleared by the user/runtime.
@@ -993,10 +986,7 @@ pub struct ChipElement {
     pub display: Option<ratatui::text::Line<'static>>,
 }
 /// Names of Shell-owned Workflow runtime commands used as capability signals.
-/// Public management is Behavior-gated, while private Deep Research remains a
-/// stable bootstrap signal that the workflow runtime is configured.
 const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
-const DEEP_RESEARCH_COMMAND_NAME: &str = "deep-research";
 impl AgentSession {
     /// Construct a session with the state shared by every lifecycle entry point.
     ///
@@ -1022,7 +1012,6 @@ impl AgentSession {
             goal_state: None,
             last_cleared_goal_id: None,
             workflow_runs: Vec::new(),
-            private_workflow_runs: Vec::new(),
             workflow_run_revisions: HashMap::new(),
             cleared_workflow_runs: HashSet::new(),
             is_worktree: false,
@@ -1314,9 +1303,7 @@ impl AgentSession {
     ///
     /// Signals (any true → available):
     /// 1. `available_tools` is `Some(_)` and contains the `workflow` tool.
-    /// 2. A Workflow runtime slash command is advertised. During bootstrap
-    ///    (`available_tools` is still `None`) private `deep-research` is the
-    ///    stable signal; public `workflow-run` appears only in Workflow Behavior.
+    /// 2. A Workflow runtime slash command is advertised.
     /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
     ///    to the pager (running or history).
     ///
@@ -1331,11 +1318,9 @@ impl AgentSession {
     ) -> bool {
         let has_workflow_tool =
             available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
-        let has_workflow_command = available_commands.iter().any(|c| {
-            c.name == WORKFLOW_TOOL_NAME
-                || c.name == WORKFLOW_RUN_COMMAND_NAME
-                || c.name == DEEP_RESEARCH_COMMAND_NAME
-        });
+        let has_workflow_command = available_commands
+            .iter()
+            .any(|c| c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME);
         has_workflow_tool || has_workflow_command || has_workflow_runs
     }
     /// Process an ACP session update. Returns true if scrollback was modified.
@@ -1641,15 +1626,6 @@ mod tests {
     }
 
     #[test]
-    fn workflows_available_true_via_private_runtime_bootstrap_signal() {
-        let cmds = [acp::AvailableCommand::new(
-            DEEP_RESEARCH_COMMAND_NAME.to_string(),
-            "private research runtime".to_string(),
-        )];
-        assert!(AgentSession::bootstrap_workflow_support(None, &cmds, false));
-    }
-
-    #[test]
     fn workflows_available_true_via_workflow_command() {
         // The literal `workflow` command name also counts (previously the only
         // pager-side signal alongside runs).
@@ -1713,16 +1689,11 @@ mod tests {
     fn stopped_label_is_consistent_across_renderers() {
         assert_eq!(GoalDisplayStatus::Paused.stopped_label(), "Paused");
         assert_eq!(GoalDisplayStatus::Blocked.stopped_label(), "Blocked");
-        assert_eq!(
-            GoalDisplayStatus::UsageLimited.stopped_label(),
-            "Usage limited"
-        );
         assert_eq!(GoalDisplayStatus::Active.stopped_label(), "");
         assert_eq!(GoalDisplayStatus::BudgetLimited.stopped_label(), "");
         assert_eq!(GoalDisplayStatus::Complete.stopped_label(), "");
         assert!(GoalDisplayStatus::Paused.uses_warning_chip());
         assert!(GoalDisplayStatus::Blocked.uses_warning_chip());
-        assert!(GoalDisplayStatus::UsageLimited.uses_warning_chip());
         assert!(!GoalDisplayStatus::Active.uses_warning_chip());
         assert!(!GoalDisplayStatus::BudgetLimited.uses_warning_chip());
         assert!(!GoalDisplayStatus::Complete.uses_warning_chip());

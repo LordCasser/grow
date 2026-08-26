@@ -582,8 +582,13 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
             )),
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
-        model_id: acp::ModelId::new(model),
-        reasoning_effort: None,
+        model_route: crate::session::handle::SessionModelRoute::new(
+            acp::ModelId::new(model),
+            sampler::SamplerConfig {
+                model: model.to_owned(),
+                ..Default::default()
+            },
+        ),
         permission_mode: crate::util::config::PermissionMode::Ask,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
             product: s.to_string(),
@@ -593,6 +598,9 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
         ask_user_question_enabled: true,
         behavior: std::sync::Arc::new(parking_lot::Mutex::new(
             crate::session::behavior::BehaviorCoordinator::new(),
+        )),
+        workflow_tracker: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::session::workflow::tracker::WorkflowTracker::default(),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: workspace::permission::PermissionHandle::allow_all(),
@@ -642,18 +650,28 @@ async fn lookup_session_model_fallback_no_session() {
         "grow-3"
     );
 }
-/// Mutating session A's model_id via the handle does not affect session B.
+/// Committing session A's model route does not affect session B.
 #[tokio::test]
 async fn set_session_model_does_not_cross_contaminate() {
     let sid_a = acp::SessionId::new("sess-a");
     let sid_b = acp::SessionId::new("sess-b");
     let default_model = acp::ModelId::new("default");
-    let mut sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
+    let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
         (sid_a.clone(), make_test_handle("grow-3", None)),
         (sid_b.clone(), make_test_handle("grow-3", None)),
     ]
     .into();
-    sessions.get_mut(&sid_a).unwrap().model_id = acp::ModelId::new("grow-mini");
+    let route = sessions
+        .get(&sid_a)
+        .unwrap()
+        .model_route
+        .snapshot()
+        .sampling_config;
+    sessions
+        .get(&sid_a)
+        .unwrap()
+        .model_route
+        .replace(acp::ModelId::new("grow-mini"), route);
     assert_eq!(
         lookup_session_model(&sessions, Some(&sid_a), &default_model)
             .0
@@ -701,8 +719,12 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
             .map(str::to_owned)
     };
     let pinned = acp::SessionId::new("sess-pinned");
-    let mut handle = make_test_handle("effort-model", None);
-    handle.reasoning_effort = Some(ReasoningEffort::Xhigh);
+    let handle = make_test_handle("effort-model", None);
+    let mut route = handle.model_route.snapshot().sampling_config;
+    route.reasoning_effort = Some(ReasoningEffort::Xhigh);
+    handle
+        .model_route
+        .replace(acp::ModelId::new("effort-model"), route);
     agent.sessions.borrow_mut().insert(pinned.clone(), handle);
     assert_eq!(
         read_effort(&agent.model_state(Some(&pinned))).as_deref(),

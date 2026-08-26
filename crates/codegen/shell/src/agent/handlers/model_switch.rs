@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 /// Apply a model switch to a session (no gate — `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
+    _catalog_transaction: &tokio::sync::MutexGuard<'_, ()>,
     args: acp::SetSessionModelRequest,
 ) -> Result<acp::SetSessionModelResponse, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
@@ -30,7 +31,7 @@ pub(crate) async fn apply(
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
-    let previous_model_id = handle.model_id.clone();
+    let previous_model_id = handle.model_route.snapshot().model_id;
     let mut model_sampling =
         agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
     if let Some(eff) = effort_override {
@@ -73,11 +74,7 @@ pub(crate) async fn apply(
     });
     let updated_model = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))?;
-    if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
-        handle.model_id = model_id.clone();
-        handle.reasoning_effort = applied_effort;
-    }
+        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
     broadcast_model_changed(
         agent,
         &session_id,

@@ -40,7 +40,7 @@ the approval lifecycle inside that Behavior.
 You can enter plan mode yourself in two ways:
 
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
-- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Workflow, Deep Research, and Goal when those Behaviors are available.
+- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Workflow, and Goal when those Behaviors are available.
 
 Permission is selected independently through `Ctrl+X P` or `/permission`;
 `Ctrl+R` remains the prompt editor's redo shortcut.
@@ -154,4 +154,3 @@ When `/compact` runs during an active plan mode session, the plan mode state is 
 - Bug fixes where the fix is obvious once you understand the bug
 - Adding features that follow existing conventions
 - Straightforward modifications (renaming, formatting, adding tests)
-- Evidence-heavy research tasks that require a terminal report (use Deep Research)

@@ -67,6 +67,7 @@ impl ChildRunner for TestRunner {
         Box::pin(async move {
             let ChildRunRequest {
                 request,
+                security_parent_session_id: _,
                 security_parent,
                 cancellation,
                 reporter,
@@ -107,7 +108,12 @@ impl ChildRunner for TestRunner {
                 };
             }
             let _ = started.send(request.id.clone());
+            // Cancellation is authoritative once the coordinator has closed
+            // the owner scope.  Bias it ahead of the synthetic `finish`
+            // broadcast so a test that releases multiple children together
+            // cannot randomly report success for an already-cancelled child.
             let result = tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => {
                     if wait_after_cancel {
                         let _ = finish.recv().await;
@@ -178,6 +184,18 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         goal_context: None,
         cancel_token: CancellationToken::new(),
     }
+}
+
+#[test]
+fn source_liveness_does_not_cross_sibling_security_parents() {
+    let mut source = request("source", true);
+    source.parent_session_id = "root".into();
+    // Nested children retain the lifecycle root for teardown, but resume
+    // liveness is queried by the direct security parent. A sibling must not
+    // observe this source merely because both share the root session.
+    assert!(belongs_to_session(&source, "child-a", Some("root")));
+    assert!(belongs_to_session(&source, "child-a", Some("child-a")));
+    assert!(!belongs_to_session(&source, "child-a", Some("child-b")));
 }
 
 struct Harness {
@@ -720,6 +738,25 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
         .expect("actor command channel open");
     assert!(list_response_rx.await.unwrap().is_empty());
 
+    let (child_cancel_tx, child_cancel_rx) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::Cancel(SubagentCancelRequest {
+            parent_session_id: Some("parent".to_owned()),
+            target: SubagentCancelTarget::SubagentId("workflow-active".to_owned()),
+            respond_to: child_cancel_tx,
+        }))
+        .expect("actor command channel open");
+    assert!(matches!(
+        child_cancel_rx.await.unwrap(),
+        SubagentCancelOutcome::NotFound
+    ));
+    assert!(
+        harness.backend.inspect("workflow-active").await.is_some(),
+        "only the Workflow Run owner may cancel its hidden child"
+    );
+
     let (cancel_respond_to, mut cancel_response_rx) = oneshot::channel();
     harness
         .backend
@@ -752,6 +789,88 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
     );
     assert!(harness.backend.inspect("workflow-active").await.is_some());
 
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_session() {
+    let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
+
+    let mut owned = request("goal-owned", false);
+    owned.await_to_completion = true;
+    owned.owner = SubagentOwner::goal("goal-epoch");
+    let owned_cancel = owned.cancel_token.clone();
+    let owned_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(owned).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().id, "goal-owned");
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("goal-owned"));
+
+    let mut other = request("other-session-goal", false);
+    other.parent_session_id = "other-session".into();
+    other.await_to_completion = true;
+    other.owner = SubagentOwner::goal("goal-epoch");
+    let other_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(other).await }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "other-session-goal"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("other-session-goal")
+    );
+
+    let (respond_to, mut response) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::Cancel(SubagentCancelRequest {
+            parent_session_id: Some("parent".into()),
+            target: SubagentCancelTarget::GoalId("goal-epoch".into()),
+            respond_to,
+        }))
+        .unwrap();
+    assert!(matches!(
+        response.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    // The cancel command and the synthetic completion broadcast are handled by
+    // separate tasks. Wait for the scoped owner cancellation to become visible
+    // before releasing both runners, otherwise the test races command delivery.
+    owned_cancel.cancelled().await;
+
+    // A new child admitted for the same long-lived Goal after the cancel
+    // command is a successor generation. It must not extend the barrier that
+    // captured only `goal-owned`.
+    let mut successor = request("goal-successor", false);
+    successor.await_to_completion = true;
+    successor.owner = SubagentOwner::goal("goal-epoch");
+    let successor_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(successor).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().id, "goal-successor");
+
+    let _ = harness.finish.send(());
+    assert!(matches!(
+        response.await.unwrap(),
+        SubagentCancelOutcome::Cancelled
+    ));
+    assert!(owned_spawn.await.unwrap().unwrap().cancelled);
+    assert!(other_spawn.await.unwrap().unwrap().success);
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("goal-successor")
+    );
+    assert!(successor_spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }
 
@@ -980,6 +1099,27 @@ async fn usage_events_feed_sorted_outstanding_reply() {
     for spawn in spawns {
         assert!(spawn.await.unwrap().unwrap().cancelled);
     }
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn cancel_parent_prompt_rejects_late_spawn_without_starting_runner() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let bound = parent_backend(&harness);
+
+    assert!(matches!(
+        bound.cancel_parent_prompt("prompt").await,
+        SubagentCancelOutcome::Cancelled
+    ));
+
+    let late = harness
+        .backend
+        .spawn(request("late-after-prompt-cancel", true))
+        .await
+        .unwrap();
+    assert!(late.cancelled && !late.success);
+    assert!(harness.requests.try_recv().is_err());
+    assert!(harness.started.try_recv().is_err());
     harness.actor.abort();
 }
 
@@ -1268,6 +1408,123 @@ async fn nested_spawn_keeps_immediate_security_parent_after_lifecycle_reparent()
     let _ = harness.finish.send(());
     assert!(outer_spawn.await.unwrap().unwrap().success);
     assert!(nested_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn nested_child_can_query_and_cancel_its_immediate_child() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let outer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("outer", true)).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().id, "outer");
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("outer"));
+
+    let child_backend = ChannelBackend::for_session(harness.backend.sender(), "outer");
+    let nested_spawn = tokio::spawn({
+        let backend = child_backend.clone();
+        async move { backend.spawn(request("nested", true)).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().id, "nested");
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("nested"));
+
+    let snapshot = child_backend
+        .query("nested", false, None)
+        .await
+        .expect("immediate parent can query nested child");
+    assert!(snapshot.is_running());
+    assert!(matches!(
+        child_backend.cancel("nested").await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    assert!(nested_spawn.await.unwrap().unwrap().cancelled);
+
+    let _ = harness.finish.send(());
+    assert!(outer_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn nested_parent_session_stop_cancels_its_immediate_children() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let outer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("outer-stop-owner", true)).await }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "outer-stop-owner"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("outer-stop-owner")
+    );
+
+    let child_backend = ChannelBackend::for_session(harness.backend.sender(), "outer-stop-owner");
+    let nested_spawn = tokio::spawn({
+        let backend = child_backend.clone();
+        async move { backend.spawn(request("nested-stop-target", true)).await }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "nested-stop-target"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("nested-stop-target")
+    );
+
+    assert!(matches!(
+        child_backend.cancel_parent_session().await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    assert!(nested_spawn.await.unwrap().unwrap().cancelled);
+
+    let _ = harness.finish.send(());
+    assert!(outer_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn nested_parent_session_stop_rejects_late_reparented_spawn() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let outer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("outer-late-owner", true)).await }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "outer-late-owner"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("outer-late-owner")
+    );
+
+    let child_backend = ChannelBackend::for_session(harness.backend.sender(), "outer-late-owner");
+    assert!(matches!(
+        child_backend.cancel_parent_session().await,
+        SubagentCancelOutcome::Cancelled
+    ));
+
+    let late = child_backend
+        .spawn(request("nested-after-stop", true))
+        .await
+        .unwrap();
+    assert!(late.cancelled && !late.success);
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a spawn rejected by the immediate-parent gate must not reach the runner"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(outer_spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }
 

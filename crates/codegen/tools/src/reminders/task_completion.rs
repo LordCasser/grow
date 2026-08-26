@@ -8,8 +8,6 @@ use crate::types::tool::ToolKind;
 use crate::util::truncate::{PREVIEW_SIZE, truncate_with_preview};
 use tool_types::{KillTaskOutput, SubagentCompletedOutput, TaskOutputOutput};
 
-pub const DEFAULT_TASK_OUTPUT_TOOL: &str = "get_task_output";
-
 /// Bash output is recoverable from its file, so its inline notification may be
 /// bounded. Subagent output has no equivalent artifact and remains verbatim.
 const MAX_INLINE_COMPLETION_BYTES: usize = 4_000;
@@ -74,17 +72,23 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
         .as_deref()
         .and_then(|display| display.strip_prefix("[monitor] "))
         .unwrap_or("monitor");
-    let tool = task_output_name.unwrap_or(DEFAULT_TASK_OUTPUT_TOOL);
-    format!(
+    let mut message = format!(
         "Monitor \"{id}\" ended: [monitor ended: {reason}].\n\
          Description: {description}\n\
          Command: {command}\n\
-         Duration: {duration:.1}s\n\
-         Use {tool}(\"{id}\") for full output.",
+         Duration: {duration:.1}s\n",
         id = task.task_id,
         command = task.command,
         duration = task.duration_secs(),
-    )
+    );
+    render_completion_output_delivery(
+        &mut message,
+        &task.task_id,
+        &task.output,
+        task_output_name,
+        Some("[output truncated because this Agent has no background-output tool]"),
+    );
+    message
 }
 
 fn split_wrapped_monitor_event(event_text: &str) -> Option<(&str, &str)> {
@@ -106,7 +110,6 @@ pub fn format_monitor_events(
 ) -> Option<String> {
     use std::fmt::Write as _;
 
-    let tool_hint = task_output_name.unwrap_or(DEFAULT_TASK_OUTPUT_TOOL);
     match events {
         [] => None,
         [event] => {
@@ -135,7 +138,7 @@ pub fn format_monitor_events(
                 }
             }
             let mut buffer = format!(
-                "{} monitor events from {} {} (use {} to identify each monitor):",
+                "{} monitor events from {} {}{}:",
                 events.len(),
                 groups.len(),
                 if groups.len() == 1 {
@@ -143,7 +146,9 @@ pub fn format_monitor_events(
                 } else {
                     "monitors"
                 },
-                tool_hint,
+                task_output_name
+                    .map(|name| format!(" (use {name} to inspect each monitor)"))
+                    .unwrap_or_default(),
             );
             for (task_id, group) in &groups {
                 let description = group
@@ -446,5 +451,17 @@ mod tests {
         .expect("events render");
         assert_eq!(rendered.matches("description=\"heartbeat\"").count(), 1);
         assert!(rendered.contains("[1] first\n[2] second"));
+        assert!(!rendered.contains("get_task_output"));
+    }
+
+    #[test]
+    fn monitor_completion_inlines_bounded_output_without_poll_tool() {
+        let task = task_snapshot("monitor-1", &"x".repeat(MAX_INLINE_COMPLETION_BYTES * 2));
+        let message = format_monitor_completion(&task, None);
+        assert!(message.contains("response:"));
+        assert!(
+            message.contains("output truncated because this Agent has no background-output tool")
+        );
+        assert!(!message.contains("get_task_output"));
     }
 }

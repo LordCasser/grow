@@ -27,6 +27,8 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bm25 = "2.3"
 bytes = { workspace = true }
+cap-fs-ext = { workspace = true }
+cap-std = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 ignore = { workspace = true }
@@ -153,8 +155,6 @@ libc = { workspace = true }
 nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-cap-fs-ext = { workspace = true }
-cap-std = { workspace = true }
 siphasher = { workspace = true }
 windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 

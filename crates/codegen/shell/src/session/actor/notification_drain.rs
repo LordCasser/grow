@@ -188,6 +188,50 @@ impl SessionActor {
         Ok(())
     }
 
+    /// Resolve receipts that are intentionally forbidden from opening a model
+    /// turn. Like consumption, dismissal is a durable Timeline fact; payload
+    /// deletion remains a post-commit garbage-collection side effect.
+    async fn dismiss_notifications_durably(
+        &self,
+        mut notification_ids: Vec<String>,
+        reason: chat_state::NotificationDismissReason,
+    ) -> Result<(), chat_state::TimelineWriteError> {
+        let artifact_guard = self.notification_artifact_gate.lock().await;
+        let pending = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
+        let pending_ids = pending
+            .iter()
+            .map(|notification| notification.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        notification_ids.retain(|id| pending_ids.contains(id.as_str()));
+        if notification_ids.is_empty() {
+            return Ok(());
+        }
+        let retained_ids = notification_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let payloads = pending
+            .into_iter()
+            .filter(|notification| retained_ids.contains(notification.id.as_str()))
+            .map(|notification| notification.payload_ref)
+            .collect::<Vec<_>>();
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Dismissed {
+                    notification_ids,
+                    reason,
+                },
+            ))
+            .await?;
+        self.cleanup_notification_payloads_under_gate(&artifact_guard, payloads)
+            .await;
+        Ok(())
+    }
+
     pub(super) async fn receive_notification(
         &self,
         source: chat_state::NotificationSource,
@@ -532,7 +576,7 @@ impl SessionActor {
         let blocks = Self::notification_blocks(
             &displayed_notifications,
             &payloads,
-            Some(&self.tool_context.task_output_tool_name),
+            self.tool_context.task_output_tool_name.as_deref(),
         );
         let body = blocks
             .into_iter()
@@ -583,6 +627,47 @@ impl SessionActor {
         if notifications.is_empty() {
             return;
         }
+        let current_goal_id = self.goal_tracker.lock().snapshot().and_then(|goal| {
+            (goal.status == crate::session::goal_tracker::GoalStatus::Active)
+                .then(|| goal.goal_id.clone())
+        });
+
+        // A Goal-owned receipt belongs only to that Goal epoch. Matching
+        // evidence remains pending for the Goal continuation; stale or stopped
+        // Goal evidence is resolved without ever becoming a Normal turn.
+        let mut stale_goal_receipts = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for notification in &notifications {
+            if let chat_state::NotificationOwner::Goal { goal_id } = notification.source.owner()
+                && current_goal_id.as_deref() != Some(goal_id.as_str())
+            {
+                stale_goal_receipts
+                    .entry(goal_id.clone())
+                    .or_default()
+                    .push(notification.id.clone());
+            }
+        }
+        for (goal_id, notification_ids) in stale_goal_receipts {
+            if let Err(error) = self
+                .dismiss_notifications_durably(
+                    notification_ids,
+                    chat_state::NotificationDismissReason::GoalOwnedAutostart { goal_id },
+                )
+                .await
+            {
+                tracing::error!(%error, "failed to dismiss stale Goal-owned notifications");
+                return;
+            }
+        }
+
+        notifications.retain(|notification| {
+            matches!(
+                notification.source.owner(),
+                chat_state::NotificationOwner::Session
+            )
+        });
+        if notifications.is_empty() {
+            return;
+        }
         notifications.sort_by_key(|notification| {
             let priority = match notification.source {
                 chat_state::NotificationSource::MonitorProgress { .. } => 1u8,
@@ -593,26 +678,6 @@ impl SessionActor {
             };
             (priority, notification.received_seq)
         });
-
-        let current_goal_id = self.goal_tracker.lock().snapshot().and_then(|goal| {
-            (goal.status == crate::session::goal_tracker::GoalStatus::Active)
-                .then(|| goal.goal_id.clone())
-        });
-        // While a Goal is active, ordinary idle admission cannot consume any
-        // Goal-owned receipt. The matching Goal continuation consumes its own
-        // evidence; old-epoch evidence remains pending until there is no active
-        // Goal, preventing current Goal Behavior/context from observing it.
-        if current_goal_id.is_some() {
-            notifications.retain(|notification| {
-                matches!(
-                    notification.source.owner(),
-                    chat_state::NotificationOwner::Session
-                )
-            });
-        }
-        if notifications.is_empty() {
-            return;
-        }
         // Resume checkpoints are context for the next real turn, not a reason
         // to spend a model turn. If a terminal receipt is also present, fold
         // the checkpoint context into that already-necessary turn.
@@ -771,7 +836,7 @@ impl SessionActor {
         let blocks = Self::notification_blocks(
             &displayed_notifications,
             &payloads,
-            Some(&self.tool_context.task_output_tool_name),
+            self.tool_context.task_output_tool_name.as_deref(),
         );
         (notification_ids, blocks)
     }
@@ -1417,6 +1482,11 @@ mod tests {
                     .unwrap();
                 assert!(actor.goal_tracker.lock().complete());
                 actor.record_goal_owned_task_ids("goal-1", ["goal-build".to_owned()]);
+                // A completed Goal remains a durable receipt and cannot be
+                // replaced implicitly. Model the explicit clear before the
+                // next Goal epoch so the fixture exercises admitted-owner
+                // retention rather than the create-vs-existing guard.
+                actor.goal_tracker.lock().clear();
                 actor
                     .behavior
                     .lock()
@@ -1464,7 +1534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prior_goal_epoch_completion_waits_until_current_goal_stops() {
+    async fn prior_goal_epoch_completion_is_dismissed_without_a_model_turn() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) =
@@ -1510,27 +1580,96 @@ mod tests {
                         .chat_state_handle
                         .pending_notifications()
                         .await
-                        .expect("old Goal receipt remains pending")
+                        .expect("pending notifications")
                         .len(),
-                    1,
-                    "old Goal evidence must not autostart under the current Goal"
+                    0,
+                    "old Goal evidence must resolve without entering the current Goal"
                 );
                 assert!(matches!(
                     actor.chat_state_handle.get_conversation().await.as_slice(),
                     [sampling_types::ConversationItem::System(_)]
                 ));
-                assert!(actor.goal_tracker.lock().complete());
-
-                actor.clone().maybe_drain_notifications(completion_tx).await;
-
-                let state = actor.state.lock().await;
                 assert!(matches!(
-                    state.foreground.regular().map(|task| &task.origin),
-                    Some(crate::session::PromptOrigin::TaskCompleted { task_id })
-                        if task_id == "old-goal-build"
+                    actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .expect("Timeline events")
+                        .last()
+                        .map(|event| &event.kind),
+                    Some(chat_state::TimelineEventKind::Notification(
+                        chat_state::NotificationEvent::Dismissed {
+                            reason: chat_state::NotificationDismissReason::GoalOwnedAutostart {
+                                goal_id,
+                            },
+                            ..
+                        }
+                    )) if goal_id == "goal-1"
                 ));
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn stopped_or_cleared_goal_completion_never_autostarts_normal() {
+        for clear_goal in [false, true] {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let (actor, _gateway_rx) =
+                        crate::session::actor::tests::support::build_actor().await;
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .create_goal(
+                            "goal-1".into(),
+                            "finish the release".into(),
+                            None,
+                            "2026-08-25T00:00:00Z".into(),
+                        )
+                        .unwrap();
+                    if clear_goal {
+                        actor.goal_tracker.lock().clear();
+                    } else {
+                        assert!(
+                            actor
+                                .goal_tracker
+                                .lock()
+                                .pause(crate::session::goal_tracker::GoalPauseReason::User)
+                        );
+                    }
+                    actor
+                        .receive_notification(
+                            chat_state::NotificationSource::TaskCompleted {
+                                task_id: "goal-build".into(),
+                                task_kind: chat_state::NotificationTaskKind::Task,
+                                owner: chat_state::NotificationOwner::Goal {
+                                    goal_id: "goal-1".into(),
+                                },
+                            },
+                            chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                            "goal build completed".into(),
+                        )
+                        .await
+                        .expect("receive late Goal completion");
+                    let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                    actor.clone().maybe_drain_notifications(completion_tx).await;
+
+                    let state = actor.state.lock().await;
+                    assert!(state.foreground.is_idle());
+                    assert!(state.pending_inputs.is_empty());
+                    drop(state);
+                    assert!(
+                        actor
+                            .chat_state_handle
+                            .pending_notifications()
+                            .await
+                            .expect("pending notifications")
+                            .is_empty()
+                    );
+                })
+                .await;
+        }
     }
 
     #[tokio::test]

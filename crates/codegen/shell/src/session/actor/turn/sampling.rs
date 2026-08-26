@@ -3,7 +3,6 @@
 //! recovery, and per-response usage recording.
 use super::*;
 
-pub(super) const UNSUPPORTED_IMAGE_PLACEHOLDER: &str = "[Images omitted from this request: the active model does not support image input and no usable auxiliary description was available. The original images remain in session history.]";
 const IMAGE_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
 const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
@@ -251,78 +250,42 @@ impl SessionActor {
     }
 
     fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> Option<String> {
-        match (report.described_images, report.unavailable_images) {
-            (0, 0) => None,
-            (described, 0) => Some(format!(
-                "当前模型不支持图片输入；已在当前模型投影中用辅助描述替代 {described} 张图片，原图仍保留在会话中。"
-            )),
-            (0, unavailable) => Some(format!(
-                "当前模型不支持图片输入；辅助多模态模型不可用，当前模型投影省略了 {unavailable} 张图片，原图仍保留在会话中。"
-            )),
-            (described, unavailable) => Some(format!(
-                "当前模型不支持图片输入；当前模型投影以描述替代 {described} 张图片，并省略 {unavailable} 张无法描述的图片；原图仍保留在会话中。"
+        match report.described_images {
+            0 => None,
+            described => Some(format!(
+                "当前模型不支持图片输入；已用辅助描述永久替代模型上下文中的 {described} 张图片，原图仅保留为 Timeline 证据。"
             )),
         }
     }
 
-    /// Build and durably bind ImageShadows for one text-only model runtime.
-    /// Canonical images remain on Timeline Surface; only the matching request
-    /// projection consumes these descriptions/placeholders.
+    /// Build and durably bind irreversible ImageShadows after one text-only
+    /// runtime rejects image input. Canonical images remain as immutable
+    /// Timeline evidence; every later model request consumes the text shadow.
     async fn project_conversation_images_for_text_model_once(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
         use sampling_types::conversation::{ConversationImageSource, conversation_image_groups};
 
-        let sampling_config = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
-        let runtime = sampling_types::model_image_input_key(&sampling_config);
         let materialized = self
             .chat_state_handle
-            .materialize_timeline(self.session_info.id.to_string())
+            .materialize_branch_transcript(self.session_info.id.to_string())
             .await
             .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
-        let input_ref = materialized.input_ref.clone();
-        let active = materialized.active_image_projections.get(&runtime);
-        let conversation = materialized.surface;
-        let groups = conversation_image_groups(&conversation)
+        let conversation = &materialized.transcript;
+        let groups = conversation_image_groups(conversation)
             .into_iter()
-            .filter(|group| {
-                let Some(source) = materialized.surface_ids.get(group.item_index) else {
-                    return true;
-                };
-                !active
-                    .and_then(|shadows| shadows.get(source))
-                    .is_some_and(|shadow| {
-                        shadow.fingerprint == group.fingerprint
-                            && shadow.image_count == group.image_count()
-                    })
-            })
             .collect::<Vec<_>>();
         if groups.is_empty() {
             return Ok(chat_state::ImageProjectionReport::default());
         }
-        let mut shadows = groups
-            .iter()
-            .map(|group| chat_state::ImageShadow {
-                source: materialized.surface_ids[group.item_index],
-                fingerprint: group.fingerprint.clone(),
-                image_count: group.image_count(),
-                replacement: UNSUPPORTED_IMAGE_PLACEHOLDER.to_owned(),
-                provenance: chat_state::ImageShadowSource::Unavailable,
-            })
-            .collect::<Vec<_>>();
+        let mut shadows = Vec::with_capacity(groups.len());
 
         if let Some((client, model, auxiliary_key)) =
             self.resolve_image_description_route(rejected_key).await
         {
-            let (outline, current_query) =
-                crate::session::image_describe::build_read_context(&conversation);
             let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
-            for (group, shadow) in groups.iter().zip(shadows.iter_mut()) {
+            for group in &groups {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     tracing::warn!(
@@ -337,35 +300,81 @@ impl SessionActor {
                 };
                 let source_text = tools::util::truncate::truncate_middle(
                     group.source_text.as_ref(),
-                    crate::session::image_describe::CURRENT_QUERY_CAP,
+                    crate::session::image_describe::SOURCE_CONTEXT_CAP,
                 );
                 let source_context = format!(
-                    "{source_kind} message at conversation position {}; {} image attachment(s), in attachment order. Existing message text:\n{source_text}",
-                    group.item_index,
+                    "{source_kind} message with {} image attachment(s), in attachment order. Existing message text:\n{source_text}",
                     group.image_count(),
                 );
+                let source_ref = chat_state::TimelineRangeRef {
+                    timeline_id: materialized.source_ref.timeline_id.clone(),
+                    first_seq: materialized.transcript_ids[group.item_index].event.get(),
+                    last_seq: materialized.transcript_ids[group.item_index].event.get(),
+                };
+                let source = materialized.transcript_ids[group.item_index];
+                let source_key = format!("{}:{}", source.event.get(), source.item);
                 let cache_key = self.image_describe_cache.key_for_urls(
                     &group.image_urls,
-                    outline.as_deref(),
-                    &current_query,
                     &source_context,
-                    &group.fingerprint,
+                    &source_key,
+                    materialized.surface_revision,
                 );
                 if let Some(cached) = self.image_describe_cache.get(&cache_key) {
-                    shadow.replacement =
-                        crate::session::image_describe::render_image_description_block(
+                    shadows.push(chat_state::ImageShadow {
+                        source,
+                        fingerprint: group.fingerprint.clone(),
+                        image_count: group.image_count(),
+                        replacement: crate::session::image_describe::render_image_description_block(
                             &cached.description,
-                        );
-                    shadow.provenance = chat_state::ImageShadowSource::Description {
-                        result_ref: cached.result_ref,
-                    };
+                        ),
+                        provenance: chat_state::ImageShadowSource::Description {
+                            result_ref: cached.result_ref,
+                        },
+                    });
                     continue;
                 }
-                let prompt_text = crate::session::image_describe::build_describe_prompt(
-                    outline.as_deref(),
-                    &current_query,
-                    &source_context,
-                );
+                let prompt_text =
+                    crate::session::image_describe::build_describe_prompt(&source_context);
+                match crate::session::image_describe::recover_completed_description(
+                    self.session_directory.clone(),
+                    self.session_info.id.to_string(),
+                    materialized.surface_revision,
+                    source,
+                    prompt_text.clone(),
+                )
+                .await
+                {
+                    Ok(Some(recovered)) => {
+                        self.image_describe_cache.insert(
+                            cache_key,
+                            recovered.description.clone(),
+                            recovered.result_ref.clone(),
+                        );
+                        shadows.push(chat_state::ImageShadow {
+                            source,
+                            fingerprint: group.fingerprint.clone(),
+                            image_count: group.image_count(),
+                            replacement:
+                                crate::session::image_describe::render_image_description_block(
+                                    &recovered.description,
+                                ),
+                            provenance: chat_state::ImageShadowSource::Description {
+                                result_ref: recovered.result_ref,
+                            },
+                        });
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            source_revision = materialized.surface_revision,
+                            source_event = source.event.get(),
+                            source_item = source.item,
+                            "failed to inspect durable image-description Sidebands"
+                        );
+                    }
+                }
                 let request = crate::session::image_describe::build_describe_request(
                     &model,
                     prompt_text.clone(),
@@ -375,7 +384,7 @@ impl SessionActor {
                     .begin_sideband(
                         chat_state::SidebandPurpose::ImageDescription,
                         prompt_text,
-                        SidebandSource::Frozen(vec![input_ref.clone()]),
+                        SidebandSource::Frozen(vec![source_ref.clone()]),
                         chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                         chat_state::SidebandRoute {
                             model: model.clone(),
@@ -395,10 +404,10 @@ impl SessionActor {
                     .attempt_selected(
                         &request,
                         client.api_backend(),
-                        vec![input_ref.clone()],
+                        vec![source_ref.clone()],
                         Some(materialized.surface_revision),
-                        vec![shadow.source],
-                        vec![shadow.source],
+                        vec![source],
+                        vec![source],
                         "image-group",
                         None,
                     )
@@ -434,7 +443,7 @@ impl SessionActor {
                                 let usage = sideband_usage(&response);
                                 let finish = sideband_finish(&response);
                                 let result_ref = sideband
-                                    .complete(raw, None, usage, finish, Vec::new())
+                                    .complete(raw, None, usage, finish, vec![source_ref.clone()])
                                     .await
                                     .map_err(|error| {
                                         crate::session::image_describe::DescribeError::Sideband(
@@ -487,12 +496,16 @@ impl SessionActor {
                 .await;
                 match described {
                     Ok((description, result_ref)) => {
-                        shadow.replacement =
-                            crate::session::image_describe::render_image_description_block(
-                                &description,
-                            );
-                        shadow.provenance =
-                            chat_state::ImageShadowSource::Description { result_ref };
+                        shadows.push(chat_state::ImageShadow {
+                            source,
+                            fingerprint: group.fingerprint.clone(),
+                            image_count: group.image_count(),
+                            replacement:
+                                crate::session::image_describe::render_image_description_block(
+                                    &description,
+                                ),
+                            provenance: chat_state::ImageShadowSource::Description { result_ref },
+                        });
                     }
                     Err(crate::session::image_describe::DescribeError::Sampling(info))
                         if is_image_input_unsupported(&info, group.image_count()) =>
@@ -526,12 +539,72 @@ impl SessionActor {
             }
         }
 
+        let unresolved = groups
+            .iter()
+            .map(|group| group.image_count())
+            .sum::<usize>()
+            .saturating_sub(shadows.iter().map(|shadow| shadow.image_count).sum());
+        if unresolved > 0 {
+            return Err(chat_state::TimelineWriteError::ImageDescriptionUnavailable(
+                format!(
+                    "{unresolved} image(s) remain untranslated; refusing a lossy permanent shadow"
+                ),
+            ));
+        }
+
+        let shadow_sources = shadows
+            .iter()
+            .map(|shadow| shadow.source)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut projected_tool_calls = std::collections::BTreeMap::<
+            chat_state::SurfaceId,
+            std::collections::BTreeSet<String>,
+        >::new();
+        for group in &groups {
+            let source = materialized.transcript_ids[group.item_index];
+            if !shadow_sources.contains(&source) {
+                continue;
+            }
+            let Some(tool_call) = group.tool_call.as_ref() else {
+                continue;
+            };
+            let call_source = materialized.transcript_ids[tool_call.item_index];
+            projected_tool_calls
+                .entry(call_source)
+                .or_default()
+                .insert(tool_call.tool_call_id.clone());
+        }
+        let tool_calls = projected_tool_calls
+            .into_iter()
+            .map(|(source, tool_call_ids)| {
+                let assistant_index = materialized
+                    .transcript_ids
+                    .iter()
+                    .position(|item_source| *item_source == source)
+                    .expect("image-producing assistant source came from this transcript");
+                let carrier_sources =
+                    sampling_types::conversation::assistant_response_carrier_indices(
+                        &materialized.transcript,
+                        assistant_index,
+                    )
+                    .into_iter()
+                    .map(|index| materialized.transcript_ids[index])
+                    .collect();
+                chat_state::ImageToolCallShadow {
+                    source,
+                    tool_call_ids: tool_call_ids.into_iter().collect(),
+                    carrier_sources,
+                }
+            })
+            .collect();
+
         let report = self
             .chat_state_handle
             .record_image_projection_and_ack(chat_state::ImageProjectionEvent {
-                runtime,
+                trigger_runtime: rejected_key.clone(),
                 source_revision: materialized.surface_revision,
                 shadows,
+                tool_calls,
             })
             .await?;
         if let Some(message) = Self::image_recovery_notification(report) {
@@ -649,18 +722,6 @@ impl SessionActor {
         } else {
             self.behavior.lock().behavior()
         };
-        if tool_behavior == tool_types::BehaviorId::DeepResearch {
-            // Deep Research foreground keeps local observation tools plus the
-            // explicitly trusted web egress adapter. Remote requests carry W
-            // under Solaris emission semantics; treating WebFetch as a file
-            // mutation here would regress the behavior's actual purpose.
-            defs.retain(|definition| {
-                bridge.max_access(&definition.function.name)
-                    == Some(tool_protocol::ToolAccess::Read)
-                    || bridge.tool_kind(&definition.function.name)
-                        == Some(tools::types::tool::ToolKind::WebFetch)
-            });
-        }
         let live_behavior = self.behavior.lock().behavior();
         if tool_behavior != tool_types::BehaviorId::Workflow
             || live_behavior != tool_types::BehaviorId::Workflow
@@ -905,16 +966,21 @@ impl SessionActor {
         judgment: &workspace::permission::PermissionJudgmentRequest,
         input: crate::config::SubagentClassifierInput,
     ) -> Vec<ConversationItem> {
-        let surface = self.chat_state_handle.get_conversation().await;
-        self.child_permission_judgment_items_from_surface(judgment, input, surface)
+        let direct_user_inputs = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+            .map(|materialized| materialized.direct_user_inputs)
+            .unwrap_or_default();
+        self.child_permission_judgment_items_from_evidence(judgment, input, direct_user_inputs)
             .await
     }
 
-    async fn child_permission_judgment_items_from_surface(
+    async fn child_permission_judgment_items_from_evidence(
         &self,
         judgment: &workspace::permission::PermissionJudgmentRequest,
         input: crate::config::SubagentClassifierInput,
-        surface: Vec<ConversationItem>,
+        direct_user_inputs: Vec<ConversationItem>,
     ) -> Vec<ConversationItem> {
         if input == crate::config::SubagentClassifierInput::RequestOnly {
             let mut request_only = judgment.clone();
@@ -939,10 +1005,7 @@ impl SessionActor {
             workspace::permission::build_primary_context_judgment_message(judgment);
         let policy = workspace::permission::primary_context_judgment_system_prompt(judgment);
         let mut items = vec![ConversationItem::system(policy)];
-        items.extend(surface.into_iter().filter(|item| match item {
-            ConversationItem::User(user) => user.permission_evidence.is_some(),
-            _ => false,
-        }));
+        items.extend(direct_user_inputs);
 
         // Apply the normal 85%-with-headroom budget to the snapshot copy only.
         // Keep the dedicated authorization policy, then spend the remainder
@@ -1117,15 +1180,15 @@ impl SessionActor {
                                         })?,
                                 )
                             };
-                            let surface = materialized
+                            let direct_user_inputs = materialized
                                 .as_ref()
-                                .map(|value| value.surface.clone())
+                                .map(|value| value.direct_user_inputs.clone())
                                 .unwrap_or_default();
                             let items = session
-                                .child_permission_judgment_items_from_surface(
+                                .child_permission_judgment_items_from_evidence(
                                     &judgment,
                                     classifier_input,
-                                    surface,
+                                    direct_user_inputs,
                                 )
                                 .await;
                             let refs = materialized
@@ -1481,28 +1544,50 @@ impl SessionActor {
             && let Some(key) = request_image_input_key
         {
             let model = key.model().to_string();
-            let first_rejection = self
-                .record_unsupported_model_image_input(key.clone())
-                .await
-                .map_err(|persist_error| {
-                    acp::Error::internal_error().data(format!(
+            let first_rejection = match self.record_unsupported_model_image_input(key.clone()).await
+            {
+                Ok(first_rejection) => first_rejection,
+                Err(persist_error) => {
+                    let message = format!(
                         "failed to persist text-only model capability: {persist_error}; sampling was not resumed"
+                    );
+                    self.log_terminal_failure(
+                        "image_capability_persistence_failed",
+                        error.status_code,
+                        &message,
+                    );
+                    self.send_grow_notification(GrowSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Failed {
+                            error_type: "image_capability_persistence_failed".to_owned(),
+                            message: message.clone(),
+                        },
                     ))
-                })?;
+                    .await;
+                    return Err(acp::Error::internal_error().data(message));
+                }
+            };
             tracing::warn!(
                 model,
                 request_image_count,
                 first_rejection,
-                "model explicitly rejected image input; installing target-model ImageShadows"
+                "model explicitly rejected image input; installing irreversible ImageShadows"
             );
-            self
-                .project_conversation_images_for_text_model(&key)
-                .await
-                .map_err(|projection_error| {
-                    acp::Error::internal_error().data(format!(
-                        "failed to persist text-only image projection: {projection_error}; sampling was not resumed"
-                    ))
-                })?;
+            if let Err(projection_error) =
+                self.project_conversation_images_for_text_model(&key).await
+            {
+                let message = format!(
+                    "failed to persist text-only image projection: {projection_error}; sampling was not resumed"
+                );
+                self.log_terminal_failure("image_projection_failed", error.status_code, &message);
+                self.send_grow_notification(GrowSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Failed {
+                        error_type: "image_projection_failed".to_owned(),
+                        message: message.clone(),
+                    },
+                ))
+                .await;
+                return Err(acp::Error::internal_error().data(message));
+            }
             return Ok(SamplerFailureRecovery::ImageInputUnsupportedAndResubmit);
         }
         if self.tool_context.task_output_token_budget.is_some() {
@@ -1945,6 +2030,7 @@ impl SessionActor {
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
         response_model_id: Option<String>,
+        admitted_goal_id: Option<&str>,
     ) {
         if let Some(ref u) = response.usage {
             self.tool_context
@@ -1959,7 +2045,11 @@ impl SessionActor {
                 response.cost_usd_ticks,
             );
             let goal_charge = crate::session::goal_tracker::model_usage_goal_tokens(u);
-            if self.goal_tracker.lock().account_model_tokens(goal_charge) {
+            if admitted_goal_id.is_some_and(|goal_id| {
+                self.goal_tracker
+                    .lock()
+                    .account_model_tokens(goal_id, goal_charge)
+            }) {
                 // Goal usage is durable Control bookkeeping. It shares the
                 // provider usage transaction but never derives from context
                 // pressure, which compaction and shadow projection may lower.

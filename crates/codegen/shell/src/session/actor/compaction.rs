@@ -235,6 +235,13 @@ impl SessionActor {
             return Err(acp::Error::internal_error().data("compaction already in progress"));
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
+        let projected_images = self.project_images_for_known_text_model().await?;
+        if projected_images.total_images() > 0 {
+            tracing::info!(
+                described_images = projected_images.described_images,
+                "installed irreversible ImageShadows before manual compaction"
+            );
+        }
         let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("pre_tokens", total_tokens as i64);
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
@@ -733,21 +740,21 @@ impl SessionActor {
         enum InputStage {
             Verbatim,
             VerbatimFitted,
-            Lossy,
+            Simplified,
         }
         impl InputStage {
             fn as_str(self) -> &'static str {
                 match self {
                     Self::Verbatim => "verbatim",
                     Self::VerbatimFitted => "verbatim_fitted",
-                    Self::Lossy => "lossy",
+                    Self::Simplified => "simplified",
                 }
             }
         }
         let mut input_stage = if verbatim_input_enabled {
             InputStage::Verbatim
         } else {
-            InputStage::Lossy
+            InputStage::Simplified
         };
         let estimated_input_tokens = chat_state::estimate_conversation_tokens(&simplified_messages);
         let auto_trigger = matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
@@ -840,8 +847,8 @@ impl SessionActor {
                     if context_overflow {
                         let next_stage = match input_stage {
                             InputStage::Verbatim => Some(InputStage::VerbatimFitted),
-                            InputStage::VerbatimFitted => Some(InputStage::Lossy),
-                            InputStage::Lossy => None,
+                            InputStage::VerbatimFitted => Some(InputStage::Simplified),
+                            InputStage::Simplified => None,
                         };
                         if let Some(stage) = next_stage {
                             input_overflow_rejections += 1;
@@ -875,13 +882,13 @@ impl SessionActor {
                                         verbatim, budget,
                                     )
                                 }
-                                InputStage::Lossy => {
-                                    let lossy_budget = context_window.saturating_mul(7) / 10;
+                                InputStage::Simplified => {
+                                    let simplified_budget = context_window.saturating_mul(7) / 10;
                                     chat_state::compaction_utils::fit_conversation_to_budget(
                                         chat_state::compaction_utils::prepare_conversation_for_summarization(
                                             summary_source.clone(),
                                         ),
-                                        lossy_budget,
+                                        simplified_budget,
                                     )
                                 }
                                 InputStage::Verbatim => {
@@ -1823,7 +1830,7 @@ impl SessionActor {
     )]
     pub(crate) async fn run_compact_only(
         self: &Arc<Self>,
-        trigger_info: AutoCompactTriggerInfo,
+        mut trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         {
@@ -1847,6 +1854,31 @@ impl SessionActor {
             return Ok(());
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
+        let projected_images = self.project_images_for_known_text_model().await?;
+        if projected_images.total_images() > 0 {
+            tracing::info!(
+                described_images = projected_images.described_images,
+                "installed irreversible ImageShadows before auto compaction"
+            );
+            let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
+            let Some(config) = self.chat_state_handle.get_sampling_config().await else {
+                return Err(acp::Error::internal_error()
+                    .data("compaction sampling configuration is unavailable"));
+            };
+            let Some(updated) = self.should_auto_compact(
+                projected_tokens,
+                config.context_window,
+                trigger_info.source,
+            ) else {
+                tracing::info!(
+                    projected_tokens,
+                    context_window = config.context_window.get(),
+                    "image projection resolved context pressure; skipping summary compaction"
+                );
+                return Ok(());
+            };
+            trigger_info = updated;
+        }
         let tokens_before = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
         ::diagnostics::session_ctx::log_event(::diagnostics::events::AutoCompactFired {

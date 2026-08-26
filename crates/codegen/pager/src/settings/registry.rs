@@ -246,7 +246,6 @@ pub struct PagerLocalSnapshot {
     /// Whether the active session exposes the Workflow tool. Used to hide the
     /// Workflow Behavior rather than offering an unavailable mode.
     pub workflows_available: bool,
-    pub deep_research_available: bool,
     pub goal_available: bool,
     /// `[cli].show_tips` mirror. `None` = no TOML override → default `false`.
     pub show_tips: Option<bool>,
@@ -279,7 +278,6 @@ impl Default for PagerLocalSnapshot {
             available_models: Vec::new(),
             behavior_mode: tools::types::BehaviorId::Normal,
             workflows_available: false,
-            deep_research_available: false,
             goal_available: false,
             show_tips: None,
             auto_update: None,

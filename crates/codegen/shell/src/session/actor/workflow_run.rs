@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::SessionActor;
@@ -51,126 +50,18 @@ impl SessionActor {
         let states = self.workflow_tracker().await.lock().list();
         for state in states
             .iter()
-            .filter(|state| !state.private && state.status.is_completion_reportable())
+            .filter(|state| state.status.is_completion_reportable())
         {
             self.admit_public_workflow_completion(state).await?;
         }
         Ok(())
     }
 
-    pub(super) async fn finish_restored_deep_research_if_terminal(&self) -> Result<(), String> {
-        let Some(run_id) = self
-            .behavior
-            .lock()
-            .deep_research_run_id()
-            .map(str::to_owned)
-        else {
-            return Ok(());
-        };
-        let state = self.workflow_tracker().await.lock().get(&run_id);
-        let Some(state) = state.filter(|state| state.status.is_completion_reportable()) else {
-            return Ok(());
-        };
-        let Some(outcome) = deep_research_outcome_from_state(&state) else {
-            return Ok(());
-        };
-        self.finish_deep_research_run(&state, outcome).await
-    }
-
-    pub(crate) async fn launch_deep_research(
-        self: &Arc<Self>,
-        query: String,
-    ) -> Result<String, String> {
-        if query.trim().is_empty() {
-            return Err("Deep Research is waiting for a non-empty research query.".to_string());
-        }
-        if self.behavior.lock().deep_research_run_id().is_some() {
-            return Err(
-                "Deep Research is already running. Manage the current run or switch behavior first."
-                    .to_string(),
-            );
-        }
-        let resolved = crate::session::workflow::registry::resolve_deep_research()
-            .map_err(|error| format!("Deep Research workflow unavailable: {error}"))?;
-        let spec = crate::session::workflow::manager::LaunchSpec {
-            objective: query.clone(),
-            args: serde_json::json!({ "query": query }),
-            agent_budget: None,
-            max_concurrency: None,
-            resume_run_id: None,
-        };
-        let (run_id, outcome_rx) = self
-            .workflow_manager
-            .lock()
-            .await
-            .launch(resolved, spec)
-            .await
-            .map_err(|error| format!("Could not start Deep Research: {error}"))?;
-        if !self
-            .behavior
-            .lock()
-            .attach_deep_research_run(run_id.clone())
-        {
-            let _ = self.workflow_manager.lock().await.cancel(&run_id).await;
-            return Err("Deep Research behavior changed before the run could start.".to_string());
-        }
-        let behavior = self.behavior.lock().snapshot();
-        let goal = self.goal_tracker.lock().snapshot().cloned();
-        if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
-            self.behavior.lock().clear_deep_research_run();
-            let _ = self.workflow_manager.lock().await.cancel(&run_id).await;
-            return Err(format!(
-                "Deep Research was cancelled because its ownership could not be persisted: {error}"
-            ));
-        }
-        // WorkflowManager delivers the terminal outcome through the session
-        // mailbox. Dropping this secondary observer keeps all Behavior
-        // transitions serialized on SessionActor.
-        drop(outcome_rx);
-        self.send_available_commands_update().await;
-        Ok(run_id)
-    }
-
-    fn deep_research_report_artifact_path(&self, run_id: &str) -> Option<PathBuf> {
-        let path = self
-            .session_dir
-            .join("workflows")
-            .join(run_id)
-            .join("scratch")
-            .join("report.md");
-        let metadata = std::fs::symlink_metadata(&path).ok()?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return None;
-        }
-        std::fs::canonicalize(path).ok()
-    }
-
-    pub(super) async fn admit_deep_research_report(
-        &self,
-        state: &crate::session::workflow::tracker::WorkflowRunState,
-        outcome: workflow::WorkflowOutcome,
-    ) -> Result<(), String> {
-        if matches!(outcome, workflow::WorkflowOutcome::Paused { .. }) {
-            return Ok(());
-        }
-        let Some((source, source_version)) =
-            self.unresolved_workflow_completion_identity(state).await?
-        else {
-            return Ok(());
-        };
-        let artifact_path = self.deep_research_report_artifact_path(&state.run_id);
-        let report =
-            deep_research_terminal_report(&state.objective, &outcome, artifact_path.as_deref());
-        self.receive_notification(source, source_version, report)
-            .await
-            .map(|_| ())
-    }
-
     pub(super) async fn admit_public_workflow_completion(
         &self,
         state: &crate::session::workflow::tracker::WorkflowRunState,
     ) -> Result<(), String> {
-        if state.private || !state.status.is_completion_reportable() {
+        if !state.status.is_completion_reportable() {
             return Ok(());
         }
         let Some((source, source_version)) =
@@ -192,37 +83,6 @@ impl SessionActor {
         .map(|_| ())
     }
 
-    pub(super) async fn finish_deep_research_run(
-        &self,
-        state: &crate::session::workflow::tracker::WorkflowRunState,
-        outcome: workflow::WorkflowOutcome,
-    ) -> Result<(), String> {
-        if matches!(outcome, workflow::WorkflowOutcome::Paused { .. }) {
-            return Ok(());
-        }
-        self.admit_deep_research_report(state, outcome).await?;
-        let owned = self.behavior.lock().deep_research_run_id() == Some(state.run_id.as_str());
-        if !owned {
-            return Ok(());
-        }
-        let goal = self.goal_tracker.lock().snapshot().cloned();
-        self.persist_behavior_transition_durably(
-            crate::session::behavior::BehaviorSnapshot::normal(),
-            goal,
-        )
-        .await
-        .map_err(|error| format!("Deep Research Behavior transition was not durable: {error}"))?;
-        {
-            let mut behavior = self.behavior.lock();
-            behavior.clear_deep_research_run();
-            behavior.select_behavior(tool_types::BehaviorId::Normal);
-        }
-        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-            tools::types::BehaviorId::Normal.as_id(),
-        ));
-        self.send_available_commands_update().await;
-        Ok(())
-    }
     pub(crate) fn named_workflow_snapshot(
         &self,
     ) -> (
@@ -276,6 +136,13 @@ impl SessionActor {
     }
 
     pub(crate) async fn launch_named_workflow(self: &Arc<Self>, name: &str, input: &str) -> String {
+        // Command visibility is presentation, not authorization. Historical
+        // Runs intentionally keep `/workflow-run` management available, so a
+        // hand-written launch must still pass the session feature gate here.
+        if !self.background_workflows_enabled {
+            return "Background workflows are disabled for this session ([workflows] enabled = false / GROW_WORKFLOWS=0 / remote flag)."
+                .into();
+        }
         // This lock is also the special-Behavior admission gate. Recheck the
         // Behavior after acquiring it: a slash command may have been resolved
         // while a concurrent Behavior switch was still committing.
@@ -409,7 +276,7 @@ impl SessionActor {
             );
         }
 
-        const USAGE: &str = "Usage: /workflow <name> [args] to launch a saved workflow, or \
+        const USAGE: &str = "Usage: /workflow-run <name> [args] to launch a saved workflow, or \
                              /workflow-run <op> [name] to manage \
                              a run — ops: pause, resume, stop. Publish session drafts through the Workflow workspace with an explicit Project or User scope.";
         if op.is_empty() {
@@ -422,9 +289,7 @@ impl SessionActor {
             let all: Vec<_> = tracker
                 .list()
                 .iter()
-                .filter(|r| {
-                    !r.private && (r.run_id.starts_with(run_id) || r.name.starts_with(run_id))
-                })
+                .filter(|r| r.run_id.starts_with(run_id) || r.name.starts_with(run_id))
                 .map(|r| (r.run_id.clone(), r.status, r.name.clone()))
                 .collect();
             narrow_run_matches(all, run_id, op)
@@ -441,7 +306,7 @@ impl SessionActor {
                     .map(|(_, status, name)| format!("  {name} ({})", status.as_str()))
                     .collect();
                 return format!(
-                    "Several runs could be '{op}' — pick one by name:\n{}\n(/workflow {op} <name>)",
+                    "Several runs could be '{op}' — pick one by name:\n{}\n(/workflow-run {op} <name>)",
                     rows.join("\n")
                 );
             }
@@ -465,8 +330,6 @@ impl SessionActor {
                         status.as_str()
                     );
                 }
-                // Private Deep Research runs were filtered out above and are
-                // controlled only by the Deep Research Behavior owner.
                 if let Err(error) = manager.cancel(&full_id).await {
                     return format!("Could not stop '{name}': {error}");
                 }
@@ -621,11 +484,10 @@ impl SessionActor {
         }
         lines.push("Runs:".into());
         let tracker = self.workflow_tracker().await;
-        let public_runs: Vec<_> = tracker
+        let runs: Vec<_> = tracker
             .lock()
             .list()
             .iter()
-            .filter(|run| !run.private)
             .map(|run| {
                 let provenance = run
                     .definition_scope
@@ -642,131 +504,13 @@ impl SessionActor {
                 )
             })
             .collect();
-        if public_runs.is_empty() {
+        if runs.is_empty() {
             lines.push("  (none)".into());
         } else {
-            lines.extend(public_runs);
+            lines.extend(runs);
         }
         lines.join("\n")
     }
-}
-
-pub(super) fn deep_research_outcome_from_state(
-    state: &crate::session::workflow::tracker::WorkflowRunState,
-) -> Option<workflow::WorkflowOutcome> {
-    use crate::session::workflow::tracker::WorkflowRunStatus;
-    Some(match state.status {
-        WorkflowRunStatus::Complete => {
-            let summary = state.result_summary.clone().unwrap_or_else(|| {
-                "The process ended after completion, but no persisted report body was available."
-                    .to_string()
-            });
-            let report = summary
-                .split_once("\n\n_Full report: ")
-                .map_or(summary.as_str(), |(report, _)| report)
-                .to_string();
-            let status = if report.contains("**Status: Partial**") {
-                "partial"
-            } else {
-                "verified"
-            };
-            workflow::WorkflowOutcome::Completed {
-                result: serde_json::json!({
-                    "report": report,
-                    "status": status,
-                    "path": "scratch/report.md",
-                }),
-            }
-        }
-        WorkflowRunStatus::Cancelled => workflow::WorkflowOutcome::Cancelled,
-        WorkflowRunStatus::BudgetLimited => workflow::WorkflowOutcome::BudgetExceeded {
-            message: state
-                .pause_message
-                .clone()
-                .unwrap_or_else(|| "The research agent budget was exhausted.".to_string()),
-        },
-        WorkflowRunStatus::Interrupted | WorkflowRunStatus::Failed => {
-            workflow::WorkflowOutcome::Failed {
-                error: state.pause_message.clone().unwrap_or_else(|| {
-                    "The process restarted before the research run reached a durable terminal report."
-                        .to_string()
-                }),
-            }
-        }
-        WorkflowRunStatus::Active
-        | WorkflowRunStatus::UserPaused
-        | WorkflowRunStatus::BackOffPaused
-        | WorkflowRunStatus::NoProgressPaused
-        | WorkflowRunStatus::InfraPaused
-        | WorkflowRunStatus::Blocked => return None,
-    })
-}
-
-pub(super) fn deep_research_terminal_report(
-    query: &str,
-    outcome: &workflow::WorkflowOutcome,
-    artifact_path: Option<&Path>,
-) -> String {
-    use workflow::WorkflowOutcome;
-    let artifact = artifact_path.map_or_else(
-        || "No complete report artifact was produced for this outcome.".to_string(),
-        |path| format!("`{}`", path.display()),
-    );
-    if let WorkflowOutcome::Completed { result } = outcome
-        && let Some(report) = result.get("report").and_then(serde_json::Value::as_str)
-        && !report.trim().is_empty()
-    {
-        let status = match result.get("status").and_then(serde_json::Value::as_str) {
-            Some("verified") => "success",
-            Some("partial") if report.contains("None of the candidate claims survived") => {
-                "verification failed"
-            }
-            Some("partial") => "partial",
-            Some(other) => other,
-            None => "completed",
-        };
-        return format!(
-            "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n{report}\n\n## Full report\n\n{artifact}\n\n## Termination reason\n\nThe research workflow reached a terminal result."
-        );
-    }
-    let (status, reason, findings) = match outcome {
-        WorkflowOutcome::Completed { result } => (
-            "completed",
-            "The research workflow completed without a dedicated report field.",
-            serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
-        ),
-        WorkflowOutcome::BudgetExceeded { message } => (
-            "budget exhausted",
-            message.as_str(),
-            "No additional verified findings were produced.".to_string(),
-        ),
-        WorkflowOutcome::Cancelled => (
-            "cancelled",
-            "The research run was cancelled by the user or by a confirmed Behavior switch.",
-            "Only findings already delivered before cancellation should be relied on.".to_string(),
-        ),
-        WorkflowOutcome::Failed { error } => {
-            let status = if error.contains("restart") {
-                "interrupted"
-            } else {
-                "runtime failure"
-            };
-            (
-                status,
-                error.as_str(),
-                "The runtime failed before it could produce a complete verified report."
-                    .to_string(),
-            )
-        }
-        WorkflowOutcome::Paused { message, .. } => (
-            "paused",
-            message.as_str(),
-            "The run remains resumable; this is not a terminal research report.".to_string(),
-        ),
-    };
-    format!(
-        "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n## Investigation and verification\n\n{findings}\n\n## Limitations\n\nThis is a terminal fallback report generated from the workflow outcome; no additional independently verified evidence was available at termination.\n\n## Full report\n\n{artifact}\n\n## Termination reason\n\n{reason}"
-    )
 }
 
 pub(crate) fn parse_named_workflow_args(
@@ -830,9 +574,7 @@ fn narrow_run_matches(mut all: Vec<RunMatch>, selector: &str, op: &str) -> Vec<R
 
 #[cfg(test)]
 mod run_match_tests {
-    use super::{
-        deep_research_terminal_report, narrow_run_matches, workflow_completion_source_version,
-    };
+    use super::{narrow_run_matches, workflow_completion_source_version};
     use crate::session::workflow::tracker::{WorkflowRunStatus, WorkflowTracker};
 
     fn run(id: &str, name: &str, status: WorkflowRunStatus) -> super::RunMatch {
@@ -860,6 +602,12 @@ mod run_match_tests {
             Vec::new(),
             None,
             None,
+            crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
         );
         let first = workflow_completion_source_version(&state);
         state.revision = state.revision.saturating_add(7);
@@ -880,6 +628,16 @@ mod run_match_tests {
                     Vec::new(),
                     None,
                     None,
+                    crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                        "test-model",
+                        None,
+                        sampling_types::ModelImageInputKey::new(
+                            "test-model",
+                            "responses",
+                            "test-endpoint",
+                        ),
+                    )
+                    .unwrap(),
                 );
                 state.status = WorkflowRunStatus::Complete;
                 let source = chat_state::NotificationSource::WorkflowCompleted {
@@ -967,60 +725,52 @@ mod run_match_tests {
         assert_eq!(narrow_run_matches(all, "", "stop").len(), 2);
     }
 
-    #[test]
-    fn deep_research_report_preserves_partial_and_verification_failed_statuses() {
-        let partial = deep_research_terminal_report(
-            "query",
-            &workflow::WorkflowOutcome::Completed {
-                result: serde_json::json!({
-                    "status": "partial",
-                    "report": "Some verified material with coverage gaps."
-                }),
-            },
-            Some(std::path::Path::new("/tmp/report.md")),
-        );
-        assert!(partial.contains("## Status\n\npartial"));
-        assert!(partial.contains("## Full report\n\n`/tmp/report.md`"));
+    #[tokio::test]
+    async fn workflow_run_help_uses_the_host_command_namespace() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Workflow);
 
-        let failed = deep_research_terminal_report(
-            "query",
-            &workflow::WorkflowOutcome::Completed {
-                result: serde_json::json!({
-                    "status": "partial",
-                    "report": "None of the candidate claims survived independent source verification."
-                }),
-            },
-            None,
-        );
-        assert!(failed.contains("## Status\n\nverification failed"));
-    }
+                let usage = actor.manage_workflow_run("", "").await;
+                assert!(usage.contains("/workflow-run <name> [args]"), "{usage}");
+                assert!(!usage.contains("/workflow <name>"), "{usage}");
 
-    #[test]
-    fn every_deep_research_terminal_fallback_has_the_report_contract() {
-        let outcomes = [
-            workflow::WorkflowOutcome::BudgetExceeded {
-                message: "budget".into(),
-            },
-            workflow::WorkflowOutcome::Cancelled,
-            workflow::WorkflowOutcome::Failed {
-                error: "process restart interrupted the run".into(),
-            },
-            workflow::WorkflowOutcome::Failed {
-                error: "runtime unavailable".into(),
-            },
-        ];
-        for outcome in outcomes {
-            let report = deep_research_terminal_report("query", &outcome, None);
-            for heading in [
-                "## Status",
-                "## Query",
-                "## Investigation and verification",
-                "## Limitations",
-                "## Full report",
-                "## Termination reason",
-            ] {
-                assert!(report.contains(heading), "missing {heading} in {report}");
-            }
-        }
+                let tracker = actor.workflow_tracker().await;
+                let mut tracker = tracker.lock();
+                for (run_id, name) in [("wf-a", "alpha"), ("wf-b", "beta")] {
+                    tracker.start_run(
+                        run_id.into(),
+                        name.into(),
+                        "verify command help".into(),
+                        Vec::new(),
+                        None,
+                        None,
+                        crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                            "test-model",
+                            None,
+                            sampling_types::ModelImageInputKey::new(
+                                "test-model",
+                                "responses",
+                                "test-endpoint",
+                            ),
+                        )
+                        .unwrap(),
+                    );
+                }
+                drop(tracker);
+
+                let ambiguity = actor.manage_workflow_run("", "stop").await;
+                assert!(
+                    ambiguity.contains("/workflow-run stop <name>"),
+                    "{ambiguity}"
+                );
+                assert!(!ambiguity.contains("/workflow stop"), "{ambiguity}");
+            })
+            .await;
     }
 }

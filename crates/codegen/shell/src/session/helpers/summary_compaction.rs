@@ -15,7 +15,7 @@
 //!   programmatic rejection into the next Sideband attempt, and emits the
 //!   `CompactionRetryDegraded` event.
 //!
-//! The verbatim → fitted → lossy **input ladder** and auto-compaction
+//! The verbatim → fitted → simplified **input ladder** and auto-compaction
 //! suppression stay in L5 (`compaction.rs`), driven by the
 //! `context_overflow` / `deterministic` flags on
 //! [`SummaryError`](compaction::SummaryError).

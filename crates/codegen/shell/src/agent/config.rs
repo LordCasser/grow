@@ -1641,8 +1641,8 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Background workflows (`workflow` tool, `.grow/workflows/*.rhai`,
-    /// `/deep-research`, host-owned `/goal` driver). Default ON: deployments
+    /// Background workflows (`workflow` tool and `.grow/workflows/*.rhai`).
+    /// Default ON: deployments
     /// that never receive remote settings still get workflows; `Some(false)`
     /// remote / config / env remains a kill-switch.
     pub(crate) fn resolve_workflows(&self) -> Resolved<bool> {

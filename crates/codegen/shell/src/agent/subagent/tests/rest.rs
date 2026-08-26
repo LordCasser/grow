@@ -339,7 +339,13 @@ fn resume_source_worktree_reuse() {
         ),
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: None,
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     let worktree = source_with_worktree.worktree_path.clone();
     assert_eq!(
@@ -356,7 +362,13 @@ fn resume_source_worktree_reuse() {
         worktree_path: None,
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: None,
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     assert!(
             source_without_worktree.worktree_path.is_none(),
@@ -399,7 +411,13 @@ fn resume_inherited_cwd_requires_existing_non_worktree_dir() {
         worktree_path: None,
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: None,
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     assert_eq!(
             resume_inherited_cwd(Some(&present)),
@@ -429,7 +447,13 @@ fn select_override_cwd_resume_never_falls_through_to_request_cwd() {
         ),
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: None,
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     assert_eq!(select_override_cwd(Some(&source), Some("/x")), None);
 }
@@ -532,7 +556,13 @@ fn resume_rejects_conflicting_subagent_type() {
         worktree_path: None,
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: None,
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     let request_type = "explore";
     assert_ne!(
@@ -549,6 +579,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                 subagent_id: "sa-resume".into(),
                 child_session_id: "child-resume".into(),
+                security_parent_session_id: "parent-session".into(),
                 subagent_type: "general-purpose".into(),
                 description: "continue work".into(),
                 prompt: "finish implementation".into(),
@@ -566,6 +597,12 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
                 child_cwd: "/workspace/project".into(),
                 worktree_path: Some("/tmp/worktree".into()),
                 effective_model_id: "grow-3".into(),
+                model_transport_key: sampling_types::ModelImageInputKey::new(
+                    "grow-3",
+                    "responses",
+                    "test-endpoint",
+                ),
+                reasoning_effort: Some(sampling_types::ReasoningEffort::High),
             }),
         ))
         .unwrap();
@@ -591,7 +628,11 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
     assert_eq!(source.child_cwd, "/workspace/project");
     assert_eq!(source.worktree_path.as_deref(), Some(Path::new("/tmp/worktree")));
     assert_eq!(source.snapshot_ref.as_deref(), Some("refs/grow/subagents/sa-resume"));
-    assert_eq!(source.model_id.as_deref(), Some("grow-3"));
+    assert_eq!(source.model_id, "grow-3");
+    assert_eq!(
+        source.reasoning_effort,
+        Some(sampling_types::ReasoningEffort::High)
+    );
 }
 
 #[test]
@@ -601,6 +642,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
         &chat_state::SubagentSpawnEvent {
             subagent_id: "sa-projection".into(),
             child_session_id: "child-projection".into(),
+            security_parent_session_id: "parent-session".into(),
             subagent_type: "review".into(),
             description: "adversarial review".into(),
             prompt: "review all features".into(),
@@ -618,6 +660,12 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
             child_cwd: "/workspace/project".into(),
             worktree_path: Some("/tmp/worktree".into()),
             effective_model_id: "grow-3".into(),
+            model_transport_key: sampling_types::ModelImageInputKey::new(
+                "grow-3",
+                "responses",
+                "test-endpoint",
+            ),
+            reasoning_effort: None,
         },
     );
 
@@ -666,10 +714,16 @@ fn resume_allows_matching_identity() {
         worktree_path: None,
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: Some("grow-3".into()),
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     assert_eq!("general-purpose", source.subagent_type);
-    assert_eq!(Some("grow-3"), source.model_id.as_deref());
+    assert_eq!("grow-3", source.model_id);
 }
 #[test]
 fn resume_identity_does_not_gate_on_model() {
@@ -680,7 +734,13 @@ fn resume_identity_does_not_gate_on_model() {
         worktree_path: None,
         snapshot_ref: None,
         subagent_type: "general-purpose".into(),
-        model_id: Some("grow-3".into()),
+        model_id: "grow-3".into(),
+        model_transport_key: sampling_types::ModelImageInputKey::new(
+            "grow-3",
+            "responses",
+            "test-endpoint",
+        ),
+        reasoning_effort: None,
     };
     assert!(
             crate::agent::subagent::resolution::validate_resume_identity(
@@ -690,8 +750,8 @@ fn resume_identity_does_not_gate_on_model() {
             .is_ok()
         );
     assert_eq!(
-            source.model_id.as_deref(),
-            Some("grow-3"),
+            source.model_id,
+            "grow-3",
             "source model remains available for pinning"
         );
 }
@@ -814,7 +874,12 @@ fn ctx_with_parent_chat_state(
 ) -> SubagentSpawnContext {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new(session_model_id);
-    ctx.parent_chat_state = Some(spawn_test_parent_chat_state(inference_slug));
+    ctx.sampling_config.base_url = "https://api.test/v1".into();
+    ctx.sampling_config.model = inference_slug.into();
+    ctx.sampling_config.context_window = 256_000;
+    let chat_state = spawn_test_parent_chat_state(inference_slug);
+    ctx.parent_chat_state = Some(chat_state.clone());
+    ctx.delegation_chat_state = Some(chat_state);
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         available_models.clone(),
         acp::ModelId::new(global_model_id),
@@ -848,18 +913,13 @@ async fn read_parent_sampling_config_inherits_output_limit() {
         "deepseek/grow-4.5".to_string(),
         test_model_entry("grow-4.5"),
     );
-    let ctx = ctx_with_parent_chat_state(
+    let mut ctx = ctx_with_parent_chat_state(
         "deepseek/grow-4.5",
         "grow-4.5",
         "deepseek/grow-4.5",
         models,
     );
-    let mut parent_config = test_sampling_config("grow-4.5");
-    parent_config.output_limit = Some(131_072);
-    ctx.parent_chat_state
-        .as_ref()
-        .expect("parent chat state")
-        .update_sampling_config(parent_config);
+    ctx.sampling_config.output_limit = Some(131_072);
 
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(config.output_limit, Some(131_072));
@@ -875,6 +935,7 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new("anthropic/composer-2-fast");
     ctx.parent_chat_state = None;
+    ctx.delegation_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
@@ -909,7 +970,7 @@ async fn read_parent_sampling_config_ignores_global_default() {
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog() {
+async fn read_parent_sampling_config_keeps_route_compaction_policy_atomic() {
     use sampling_types::CompactionsRemaining;
     let mut entry = test_model_entry("grow-4.5");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
@@ -921,16 +982,16 @@ async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog
         "deepseek/grow-4.5",
         models,
     );
-    ctx.sampling_config.compactions_remaining = None;
+    ctx.sampling_config.compactions_remaining = Some(CompactionsRemaining::Dynamic(false));
     let (config, _model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(
             config.compactions_remaining,
-            Some(CompactionsRemaining::Dynamic(true)),
-            "subagent should inherit compactions-remaining capability from the live model catalog"
+            Some(CompactionsRemaining::Dynamic(false)),
+            "subagent must not splice a later catalog capability into its committed parent route"
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_from_catalog() {
+async fn read_parent_sampling_config_without_chat_state_keeps_route_compaction_policy() {
     use sampling_types::CompactionsRemaining;
     let mut entry = test_model_entry("composer-2-fast");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
@@ -939,8 +1000,9 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new("anthropic/composer-2-fast");
     ctx.parent_chat_state = None;
+    ctx.delegation_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
-    ctx.sampling_config.compactions_remaining = None;
+    ctx.sampling_config.compactions_remaining = Some(CompactionsRemaining::Dynamic(false));
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         models,
         acp::ModelId::new("anthropic/composer-2-fast"),
@@ -950,8 +1012,8 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     assert_eq!(model_id.0.as_ref(), "anthropic/composer-2-fast");
     assert_eq!(
             config.compactions_remaining,
-            Some(CompactionsRemaining::Dynamic(true)),
-            "fallback path should also resolve compactions-remaining capability from the catalog"
+            Some(CompactionsRemaining::Dynamic(false)),
+            "credential availability must not change the committed parent route"
         );
 }
 /// Drive the REAL precedence path
@@ -959,7 +1021,7 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
 /// calls) with BOTH an explicit `runtime_override_model` AND a
 /// `[subagents.models]` pin for the same agent present, asserting the
 /// runtime override wins; with `None` (inherit) the pin wins (precedence
-/// handed back); and an unknown override falls through to the pin.
+/// handed back); and an unknown override fails closed.
 #[tokio::test]
 async fn runtime_override_wins_over_subagents_models_pin_in_precedence_path() {
     let build_ctx = || {
@@ -975,27 +1037,27 @@ async fn runtime_override_wins_over_subagents_models_pin_in_precedence_path() {
     };
     let ctx = build_ctx();
     let (config, model_id) = resolve_effective_model_config(Some("goal-model"), "explore", &ctx)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
             config.model, "goal-model",
             "the goal runtime override must win over the `[subagents.models]` pin",
         );
     assert_eq!(model_id.0.as_ref(), "goal-model");
     let ctx = build_ctx();
-    let (config, model_id) = resolve_effective_model_config(None, "explore", &ctx).await;
+    let (config, model_id) = resolve_effective_model_config(None, "explore", &ctx)
+        .await
+        .unwrap();
     assert_eq!(
             config.model, "pinned-model",
             "with no runtime override, the `[subagents.models]` pin wins",
         );
     assert_eq!(model_id.0.as_ref(), "pinned-model");
     let ctx = build_ctx();
-    let (config, _) =
-        resolve_effective_model_config(Some("does-not-exist"), "explore", &ctx)
-        .await;
-    assert_eq!(
-            config.model, "pinned-model",
-            "an unknown override falls through to the pin",
-        );
+    let error = resolve_effective_model_config(Some("does-not-exist"), "explore", &ctx)
+        .await
+        .unwrap_err();
+    assert!(error.contains("not present in the model catalogue"));
 }
 /// A `fork_context = true` spawn must infer on the parent session model
 /// (`ctx.model_id`) for per-model radix reuse, even when a
@@ -1028,7 +1090,8 @@ async fn fork_context_pins_parent_model_over_overrides() {
             "general-purpose",
             &ctx,
         )
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
             config.model, "parent-model",
             "fork_context must pin the parent model over the [subagents.models] pin",
@@ -1036,7 +1099,9 @@ async fn fork_context_pins_parent_model_over_overrides() {
     assert_eq!(model_id.0.as_ref(), "parent-model");
     let ctx = build_ctx();
     let (config, model_id) =
-        resolve_effective_model_config(None, "general-purpose", &ctx).await;
+        resolve_effective_model_config(None, "general-purpose", &ctx)
+            .await
+            .unwrap();
     assert_eq!(
             config.model, "pinned-model",
             "without the fork pin the [subagents.models] override wins",
@@ -1052,7 +1117,9 @@ async fn resolve_subagent_inherits_parent_model_without_pins() {
         let mut ctx = ctx_with_toggle(HashMap::new());
         ctx.sampling_config.model = parent_model.to_string();
         ctx.model_id = acp::ModelId::new(parent_model);
-        let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx).await;
+        let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)
+            .await
+            .unwrap();
         assert_eq!(
                 config.model, parent_model,
                 "subagent must inherit parent model {parent_model:?} when no pin is set",
@@ -1074,7 +1141,9 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
             .insert("pinned-model".to_string(), test_model_entry("pinned-model"));
         ctx.subagent_model_overrides
             .insert("explore".to_string(), "pinned-model".to_string());
-        let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx).await;
+        let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)
+            .await
+            .unwrap();
         assert_eq!(
                 config.model, "pinned-model",
                 "config pin must win for parent {parent_model:?}",
@@ -1082,18 +1151,20 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
         assert_eq!(model_id.0.as_ref(), "pinned-model");
     }
 }
-/// An unresolvable `[subagents.models]` pin (model absent from
-/// `available_models`) falls through to inherit the parent model.
+/// An unresolvable `[subagents.models]` pin must fail closed instead of
+/// silently changing the child to the parent's current model.
 #[tokio::test]
-async fn resolve_subagent_config_override_unknown_model_falls_through_to_inherit() {
+async fn resolve_subagent_config_override_unknown_model_fails_closed() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.sampling_config.model = "grow-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grow-4.5");
     ctx.subagent_model_overrides
         .insert("explore".to_string(), "does-not-exist".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx).await;
-    assert_eq!(config.model, "grow-4.5");
-    assert_eq!(model_id.0.as_ref(), "grow-4.5");
+    let error = resolve_subagent_sampling_config("explore", &ctx)
+        .await
+        .unwrap_err();
+    assert!(error.contains("does-not-exist"));
+    assert!(error.contains("not present in the model catalogue"));
 }
 /// Spawn-time credentials are cache-only: a cold spawn has no key,
 /// never the parent session key.
@@ -1114,14 +1185,18 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     ctx.model_id = acp::ModelId::new("grow-4.5");
     ctx.available_models = models;
     ctx.subagent_model_overrides.insert("explore".to_string(), "proxied".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx).await;
+    let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)
+        .await
+        .unwrap();
     assert_eq!(model_id.0.as_ref(), "proxied");
     assert_eq!(
             config.api_key, None,
             "a cold cache spawns with no key, never the parent session key"
         );
     provider.ensure_fresh_token(None).await.rotated().unwrap();
-    let (config, _) = resolve_subagent_sampling_config("explore", &ctx).await;
+    let (config, _) = resolve_subagent_sampling_config("explore", &ctx)
+        .await
+        .unwrap();
     assert_eq!(config.api_key.as_deref(), Some("tok-1"));
     assert_eq!(config.base_url, "https://gateway.example/v1");
 }

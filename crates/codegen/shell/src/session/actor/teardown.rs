@@ -70,3 +70,16 @@ pub(super) async fn final_session_persistence_flush(session: &SessionActor) {
         tracing::warn!("permission audit persistence actor dropped flush ack");
     }
 }
+
+/// Stop a session whose Timeline writer epoch has permanently failed. No
+/// session-end hook or memory mutation is admitted after causal persistence is
+/// unavailable; only local authorities and child execution are unwound.
+pub(super) async fn terminate_failed_timeline_writer(session: &SessionActor) {
+    session.goal_drive.cancel();
+    session.cancel_all_session_subagents();
+    stop_permission_manager_and_drain_audit(session).await;
+    shutdown_workflows(session).await;
+    final_session_persistence_flush(session).await;
+    session.signals_handle.shutdown();
+    cleanup_session_scratch(session);
+}

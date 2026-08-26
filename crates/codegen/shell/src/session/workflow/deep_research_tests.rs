@@ -59,8 +59,11 @@ fn run_scenario(
     case: VerificationCase,
     synthesis_output: &'static str,
 ) -> (serde_json::Value, String, Vec<(String, Option<String>)>) {
-    let resolved = super::registry::resolve_deep_research()
-        .expect("private deep-research definition must validate");
+    let home = tempfile::tempdir().unwrap();
+    crate::builtin::extract_builtin_files(home.path());
+    let resolved = super::registry::WorkflowRegistry::scan_with_user_root(None, home.path())
+        .resolve_by_name("deep-research")
+        .expect("managed deep-research definition must validate");
     let (host_tx, mut host_rx) = tokio::sync::mpsc::unbounded_channel();
     let artifact = Arc::new(Mutex::new(String::new()));
     let captured = artifact.clone();

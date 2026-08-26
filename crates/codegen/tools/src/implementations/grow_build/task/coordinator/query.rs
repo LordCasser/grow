@@ -21,21 +21,25 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         timeout_ms: Option<u64>,
         respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
     ) {
-        if let Some(child) = self
-            .completed
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.completed.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             let snapshot = (!child.request.owner.is_workflow())
                 .then(|| self.completed_snapshot_for_query(child));
             let _ = respond_to.send(snapshot);
             return;
         }
-        if let Some(child) = self
-            .active
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.active.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
@@ -51,11 +55,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             return;
         }
-        if let Some(child) = self
-            .pending
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.pending.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
@@ -80,23 +86,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         parent_session_id: Option<String>,
         respond_to: oneshot::Sender<Option<SubagentInspection>>,
     ) {
-        if let Some(child) = self
-            .completed
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.completed.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             let _ = respond_to.send(Some(self.completed_inspection_for_query(child)));
-        } else if let Some(child) = self
-            .pending
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        } else if let Some(child) = self.pending.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             let _ = respond_to.send(Some(pending_inspection(child)));
-        } else if self
-            .active
-            .get(&id)
-            .is_some_and(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        } else if self.active.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
             self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
         } else {
             let _ = respond_to.send(None);
@@ -148,8 +160,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .active
             .values()
             .filter(|child| {
-                child.request.parent_session_id == parent_session_id
-                    && !child.request.owner.is_workflow()
+                belongs_to_session(
+                    &child.request,
+                    &child.immediate_parent_session_id,
+                    Some(&parent_session_id),
+                ) && !child.request.owner.is_workflow()
             })
             .map(|child| child.request.id.clone())
             .collect();

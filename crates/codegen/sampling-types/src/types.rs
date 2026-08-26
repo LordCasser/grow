@@ -850,7 +850,7 @@ impl ApiBackend {
 }
 
 /// Sampling client configuration (API key excluded — that stays in the client).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
     pub model: String,

@@ -310,6 +310,7 @@ impl ChildRunner for SoakRunner {
         Box::pin(async move {
             let ChildRunRequest {
                 request,
+                security_parent_session_id: _,
                 security_parent: _,
                 cancellation,
                 reporter,

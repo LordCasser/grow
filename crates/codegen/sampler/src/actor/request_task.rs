@@ -142,7 +142,7 @@ pub(crate) async fn run_request_task(
         sampling_span.record("reasoning_effort", eff.as_str());
     }
 
-    let mut request = request;
+    let request = request;
     let mut retry_count: u32 = 0;
     // Doom-loop recovery keeps its own resample budget, independent of the
     // transport/empty budget above.
@@ -240,7 +240,6 @@ pub(crate) async fn run_request_task(
                     &retry_policy,
                     &event_tx,
                     &request_id,
-                    &mut request,
                     &mut client,
                     &config,
                     &cancel_token,
@@ -293,7 +292,6 @@ pub(crate) async fn run_request_task(
                     &retry_policy,
                     &event_tx,
                     &request_id,
-                    &mut request,
                     &mut client,
                     &config,
                     &cancel_token,
@@ -316,7 +314,6 @@ pub(crate) async fn run_request_task(
                     &retry_policy,
                     &event_tx,
                     &request_id,
-                    &mut request,
                     &mut client,
                     &config,
                     &cancel_token,
@@ -374,8 +371,7 @@ pub(crate) async fn run_request_task(
 /// Apply a [`RetryDecision`]. Returns `true` if the loop should
 /// continue, `false` if the request is finished (either fatal or
 /// emit-to-session). Performs the side-effects of the decision:
-/// sleeping, rebuilding the client, stripping images, emitting the
-/// `Retrying` event.
+/// sleeping, rebuilding the client, or emitting the `Retrying` event.
 #[allow(clippy::too_many_arguments)]
 async fn apply_retry_decision(
     err: &SamplingError,
@@ -384,7 +380,6 @@ async fn apply_retry_decision(
     retry_policy: &RetryPolicy,
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
-    request: &mut ConversationRequest,
     client: &mut SamplingClient,
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
@@ -396,20 +391,6 @@ async fn apply_retry_decision(
         retry_policy.rate_limit_retry_threshold
     };
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
-
-    // Connection-reset / broken-pipe on body upload often means nginx
-    // rejected an oversized payload before responding 413. Strip
-    // images proactively before any retry of those errors so we don't
-    // burn budget re-uploading the same large body.
-    if err.is_likely_body_rejected() {
-        let stripped = request.strip_images();
-        if stripped > 0 {
-            tracing::warn!(
-                stripped,
-                "stripped {stripped} image(s) before retry (likely nginx 413 via connection reset)"
-            );
-        }
-    }
 
     match decision {
         RetryDecision::Retry { backoff } => {
@@ -431,18 +412,6 @@ async fn apply_retry_decision(
                 handle_cancellation(event_tx, request_id, completion_tx);
                 false
             }
-        }
-        RetryDecision::RetryWithImageStrip => {
-            let stripped = request.strip_images();
-            if stripped == 0 {
-                // Nothing left to strip; upgrade to fatal.
-                emit_failed(event_tx, request_id, err);
-                send_completion(completion_tx, Err(clone_error(err)));
-                return false;
-            }
-            *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
@@ -998,7 +967,6 @@ mod tests {
         let (completion_tx, completion_rx) = oneshot::channel();
         let mut completion_tx = Some(completion_tx);
         let mut retry_count = 0;
-        let mut request = ConversationRequest::default();
         let config = SamplerConfig {
             base_url: "http://localhost".into(),
             model: "test-model".into(),
@@ -1014,7 +982,6 @@ mod tests {
             &RetryPolicy::default(),
             &event_tx,
             &RequestId::from("cancel-backoff"),
-            &mut request,
             &mut client,
             &config,
             &cancel_token,

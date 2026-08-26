@@ -245,47 +245,6 @@ fn worktree_session_created_sets_session_and_cwd() {
 }
 
 #[test]
-fn worktree_deferred_behavior_parks_first_prompt_until_mode_applies() {
-    let mut app = test_app_git();
-    dispatch(
-        Action::NewWorktreeSession {
-            load_session_id: None,
-            label: None,
-            git_ref: None,
-        },
-        &mut app,
-    );
-    let id = AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.enqueue_prompt("research this first".into());
-    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::DeepResearch);
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::WorktreeSessionCreated {
-            agent_id: id,
-            session_id: acp::SessionId::new("wt-session-1"),
-            worktree_path: PathBuf::from("/tmp/worktree"),
-            session_cwd: PathBuf::from("/tmp/worktree"),
-            models: None,
-        }),
-        &mut app,
-    );
-
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::SetSessionMode { mode_id, .. }
-            if mode_id.0.as_ref() == "deep_research"
-    )));
-    assert!(!effects.iter().any(|effect| matches!(
-        effect,
-        Effect::SendPrompt { .. }
-            | Effect::SendPromptBlocks { .. }
-            | Effect::SetModeThenPrompt { .. }
-    )));
-    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
-    assert!(app.agents[&id].session.current_prompt_id.is_none());
-}
-#[test]
 fn worktree_session_preserves_subdirectory_offset() {
     let mut app = test_app();
     app.cwd = PathBuf::from("/repo/crates/codegen/pager");

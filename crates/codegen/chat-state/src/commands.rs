@@ -31,6 +31,8 @@ pub enum TimelineWriteError {
         "surface changed while transformation was in flight (expected revision {expected}, current {actual})"
     )]
     SurfaceChanged { expected: u64, actual: u64 },
+    #[error("image context could not be durably translated: {0}")]
+    ImageDescriptionUnavailable(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,12 +45,11 @@ pub struct ModelMetadata {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImageProjectionReport {
     pub described_images: usize,
-    pub unavailable_images: usize,
 }
 
 impl ImageProjectionReport {
     pub fn total_images(self) -> usize {
-        self.described_images + self.unavailable_images
+        self.described_images
     }
 }
 
@@ -234,7 +235,7 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
-    /// Record target-model ImageShadows without mutating the canonical Surface.
+    /// Record irreversible model-facing ImageShadows without mutating source evidence.
     /// Timeline validation binds every shadow to the current Surface revision,
     /// source identity, image fingerprint, and optional Sideband result.
     RecordImageProjectionAndAck {

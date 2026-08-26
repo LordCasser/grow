@@ -118,6 +118,9 @@ pub(crate) struct SubagentSpawnContext {
     pub model_id: acp::ModelId,
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
+    /// Session that directly owns this delegation's security boundary. It is
+    /// distinct from the lifecycle-root `parent_session_id` for nested Tasks.
+    pub security_parent_session_id: String,
     /// Parent permission mode inherited at child spawn.
     pub permission_mode: crate::util::config::PermissionMode,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
@@ -195,10 +198,25 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     /// Parent session info — used to locate parent session directory.
     pub parent_session_info: Option<SessionInfo>,
+    /// Session info for the immediate delegation parent. Fork context and
+    /// prompt-blob freezing use this source; lifecycle persistence continues
+    /// to use `parent_session_info`.
+    pub delegation_session_info: Option<SessionInfo>,
     /// Parent session's ChatStateHandle — used to read the actual live
-    /// sampling config and credentials from the parent session actor (async).
-    /// Cheap Clone (mpsc sender). `None` when parent SessionHandle not found.
+    /// lifecycle Timeline and fork source. Nested Tasks keep this bound to the
+    /// lifecycle root even though their delegation authority comes from the
+    /// immediate parent.
     pub parent_chat_state: Option<chat_state::ChatStateHandle>,
+    /// Root session Workflow state. Only Workflow-owned child requests read
+    /// this handle, selecting the immutable sampler snapshot by `run_id`.
+    pub workflow_tracker: Option<
+        std::sync::Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>>,
+    >,
+    /// Immediate delegation parent's ChatStateHandle. This is deliberately
+    /// separate from `parent_chat_state`: only credentials follow the
+    /// security parent, while lifecycle facts remain rooted in the canonical
+    /// parent Timeline.
+    pub delegation_chat_state: Option<chat_state::ChatStateHandle>,
     /// Parent session's resolved turn limit, for subagent inheritance.
     pub parent_max_turns: Option<usize>,
     /// All available models for resolving model IDs from overrides.
@@ -251,7 +269,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Parent's skills config for the child's SkillManager.
     pub parent_skills_config: agent::prompt::skills::SkillsConfig,
     /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
-    pub task_output_tool_name: String,
+    pub task_output_tool_name: Option<String>,
     /// Parent's live Goal wait-race marker. The completion producer uses it
     /// only to preserve results displaced by steering; Timeline owns delivery.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -422,7 +440,7 @@ impl ChildControl for ShellChildRuntime {
 #[derive(Default)]
 pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
-    task_output_tool_name: String,
+    task_output_tool_name: Option<String>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     diagnostics_tokens: u64,
     spawned_notification_emitted: bool,
@@ -622,7 +640,7 @@ pub(super) async fn admit_completion_receipt_before_result(
     let summary = tools::implementations::grow_build::task::completion_summary(request, result);
     let body = tools::reminders::task_completion::format_subagent_completion(
         &summary,
-        Some(&completion_data.task_output_tool_name),
+        completion_data.task_output_tool_name.as_deref(),
     );
     completion_data.completion_receipt_admitted =
         admit_subagent_completion_receipt(cmd_tx, &request.id, &request.owner, body).await;
@@ -633,15 +651,15 @@ pub(super) async fn admit_completion_receipt_before_result(
 /// `[subagents.models]` entry can override that inheritance; Agent prompt
 /// profiles never participate in model selection. Precedence:
 ///
-///   1. `config.toml [subagents.models].{agent_name}` override, if it
-///      resolves to a known model. Applies unconditionally.
+///   1. `config.toml [subagents.models].{agent_name}` override. It must
+///      resolve to a known model and applies unconditionally.
 ///
 ///   2. Inherit the parent session's actual live sampling config (from
 ///      `ChatStateHandle`).
 ///
-/// Both explicit pins apply regardless of which model the parent is on. If a
-/// pin references an unknown model it is ignored (with a `tracing::warn!`)
-/// and resolution falls through to the next priority.
+/// Explicit pins apply regardless of which model the parent is on. An unknown
+/// pin fails closed instead of silently changing the child to its parent's
+/// current route.
 ///
 /// NOTE: the host/runtime override (`effective_runtime.model`) is
 /// applied by the caller (`run_shell_child`) BEFORE this function
@@ -653,34 +671,22 @@ pub(super) async fn admit_completion_receipt_before_result(
 async fn resolve_subagent_sampling_config(
     agent_name: &str,
     ctx: &SubagentSpawnContext,
-) -> (sampler::SamplerConfig, acp::ModelId) {
+) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
     let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
-    let try_pin = |model_id: &str, source: &'static str, unknown_msg: &'static str| {
-        match resolve_model_override_to_config(model_id, ctx) {
-            Some((config, canonical_id)) => {
-                log_subagent_model_resolution(
-                    agent_name,
-                    source,
-                    &config,
-                    &canonical_id,
-                    &parent_config,
-                );
-                Some((config, canonical_id))
-            }
-            None => {
-                tracing::warn!(agent = agent_name, model_id, "{unknown_msg}");
-                None
-            }
-        }
-    };
-    if let Some(model_id) = ctx.subagent_model_overrides.get(agent_name)
-        && let Some(resolved) = try_pin(
-            model_id,
+    if let Some(model_id) = ctx.subagent_model_overrides.get(agent_name) {
+        let Some((config, canonical_id)) = resolve_model_override_to_config(model_id, ctx) else {
+            return Err(format!(
+                "Configured model override '{model_id}' for subagent '{agent_name}' is not present in the model catalogue"
+            ));
+        };
+        log_subagent_model_resolution(
+            agent_name,
             "config_override",
-            "Subagent model override references unknown model, falling through to inherit",
-        )
-    {
-        return resolved;
+            &config,
+            &canonical_id,
+            &parent_config,
+        );
+        return Ok((config, canonical_id));
     }
     log_subagent_model_resolution(
         agent_name,
@@ -689,7 +695,7 @@ async fn resolve_subagent_sampling_config(
         &parent_mid,
         &parent_config,
     );
-    (parent_config, parent_mid)
+    Ok((parent_config, parent_mid))
 }
 /// Resolve a subagent's effective sampling config + model id, honoring the
 /// model-resolution precedence (Key Decision #16).
@@ -699,7 +705,9 @@ async fn resolve_subagent_sampling_config(
 /// [`resolve_subagent_sampling_config`] (where the user `[subagents.models]`
 /// pin applies). So an explicit host/runtime override WINS
 /// over a user per-agent pin. An override that does not resolve to a known
-/// model warns and falls through to the pin path; `None` (inherit) hands
+/// model fails closed; silently inheriting a different model would violate a
+/// Goal runtime route. Workflow-owned requests bypass this function and are
+/// resolved from their immutable Run sampler catalog. `None` (inherit) hands
 /// precedence back to the pin path entirely (pin > inherit).
 ///
 /// Extracted from `run_shell_child` so the precedence is unit-testable
@@ -708,15 +716,14 @@ async fn resolve_effective_model_config(
     runtime_override_model: Option<&str>,
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
-) -> (sampler::SamplerConfig, acp::ModelId) {
+) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
     if let Some(model_id) = runtime_override_model {
         if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
-            return resolved;
+            return Ok(resolved);
         }
-        tracing::warn!(
-            model_id,
-            "Runtime model override references unknown model, falling through"
-        );
+        return Err(format!(
+            "Runtime model override '{model_id}' is not present in the model catalogue"
+        ));
     }
     resolve_subagent_sampling_config(subagent_type, ctx).await
 }
@@ -758,103 +765,35 @@ fn log_subagent_model_resolution(
         })),
     );
 }
-/// Read the parent session's actual current sampling config.
-///
-/// Prefers the live state from `ChatStateHandle` (authoritative). Falls back
-/// to the baseline on `SubagentSpawnContext` if the actor is unavailable.
-/// The returned [`acp::ModelId`] is the parent session catalog id (`ctx.model_id`),
-/// not the process-global default or chat-state routing slug.
+/// Read the actor-committed parent route captured atomically for this spawn.
+/// ChatState contributes only live credentials; its conversation sampler
+/// projection is never combined with a separately-read catalog identity.
 async fn read_parent_sampling_config(
     ctx: &SubagentSpawnContext,
 ) -> (sampler::SamplerConfig, acp::ModelId) {
-    if let Some(ref chat_state) = ctx.parent_chat_state {
-        if let Some(cfg) = chat_state.get_sampling_config().await {
-            let creds = chat_state.get_credentials().await;
-            let mut extra_headers = cfg.extra_headers;
-            crate::agent::config::inject_url_derived_headers(
-                &mut extra_headers,
-                creds.alpha_test_key.as_deref(),
-                &cfg.base_url,
-            );
-            let auth_scheme =
-                crate::agent::config::try_resolve_model_credentials(ctx.model_id.0.as_ref())
-                    .map(|r| r.auth_scheme)
-                    .unwrap_or_default();
-            let bearer_resolver = crate::agent::config::find_model_by_catalog_id(
-                &ctx.available_models,
-                ctx.model_id.0.as_ref(),
-            )
-            .and_then(crate::agent::config::ModelEntry::effective_auth_provider)
-            .map(crate::auth::AuthProviderRef::bearer_resolver);
-            let inherited = sampler::SamplerConfig {
-                api_key: creds.api_key,
-                base_url: cfg.base_url,
-                model: cfg.model.clone(),
-                output_limit: cfg.output_limit,
-                temperature: cfg.temperature,
-                top_p: cfg.top_p,
-                api_backend: cfg.api_backend,
-                auth_scheme,
-                extra_headers,
-                query_params: cfg.query_params.clone(),
-                env_http_headers: cfg.env_http_headers.clone(),
-                context_window: cfg.context_window.get(),
-                reasoning_effort: cfg.reasoning_effort,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
-                idle_timeout_secs: None,
-                origin_client: ctx.sampling_config.origin_client.clone(),
-                attribution_callback: None,
-                bearer_resolver,
-                compactions_remaining: ctx
-                    .models_manager
-                    .model_compactions_remaining(ctx.model_id.0.as_ref()),
-                compaction_at_tokens: ctx
-                    .models_manager
-                    .model_compaction_at_tokens(ctx.model_id.0.as_ref()),
-                doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
-            };
-            let model_id = ctx.model_id.clone();
-            let global_model_id = ctx.models_manager.current_model_id();
-            ::diagnostics::unified_log::debug(
-                "subagent read parent config (live)",
-                None,
-                Some(serde_json::json!({
-                    "parent_model": &inherited.model,
-                    "parent_base_url": &inherited.base_url,
-                    "parent_key_prefix": key_prefix(&inherited.api_key),
-                    "session_model_id": model_id.0.as_ref(),
-                    "global_model_id": global_model_id.0.as_ref(),
-                    "source": "chat_state",
-                })),
-            );
-            return (inherited, model_id);
-        }
-        tracing::warn!(
-            "Parent chat state actor returned None for sampling config, \
-             falling back to spawn context baseline"
+    let mut inherited = ctx.sampling_config.clone();
+    if let Some(ref chat_state) = ctx.delegation_chat_state {
+        let creds = chat_state.get_credentials().await;
+        inherited.api_key = creds.api_key;
+        crate::agent::config::inject_url_derived_headers(
+            &mut inherited.extra_headers,
+            creds.alpha_test_key.as_deref(),
+            &inherited.base_url,
         );
     }
-    ::diagnostics::unified_log::warn(
-        "subagent read parent config (fallback)",
+    ::diagnostics::unified_log::debug(
+        "subagent read actor-committed parent route",
         None,
         Some(serde_json::json!({
-            "parent_model": &ctx.sampling_config.model,
-            "parent_base_url": &ctx.sampling_config.base_url,
-            "parent_key_prefix": key_prefix(&ctx.sampling_config.api_key),
-            "source": "spawn_context_baseline",
-            "has_chat_state": ctx.parent_chat_state.is_some(),
+            "parent_model": &inherited.model,
+            "parent_base_url": &inherited.base_url,
+            "parent_key_prefix": key_prefix(&inherited.api_key),
+            "session_model_id": ctx.model_id.0.as_ref(),
+            "source": "session_model_route",
+            "has_chat_state": ctx.delegation_chat_state.is_some(),
         })),
     );
-    let mut fallback = ctx.sampling_config.clone();
-    fallback.compactions_remaining = ctx
-        .models_manager
-        .model_compactions_remaining(ctx.model_id.0.as_ref());
-    fallback.compaction_at_tokens = ctx
-        .models_manager
-        .model_compaction_at_tokens(ctx.model_id.0.as_ref());
-    (fallback, ctx.model_id.clone())
+    (inherited, ctx.model_id.clone())
 }
 /// Resolve an exact `provider/model` override to a
 /// `(SamplerConfig, ModelId)` pair.
@@ -1184,10 +1123,10 @@ async fn bootstrap_initial_context(
             verbatim_fork: false,
         });
     }
-    let live_materialized = match ctx.parent_chat_state.as_ref() {
+    let live_materialized = match ctx.delegation_chat_state.as_ref() {
         Some(chat_state) => {
             chat_state
-                .materialize_timeline(ctx.parent_session_id.clone())
+                .materialize_timeline(ctx.security_parent_session_id.clone())
                 .await
         }
         None => None,
@@ -1201,7 +1140,7 @@ async fn bootstrap_initial_context(
             Ok(context) => context,
             Err(error) => return BootstrapInitialContext::Abort(error),
         };
-        let source_session = ctx.parent_session_info.as_ref().and_then(|info| {
+        let source_session = ctx.delegation_session_info.as_ref().and_then(|info| {
             crate::session::storage::jsonl::JsonlStorageAdapter::new()
                 .open_session(info)
                 .ok()
@@ -1223,7 +1162,7 @@ async fn bootstrap_initial_context(
         );
         return BootstrapInitialContext::Ready(ctx_out);
     }
-    if let Some(ref parent_info) = ctx.parent_session_info {
+    if let Some(ref parent_info) = ctx.delegation_session_info {
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
             crate::util::grow_home::grow_home(),
         );
@@ -1235,15 +1174,16 @@ async fn bootstrap_initial_context(
                 ));
             }
         };
-        let materialized = match parent_session.materialize_timeline(&ctx.parent_session_id) {
-            Ok(materialized) => materialized,
-            Err(error) => {
-                return BootstrapInitialContext::Abort(format!(
-                    "Cannot fork parent session: source Timeline could not be materialized: \
+        let materialized =
+            match parent_session.materialize_timeline(&ctx.security_parent_session_id) {
+                Ok(materialized) => materialized,
+                Err(error) => {
+                    return BootstrapInitialContext::Abort(format!(
+                        "Cannot fork parent session: source Timeline could not be materialized: \
                      {error}"
-                ));
-            }
-        };
+                    ));
+                }
+            };
         tracing::info!(
             subagent_id = %request.id,
             subagent_type = %request.subagent_type,
@@ -1314,18 +1254,25 @@ fn select_override_cwd<'a>(
 fn durable_resume_source_for(
     id: &str,
     parent_session_id: &str,
-    parent_cwd: &Path,
+    requester_security_parent_session_id: &str,
 ) -> Option<DurableResumeSource> {
-    let parent_info = SessionInfo {
-        id: acp::SessionId::new(parent_session_id),
-        cwd: parent_cwd.to_string_lossy().into_owned(),
-    };
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
         crate::util::grow_home::grow_home(),
     );
-    let parent = storage.open_session(&parent_info).ok()?;
-    let timeline = chat_state::Timeline::from_events(parent.timeline_events().ok()?).ok()?;
+    // Lifecycle ownership is keyed by the root session id. The immediate
+    // delegation cwd is a workspace confinement input, never part of that
+    // durable identity; nested children may legitimately run in a subdir or
+    // worktree while their spawn fact remains in the root Timeline.
+    let parent = storage.open_session_by_id(parent_session_id).ok()??;
+    let timeline = parent.validated_timeline(parent_session_id).ok()?.timeline;
     let (spawn_seq, spawn, terminal) = resume_source_facts_from_timeline(&timeline, id)?;
+    if !resume_security_parent_allows(
+        parent_session_id,
+        requester_security_parent_session_id,
+        &spawn.security_parent_session_id,
+    ) {
+        return None;
+    }
     let child_session = storage.open_session_by_id(&spawn.child_session_id).ok()??;
     let summary = child_session.summary();
     if summary.parent_session_id.as_deref() != Some(parent_session_id)
@@ -1336,7 +1283,10 @@ fn durable_resume_source_for(
     {
         return None;
     }
-    let child = chat_state::Timeline::from_events(child_session.timeline_events().ok()?).ok()?;
+    let child = child_session
+        .validated_timeline(&spawn.child_session_id)
+        .ok()?
+        .timeline;
     child
         .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
         .ok()?;
@@ -1346,6 +1296,15 @@ fn durable_resume_source_for(
         data,
         session: child_session,
     })
+}
+
+fn resume_security_parent_allows(
+    lifecycle_root_session_id: &str,
+    requester_security_parent_session_id: &str,
+    source_security_parent_session_id: &str,
+) -> bool {
+    requester_security_parent_session_id == lifecycle_root_session_id
+        || requester_security_parent_session_id == source_security_parent_session_id
 }
 
 struct DurableResumeSource {
@@ -1403,7 +1362,9 @@ fn resume_source_from_facts(
         worktree_path: spawn.worktree_path.as_deref().map(PathBuf::from),
         snapshot_ref: terminal.snapshot_ref.clone(),
         subagent_type: spawn.subagent_type.clone(),
-        model_id: Some(spawn.effective_model_id.clone()),
+        model_id: spawn.effective_model_id.clone(),
+        model_transport_key: spawn.model_transport_key.clone(),
+        reasoning_effort: spawn.reasoning_effort,
     }
 }
 
@@ -1648,14 +1609,11 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
         ResumeWorktreeAction::Missing
     }
 }
-/// The parent session's working directory — the source path for a subagent
-/// worktree. Prefers the reconstructed `SessionInfo` cwd, falling back to
-/// `parent_cwd`.
+/// The immediate delegation parent's working directory is the only valid
+/// source path for a nested subagent worktree. Lifecycle-root metadata must
+/// never widen this workspace boundary.
 fn parent_source_cwd(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
-    ctx.parent_session_info
-        .as_ref()
-        .map(|i| std::path::PathBuf::from(&i.cwd))
-        .unwrap_or_else(|| std::path::PathBuf::from(&ctx.parent_cwd))
+    ctx.parent_cwd.clone()
 }
 /// Effective permission mode for a spawned subagent. Plugin agents never honor
 /// `always-approve`; under the pin it downgrades to `ask` so a repo, profile, or
@@ -2220,12 +2178,10 @@ fn finish_from_durable_facts(
         .ok_or_else(|| "cannot resolve child session: session is missing".to_string())
         .map_err(|error| format!("cannot resolve child session: {error}"))?;
     validate_child_session_identity(&opened, parent_timeline_id, spawn)?;
-    let child = chat_state::Timeline::from_events(
-        opened
-            .timeline_events()
-            .map_err(|error| format!("cannot validate child Timeline: {error}"))?,
-    )
-    .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+    let child = opened
+        .validated_timeline(&spawn.child_session_id)
+        .map_err(|error| format!("cannot validate child session entity: {error}"))?
+        .timeline;
     let result = child
         .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
         .map_err(|error| format!("invalid child result link: {error}"))?;
@@ -2288,12 +2244,10 @@ pub(crate) async fn durable_child_operation(
             .map_err(|error| format!("cannot resolve child session: {error}"))?
             .ok_or_else(|| "canonical child session is missing".to_string())?;
         validate_child_session_identity(&child, parent_timeline_id, spawn)?;
-        let child_timeline = chat_state::Timeline::from_events(
-            child
-                .timeline_events()
-                .map_err(|error| format!("cannot read child Timeline: {error}"))?,
-        )
-        .map_err(|error| format!("invalid child Timeline: {error}"))?;
+        let child_timeline = child
+            .validated_timeline(&spawn.child_session_id)
+            .map_err(|error| format!("invalid child session entity: {error}"))?
+            .timeline;
         let result = child_timeline
             .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
             .map_err(|error| format!("invalid child result link: {error}"))?;
@@ -2570,12 +2524,12 @@ async fn ensure_recovered_child_result_with_opened(
 > {
     validate_child_session_identity(opened, parent_timeline_id, spawn)
         .map_err(ChildResultRecoveryError::Invalid)?;
-    let events = opened.timeline_events().map_err(|error| {
-        ChildResultRecoveryError::Invalid(format!("cannot read child Timeline: {error}"))
-    })?;
-    let mut timeline = chat_state::Timeline::from_events(events).map_err(|error| {
-        ChildResultRecoveryError::Invalid(format!("invalid child Timeline: {error}"))
-    })?;
+    let mut timeline = opened
+        .validated_timeline(&spawn.child_session_id)
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!("invalid child session entity: {error}"))
+        })?
+        .timeline;
     timeline
         .validate_subagent_seed_link(parent_timeline_id, parent_spawn_seq, spawn)
         .map_err(|error| {
@@ -2674,12 +2628,7 @@ fn completion_receipt_body_from_durable_facts(
         turns: terminal.turns,
         output: std::sync::Arc::from(output.unwrap_or_default()),
     };
-    Ok(
-        tools::reminders::task_completion::format_subagent_completion(
-            &summary,
-            Some(tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL),
-        ),
-    )
+    Ok(tools::reminders::task_completion::format_subagent_completion(&summary, None))
 }
 
 /// Repair the crash window between the durable parent terminal and the

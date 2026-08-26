@@ -54,11 +54,11 @@ pub async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
 fn read_entity_state(
     opened: &st::jsonl::OpenedSession,
 ) -> std::io::Result<std::collections::HashMap<String, Value>> {
-    let timeline_events = opened.timeline_events()?;
-    let timeline = chat_state::Timeline::from_events(timeline_events.clone())
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let session_id = opened.summary().info.id.to_string();
-    let sidebands = opened.sideband_ledgers(&session_id, &timeline)?;
+    let validated = opened.validated_timeline(&session_id)?;
+    let timeline_events = validated.events;
+    let timeline = validated.timeline;
+    let sidebands = validated.sidebands;
     let blobs = read_entity_blobs(opened.directory(), &timeline)?;
     let updates = opened.update_envelopes()?;
     Ok(std::collections::HashMap::from([

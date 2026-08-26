@@ -36,14 +36,20 @@ pub enum GoalUpdateStatus {
 #[serde(deny_unknown_fields)]
 pub struct UpdateGoalInput {
     #[schemars(
-        description = "Set complete only when current evidence proves the entire objective is achieved. Set blocked only when the same genuine impasse has recurred for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change."
+        description = "Set complete only when current evidence proves the entire objective is achieved. Set blocked only when the same genuine impasse has recurred for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run."
     )]
     pub status: GoalUpdateStatus,
+    #[schemars(
+        description = "Required when status is blocked: a concise, concrete description of the unchanged external or user-input dependency. The runtime compares this value across three consecutive Goal turns. Omit it when completing the Goal."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct GoalView {
     pub goal_id: String,
+    pub definition_revision: u64,
     pub objective: String,
     pub status: String,
     pub token_budget: Option<i64>,
@@ -82,6 +88,26 @@ crate::register_resource!(
     GoalDelegationSnapshotResource
 );
 
+/// Immutable authority captured for the exact primary Goal turn that may
+/// mutate lifecycle state. Goal identity and definition revision reject edits
+/// or replacements; prompt identity rejects a cancelled turn after restart.
+#[derive(Debug, Clone)]
+pub struct GoalMutationAuthority {
+    pub prompt_id: String,
+    pub prompt_index: u64,
+    pub control_revision: u64,
+    pub goal: Option<(String, u64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoalMutationAuthorityResource(pub Option<GoalMutationAuthority>);
+
+crate::register_resource!(
+    "grow_build",
+    "GoalMutationAuthorityResource",
+    GoalMutationAuthorityResource
+);
+
 #[derive(Debug)]
 pub enum GoalCommand {
     Get {
@@ -89,10 +115,12 @@ pub enum GoalCommand {
     },
     Create {
         input: CreateGoalInput,
+        authority: GoalMutationAuthority,
         respond_to: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
     Update {
         input: UpdateGoalInput,
+        authority: GoalMutationAuthority,
         respond_to: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
 }
@@ -142,6 +170,45 @@ async fn runtime_sender(
         .ok_or_else(|| {
             tool_runtime::ToolError::custom("goal_not_available", "Goal runtime is unavailable.")
         })
+}
+
+async fn mutation_runtime(
+    ctx: &tool_runtime::ToolCallContext,
+) -> Result<
+    (
+        tokio::sync::mpsc::UnboundedSender<GoalCommand>,
+        GoalMutationAuthority,
+    ),
+    tool_runtime::ToolError,
+> {
+    use crate::types::tool_metadata::shared_resources;
+    let resources = shared_resources(ctx)?;
+    let resources = resources.lock().await;
+    if resources
+        .get::<GoalContextSnapshotResource>()
+        .is_some_and(|resource| resource.0.is_some())
+    {
+        return Err(tool_runtime::ToolError::custom(
+            "delegated_goal_read_only",
+            "A delegated session may read its inherited Goal snapshot but cannot mutate it.",
+        ));
+    }
+    let authority = resources
+        .get::<GoalMutationAuthorityResource>()
+        .and_then(|resource| resource.0.clone())
+        .ok_or_else(|| {
+            tool_runtime::ToolError::custom(
+                "goal_update_rejected",
+                "This turn has no current Goal mutation authority.",
+            )
+        })?;
+    let sender = resources
+        .get::<GoalRuntimeHandle>()
+        .map(|handle| handle.0.clone())
+        .ok_or_else(|| {
+            tool_runtime::ToolError::custom("goal_not_available", "Goal runtime is unavailable.")
+        })?;
+    Ok((sender, authority))
 }
 
 fn channel_error() -> tool_runtime::ToolError {
@@ -275,10 +342,14 @@ impl tool_runtime::Tool for CreateGoalTool {
         ctx: tool_runtime::ToolCallContext,
         input: CreateGoalInput,
     ) -> Result<CreateGoalOutput, tool_runtime::ToolError> {
-        let sender = runtime_sender(&ctx).await?;
+        let (sender, authority) = mutation_runtime(&ctx).await?;
         command_output(
             sender,
-            |respond_to| GoalCommand::Create { input, respond_to },
+            |respond_to| GoalCommand::Create {
+                input,
+                authority,
+                respond_to,
+            },
             "goal_create_rejected",
         )
         .await
@@ -295,7 +366,7 @@ pub struct UpdateGoalTool;
 goal_metadata!(
     UpdateGoalTool,
     ToolKind::GoalLifecycleUpdate,
-    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. Pause, resume, edit, budget, and clear are user-owned controls."
+    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run. Pause, resume, edit, budget, and clear are user-owned controls."
 );
 
 impl tool_runtime::Tool for UpdateGoalTool {
@@ -322,10 +393,14 @@ impl tool_runtime::Tool for UpdateGoalTool {
         ctx: tool_runtime::ToolCallContext,
         input: UpdateGoalInput,
     ) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
-        let sender = runtime_sender(&ctx).await?;
+        let (sender, authority) = mutation_runtime(&ctx).await?;
         command_output(
             sender,
-            |respond_to| GoalCommand::Update { input, respond_to },
+            |respond_to| GoalCommand::Update {
+                input,
+                authority,
+                respond_to,
+            },
             "goal_update_rejected",
         )
         .await

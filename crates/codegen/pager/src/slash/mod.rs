@@ -269,7 +269,6 @@ pub struct SlashController {
     agent_catalog: Vec<command::AgentArg>,
     current_agent: Option<String>,
     behavior_mode: tools::types::BehaviorId,
-    deep_research_available: bool,
     goal_available: bool,
     current_goal_objective: Option<String>,
     auto_permission_available: bool,
@@ -318,7 +317,6 @@ impl SlashController {
             agent_catalog: Vec::new(),
             current_agent: None,
             behavior_mode: tools::types::BehaviorId::Normal,
-            deep_research_available: false,
             goal_available: false,
             current_goal_objective: None,
             auto_permission_available: false,
@@ -368,7 +366,6 @@ impl SlashController {
         &mut self,
         current_agent: Option<String>,
         behavior_mode: tools::types::BehaviorId,
-        deep_research_available: bool,
         goal_available: bool,
         current_goal_objective: Option<String>,
         auto_permission_available: bool,
@@ -376,7 +373,6 @@ impl SlashController {
     ) {
         self.current_agent = current_agent;
         self.behavior_mode = behavior_mode;
-        self.deep_research_available = deep_research_available;
         self.goal_available = goal_available;
         self.current_goal_objective = current_goal_objective;
         self.auto_permission_available = auto_permission_available;
@@ -398,7 +394,6 @@ impl SlashController {
             agents: &self.agent_catalog,
             current_agent: self.current_agent.as_deref(),
             behavior_mode: self.behavior_mode,
-            deep_research_available: self.deep_research_available,
             goal_available: self.goal_available,
             current_goal_objective: self.current_goal_objective.as_deref(),
             auto_permission_available: self.auto_permission_available,

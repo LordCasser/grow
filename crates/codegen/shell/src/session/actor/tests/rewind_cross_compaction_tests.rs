@@ -81,10 +81,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .chat_state_handle
         .replace_compaction_range(
             target,
-            vec![
-                ConversationItem::user("UI1"),
-                ConversationItem::user("SUMMARY"),
-            ],
+            vec![ConversationItem::user_meta("SUMMARY")],
             source_surface_revision,
         )
         .await
@@ -95,7 +92,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
             chat_state::CompactionEvent::Completed {
                 id: "compact-5".into(),
                 source_items: 7,
-                result_items: 2,
+                result_items: 1,
                 duration_ms: 1,
             },
         ))

@@ -120,44 +120,23 @@ pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<Conver
         .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
         .collect()
 }
-/// Replace `ContentPart::Image` entries with `"[image]"` so downstream
-/// consumers (summary model, segment store) don't carry megabytes of base64.
-pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
-    conversation
-        .into_iter()
-        .map(|item| match item {
-            ConversationItem::User(mut u) => {
-                for part in &mut u.content {
-                    if matches!(part, ContentPart::Image { .. }) {
-                        *part = ContentPart::Text {
-                            text: std::sync::Arc::<str>::from("[image]"),
-                        };
-                    }
-                }
-                ConversationItem::User(u)
-            }
-            other => other,
-        })
-        .collect()
-}
 /// Prepare a conversation for a summarization call (compaction or memory flush).
 ///
 /// Combines `strip_tool_messages_for_conversation_item` (drops tool
-/// results, flattens `tool_calls` into text annotations),
-/// `strip_reasoning_blocks`, and `strip_images`.
+/// results, flattens `tool_calls` into text annotations) and
+/// `strip_reasoning_blocks`.
 ///
 /// The reasoning strip is required because the text mutation in the
 /// tool-message step would invalidate signed `thinking` blocks, which
 /// strict providers reject with a 400.
 ///
-/// The image strip replaces `ContentPart::Image` with `"[image]"` so the
-/// summarizer doesn't receive megabytes of base64 data.
+/// Images are never erased here. A known text-only runtime must first commit
+/// the canonical ImageDescription Sideband + irreversible ImageProjection;
+/// an unknown route receives the real image or fails without mutating history.
 pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(
-        strip_tool_messages_for_conversation_item(conversation),
-    ))
+    strip_reasoning_blocks(strip_tool_messages_for_conversation_item(conversation))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -2460,39 +2439,7 @@ actual user question";
         assert_eq!(once_json, twice_json, "second pass must be a no-op");
     }
     #[test]
-    fn test_strip_images_replaces_with_placeholder() {
-        let mut user = ConversationItem::user("describe this");
-        user.add_image("data:image/png;base64,iVBORw0KGgo=");
-        let input = vec![
-            ConversationItem::system("sys"),
-            user,
-            ConversationItem::assistant("I see an image"),
-        ];
-        let result = strip_images(input);
-        match &result[1] {
-            ConversationItem::User(u) => {
-                assert_eq!(u.content.len(), 2);
-                match &u.content[1] {
-                    ContentPart::Text { text } => assert_eq!(text.as_ref(), "[image]"),
-                    ContentPart::Image { .. } => {
-                        panic!("image should have been stripped")
-                    }
-                }
-            }
-            _ => panic!("expected User item"),
-        }
-    }
-    #[test]
-    fn test_strip_images_leaves_text_only_messages_unchanged() {
-        let input = vec![
-            ConversationItem::user("just text"),
-            ConversationItem::assistant("reply"),
-        ];
-        let result = strip_images(input);
-        assert_eq!(result[0].text_content(), "just text");
-    }
-    #[test]
-    fn test_prepare_for_summarization_strips_images() {
+    fn prepare_for_summarization_never_erases_images_without_projection() {
         let mut user = ConversationItem::user("look at this");
         user.add_image("data:image/jpeg;base64,/9j/4AAQ");
         let input = vec![
@@ -2503,12 +2450,9 @@ actual user question";
         let result = prepare_conversation_for_summarization(input);
         match &result[1] {
             ConversationItem::User(u) => {
-                for part in &u.content {
-                    assert!(
-                        !matches!(part, ContentPart::Image { .. }),
-                        "images should be stripped by prepare_conversation_for_summarization"
-                    );
-                }
+                assert!(u.content.iter().any(
+                    |part| matches!(part, ContentPart::Image { url } if url.as_ref() == "data:image/jpeg;base64,/9j/4AAQ")
+                ));
             }
             _ => panic!("expected User item"),
         }

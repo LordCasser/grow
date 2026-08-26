@@ -459,11 +459,11 @@ pub(crate) const CLASSIFIER_REFRESH_TURNS: usize = 16;
 const CLASSIFIER_TURN_MAX_LEN: usize = workspace::permission::CLASSIFIER_TURN_MAX_LEN;
 
 /// Build the auto-mode classifier transcript from the most recent `max_items`
-/// conversation items, chronological. Captures GENUINE user text (real input or
-/// a Ctrl+Enter interjection) and assistant tool_use only — every other
-/// synthetic user item is dropped (not user intent, and an injection vector),
-/// and assistant free-text and tool results are excluded so the agent can't
-/// prompt-inject its own permission classifier. User text
+/// authority-context items. Captures only user text carrying an explicit
+/// Timeline-derived [`PermissionEvidence`] fact and assistant tool_use. Every
+/// untagged/synthetic user item is dropped, and assistant free-text and tool
+/// results are excluded so ImageProjection, reminders, summaries, and model
+/// output cannot authorize their own permission classifier. User text
 /// and tool args are neutralized (one turn = one line, no forgeable role labels)
 /// and length-capped.
 pub(crate) fn build_classifier_turns(
@@ -471,20 +471,26 @@ pub(crate) fn build_classifier_turns(
     max_items: usize,
 ) -> Vec<workspace::permission::ClassifierTurn> {
     use workspace::permission::ClassifierTurn;
-    let start = items.len().saturating_sub(max_items);
+    let authority_count = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ConversationItem::User(user) if user.permission_evidence.is_some()
+            )
+        })
+        .count();
+    let mut authority_to_skip = authority_count.saturating_sub(max_items);
+    let assistant_start = items.len().saturating_sub(max_items);
     let mut turns = Vec::new();
-    for item in &items[start..] {
+    for (index, item) in items.iter().enumerate() {
         match item {
             ConversationItem::User(user) => {
-                // Only genuine user intent feeds the security classifier: real
-                // input (`synthetic_reason == None`) or a Ctrl+Enter interjection.
-                // Drop every other synthetic user item — ProjectInstructions (also
-                // sent via set_project_instructions, so it would double-include
-                // AGENTS.md), AutoContinue, SystemReminder, etc. — which are not
-                // user input and are an injection vector into the classifier.
-                let genuine_user = user.synthetic_reason.is_none()
-                    || user.synthetic_reason == Some(SyntheticReason::Interjection);
-                if !genuine_user {
+                if user.permission_evidence.is_none() {
+                    continue;
+                }
+                if authority_to_skip > 0 {
+                    authority_to_skip -= 1;
                     continue;
                 }
                 let text = item.text_content();
@@ -498,6 +504,9 @@ pub(crate) fn build_classifier_turns(
                 }
             }
             ConversationItem::Assistant(assistant) => {
+                if index < assistant_start {
+                    continue;
+                }
                 for tc in &assistant.tool_calls {
                     // Compact the stored JSON args; fall back to the raw string.
                     let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)

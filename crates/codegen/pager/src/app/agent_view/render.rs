@@ -1079,7 +1079,6 @@ impl AgentView {
             &self.session.subagent_sessions,
             &self.session.scheduled_tasks,
             &self.session.workflow_runs,
-            &self.session.private_workflow_runs,
             frame_stamp,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
@@ -2197,8 +2196,6 @@ impl AgentView {
             "clarify"
         } else if effective_behavior == tools::types::BehaviorId::Workflow {
             "workflow"
-        } else if effective_behavior == tools::types::BehaviorId::DeepResearch {
-            "deep-research"
         } else if effective_behavior == tools::types::BehaviorId::Goal {
             "goal"
         } else {

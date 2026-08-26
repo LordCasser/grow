@@ -281,6 +281,7 @@ impl SessionActor {
     /// idle arbiter. Stage scheduling never happens inline with completion.
     pub(crate) async fn handle_turn_end(
         self: &std::sync::Arc<Self>,
+        prompt_id: &str,
         suppress_goal_continuation: bool,
     ) {
         let goal_active_now = laziness_injection_active(
@@ -290,7 +291,9 @@ impl SessionActor {
         if !goal_active_now {
             return;
         }
-        let _ = self.enforce_goal_token_budget().await;
+        let _ = self
+            .enforce_goal_token_budget_for_prompt(Some(prompt_id))
+            .await;
         if !suppress_goal_continuation {
             self.idle_arbiter.notify_one();
         }
@@ -649,6 +652,18 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
+        let admitted_goal_id = match origin {
+            super::super::PromptOrigin::GoalContinuation { goal_id } => Some(goal_id.clone()),
+            super::super::PromptOrigin::User
+                if *self.turn_behavior.lock() == tool_types::BehaviorId::Goal =>
+            {
+                self.goal_tracker.lock().snapshot().and_then(|goal| {
+                    (goal.status == crate::session::goal_tracker::GoalStatus::Active)
+                        .then(|| goal.goal_id.clone())
+                })
+            }
+            _ => None,
+        };
         self.repair_missing_control_contexts_durably()
             .await
             .map_err(|error| {
@@ -844,8 +859,7 @@ impl SessionActor {
             if projected_images.total_images() > 0 {
                 tracing::info!(
                     described_images = projected_images.described_images,
-                    unavailable_images = projected_images.unavailable_images,
-                    "installed target-model ImageShadows without changing canonical images"
+                    "installed irreversible model-facing ImageShadows"
                 );
             }
             let mut effective_tools: Vec<ToolSpec> = self.turn_base_tool_specs(&tool_definitions);
@@ -1132,7 +1146,12 @@ impl SessionActor {
             // The response Surface facts must precede the provider anchor.
             // With usage, the anchor replaces their local estimates; without
             // usage, the estimates remain as fail-safe context pressure.
-            self.record_response_token_usage(&response, Some(model_duration_ms), response_model_id);
+            self.record_response_token_usage(
+                &response,
+                Some(model_duration_ms),
+                response_model_id,
+                admitted_goal_id.as_deref(),
+            );
             if response.usage.is_some() {
                 self.send_available_commands_update().await;
             }
@@ -1498,6 +1517,22 @@ impl SessionActor {
                     });
                 }
                 Ok(ToolLoop::HookDenied { .. }) => {}
+                Ok(ToolLoop::ControlBoundary) => {
+                    let snapshot = self
+                        .finalize_turn_bookkeeping(
+                            req_id,
+                            conv_turn_start,
+                            &turn_span_totals,
+                            model_fingerprint.clone(),
+                        )
+                        .await;
+                    return Ok(TurnOutcome::Completed {
+                        snapshot: Box::new(snapshot),
+                        tools_called: turn_tools_called,
+                        structured_output: None,
+                        refusal: None,
+                    });
+                }
                 Ok(ToolLoop::Cancelled) => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(

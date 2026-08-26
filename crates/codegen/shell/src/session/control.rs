@@ -37,6 +37,46 @@ impl SessionControlSnapshot {
         self.architecture_version == SESSION_CONTROL_ARCHITECTURE_VERSION
     }
 
+    fn validate(&self) -> std::io::Result<()> {
+        if !self.architecture_is_current() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported session control architecture {}",
+                    self.architecture_version
+                ),
+            ));
+        }
+        if self.agent_name.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session control Agent name is empty",
+            ));
+        }
+        if !self.behavior.runtime_fields_match_selection() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session control Behavior contains cross-runtime state",
+            ));
+        }
+        if let Some(goal) = self.goal.as_ref() {
+            crate::session::goal_tracker::GoalTracker::validate_snapshot(goal)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        }
+        let active_goal = self
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active);
+        let goal_behavior = self.behavior.behavior() == tool_types::BehaviorId::Goal;
+        if active_goal != goal_behavior && (active_goal || self.goal.is_some()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "active Goal and Goal Behavior ownership do not agree",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn timeline_kind(&self) -> std::io::Result<chat_state::TimelineEventKind> {
         self.timeline_kind_inner(None)
     }
@@ -58,6 +98,7 @@ impl SessionControlSnapshot {
         &self,
         model_context: Option<chat_state::ControlContext>,
     ) -> std::io::Result<chat_state::TimelineEventKind> {
+        self.validate()?;
         let snapshot = serde_json::to_value(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         Ok(chat_state::TimelineEventKind::Control(
@@ -79,21 +120,7 @@ impl SessionControlSnapshot {
         }) {
             let snapshot: Self = serde_json::from_value(control.snapshot.clone())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            if !snapshot.architecture_is_current() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "unsupported session control architecture {}",
-                        snapshot.architecture_version
-                    ),
-                ));
-            }
-            if snapshot.agent_name.trim().is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "session control Agent name is empty",
-                ));
-            }
+            snapshot.validate()?;
             if snapshot.control_revision != control.revision {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -128,6 +155,40 @@ pub fn agent_role_transition_context(agent_name: &str, role_prompt: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn goal(
+        status: crate::session::goal_tracker::GoalStatus,
+    ) -> crate::session::goal_tracker::GoalState {
+        let mut tracker = crate::session::goal_tracker::GoalTracker::new();
+        tracker
+            .create_goal(
+                "goal-1".into(),
+                "ship safely".into(),
+                None,
+                "2026-08-26T00:00:00Z".into(),
+            )
+            .unwrap();
+        match status {
+            crate::session::goal_tracker::GoalStatus::Active => {}
+            crate::session::goal_tracker::GoalStatus::Paused => {
+                tracker.pause(crate::session::goal_tracker::GoalPauseReason::User);
+            }
+            crate::session::goal_tracker::GoalStatus::Blocked => {
+                for index in 1..=3 {
+                    tracker
+                        .report_blocked("waiting for user".into(), index)
+                        .unwrap();
+                }
+            }
+            crate::session::goal_tracker::GoalStatus::BudgetLimited => {
+                tracker.budget_limit();
+            }
+            crate::session::goal_tracker::GoalStatus::Complete => {
+                tracker.complete();
+            }
+        }
+        tracker.snapshot().unwrap().clone()
+    }
 
     fn snapshot(revision: u64) -> SessionControlSnapshot {
         SessionControlSnapshot::new(
@@ -232,6 +293,56 @@ mod tests {
 
         let error = SessionControlSnapshot::latest_from_timeline(timeline.events()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn goal_runtime_ownership_must_be_atomic_with_behavior() {
+        let active_outside_goal = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::normal(),
+            Some(goal(crate::session::goal_tracker::GoalStatus::Active)),
+        );
+        assert!(active_outside_goal.timeline_kind().is_err());
+
+        let stopped_inside_goal = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            Some(goal(crate::session::goal_tracker::GoalStatus::Paused)),
+        );
+        assert!(stopped_inside_goal.timeline_kind().is_err());
+
+        let awaiting_objective = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            None,
+        );
+        assert!(awaiting_objective.timeline_kind().is_ok());
+    }
+
+    #[test]
+    fn malformed_goal_payload_cannot_be_silently_dropped_on_load() {
+        let mut snapshot = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            Some(goal(crate::session::goal_tracker::GoalStatus::Active)),
+        );
+        snapshot.goal.as_mut().unwrap().objective = "   ".into();
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Control(
+                chat_state::ControlEvent {
+                    revision: 1,
+                    snapshot: serde_json::to_value(snapshot).unwrap(),
+                    model_context: None,
+                },
+            ))
+            .unwrap();
+
+        assert!(SessionControlSnapshot::latest_from_timeline(timeline.events()).is_err());
     }
 
     #[test]

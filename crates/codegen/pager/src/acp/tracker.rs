@@ -2409,7 +2409,7 @@ mod tests {
         };
         assert!(is_workflow_tool(&wf(
             "Workflow: deep-research",
-            serde_json::json!({ "variant": "Workflow", "action": "run", "definition_id": "builtin:deep-research" }),
+            serde_json::json!({ "variant": "Workflow", "action": "run", "definition_id": "user:deep-research" }),
         )));
         assert!(is_workflow_tool(&wf(
             "Workflow: resume run",

@@ -537,6 +537,7 @@ impl MvpAgent {
             ),
             plugin_registry_initialized: std::cell::Cell::new(false),
             models_manager,
+            model_reload_lock: tokio::sync::Mutex::new(()),
             cfg: RefCell::new(cfg.clone()),
             auth_method_id: crate::agent::auth_method::new_shared_auth_method_id(None),
             sampling_config: RefCell::new(sampling_config),
@@ -1036,7 +1037,15 @@ impl MvpAgent {
             .cloned()
             .collect();
         let override_effort = session_id
-            .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
+            .and_then(|sid| {
+                self.sessions.borrow().get(sid).map(|handle| {
+                    handle
+                        .model_route
+                        .snapshot()
+                        .sampling_config
+                        .reasoning_effort
+                })
+            })
             .flatten()
             .or_else(|| {
                 self.models_manager
@@ -1070,7 +1079,13 @@ impl MvpAgent {
         let current_effort = if supports_effort {
             session_id
                 .and_then(|sid| {
-                    self.sessions.borrow().get(sid).map(|h| h.reasoning_effort)
+                    self.sessions.borrow().get(sid).map(|handle| {
+                        handle
+                            .model_route
+                            .snapshot()
+                            .sampling_config
+                            .reasoning_effort
+                    })
                 })
                 .flatten()
                 .or_else(|| {

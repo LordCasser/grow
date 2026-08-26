@@ -16,7 +16,7 @@ use super::notify::WorkflowNotifySender;
 use super::schema_contract::{
     SCHEMA_CONTRACT_RETRIES, compile_contract_schema, contract_prompt, validate_contract_output,
 };
-use super::tracker::WorkflowTracker;
+use super::tracker::{WorkflowRuntimeRoute, WorkflowTracker};
 
 pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
@@ -50,6 +50,7 @@ pub(crate) struct WorkflowHostParams {
     pub diagnostics: DiagnosticHook,
     pub cancel: CancellationToken,
     pub max_concurrency: u16,
+    pub runtime_route: WorkflowRuntimeRoute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +389,30 @@ impl HostService {
             None => opts.prompt.clone(),
             Some(schema) => contract_prompt(&opts.prompt, schema),
         };
+        let explicit_model_route = match opts.model.as_deref() {
+            None => None,
+            Some(model) => {
+                let transport =
+                    self.params
+                        .runtime_route
+                        .transport_for(model)
+                        .ok_or_else(|| {
+                            HostError::Failed(format!(
+                                "model '{model}' was not present in the Workflow Run route snapshot"
+                            ))
+                        })?;
+                let effort = self
+                    .params
+                    .runtime_route
+                    .reasoning_effort_for(model)
+                    .ok_or_else(|| {
+                        HostError::Failed(format!(
+                            "model '{model}' has no reasoning policy in the Workflow Run route snapshot"
+                        ))
+                    })?;
+                Some((transport, effort))
+            }
+        };
 
         let description = self.params.tracker.lock().agent_started(
             &self.params.run_id,
@@ -428,6 +453,34 @@ impl HostService {
 
         let spawn_once =
             |child_id: String, prompt: String, resume_from: Option<String>, fork_context: bool| {
+                let (model, reasoning_effort, model_override_provenance, model_transport_key) =
+                    if let Some(model) = opts.model.clone() {
+                        // A Definition-authored model is an untrusted explicit
+                        // choice and must exist in the immutable Run sampler
+                        // catalog. Its own snapshotted effort replaces the
+                        // policy selected for the default Run model.
+                        (
+                            model,
+                            explicit_model_route
+                                .as_ref()
+                                .and_then(|(_, effort)| *effort)
+                                .map(|effort| effort.as_str().to_owned()),
+                            ModelOverrideProvenance::Tool,
+                            explicit_model_route
+                                .as_ref()
+                                .map(|(transport, _)| transport.clone()),
+                        )
+                    } else {
+                        (
+                            self.params.runtime_route.model_id().to_owned(),
+                            self.params
+                                .runtime_route
+                                .reasoning_effort()
+                                .map(|effort| effort.as_str().to_owned()),
+                            ModelOverrideProvenance::Harness,
+                            Some(self.params.runtime_route.transport_key()),
+                        )
+                    };
                 SubagentRequest {
                     id: child_id,
                     prompt,
@@ -438,9 +491,11 @@ impl HostService {
                     resume_from,
                     cwd: None,
                     runtime_overrides: SubagentRuntimeOverrides {
-                        model: opts.model.clone(),
+                        model: Some(model),
+                        model_transport_key,
                         output_token_budget: None,
-                        model_override_provenance: ModelOverrideProvenance::Tool,
+                        model_override_provenance,
+                        reasoning_effort: Some(reasoning_effort),
                         capability_mode,
                         isolation,
                         output_schema: None,
@@ -899,6 +954,7 @@ mod tests {
             vec![],
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         let tracker = Arc::new(parking_lot::Mutex::new(tracker));
         let (persist_tx, _persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -927,6 +983,7 @@ mod tests {
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
             max_concurrency: 1,
+            runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
@@ -1017,6 +1074,7 @@ mod tests {
             vec![],
             Some(1000),
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         tracker.reserve_agents(&run_id, 10).unwrap();
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 10);
@@ -1048,6 +1106,7 @@ mod tests {
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
             max_concurrency: 3,
+            runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
@@ -1091,6 +1150,7 @@ mod tests {
             vec![],
             Some(1000),
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         tracker.reserve_agents(&run_id, 50).unwrap();
         assert_eq!(tracker.get(&run_id).unwrap().agents_used, 50);
@@ -1122,6 +1182,7 @@ mod tests {
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
             max_concurrency: 3,
+            runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();

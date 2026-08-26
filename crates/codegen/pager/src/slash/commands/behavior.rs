@@ -29,13 +29,6 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(BehaviorId, &'static str
             "Author and run one deterministic scripted workflow per phase, without approval",
         ));
     }
-    if ctx.deep_research_available {
-        modes.push((
-            BehaviorId::DeepResearch,
-            "Deep Research",
-            "Run read-only evidence research and always deliver a terminal report",
-        ));
-    }
     if ctx.goal_available {
         modes.push((
             BehaviorId::Goal,
@@ -93,7 +86,7 @@ impl SlashCommand for BehaviorCommand {
         "Choose how the primary Agent advances the task"
     }
     fn usage(&self) -> &str {
-        "/behavior [normal|clarify|plan|workflow|deep-research|goal]"
+        "/behavior [normal|clarify|plan|workflow|goal]"
     }
     fn takes_args(&self) -> bool {
         true
@@ -120,26 +113,19 @@ impl SlashCommand for BehaviorCommand {
                 args_query: String::new(),
             });
         }
-        // Hyphen→underscore normalization lets both the documented
-        // "deep-research" spelling and the canonical wire id
-        // "deep_research" resolve to the same mode; parsing goes through
-        // `BehaviorId::try_from_id` so unknown ids (including the legacy
-        // "default") are strictly rejected instead of silently switching.
-        let normalized = id.to_ascii_lowercase().replace('-', "_");
+        let normalized = id.to_ascii_lowercase();
         let mode = match normalized.as_str() {
+            "normal" => BehaviorId::Normal,
             // `clarify` is the documented command word for Ask (wire id:
             // `ask`) and stays accepted so the usage string remains accurate.
-            "clarify" => BehaviorId::Clarify,
-            _ => match BehaviorId::try_from_id(&normalized) {
-                Some(mode) => mode,
-                None => {
-                    return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}"));
-                }
-            },
+            "ask" | "clarify" => BehaviorId::Clarify,
+            "plan" => BehaviorId::Plan,
+            "workflow" => BehaviorId::Workflow,
+            "goal" => BehaviorId::Goal,
+            _ => return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}")),
         };
         let unavailable = match mode {
             BehaviorId::Workflow => !ctx.pager_state.workflows_available,
-            BehaviorId::DeepResearch => !ctx.pager_state.deep_research_available,
             BehaviorId::Goal => !ctx.pager_state.goal_available,
             _ => false,
         };
@@ -205,7 +191,6 @@ mod tests {
             agents: &[],
             current_agent: None,
             behavior_mode: tools::types::BehaviorId::Normal,
-            deep_research_available: true,
             goal_available: true,
             current_goal_objective: None,
             auto_permission_available: false,
@@ -239,9 +224,8 @@ mod tests {
         assert_eq!(by_wire_id("normal").display, "Normal (current)");
         assert_eq!(by_wire_id("ask").display, "Clarify");
         assert_eq!(by_wire_id("plan").display, "Plan");
-        assert_eq!(by_wire_id("deep_research").display, "Deep Research");
         assert_eq!(by_wire_id("goal").display, "Goal");
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 5);
     }
 
     #[test]
@@ -260,7 +244,6 @@ mod tests {
         models: &'a ModelState,
         bundle: &'a crate::app::bundle::BundleState,
         workflows_available: bool,
-        deep_research_available: bool,
         goal_available: bool,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
@@ -270,7 +253,6 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot {
                 workflows_available,
-                deep_research_available,
                 goal_available,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
@@ -282,7 +264,7 @@ mod tests {
         bundle: &crate::app::bundle::BundleState,
         args: &str,
     ) -> CommandResult {
-        let mut ctx = exec_ctx(models, bundle, true, true, true);
+        let mut ctx = exec_ctx(models, bundle, true, true);
         BehaviorCommand.run(&mut ctx, args)
     }
 
@@ -317,20 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn behavior_run_accepts_hyphen_and_underscore_deep_research() {
-        let state = ModelState::default();
-        let bundle = crate::app::bundle::BundleState::default();
-        assert!(matches!(
-            run_in_ctx(&state, &bundle, "deep-research"),
-            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
-        ));
-        assert!(matches!(
-            run_in_ctx(&state, &bundle, "deep_research"),
-            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
-        ));
-    }
-
-    #[test]
     fn behavior_run_rejects_legacy_default_id() {
         let state = ModelState::default();
         let bundle = crate::app::bundle::BundleState::default();
@@ -344,8 +312,8 @@ mod tests {
     fn behavior_run_rejects_unavailable_modes() {
         let state = ModelState::default();
         let bundle = crate::app::bundle::BundleState::default();
-        let mut ctx = exec_ctx(&state, &bundle, false, false, false);
-        for arg in ["workflow", "deep-research", "goal"] {
+        let mut ctx = exec_ctx(&state, &bundle, false, false);
+        for arg in ["workflow", "goal"] {
             assert!(
                 matches!(
                     BehaviorCommand.run(&mut ctx, arg),
@@ -355,10 +323,5 @@ mod tests {
             );
         }
         // Available-modes still resolve when other modes are gated off.
-        let mut ctx = exec_ctx(&state, &bundle, false, true, false);
-        assert!(matches!(
-            BehaviorCommand.run(&mut ctx, "deep_research"),
-            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
-        ));
     }
 }

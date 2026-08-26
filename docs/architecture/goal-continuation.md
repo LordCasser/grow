@@ -1,4 +1,4 @@
-# Long-term Goal runtime v8
+# Long-term Goal runtime v9
 
 Goal is one durable objective plus the right to request another turn after the session becomes idle. It is not a plan executor and owns no blackboard, task graph, planner/verifier child, or finalization phase.
 
@@ -9,7 +9,6 @@ enum GoalStatus {
     Active,
     Paused,
     Blocked,
-    UsageLimited,
     BudgetLimited,
     Complete,
 }
@@ -26,23 +25,26 @@ struct GoalState {
     created_at: String,
     updated_at: String,
     status_message: Option<String>,
+    blocked_audit: Option<GoalBlockedAudit>,
 }
 ```
 
 Goal and the selected Behavior are written together in the versioned Timeline `Control` snapshot. The Timeline is the only persistence authority. A transition publishes UI state only after the durable append succeeds; failure restores the prior in-memory Goal. Create, edit, restart, complete, and clear therefore cannot expose a half-applied Goal/Behavior pair.
 
-Goal architecture v8 deliberately rejects older snapshots. `definition_revision` advances only when the user-controlled objective or token budget changes; lifecycle and accounting checkpoints cannot invalidate model context. `tokens_used` is cumulative model consumption—uncached input plus output from each active primary-Agent call and each acknowledged usage fold from a Goal-owned child. It never derives from current context pressure, so compaction, pruning, provider anchors, and request shadows cannot decrease or replay the budget. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
+Goal architecture v9 deliberately rejects older snapshots. `goal_id` is the stable identity of one long-lived Goal and changes only after explicit clear plus create. `definition_revision` advances when the user-controlled objective or token budget changes and invalidates stale continuation directives. Keeping identity and revision separate means an edit can cancel old execution without orphaning usage from work admitted before the edit; pause/restart likewise preserves the owner so late terminal receipts settle against the Goal that admitted them. Restart only resets stopped lifecycle state and the blocked audit. Lifecycle and accounting checkpoints cannot invalidate model context. `tokens_used` is cumulative model consumption—uncached input plus output from each admitted primary-Agent call and each acknowledged usage fold from a Goal-owned child. It never derives from current context pressure, so compaction, pruning, provider anchors, and request shadows cannot decrease or replay the budget. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
 
 ## Lifecycle ownership
 
 - The user creates, edits, pauses, restarts, budgets, and clears a Goal through `/goal`.
-- The model sees only `create_goal`, `get_goal`, and `update_goal`.
+- Creating a different Goal requires explicitly clearing the existing Goal,
+  including a completed one; completed state is never silently overwritten.
+- The model-facing Goal lifecycle surface is only `create_goal`, `get_goal`, and `update_goal`.
 - `update_goal(status=complete)` is valid only after the entire objective is achieved.
-- `update_goal(status=blocked)` records a genuine impasse and stops automatic continuation.
-- Usage or token limits stop the Goal without deleting its objective or accumulated usage.
-- Completion and clear select Normal Behavior. Other stopped states keep Goal Behavior selected.
+- `update_goal(status=blocked, blocker=...)` records one prompt-indexed impasse. Only the same blocker reported on three consecutive Goal turns stops automatic continuation; earlier reports remain Active, and another blocker or an intervening turn resets the count.
+- The explicit token budget can stop the Goal without deleting its objective or accumulated usage; Grow does not guess a durable usage-limit state from provider 429/503/529 responses.
+- Only Active selects Goal Behavior. Pause, block, budget limit, and completion release to Normal. Clear deletes Goal state but preserves another Behavior already selected while the Goal was stopped.
 
-An unfinished Goal is exclusive with other special Behaviors. Goal does not own the foreground between turns, so user input, cancellation, and ordinary task execution still use the single session foreground/FIFO protocol.
+An Active Goal cannot coexist with another special Behavior. A stopped Goal is durable thread state orthogonal to Behavior, and can be edited, restarted, re-budgeted, or cleared while Normal, Clarify, Plan, or Workflow is selected. Goal does not own the foreground between turns, so user input, cancellation, and ordinary task execution still use the single session foreground/FIFO protocol.
 
 ## Idle continuation
 
@@ -73,22 +75,25 @@ A child spawned during Goal work receives an immutable `GoalView` and `SubagentO
 
 The effective child tool surface remains the intersection of registered tools, Agent definition, Behavior policy, delegated capability, and user permission. Goal ownership adds an object-level restriction; it never expands capability.
 
-Background shell and monitor task ids created by Goal work are retained in the runtime ownership set across `/goal clear`, so late terminal receipts cannot start an idle turn after the Goal has stopped. They are cleared only when a new Goal is created, which establishes a new ownership epoch. A Goal-owned shell/monitor receipt is still visible when consumed during an active turn, but is `Dismissed` while idle with an explicit durable reason rather than being silently dropped. `SubagentCompleted` and `WorkflowCompleted` receipts are not suppressed by this rule and remain eligible to advance the session. A Goal-owned child's acknowledged usage-ledger fold settles its uncached input plus output exactly once into the durable Goal budget before terminal presentation. Live progress remains a context-pressure diagnostic and is never treated as cumulative consumption or persisted as a Goal update.
+Background task ownership is stamped with the admitted `goal_id` and survives lifecycle changes long enough to classify late receipts. Evidence matching the current Active Goal remains pending for that Goal continuation. Evidence owned by an older, paused, blocked, budget-limited, complete, or cleared Goal is durably `Dismissed(reason=goal_owned_autostart)` and its payload is reclaimed after commit; it can never autostart a Normal turn. The owner rule applies uniformly to task, monitor, subagent, and Workflow completion sources. A Goal-owned child's acknowledged usage-ledger fold settles its uncached input plus output exactly once into the durable Goal budget before terminal presentation. Live progress remains a context-pressure diagnostic and is never treated as cumulative consumption or persisted as a Goal update.
+
+Every terminal Goal transition first retires the exact producing prompt and then sweeps the stable `goal_id`. The prompt retirement is the coordinator epoch's admission tombstone: a detached child spawn that races after the sweep is rejected by its parent prompt identity instead of recreating work under the stopped Goal. Process restart creates a new coordinator epoch and cannot resurrect an old in-process spawn future. Automatic turn-error and token-budget stops carry the just-settled prompt id through this same path; explicit lifecycle controls use their command authority boundary and never maintain a second cancellation registry.
 
 ## Observability
 
-`GoalUpdated` projects only goal id, objective, lifecycle status, budget, usage, elapsed time, timestamps, and status message. Pager scrollback records lifecycle transitions—create, objective update, pause, block, usage limit, budget limit, restart, complete, and clear. It does not record streaming phase changes or task progress.
+`GoalUpdated` projects only goal id, objective, lifecycle status, budget, usage, elapsed time, timestamps, and status message. Pager scrollback records lifecycle transitions—create, objective update, pause, block, budget limit, restart, complete, and clear. It does not record streaming phase changes or task progress.
 
 The Goal detail overlay is a read-only projection of that same state. It contains no task board or hidden planner state.
 
 ## Recovery invariants
 
-- Active reloads re-arm idle continuation; stopped statuses remain stopped.
+- Active reloads re-arm idle continuation; stopped statuses remain stopped and restore with Normal unless another orthogonal Behavior is already selected.
 - The Goal runtime requires `create_goal`, `get_goal`, `update_goal`, and
   `todo_write`. A missing required tool pauses an Active Goal with an actionable
   runtime-unavailable message; `task` remains optional bounded delegation.
-- Complete receipts freeze Goal usage; later Normal turns are not charged.
+- Usage is charged by the immutable owner captured at admission, even when settlement follows pause or completion. Later Normal turns have no Goal owner and are not charged.
 - Graceful shutdown checkpoints already-accounted usage and elapsed time before the persistence barrier; it never guesses delegated consumption from a live context watermark.
 - Fork/copy does not clone Goal runtime ownership.
 - Rewind requires explicit Goal clear because prompt/file rewind has no prompt-indexed Goal snapshot.
 - An Active Goal keeps the session resident even when foreground is idle; all stopped statuses may unload normally.
+- A permanent durable turn-boundary failure ends the session writer epoch after local cleanup. Recovery closes the incomplete turn before any Goal continuation is re-armed.

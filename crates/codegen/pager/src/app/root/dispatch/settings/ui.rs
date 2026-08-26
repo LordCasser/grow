@@ -56,8 +56,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
         .collect();
     for agent in app.agents.values_mut() {
         let workflows_available = agent.behavior_supported(tools::types::BehaviorId::Workflow);
-        let deep_research_available =
-            agent.behavior_supported(tools::types::BehaviorId::DeepResearch);
         let goal_available = agent.behavior_supported(tools::types::BehaviorId::Goal);
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -82,7 +80,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                     .behavior_mode_pending
                     .unwrap_or(agent.session.behavior_mode),
                 workflows_available,
-                deep_research_available,
                 goal_available,
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,
@@ -226,7 +223,6 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
             .behavior_mode_pending
             .unwrap_or(agent.session.behavior_mode),
         workflows_available: agent.behavior_supported(tools::types::BehaviorId::Workflow),
-        deep_research_available: agent.behavior_supported(tools::types::BehaviorId::DeepResearch),
         goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
         show_tips: show_tips_from_app,
         auto_update: auto_update_from_app,
@@ -681,10 +677,6 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
             .collect(),
         behavior_mode: agent_behavior_mode(app),
         workflows_available: agent_workflows_available(app),
-        deep_research_available: agent_behavior_available(
-            app,
-            tools::types::BehaviorId::DeepResearch,
-        ),
         goal_available: agent_behavior_available(app, tools::types::BehaviorId::Goal),
         show_tips: app.show_tips,
         auto_update: app.auto_update,

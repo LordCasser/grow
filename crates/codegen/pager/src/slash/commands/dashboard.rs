@@ -90,7 +90,6 @@ mod tests {
             agents: &[],
             current_agent: None,
             behavior_mode: tools::types::BehaviorId::Normal,
-            deep_research_available: false,
             goal_available: false,
             current_goal_objective: None,
             auto_permission_available: false,

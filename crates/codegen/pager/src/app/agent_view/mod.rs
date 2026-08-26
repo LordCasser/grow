@@ -164,7 +164,6 @@ mod shell_completion;
 pub(in crate::app) mod turn_completion;
 mod viewer;
 mod workflow_ingest;
-pub(in crate::app) use workflow_ingest::is_builtin_workflow_handle;
 mod workflows_overlay;
 use super::actions;
 use crate::app::root::dispatch;
@@ -496,7 +495,6 @@ pub(crate) struct SessionReload {
     todo: TodoPane,
     workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
     workflow_runs: Vec<crate::app::session::WorkflowRunSnapshot>,
-    private_workflow_runs: Vec<crate::app::session::WorkflowRunSnapshot>,
     workflow_run_revisions: std::collections::HashMap<String, u64>,
     cleared_workflow_runs: std::collections::HashSet<String>,
     /// Reconnect cursor as of window open, restored with the stash so a
@@ -2269,7 +2267,6 @@ pub(crate) mod test_fixtures {
             objective: "obj".to_string(),
             status: status.to_string(),
             management_available: true,
-            builtin: false,
             phases: Vec::new(),
             current_phase: None,
             agents: Vec::new(),

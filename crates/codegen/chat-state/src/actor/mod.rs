@@ -617,7 +617,8 @@ impl ChatStateActor {
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
-                        active_image_projections: self.state.timeline.active_image_projections(),
+                        direct_user_inputs: self.state.timeline.direct_user_permission_evidence(),
+                        permission_context: self.state.timeline.permission_classifier_context(),
                         active_control_contexts: self.state.timeline.active_control_contexts(),
                     }
                 });

@@ -83,6 +83,30 @@ fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
     }
 }
 
+fn resolve_workflow_sampler(
+    request: &SubagentRequest,
+    model_id: &str,
+    ctx: &SubagentSpawnContext,
+) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
+    let run_id = request
+        .owner
+        .workflow_run_id()
+        .ok_or_else(|| "Workflow sampler resolution requires a Workflow owner".to_owned())?;
+    let tracker = ctx.workflow_tracker.as_ref().ok_or_else(|| {
+        "Workflow sampler resolution requires the root Workflow tracker".to_owned()
+    })?;
+    let state = tracker
+        .lock()
+        .get(run_id)
+        .ok_or_else(|| format!("Workflow Run '{run_id}' is no longer registered"))?;
+    let sampler = state.runtime_route.sampler_for(
+        model_id,
+        &ctx.models_manager,
+        ctx.alpha_test_key.clone(),
+    )?;
+    Ok((sampler, acp::ModelId::new(model_id)))
+}
+
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
@@ -167,10 +191,14 @@ pub(crate) async fn run_shell_child(
         .as_deref()
         .filter(|s| is_valid_resume_id(s))
     {
-        match durable_resume_source_for(resume_id, &ctx.parent_session_id, &ctx.parent_cwd) {
+        match durable_resume_source_for(
+            resume_id,
+            &ctx.parent_session_id,
+            &ctx.security_parent_session_id,
+        ) {
             Some(info) => Some(info),
             None if reporter
-                .source_is_active(resume_id, &ctx.parent_session_id)
+                .source_is_active(resume_id, &ctx.security_parent_session_id)
                 .await =>
             {
                 let msg = format!(
@@ -204,15 +232,32 @@ pub(crate) async fn run_shell_child(
         ) {
             return child_run_output(failure_result(&request, &e.to_string()), completion_data);
         }
+        if source.worktree_path.is_none() {
+            let confined = dunce::canonicalize(&source.child_cwd)
+                .ok()
+                .zip(dunce::canonicalize(&ctx.parent_cwd).ok())
+                .is_some_and(|(child, parent)| child.is_dir() && child.starts_with(parent));
+            if !confined {
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        "Cannot resume a child whose cwd is outside the parent workspace",
+                    ),
+                    completion_data,
+                );
+            }
+        }
     }
-    if let Some(error) = task_model_override_error(
-        request.runtime_overrides.model.as_deref(),
-        request.runtime_overrides.model_override_provenance,
-        resume_source.is_some(),
-        &ctx.available_models,
-        false,
-    ) {
-        return child_run_output(failure_result(&request, &error), completion_data);
+    if !request.owner.is_workflow() {
+        if let Some(error) = task_model_override_error(
+            request.runtime_overrides.model.as_deref(),
+            request.runtime_overrides.model_override_provenance,
+            resume_source.is_some(),
+            &ctx.available_models,
+            false,
+        ) {
+            return child_run_output(failure_result(&request, &error), completion_data);
+        }
     }
     let (worktree_path, worktree_materialization) = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
@@ -283,17 +328,48 @@ pub(crate) async fn run_shell_child(
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
                 if worktree_path.is_none() && resume_source.is_none() {
-                    let p = Path::new(&cwd_path);
-                    if !p.is_dir() {
-                        let msg = if p.exists() {
-                            format!("cwd \"{cwd_path}\" exists but is not a directory")
-                        } else {
-                            format!("cwd \"{cwd_path}\" does not exist")
-                        };
+                    let requested = Path::new(&cwd_path);
+                    let candidate = if requested.is_absolute() {
+                        requested.to_path_buf()
+                    } else {
+                        ctx.parent_cwd.join(requested)
+                    };
+                    let canonical = match dunce::canonicalize(&candidate) {
+                        Ok(path) if path.is_dir() => path,
+                        _ => {
+                            let msg = if candidate.exists() {
+                                format!("cwd \"{cwd_path}\" exists but is not a directory")
+                            } else {
+                                format!("cwd \"{cwd_path}\" does not exist")
+                            };
+                            return child_run_output(
+                                failure_result(&request, &msg),
+                                completion_data,
+                            );
+                        }
+                    };
+                    let parent = match dunce::canonicalize(&ctx.parent_cwd) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let msg = format!("cannot resolve parent workspace: {error}");
+                            return child_run_output(
+                                failure_result(&request, &msg),
+                                completion_data,
+                            );
+                        }
+                    };
+                    if !canonical.starts_with(&parent) {
+                        let msg = format!(
+                            "cwd \"{}\" is outside the parent workspace \"{}\"; use isolation=\"worktree\" for an isolated child",
+                            canonical.display(),
+                            parent.display()
+                        );
                         return child_run_output(failure_result(&request, &msg), completion_data);
                     }
+                    request.cwd = Some(canonical.to_string_lossy().into_owned());
+                } else {
+                    request.cwd = Some(cwd_path);
                 }
-                request.cwd = Some(cwd_path);
             }
             None => request.cwd = None,
         }
@@ -340,42 +416,56 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
-    if request.fork_context {
+    // Ordinary Task forks pin the live parent model to preserve exact radix
+    // reuse. A Workflow Run already owns a durable route snapshot; replacing
+    // it with the parent's later model selection would make phases of one Run
+    // nondeterministic. The forked conversation remains valid without cache
+    // reuse, so Workflow ownership wins here.
+    if request.fork_context && !request.owner.is_workflow() {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
-    let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
-        effective_runtime.model.as_deref(),
-        &request.subagent_type,
-        &ctx,
-    )
-    .await;
-    let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
-    {
-        let model_str = &effective_sampling_config.model;
-        let model_unknown = !model_str.is_empty()
-            && !ctx.available_models.is_empty()
-            && !ctx.available_models.contains_key(model_str)
-            && !ctx
-                .available_models
-                .values()
-                .any(|e| e.info().model == *model_str);
-        if model_unknown {
-            return child_run_output(
-                failure_result(
-                    &request,
-                    &format!(
-                        "Resolved subagent model '{model_str}' is not present in the model catalogue"
-                    ),
-                ),
-                completion_data,
-            );
+    let workflow_model = resume_source
+        .as_ref()
+        .map(|source| source.model_id.as_str())
+        .or(effective_runtime.model.as_deref());
+    let resolved_model = if request.owner.is_workflow() {
+        match workflow_model {
+            Some(model_id) => resolve_workflow_sampler(&request, model_id, &ctx),
+            None => Err("Workflow child request has no captured model route".to_owned()),
         }
-    }
+    } else {
+        resolve_effective_model_config(
+            effective_runtime.model.as_deref(),
+            &request.subagent_type,
+            &ctx,
+        )
+        .await
+    };
+    let (mut effective_sampling_config, mut effective_model_id) = match resolved_model {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return child_run_output(failure_result(&request, &error), completion_data);
+        }
+    };
+    let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
+    // Workflow routes came from the immutable Run catalog; ordinary explicit
+    // routes came from the live catalog. The remaining route is an
+    // actor-committed parent snapshot. None may be reassembled from separately
+    // observed catalog epochs.
     if let Some(ref source) = resume_source
-        && let Some(ref source_model) = source.model_id
-        && effective_model_id.0.as_ref() != source_model.as_str()
+        && effective_model_id.0.as_ref() != source.model_id.as_str()
     {
-        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
+        let source_model = &source.model_id;
+        if request.owner.is_workflow() {
+            let resolved = match resolve_workflow_sampler(&request, source_model, &ctx) {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    return child_run_output(failure_result(&request, &message), completion_data);
+                }
+            };
+            effective_sampling_config = resolved.0;
+            effective_model_id = resolved.1;
+        } else if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
             tracing::info!(
                 subagent_id = %request.id,
                 resolved_model = %effective_model_id.0,
@@ -393,28 +483,77 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data);
         }
     }
-    if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
-        match raw.parse::<ReasoningEffort>() {
-            Ok(eff)
-                if ctx
-                    .models_manager
-                    .model_offers_reasoning_effort(effective_model_id.0.as_ref(), eff) =>
-            {
-                effective_sampling_config.reasoning_effort = Some(eff)
-            }
-            Ok(eff) => tracing::warn!(
-                model_id = %effective_model_id.0,
-                effort = %eff,
-                "subagent reasoning_effort is not offered by the selected model"
-            ),
-            Err(err) => {
-                tracing::warn!(
-                    value = raw,
-                    error = %err,
-                    "subagent reasoning_effort: parse failed, ignoring override"
-                )
-            }
+    if let Some(source) = resume_source.as_ref() {
+        if !request.owner.is_workflow()
+            && let Some(effort) = source.reasoning_effort
+            && !ctx
+                .models_manager
+                .model_offers_reasoning_effort(effective_model_id.0.as_ref(), effort)
+        {
+            let message = format!(
+                "Cannot resume from subagent '{}': source reasoning effort '{}' is no longer offered by model '{}'.",
+                source.subagent_id, effort, effective_model_id.0,
+            );
+            return child_run_output(failure_result(&request, &message), completion_data);
         }
+        effective_sampling_config.reasoning_effort = source.reasoning_effort;
+    } else if let Some(policy) = effective_runtime.reasoning_effort.as_ref() {
+        if let Some(raw) = policy.as_deref() {
+            let effort = match raw.parse::<ReasoningEffort>() {
+                Ok(effort) => effort,
+                Err(error) => {
+                    return child_run_output(
+                        failure_result(
+                            &request,
+                            &format!("Invalid subagent reasoning effort '{raw}': {error}"),
+                        ),
+                        completion_data,
+                    );
+                }
+            };
+            if !request.owner.is_workflow()
+                && !ctx
+                    .models_manager
+                    .model_offers_reasoning_effort(effective_model_id.0.as_ref(), effort)
+            {
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        &format!(
+                            "Subagent reasoning effort '{effort}' is not offered by model '{}'.",
+                            effective_model_id.0
+                        ),
+                    ),
+                    completion_data,
+                );
+            }
+            effective_sampling_config.reasoning_effort = Some(effort);
+        } else {
+            effective_sampling_config.reasoning_effort = None;
+        }
+    }
+    let model_transport_key = sampling_types::model_image_input_key_from_parts(
+        &effective_sampling_config.model,
+        &effective_sampling_config.api_backend,
+        &effective_sampling_config.base_url,
+        &effective_sampling_config.query_params,
+    );
+    let expected_transport_key = resume_source
+        .as_ref()
+        .map(|source| &source.model_transport_key)
+        .or(request.runtime_overrides.model_transport_key.as_ref());
+    if let Some(expected) = expected_transport_key
+        && expected != &model_transport_key
+    {
+        let origin = resume_source.as_ref().map_or_else(
+            || "Workflow Run snapshot".to_owned(),
+            |source| format!("resumed subagent '{}'", source.subagent_id),
+        );
+        let message = format!(
+            "Cannot start subagent '{}': model transport for '{}' changed since the {origin} was recorded.",
+            request.id, effective_model_id.0,
+        );
+        return child_run_output(failure_result(&request, &message), completion_data);
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
@@ -519,6 +658,7 @@ pub(crate) async fn run_shell_child(
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.clone(),
                 child_session_id: child_session_id.0.to_string(),
+                security_parent_session_id: ctx.security_parent_session_id.clone(),
                 subagent_type: request.subagent_type.clone(),
                 description: request.description.clone(),
                 prompt: request.prompt.clone(),
@@ -538,6 +678,8 @@ pub(crate) async fn run_shell_child(
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
                 effective_model_id: effective_model_id.0.to_string(),
+                model_transport_key: model_transport_key.clone(),
+                reasoning_effort: effective_sampling_config.reasoning_effort,
             }),
         ))
         .await
@@ -552,6 +694,7 @@ pub(crate) async fn run_shell_child(
         parent_timeline_id: ctx.parent_session_id.clone(),
         parent_spawn_seq: parent_spawn.seq.get(),
         subagent_id: subagent_id.clone(),
+        security_parent_session_id: ctx.security_parent_session_id.clone(),
         context_source: timeline_context_source,
         source_ref,
         normalized: context_normalized,
@@ -933,6 +1076,9 @@ pub(crate) async fn run_shell_child(
         skills_inherited_count,
     });
     let subagent_model_id = effective_sampling_config.model.clone();
+    let effective_inference_idle_timeout_secs = effective_sampling_config
+        .idle_timeout_secs
+        .unwrap_or(ctx.inference_idle_timeout_secs);
     let _ = persistence
         .tx
         .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -1024,7 +1170,7 @@ pub(crate) async fn run_shell_child(
         effective_model_id,
         ctx.permission_mode,
         None,
-        ctx.inference_idle_timeout_secs,
+        effective_inference_idle_timeout_secs,
         None,
         ctx.web_fetch_config.clone(),
         ctx.app_builder_deployer_config.clone(),

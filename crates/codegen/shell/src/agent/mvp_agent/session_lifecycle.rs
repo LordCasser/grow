@@ -9,6 +9,13 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
         }
     }
+    /// Fail closed when a resident cannot durably adopt the one published
+    /// model catalog. Its on-disk Timeline remains resumable; only the
+    /// divergent in-memory actor is retired.
+    pub(crate) fn evict_catalog_diverged_session(&self, id: &acp::SessionId) {
+        self.request_session_shutdown(id);
+        self.remove_session_terminal(id, SessionLiveState::DeadFailed);
+    }
     pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
         let Some(handle) = self.sessions.borrow().get(id).cloned() else {
             return;
@@ -222,11 +229,12 @@ impl MvpAgent {
         let (cwd, is_worktree, model_id, reasoning_effort, permission_mode) = {
             let sessions = self.sessions.borrow();
             let h = sessions.get(id)?;
+            let route = h.model_route.snapshot();
             (
                 h.display_cwd.clone().unwrap_or_else(|| h.info.cwd.clone()),
                 h.display_cwd.is_some(),
-                Some(h.model_id.0.to_string()),
-                h.reasoning_effort,
+                Some(route.model_id.0.to_string()),
+                route.sampling_config.reasoning_effort,
                 h.permission_mode,
             )
         };

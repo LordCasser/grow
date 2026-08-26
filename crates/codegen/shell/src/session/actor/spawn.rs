@@ -272,42 +272,17 @@ mod permission_audit_tests {
     }
 }
 
-fn reconcile_goal_behavior(
-    goal_status: Option<crate::session::goal_tracker::GoalStatus>,
-    restored: tool_types::BehaviorId,
-) -> tool_types::BehaviorId {
-    match goal_status {
-        Some(crate::session::goal_tracker::GoalStatus::Complete) => tool_types::BehaviorId::Normal,
-        Some(_) => tool_types::BehaviorId::Goal,
-        None if restored == tool_types::BehaviorId::Goal => tool_types::BehaviorId::Normal,
-        None => restored,
-    }
-}
-
-/// Persistence and capability fallback are separate restore actions. Goal
-/// reconciliation may require writing repaired Behavior state, but must never
-/// be mistaken for evidence that the selected Behavior is unavailable.
-fn restored_behavior_actions(
-    goal_reconciled: bool,
-    selected_behavior_unavailable: bool,
-) -> (bool, bool) {
-    (
-        goal_reconciled || selected_behavior_unavailable,
-        selected_behavior_unavailable,
-    )
-}
-
 fn restored_runtime_conflict_actions(
     behavior: tool_types::BehaviorId,
-    unfinished_goal: bool,
+    active_goal: bool,
     public_workflow_active: bool,
 ) -> (bool, bool) {
     if !public_workflow_active {
         return (false, false);
     }
     match behavior {
-        tool_types::BehaviorId::Goal if unfinished_goal => (true, false),
-        tool_types::BehaviorId::Plan | tool_types::BehaviorId::DeepResearch => (false, true),
+        tool_types::BehaviorId::Goal if active_goal => (true, true),
+        tool_types::BehaviorId::Plan => (false, true),
         _ => (false, false),
     }
 }
@@ -423,61 +398,19 @@ fn restored_plan_artifact_is_valid(
 
 #[cfg(test)]
 mod goal_restore_reconciliation_tests {
-    use super::{
-        reconcile_goal_behavior, restored_behavior_actions, restored_runtime_conflict_actions,
-    };
-    use crate::session::goal_tracker::GoalStatus;
+    use super::restored_runtime_conflict_actions;
     use tool_types::BehaviorId;
-
-    #[test]
-    fn unfinished_goal_is_authoritative_over_persisted_behavior() {
-        for status in [
-            GoalStatus::Active,
-            GoalStatus::Paused,
-            GoalStatus::Blocked,
-            GoalStatus::BudgetLimited,
-        ] {
-            assert_eq!(
-                reconcile_goal_behavior(Some(status), BehaviorId::Normal),
-                BehaviorId::Goal,
-            );
-        }
-    }
-
-    #[test]
-    fn missing_or_complete_goal_cannot_restore_goal_behavior() {
-        assert_eq!(
-            reconcile_goal_behavior(None, BehaviorId::Goal),
-            BehaviorId::Normal,
-        );
-        assert_eq!(
-            reconcile_goal_behavior(Some(GoalStatus::Complete), BehaviorId::Goal),
-            BehaviorId::Normal,
-        );
-    }
-
-    #[test]
-    fn repaired_goal_behavior_is_persisted_without_being_reset_to_normal() {
-        let (persist_repair, reset_to_normal) = restored_behavior_actions(true, false);
-        assert!(persist_repair);
-        assert!(
-            !reset_to_normal,
-            "repairing Normal -> Goal is not an unavailable-Behavior fallback"
-        );
-    }
 
     #[test]
     fn restored_public_workflow_conflicts_fail_closed_without_deleting_the_run() {
         assert_eq!(
             restored_runtime_conflict_actions(BehaviorId::Goal, true, true),
-            (true, false)
+            (true, true)
         );
-        for behavior in [BehaviorId::Plan, BehaviorId::DeepResearch] {
-            assert_eq!(
-                restored_runtime_conflict_actions(behavior, false, true),
-                (false, true)
-            );
-        }
+        assert_eq!(
+            restored_runtime_conflict_actions(BehaviorId::Plan, false, true),
+            (false, true)
+        );
         assert_eq!(
             restored_runtime_conflict_actions(BehaviorId::Workflow, false, true),
             (false, false)
@@ -1068,6 +1001,7 @@ pub(crate) async fn spawn_session_actor(
             tokio_util::sync::CancellationToken::new(),
         )
     };
+    let workflow_alpha_test_key = credentials.alpha_test_key.clone();
     chat_state_handle.update_credentials(credentials);
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
@@ -1078,6 +1012,7 @@ pub(crate) async fn spawn_session_actor(
         nudges_used_this_session: 0,
         recent_terminals: VecDeque::new(),
         pending_manual_compact: None,
+        pending_model_reload: None,
     });
     let mcp_strategy = match std::env::var("MCP_INIT_STRATEGY") {
         Ok(v) if !v.trim().is_empty() => McpInitStrategy::from(v),
@@ -1097,86 +1032,52 @@ pub(crate) async fn spawn_session_actor(
     let hunk_tracker_handle_for_bridge = tool_context.hunk_tracker_handle.clone();
     let hunk_tracker_handle = tool_context.hunk_tracker_handle.clone();
     let prompt_index_for_bridge = tool_context.prompt_index.clone();
-    let persisted_goal_meta = persisted_goal_mode.as_ref().map(|goal| {
-        serde_json::json!({
-            "architecture_version": goal.architecture_version,
-            "status": goal.status,
-            "goal_enabled": goal_enabled,
-        })
-    });
-    let had_persisted_goal = persisted_goal_mode.is_some();
-    let restored_goal_tracker = goal_enabled
-        .then_some(persisted_goal_mode)
-        .flatten()
-        .and_then(crate::session::goal_tracker::GoalTracker::from_snapshot);
+    // Goal state is durable user data, independent of whether the current
+    // harness can drive it. Restore it first; capability reconciliation below
+    // pauses an active Goal when its runtime is unavailable instead of
+    // silently deleting the objective. Invalid payloads were already rejected
+    // by the Control loader and must never degrade into an empty Goal here.
+    let restored_goal_tracker = match persisted_goal_mode {
+        Some(goal) => Some(
+            crate::session::goal_tracker::GoalTracker::from_snapshot(goal).ok_or_else(|| {
+                agent::AgentBuildError::InvalidConfig(
+                    "invalid persisted Goal control payload".to_string(),
+                )
+            })?,
+        ),
+        None => None,
+    };
     let goal_was_restored = restored_goal_tracker.is_some();
-    let goal_state_needs_clear = had_persisted_goal && !goal_was_restored;
-    if goal_state_needs_clear {
-        ::diagnostics::unified_log::info(
-            "shell.goal.restore_rejected",
-            Some(session_info.id.0.as_ref()),
-            persisted_goal_meta,
-        );
-    }
     let goal_tracker = Arc::new(parking_lot::Mutex::new(
         restored_goal_tracker.unwrap_or_default(),
     ));
-    let mut persisted_behavior_rejected = false;
-    let persisted_behavior = persisted_behavior.and_then(|snapshot| {
-        let valid = snapshot.runtime_fields_match_selection()
-            && match &snapshot.state {
-                crate::session::behavior::BehaviorState::Plan(phase) => {
-                    restored_plan_artifact_is_valid(&session_directory, &snapshot, *phase)
-                }
-                crate::session::behavior::BehaviorState::DeepResearch {
-                    run_id: Some(run_id),
-                } => persisted_workflow_runs.iter().any(|run| {
-                    run.manifest.state.run_id == *run_id
-                        && run.manifest.state.name == "deep-research"
-                        && run.manifest.state.private
-                        && crate::session::workflow::store::WorkflowRunStore::manifest_matches_timeline_spawn(
-                            &run.manifest,
-                            resumed_timeline.as_ref(),
-                        )
-                }),
-                _ => true,
-            };
-        if valid {
-            Some(snapshot)
-        } else {
-            persisted_behavior_rejected = true;
-            ::diagnostics::unified_log::info(
-                "shell.behavior.restore_rejected",
-                Some(session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "state": snapshot.state })),
-            );
-            None
-        }
-    });
-    let (behavior, restored_behavior) = {
-        let mut tracker = if let Some(snapshot) = persisted_behavior {
+    let persisted_behavior = persisted_behavior
+        .map(|snapshot| {
+            let valid = snapshot.runtime_fields_match_selection()
+                && match &snapshot.state {
+                    crate::session::behavior::BehaviorState::Plan(phase) => {
+                        restored_plan_artifact_is_valid(&session_directory, &snapshot, *phase)
+                    }
+                    _ => true,
+                };
+            if valid {
+                Ok(snapshot)
+            } else {
+                Err(agent::AgentBuildError::InvalidConfig(format!(
+                    "invalid persisted Behavior control state: {:?}",
+                    snapshot.state
+                )))
+            }
+        })
+        .transpose()?;
+    let behavior = {
+        let tracker = if let Some(snapshot) = persisted_behavior {
             crate::session::behavior::BehaviorCoordinator::from_snapshot(snapshot)
         } else {
             crate::session::behavior::BehaviorCoordinator::new()
         };
-        let selected_behavior = tracker.behavior();
-        (
-            Arc::new(parking_lot::Mutex::new(tracker)),
-            selected_behavior,
-        )
+        Arc::new(parking_lot::Mutex::new(tracker))
     };
-    // Goal state is authoritative for Goal Behavior restoration. An unfinished
-    // Goal must remain in Goal; a completed receipt or a missing/rejected state
-    // must be Normal. Behavior and Goal come from one atomic control snapshot,
-    // so this only repairs semantic inconsistencies within that snapshot.
-    let restored_goal_status = goal_tracker.lock().status();
-    let desired_goal_behavior = reconcile_goal_behavior(restored_goal_status, restored_behavior);
-    let goal_behavior_normalized = desired_goal_behavior != restored_behavior;
-    if goal_behavior_normalized {
-        behavior.lock().select_behavior(desired_goal_behavior);
-    }
-    let goal_projection_needs_clear =
-        goal_state_needs_clear || (goal_behavior_normalized && restored_goal_status.is_none());
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
     let tools_notification_handle = crate::tools::notification_bridge::spawn_notification_bridge(
@@ -1559,15 +1460,11 @@ pub(crate) async fn spawn_session_actor(
             .tool_for_kind(tools::types::tool::ToolKind::Workflow)
             .await
             .is_none(),
-        tool_types::BehaviorId::DeepResearch => !background_workflows_enabled,
         tool_types::BehaviorId::Goal => false,
         tool_types::BehaviorId::Clarify | tool_types::BehaviorId::Normal => false,
     };
-    let (mut behavior_normalized, reset_unavailable_behavior) = restored_behavior_actions(
-        goal_behavior_normalized || persisted_behavior_rejected,
-        selected_behavior_unavailable,
-    );
-    if reset_unavailable_behavior {
+    let mut behavior_normalized = selected_behavior_unavailable;
+    if selected_behavior_unavailable {
         behavior
             .lock()
             .select_behavior(tool_types::BehaviorId::Normal);
@@ -1578,8 +1475,7 @@ pub(crate) async fn spawn_session_actor(
         tools::reminders::task_completion::resolve_read_tool_name(agent.tool_bridge()).await;
     let _ = task_output_tool_name.set(resolved_task_output.clone());
     let _ = read_tool_name.set(resolved_read);
-    tool_context.task_output_tool_name = resolved_task_output
-        .unwrap_or_else(|| tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string());
+    tool_context.task_output_tool_name = resolved_task_output;
     let scheduler_handle_for_handle = {
         let toolset = agent.tool_bridge().toolset();
         let res = toolset.resources.lock().await;
@@ -1738,7 +1634,6 @@ pub(crate) async fn spawn_session_actor(
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::update_goal::GoalCommand,
     >();
-    crate::session::workflow::registry::warm_builtin_cache();
     let workflow_session_directory = session_directory.clone();
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
@@ -1748,18 +1643,13 @@ pub(crate) async fn spawn_session_actor(
             resumed_timeline.as_ref(),
         );
     let restored_behavior = behavior.lock().behavior();
-    let public_workflow_active = workflow_snapshots.iter().any(|run| {
-        run.status == crate::session::workflow::tracker::WorkflowRunStatus::Active && !run.private
-    });
-    let unfinished_goal = goal_tracker
-        .lock()
-        .status()
-        .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
-    let (pause_goal, reset_behavior) = restored_runtime_conflict_actions(
-        restored_behavior,
-        unfinished_goal,
-        public_workflow_active,
-    );
+    let public_workflow_active = workflow_snapshots
+        .iter()
+        .any(|run| run.status == crate::session::workflow::tracker::WorkflowRunStatus::Active);
+    let active_goal =
+        goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
+    let (pause_goal, reset_behavior) =
+        restored_runtime_conflict_actions(restored_behavior, active_goal, public_workflow_active);
     if pause_goal {
         goal_tracker.lock().pause_with_message(
             crate::session::goal_tracker::GoalPauseReason::RuntimeUnavailable,
@@ -1786,6 +1676,16 @@ pub(crate) async fn spawn_session_actor(
     for state in workflow_tracker.lock().snapshot() {
         workflow_notify.emit(&state, state.elapsed_ms_floor, 0);
     }
+    let mut workflow_default_sampler = sampling_config.clone();
+    workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout_secs);
+    workflow_default_sampler.max_retries = max_retries;
+    let workflow_next_run_route = crate::session::workflow::tracker::WorkflowRuntimeRoute::capture(
+        session_model_id.0.to_string(),
+        workflow_default_sampler,
+        &models_manager,
+        workflow_alpha_test_key,
+    )
+    .map_err(|error| agent::AgentBuildError::InvalidConfig(error.into()))?;
     let workflow_manager = Arc::new(tokio::sync::Mutex::new(
         crate::session::workflow::manager::WorkflowManager::new(
             session_info.id.0.to_string(),
@@ -1808,6 +1708,7 @@ pub(crate) async fn spawn_session_actor(
             cmd_tx.clone(),
             chat_state_handle.clone(),
             std::collections::HashMap::new(),
+            workflow_next_run_route,
         ),
     ));
     let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2110,13 +2011,6 @@ pub(crate) async fn spawn_session_actor(
                                     ));
                                 }
                             };
-                            if state.private {
-                                return Err((
-                                    "workflow_run_private",
-                                    "Deep Research uses a private runtime and is not part of the public Workflow workspace."
-                                        .into(),
-                                ));
-                            }
                             let final_state = match operation {
                                 WorkflowRunControl::Pause => {
                                     Some(workflow_admission.pause(&state.run_id).await.map_err(
@@ -2212,6 +2106,10 @@ pub(crate) async fn spawn_session_actor(
         behavior_normalized = true;
     }
     let doom_loop_recovery = effective_config.resolve_doom_loop_recovery();
+    let model_route = crate::session::handle::SessionModelRoute::new(
+        session_model_id.clone(),
+        sampling_config.clone(),
+    );
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         #[cfg(test)]
@@ -2352,7 +2250,7 @@ pub(crate) async fn spawn_session_actor(
             }
             lock
         },
-        selected_model_id: std::cell::RefCell::new(session_model_id.clone()),
+        model_route: model_route.clone(),
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(behavior.lock().behavior())),
         behavior: behavior.clone(),
@@ -2363,6 +2261,7 @@ pub(crate) async fn spawn_session_actor(
         background_workflows_enabled,
         // Fail closed until the live tool bridge proves all Goal tools exist.
         goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
+        goal_drive: TaskSlot::new(),
         goal_tracker,
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
@@ -2464,14 +2363,6 @@ pub(crate) async fn spawn_session_actor(
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_runtime_availability().await;
     session
-        .finish_restored_deep_research_if_terminal()
-        .await
-        .map_err(|error| {
-            agent::AgentBuildError::IoError(std::io::Error::other(format!(
-                "restored Deep Research terminal state was not reconciled: {error}"
-            )))
-        })?;
-    session
         .reconcile_restored_public_workflow_notifications()
         .await
         .map_err(|error| {
@@ -2479,7 +2370,7 @@ pub(crate) async fn spawn_session_actor(
                 "restored Workflow terminal notification was not reconciled: {error}"
             )))
         })?;
-    if behavior_normalized || goal_was_restored || goal_state_needs_clear {
+    if behavior_normalized || goal_was_restored {
         let behavior = session.behavior.lock().snapshot();
         let goal = session.goal_tracker.lock().snapshot().cloned();
         let persisted = if behavior_normalized {
@@ -2496,13 +2387,6 @@ pub(crate) async fn spawn_session_actor(
                 "reconciled session control state was not durably recorded: {error}"
             )))
         })?;
-    }
-    if goal_projection_needs_clear {
-        // Replay happens before actor spawn, so explicitly retire any stale
-        // GoalUpdated projection only after its authoritative Control repair.
-        session
-            .send_grow_notification(crate::session::goal_notification::build_goal_cleared())
-            .await;
     }
     if goal_was_restored {
         let tokens_used = session.goal_tokens_used();
@@ -2523,13 +2407,18 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     {
-        let drainer_session = session.clone();
         let Some(mut goal_command_rx) = session.goal_command_rx.borrow_mut().take() else {
             unreachable!("goal_command_rx must be Some at session spawn");
         };
+        let session_cmd_tx = cmd_tx.clone();
         tokio::task::spawn_local(async move {
             while let Some(command) = goal_command_rx.recv().await {
-                drainer_session.handle_goal_command(command).await;
+                if session_cmd_tx
+                    .send(SessionCommand::GoalControl { command })
+                    .is_err()
+                {
+                    break;
+                }
             }
             tracing::debug!("goal command drainer exiting (channel closed)");
         });
@@ -2833,13 +2722,13 @@ pub(crate) async fn spawn_session_actor(
             initial_client_mcp_servers,
             display_cwd: None,
             tool_context: tool_context_for_handle,
-            model_id: session_model_id,
-            reasoning_effort: sampling_config.reasoning_effort,
+            model_route,
             permission_mode: session_permission_mode,
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
             behavior: behavior.clone(),
+            workflow_tracker,
             force_compact,
             permission_handle: permissions_for_handle,
             delegable_capability_ceiling,

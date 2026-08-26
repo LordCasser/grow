@@ -16,7 +16,7 @@ pub(crate) fn task_model_error_for_catalog(
     requested: &str,
     available: &IndexMap<String, ModelEntry>,
 ) -> Option<String> {
-    let is_available = |entry: &ModelEntry| entry.info.user_selectable && !entry.info.hidden;
+    let is_available = task_model_is_selectable;
     if config::find_model_by_catalog_id(available, requested).is_some_and(&is_available) {
         return None;
     }
@@ -39,6 +39,23 @@ pub(crate) fn task_model_error_for_catalog(
     Some(format!("Unknown Task.model ID '{requested}'. {guidance}"))
 }
 
+fn task_model_is_selectable(entry: &ModelEntry) -> bool {
+    entry.info.user_selectable && !entry.info.hidden
+}
+
+/// Canonical catalog projection accepted by an explicit `Task.model` route.
+/// Workflow Run snapshots consume this same projection so a Definition cannot
+/// bypass the Task-facing allowlist by deferring model resolution to its Host.
+pub(crate) fn task_selectable_catalog(
+    catalog: &IndexMap<String, ModelEntry>,
+) -> IndexMap<String, ModelEntry> {
+    catalog
+        .iter()
+        .filter(|(_, entry)| task_model_is_selectable(entry))
+        .map(|(id, entry)| (id.clone(), entry.clone()))
+        .collect()
+}
+
 /// Thread-safe model manager.
 #[derive(Clone)]
 pub struct ModelsManager {
@@ -48,6 +65,8 @@ pub struct ModelsManager {
 /// Complete live model configuration written under one lock, so readers never
 /// observe a new provider config with an old catalog/current selection.
 struct CatalogState {
+    /// Monotonic identity of the atomically published catalog/config snapshot.
+    revision: u64,
     models: IndexMap<String, ModelEntry>,
     /// `allowed_models` matched nothing; the prompt path blocks instead.
     allowlist_excludes_all: bool,
@@ -81,6 +100,7 @@ impl ModelsManager {
         Self {
             inner: Arc::new(Inner {
                 catalog: RwLock::new(CatalogState {
+                    revision: 0,
                     allowlist_excludes_all: allowlist_matches_nothing(&cfg, &models),
                     models,
                     current_model_id,
@@ -175,7 +195,9 @@ impl ModelsManager {
 
         // Validation and selection are complete before the single commit.
         // A failed candidate leaves every reader on the previous snapshot.
+        let revision = state.revision.saturating_add(1);
         *state = CatalogState {
+            revision,
             allowlist_excludes_all: allowlist_matches_nothing(&new_config, &new_catalog),
             models: new_catalog,
             current_model_id: new_current.clone(),
@@ -196,6 +218,16 @@ impl ModelsManager {
 
     pub fn models(&self) -> IndexMap<String, ModelEntry> {
         self.inner.catalog.read().models.clone()
+    }
+
+    pub(crate) fn task_selectable_models(&self) -> IndexMap<String, ModelEntry> {
+        task_selectable_catalog(&self.inner.catalog.read().models)
+    }
+
+    /// Generation of the complete catalog/provider snapshot, distinct from the
+    /// current-model watch used by per-session sampling interruption.
+    pub(crate) fn catalog_revision(&self) -> u64 {
+        self.inner.catalog.read().revision
     }
 
     pub fn endpoints(&self) -> config::EndpointsConfig {

@@ -1840,7 +1840,6 @@ mod tests {
             objective: "objective".to_owned(),
             status: "active".to_owned(),
             management_available: true,
-            builtin: false,
             phases: Vec::new(),
             current_phase: None,
             agents: Vec::new(),

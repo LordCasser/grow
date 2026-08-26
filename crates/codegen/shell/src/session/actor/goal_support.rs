@@ -66,13 +66,20 @@ impl SessionActor {
                 Some(context.view),
             )
         } else {
-            let goal_snapshot = (expected_goal_id != Some(""))
-                .then(|| self.goal_tracker.lock().snapshot().cloned())
-                .flatten()
-                .filter(|goal| {
-                    goal.status == crate::session::goal_tracker::GoalStatus::Active
-                        && expected_goal_id.is_none_or(|expected| expected == goal.goal_id)
-                });
+            let (goal_snapshot, used, elapsed_ms) = if expected_goal_id != Some("") {
+                let tracker = self.goal_tracker.lock();
+                (
+                    tracker.snapshot().cloned(),
+                    tracker.tokens_used(),
+                    tracker.elapsed_ms(),
+                )
+            } else {
+                (None, 0, 0)
+            };
+            let goal_snapshot = goal_snapshot.filter(|goal| {
+                goal.status == crate::session::goal_tracker::GoalStatus::Active
+                    && expected_goal_id.is_none_or(|expected| expected == goal.goal_id)
+            });
             goal_snapshot
                 .as_ref()
                 .map(|goal| {
@@ -80,11 +87,7 @@ impl SessionActor {
                         tools::implementations::grow_build::task::types::SubagentOwner::goal(
                             &goal.goal_id,
                         ),
-                        Some(super::goal::goal_view_from_snapshot(
-                            goal,
-                            0,
-                            goal.elapsed_ms,
-                        )),
+                        Some(super::goal::goal_view_from_snapshot(goal, used, elapsed_ms)),
                     )
                 })
                 .unwrap_or_default()
@@ -110,6 +113,30 @@ impl SessionActor {
             .update_resource(
                 tools::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(
                     delegation_snapshot,
+                ),
+            )
+            .await;
+    }
+
+    pub(super) async fn publish_goal_mutation_authority(&self, prompt_id: &str, prompt_index: u64) {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let goal = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .map(|goal| (goal.goal_id.clone(), goal.definition_revision));
+        let authority = tools::implementations::grow_build::update_goal::GoalMutationAuthority {
+            prompt_id: prompt_id.to_string(),
+            prompt_index,
+            control_revision: self
+                .control_revision
+                .load(std::sync::atomic::Ordering::SeqCst),
+            goal,
+        };
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::update_goal::GoalMutationAuthorityResource(
+                    Some(authority),
                 ),
             )
             .await;
@@ -356,28 +383,73 @@ impl SessionActor {
         }
     }
 
-    pub(super) async fn inject_stopped_goal_interaction_directive(&self) {
-        if self.behavior.lock().behavior() == tool_types::BehaviorId::Goal
-            && self.goal_tracker.lock().status().is_some_and(|status| {
-                matches!(
-                    status,
-                    crate::session::goal_tracker::GoalStatus::Paused
-                        | crate::session::goal_tracker::GoalStatus::Blocked
-                        | crate::session::goal_tracker::GoalStatus::UsageLimited
-                        | crate::session::goal_tracker::GoalStatus::BudgetLimited
-                )
-            })
-        {
-            self.chat_state_handle
-                .push_user_message(ConversationItem::system_reminder(
-                    "The Goal is stopped. Answer the user's current message normally; do not restart autonomous work unless the user explicitly restarts it."
-                        .to_string(),
-                ));
+    pub(super) fn finish_goal_subagent_accounting(&self, subagent_id: &str) {
+        self.subagent_token_records.lock().remove(subagent_id);
+    }
+
+    /// Revoke every runtime descendant and background terminal task admitted
+    /// under one Goal owner. Cancellation admission completes inline, while
+    /// coordinator drain is observed by a detached waiter: child shutdown must
+    /// remain free to submit its final usage fold through the Session mailbox.
+    pub(super) async fn cancel_goal_owned_work(&self, goal_id: &str) {
+        if let Some(event_tx) = self.tool_context.subagent_event_tx.clone() {
+            use tools::implementations::grow_build::task::types::{
+                SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
+            };
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            if event_tx
+                .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                    parent_session_id: Some(self.session_id_string()),
+                    target: SubagentCancelTarget::GoalId(goal_id.to_owned()),
+                    respond_to,
+                }))
+                .is_ok()
+            {
+                let owner = goal_id.to_owned();
+                tokio::task::spawn_local(async move {
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), response).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => {
+                            tracing::warn!(goal_id = owner, "Goal cancellation drain was dropped");
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                goal_id = owner,
+                                "timed out draining Goal-owned subagents"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+
+        let task_ids = self
+            .goal_turn_task_ids
+            .lock()
+            .iter()
+            .filter_map(|(task_id, owner)| (owner == goal_id).then(|| task_id.clone()))
+            .collect::<Vec<_>>();
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        for task_id in task_ids {
+            if let Err(error) = bridge.kill_background_task(&task_id).await {
+                tracing::warn!(%error, goal_id, task_id, "failed to stop Goal-owned task");
+            }
         }
     }
 
-    pub(super) fn finish_goal_subagent_accounting(&self, subagent_id: &str) {
-        self.subagent_token_records.lock().remove(subagent_id);
+    /// Close the exact producing turn before sweeping the Goal owner. The
+    /// prompt cancellation is an epoch-scoped coordinator admission tombstone: a
+    /// detached Task spawn that arrives after the Goal sweep is rejected
+    /// instead of resurrecting work from the retired turn.
+    pub(super) async fn retire_goal_owned_work(
+        &self,
+        goal_id: &str,
+        parent_prompt_id: Option<&str>,
+    ) {
+        if let Some(parent_prompt_id) = parent_prompt_id {
+            self.cancel_running_turn_subagents(parent_prompt_id);
+        }
+        self.cancel_goal_owned_work(goal_id).await;
     }
 
     pub(crate) fn goal_tokens_used(&self) -> i64 {

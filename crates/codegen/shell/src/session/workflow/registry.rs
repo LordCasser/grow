@@ -10,19 +10,10 @@ use workflow::{WorkflowMeta, extract_meta};
 pub(crate) const MAX_WORKFLOW_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_WORKFLOW_NAME_BYTES: usize = 64;
 
-pub(crate) struct BuiltinWorkflow {
-    pub name: &'static str,
-    pub script: &'static str,
-}
-
-pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[];
-const DEEP_RESEARCH_SCRIPT: &str = include_str!("../workflows/deep_research.rhai");
-
 pub(crate) struct ResolvedWorkflow {
     pub definition_id: WorkflowDefinitionId,
     pub scope: WorkflowScope,
     pub content_hash: String,
-    pub private: bool,
     pub meta: WorkflowMeta,
     pub script: String,
     pub source: WorkflowSource,
@@ -30,7 +21,6 @@ pub(crate) struct ResolvedWorkflow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkflowSource {
-    Builtin,
     Inline,
     File(PathBuf),
 }
@@ -86,42 +76,12 @@ struct RegistryEntry {
     path: Option<PathBuf>,
 }
 
-fn builtin_meta_cache() -> &'static [(WorkflowMeta, &'static BuiltinWorkflow)] {
-    static CACHE: std::sync::OnceLock<Vec<(WorkflowMeta, &'static BuiltinWorkflow)>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        BUILTIN_WORKFLOWS
-            .iter()
-            .filter_map(|builtin| {
-                let meta = parse_workflow(builtin.script, None).ok()?;
-                (meta.name == builtin.name && is_valid_workflow_name(builtin.name))
-                    .then_some((meta, builtin))
-            })
-            .collect()
-    })
-}
-
-pub(crate) fn warm_builtin_cache() {
-    let _ = builtin_meta_cache();
-}
-
-fn cached_builtin_entries() -> Vec<RegistryEntry> {
-    builtin_meta_cache()
-        .iter()
-        .map(|(meta, builtin)| RegistryEntry {
-            definition_id: definition_id(WorkflowScope::Builtin, &meta.name),
-            scope: WorkflowScope::Builtin,
-            meta: meta.clone(),
-            script: builtin.script.to_string(),
-            source: WorkflowSource::Builtin,
-            source_label: "builtin",
-            path: None,
-        })
-        .collect()
-}
-
 impl WorkflowRegistry {
     pub(crate) fn scan(session_cwd: Option<&Path>) -> Self {
+        Self::scan_with_user_root(session_cwd, &crate::util::grow_home::grow_home())
+    }
+
+    pub(super) fn scan_with_user_root(session_cwd: Option<&Path>, user_root: &Path) -> Self {
         let mut entries = Vec::new();
         let mut duplicate_names = BTreeMap::new();
         let mut diagnostics = Vec::new();
@@ -149,7 +109,7 @@ impl WorkflowRegistry {
             }
         }
         dirs.push((
-            crate::util::grow_home::grow_home(),
+            user_root.to_path_buf(),
             PathBuf::from("workflows"),
             "user",
             WorkflowScope::User,
@@ -168,16 +128,6 @@ impl WorkflowRegistry {
             entries.extend(scoped);
             diagnostics.append(&mut scoped_diagnostics);
         }
-
-        let mut builtin_entries = cached_builtin_entries();
-        reject_same_scope_duplicates(
-            &mut builtin_entries,
-            "builtin",
-            WorkflowScope::Builtin,
-            &mut duplicate_names,
-            &mut diagnostics,
-        );
-        entries.extend(builtin_entries);
 
         Self {
             entries,
@@ -246,7 +196,6 @@ fn resolved_entry(entry: &RegistryEntry) -> ResolvedWorkflow {
         definition_id: entry.definition_id.clone(),
         scope: entry.scope,
         content_hash: content_hash(&entry.script),
-        private: false,
         meta: entry.meta.clone(),
         script: entry.script.clone(),
         source: entry.source.clone(),
@@ -364,22 +313,6 @@ pub(crate) fn resolve_by_name(
     WorkflowRegistry::scan(session_cwd).resolve_by_name(name)
 }
 
-/// Resolve the private workflow backing Deep Research Behavior. It is not
-/// inserted into the public registry, so `/workflow-run deep-research` cannot
-/// bypass the Behavior lifecycle or its report contract.
-pub(crate) fn resolve_deep_research() -> Result<ResolvedWorkflow, ResolveError> {
-    let meta = parse_workflow(DEEP_RESEARCH_SCRIPT, None)?;
-    Ok(ResolvedWorkflow {
-        definition_id: definition_id(WorkflowScope::Builtin, &meta.name),
-        scope: WorkflowScope::Builtin,
-        content_hash: content_hash(DEEP_RESEARCH_SCRIPT),
-        private: true,
-        meta,
-        script: DEEP_RESEARCH_SCRIPT.to_string(),
-        source: WorkflowSource::Builtin,
-    })
-}
-
 pub(crate) fn resolve_by_path(
     path: &Path,
     session_cwd: &Path,
@@ -477,7 +410,6 @@ pub(crate) fn resolve_by_path(
         definition_id: definition_id(scope, &meta.name),
         scope,
         content_hash: content_hash(&script),
-        private: false,
         meta,
         script,
         source: WorkflowSource::File(canonical),
@@ -499,7 +431,6 @@ pub(crate) fn resolve_inline(script: String) -> Result<ResolvedWorkflow, Resolve
         )),
         scope: WorkflowScope::Session,
         content_hash: content_hash(&script),
-        private: false,
         meta,
         script,
         source: WorkflowSource::Inline,
@@ -849,7 +780,7 @@ fn open_publish_directory(
             crate::util::grow_home::grow_home(),
             PathBuf::from("workflows"),
         ),
-        WorkflowScope::Session | WorkflowScope::Builtin => {
+        WorkflowScope::Session => {
             return Err(ResolveError::PublishConflict {
                 path: scope.as_str().into(),
                 reason: "only project and user scopes are publishable".into(),
@@ -1034,13 +965,13 @@ mod tests {
                 path: Some(PathBuf::from("project/same.rhai")),
             },
             RegistryEntry {
-                definition_id: definition_id(WorkflowScope::Builtin, "same"),
-                scope: WorkflowScope::Builtin,
+                definition_id: definition_id(WorkflowScope::User, "same"),
+                scope: WorkflowScope::User,
                 meta: extract_meta(&script("same")).unwrap(),
                 script: script("same"),
-                source: WorkflowSource::Builtin,
-                source_label: "builtin",
-                path: None,
+                source: WorkflowSource::File(PathBuf::from("user/same.rhai")),
+                source_label: "user",
+                path: Some(PathBuf::from("user/same.rhai")),
             },
         ];
         let registry = WorkflowRegistry {

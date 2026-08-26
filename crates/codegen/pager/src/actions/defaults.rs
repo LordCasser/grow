@@ -778,7 +778,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the Behavior picker for Normal, Clarify, Plan, Workflow, Deep Research, or Goal.\nPress Ctrl+X, then B.",
+                "Opens the Behavior picker for Normal, Clarify, Plan, Workflow, or Goal.\nPress Ctrl+X, then B.",
             ),
         },
         ActionDef {

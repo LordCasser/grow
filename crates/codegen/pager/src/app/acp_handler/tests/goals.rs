@@ -93,7 +93,6 @@ fn lifecycle_transitions_append_deduplicated_goal_events() {
         ("paused", SessionEvent::GoalPaused),
         ("active", SessionEvent::GoalRestarted),
         ("blocked", SessionEvent::GoalBlocked),
-        ("usage_limited", SessionEvent::GoalUsageLimited),
         ("budget_limited", SessionEvent::GoalBudgetLimited),
     ] {
         assert!(send_goal_update(&mut app, status, "ship it safely"));

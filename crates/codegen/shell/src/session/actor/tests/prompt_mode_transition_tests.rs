@@ -30,6 +30,34 @@ async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal(
         })
         .await;
 }
+
+#[tokio::test]
+async fn host_command_turn_can_apply_its_own_behavior_transition() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            let mut command = super::support::running_task_stub("host-goal-enter");
+            command.origin = crate::session::PromptOrigin::HostCommand;
+            actor.state.lock().await.foreground = ForegroundState::RegularTurn(command);
+
+            let outcome = actor
+                .request_behavior_change(acp::SessionModeId::new("ask"))
+                .await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ),
+                "unexpected HostCommand transition outcome: {outcome:?}"
+            );
+            assert_eq!(
+                actor.behavior.lock().behavior(),
+                tool_types::BehaviorId::Clarify
+            );
+        })
+        .await;
+}
 fn fn_def(name: &str) -> ToolDefinition {
     ToolDefinition::function(name, None::<&str>, serde_json::json!({"type": "object"}))
 }

@@ -62,9 +62,19 @@ fn status_label(status: GoalDisplayStatus) -> &'static str {
         GoalDisplayStatus::Active => "Active",
         GoalDisplayStatus::Paused => "Paused",
         GoalDisplayStatus::Blocked => "Blocked",
-        GoalDisplayStatus::UsageLimited => "Usage limited",
         GoalDisplayStatus::BudgetLimited => "Budget limited",
         GoalDisplayStatus::Complete => "Complete",
+    }
+}
+
+fn goal_actions_hint(status: GoalDisplayStatus) -> &'static str {
+    match status {
+        GoalDisplayStatus::Active => "/goal edit · pause · budget · clear",
+        GoalDisplayStatus::Paused | GoalDisplayStatus::Blocked => {
+            "/goal edit · restart · budget · clear"
+        }
+        GoalDisplayStatus::BudgetLimited => "/goal budget · edit · clear",
+        GoalDisplayStatus::Complete => "/goal edit · clear",
     }
 }
 
@@ -199,7 +209,7 @@ pub(crate) fn render_goal_detail(
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "/goal edit · pause · restart · clear",
+        goal_actions_hint(goal.status),
         Style::default().fg(theme.gray_dim),
     )));
 
@@ -265,4 +275,22 @@ pub(crate) fn truncate_to_width(input: &str, width: usize) -> String {
     }
     output.push('…');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goal_action_hint_only_offers_valid_lifecycle_controls() {
+        assert!(goal_actions_hint(GoalDisplayStatus::Active).contains("pause"));
+        assert!(!goal_actions_hint(GoalDisplayStatus::Active).contains("restart"));
+        assert!(goal_actions_hint(GoalDisplayStatus::Paused).contains("restart"));
+        assert!(!goal_actions_hint(GoalDisplayStatus::Paused).contains("pause"));
+        assert!(!goal_actions_hint(GoalDisplayStatus::BudgetLimited).contains("restart"));
+        assert_eq!(
+            goal_actions_hint(GoalDisplayStatus::Complete),
+            "/goal edit · clear"
+        );
+    }
 }

@@ -61,6 +61,15 @@ pub(crate) struct OpenedSession {
     summary: Summary,
 }
 
+/// One fully validated view of a pinned Session entity. Consumers that derive
+/// model-visible Surface, resume state, or copies must start here so Timeline,
+/// prompt blobs, and Sideband provenance cannot be validated independently.
+pub(crate) struct ValidatedTimeline {
+    pub(crate) events: Vec<chat_state::TimelineEvent>,
+    pub(crate) timeline: chat_state::Timeline,
+    pub(crate) sidebands: super::SidebandLedgers,
+}
+
 impl OpenedSession {
     pub(crate) fn directory(&self) -> &super::ContainedDirectory {
         &self.directory
@@ -135,20 +144,35 @@ impl OpenedSession {
         )
     }
 
-    pub(crate) fn materialize_timeline(
-        &self,
-        timeline_id: &str,
-    ) -> io::Result<chat_state::TimelineMaterialization> {
+    pub(crate) fn validated_timeline(&self, timeline_id: &str) -> io::Result<ValidatedTimeline> {
         let events = self.timeline_events()?;
-        let last_seq = events.last().map(|event| event.seq.get()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "source Timeline is empty")
-        })?;
-        let timeline = Timeline::from_events(events)
+        let timeline = Timeline::from_events(events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
             &self.directory,
             &timeline,
         )?;
+        let sidebands = self.sideband_ledgers(timeline_id, &timeline)?;
+        Ok(ValidatedTimeline {
+            events,
+            timeline,
+            sidebands,
+        })
+    }
+
+    pub(crate) fn materialize_timeline(
+        &self,
+        timeline_id: &str,
+    ) -> io::Result<chat_state::TimelineMaterialization> {
+        let validated = self.validated_timeline(timeline_id)?;
+        let last_seq = validated
+            .events
+            .last()
+            .map(|event| event.seq.get())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "source Timeline is empty")
+            })?;
+        let timeline = validated.timeline;
         Ok(chat_state::TimelineMaterialization {
             input_ref: chat_state::TimelineRangeRef {
                 timeline_id: timeline_id.to_string(),
@@ -158,7 +182,8 @@ impl OpenedSession {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
-            active_image_projections: timeline.active_image_projections(),
+            direct_user_inputs: timeline.direct_user_permission_evidence(),
+            permission_context: timeline.permission_classifier_context(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }
@@ -260,7 +285,8 @@ impl JsonlStorageAdapter {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
-            active_image_projections: timeline.active_image_projections(),
+            direct_user_inputs: timeline.direct_user_permission_evidence(),
+            permission_context: timeline.permission_classifier_context(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }
@@ -317,6 +343,128 @@ impl JsonlStorageAdapter {
             false,
         )?;
         Self::read_sideband_ledgers_from_directory(&session, parent_timeline_id, parent)
+    }
+
+    /// Recover a completed image transcription that reached its durable
+    /// Sideband terminal boundary before the parent ImageProjection commit.
+    ///
+    /// This closes the crash window without treating a sideband as a second
+    /// model-facing store: the returned result is still only provenance for a
+    /// new parent Timeline projection.
+    pub(crate) fn recover_completed_image_description_from_directory(
+        session: &super::ContainedDirectory,
+        parent_timeline_id: &str,
+        source_revision: u64,
+        source: chat_state::SurfaceId,
+        prompt: &str,
+    ) -> io::Result<Option<(String, chat_state::TimelineRangeRef)>> {
+        let events = super::read_committed_jsonl_from_directory::<chat_state::TimelineEvent>(
+            session,
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            "session Timeline ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+        )?;
+        let parent = Timeline::from_events(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let ledgers =
+            Self::read_sideband_ledgers_from_directory(session, parent_timeline_id, &parent)?;
+        let candidates = parent
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Sideband(spawn)
+                    if spawn.purpose == chat_state::SidebandPurpose::ImageDescription =>
+                {
+                    Some(spawn.sideband_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for sideband_id in candidates.into_iter().rev() {
+            let Some(events) = ledgers.get(sideband_id) else {
+                continue;
+            };
+            let Some(request) = events.first().and_then(|event| match &event.kind {
+                chat_state::SidebandEventKind::Request(request) => Some(request),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if request.purpose != chat_state::SidebandPurpose::ImageDescription
+                || request.prompt != prompt
+            {
+                continue;
+            }
+            let Some((result_event, result)) = events.iter().find_map(|event| match &event.kind {
+                chat_state::SidebandEventKind::Result(result) => Some((event, result)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let result_index = usize::try_from(result_event.seq).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "image description result seq exceeds platform capacity",
+                )
+            })?;
+            if !matches!(
+                events
+                    .get(result_index.saturating_add(1))
+                    .map(|event| &event.kind),
+                Some(chat_state::SidebandEventKind::End(
+                    chat_state::SidebandEnd {
+                        outcome: chat_state::SidebandOutcome::Completed,
+                        error: None,
+                    }
+                ))
+            ) {
+                continue;
+            }
+            let attempt_index = usize::try_from(result.source_event_seqs[1]).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "image description attempt seq exceeds platform capacity",
+                )
+            })?;
+            let Some(attempt) = events
+                .get(attempt_index)
+                .and_then(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let manifest = &attempt.assembly_manifest;
+            let source_event = source.event.get();
+            let source_is_proven = manifest.strategy == "image-group"
+                && manifest.strategy_version == 1
+                && manifest.source_revision == Some(source_revision)
+                && manifest.context_surface_ids.contains(&source)
+                && manifest.selected_surface_ids.contains(&source)
+                && attempt.input_refs.iter().any(|range| {
+                    range.timeline_id == parent_timeline_id
+                        && range.first_seq <= source_event
+                        && source_event <= range.last_seq
+                })
+                && result.evidence_refs.iter().any(|range| {
+                    range.timeline_id == parent_timeline_id
+                        && range.first_seq <= source_event
+                        && source_event <= range.last_seq
+                });
+            let description = result.raw_output.trim().to_owned();
+            if source_is_proven && !description.is_empty() {
+                return Ok(Some((
+                    description,
+                    chat_state::TimelineRangeRef {
+                        timeline_id: sideband_id.to_owned(),
+                        first_seq: result_event.seq,
+                        last_seq: result_event.seq,
+                    },
+                )));
+            }
+        }
+        Ok(None)
     }
 
     fn read_sideband_ledgers_from_directory(
@@ -2490,9 +2638,9 @@ impl JsonlStorageAdapter {
         let source_session = self.open_session(source_info)?;
         self.build_publish_and_cache(target_info, &parent, |staging| {
             let source_summary = source_session.summary().clone();
-            let source_events = source_session.timeline_events()?;
-            let source_timeline = Timeline::from_events(source_events)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let source_timeline = source_session
+                .validated_timeline(&source_info.id.to_string())?
+                .timeline;
             let mut surface_to_copy = source_timeline.surface().to_vec();
             let mut updates_to_copy: Vec<super::SessionUpdate> =
                 Self::read_updates_from_directory(source_session.directory())?;
@@ -2513,6 +2661,12 @@ impl JsonlStorageAdapter {
             for item in &mut surface_to_copy {
                 if let ConversationItem::User(user) = item {
                     user.prompt_index = None;
+                    // A fork is a new authority domain. Historical text remains
+                    // useful context, but first-party ingress evidence belongs
+                    // to the parent ledger and must not authorize actions in the
+                    // child. Subagent capability ceilings are delegated through
+                    // their typed spawn request, never through copied messages.
+                    user.permission_evidence = None;
                 }
             }
             if !options.skip_cwd_transform && source_info.cwd != target_info.cwd {
@@ -2600,7 +2754,6 @@ impl JsonlStorageAdapter {
                         control.behavior.state,
                         crate::session::behavior::BehaviorState::Plan(_)
                             | crate::session::behavior::BehaviorState::Workflow
-                            | crate::session::behavior::BehaviorState::DeepResearch { .. }
                             | crate::session::behavior::BehaviorState::Goal
                     );
                     if behavior_normalized {
@@ -2676,9 +2829,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             Ok(opened) => {
                 tracing::info!("Loading existing session from JSONL");
                 let summary = opened.summary().clone();
-                let timeline = Timeline::from_events(opened.timeline_events()?)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                let _ = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
+                let _ = opened.validated_timeline(&info.id.to_string())?;
                 Ok(summary)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -2831,14 +2982,10 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
         let opened = self.open_session(info)?;
         let summary = opened.summary().clone();
-        let timeline_events = opened.timeline_events()?;
-        let timeline = Timeline::from_events(timeline_events.clone())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
-            opened.directory(),
-            &timeline,
-        )?;
-        let sidebands = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
+        let validated = opened.validated_timeline(&info.id.to_string())?;
+        let timeline_events = validated.events;
+        let timeline = validated.timeline;
+        let sidebands = validated.sidebands;
         self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
@@ -2894,14 +3041,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         tracing::info!("Loading session data (without updates) from JSONL");
         let opened = self.open_session(info)?;
         let summary = opened.summary().clone();
-        let timeline_events = opened.timeline_events()?;
-        let timeline = Timeline::from_events(timeline_events.clone())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
-            opened.directory(),
-            &timeline,
-        )?;
-        let sidebands = opened.sideband_ledgers(&info.id.to_string(), &timeline)?;
+        let validated = opened.validated_timeline(&info.id.to_string())?;
+        let timeline_events = validated.events;
+        let timeline = validated.timeline;
+        let sidebands = validated.sidebands;
         self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
@@ -3073,10 +3216,9 @@ impl StorageAdapter for JsonlStorageAdapter {
     }
     async fn load_prompt_records(&self, info: &Info) -> io::Result<Vec<chat_state::PromptRecord>> {
         let opened = self.open_session(info)?;
+        let timeline_id = info.id.to_string();
         tokio::task::spawn_blocking(move || {
-            let events = opened.timeline_events()?;
-            let timeline = chat_state::Timeline::from_events(events)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let timeline = opened.validated_timeline(&timeline_id)?.timeline;
             Ok(timeline.prompt_records())
         })
         .await

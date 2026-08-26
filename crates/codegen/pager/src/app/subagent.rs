@@ -894,6 +894,7 @@ mod tests {
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                     subagent_id: subagent_id.into(),
                     child_session_id: child_session_id.into(),
+                    security_parent_session_id: "parent-session".into(),
                     subagent_type: "general-purpose".into(),
                     description: "task".into(),
                     prompt: prompt.into(),
@@ -911,6 +912,12 @@ mod tests {
                     child_cwd: child_cwd.into(),
                     worktree_path: worktree_path.map(str::to_owned),
                     effective_model_id: "grow-3".into(),
+                    model_transport_key: tools::types::resources::ModelImageInputKey::new(
+                        "grow-3",
+                        "responses",
+                        "test-endpoint",
+                    ),
+                    reasoning_effort: None,
                 }),
             ))
             .unwrap();

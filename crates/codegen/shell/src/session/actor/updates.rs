@@ -57,10 +57,6 @@ impl SessionActor {
             self.subagent_token_records.lock().remove(subagent_id);
             return Ok(());
         };
-        if goal.status == crate::session::goal_tracker::GoalStatus::Complete {
-            self.subagent_token_records.lock().remove(subagent_id);
-            return Ok(());
-        }
         let previous_record = {
             let mut records = self.subagent_token_records.lock();
             let Some(record) = records.get_mut(subagent_id) else {
@@ -85,7 +81,11 @@ impl SessionActor {
             return Ok(());
         }
         let previous_goal = goal.clone();
-        if !self.goal_tracker.lock().settle_subagent_tokens(tokens) {
+        if !self
+            .goal_tracker
+            .lock()
+            .settle_subagent_tokens(&goal.goal_id, tokens)
+        {
             self.subagent_token_records
                 .lock()
                 .insert(subagent_id.to_string(), previous_record);
@@ -266,7 +266,6 @@ impl SessionActor {
                 tool_types::BehaviorId::Clarify => "clarify",
                 tool_types::BehaviorId::Plan => "plan",
                 tool_types::BehaviorId::Workflow => "workflow",
-                tool_types::BehaviorId::DeepResearch => "deep_research",
                 tool_types::BehaviorId::Goal => "goal",
             },
             "grow/planPhase": self.behavior.lock().plan_phase_label(),
@@ -1264,6 +1263,13 @@ mod grow_event_id_stamping_tests {
                         "now".into(),
                     )
                     .unwrap();
+                // Direct tracker setup bypasses the normal Goal activation
+                // transaction; establish its corresponding Behavior owner so
+                // the durable usage fold is validated under real invariants.
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
                 actor.subagent_token_records.lock().insert(
                     "sub-1".into(),
                     SubagentTokenRecord {

@@ -1,6 +1,6 @@
 //! Production subagent definition discovery and tool-policy resolution.
 use super::types::{EffectiveRuntimeConfig, ResolutionError};
-use agent::config::{AgentDefinition, IsolationMode};
+use agent::config::{AgentDefinition, Effort, IsolationMode};
 use agent::plugins::PluginRegistry;
 use std::collections::HashMap;
 use std::path::Path;
@@ -197,7 +197,7 @@ pub fn resolve_runtime_config(
         reasoning_effort: overrides.reasoning_effort.clone().or_else(|| {
             definition
                 .effort
-                .map(|effort| <&str>::from(effort).to_string())
+                .map(|effort| Some(<&str>::from(effort).to_string()))
         }),
         capability_mode: overrides
             .capability_mode
@@ -321,6 +321,25 @@ mod tests {
             resolve_runtime_config(&SubagentRuntimeOverrides::default(), &general).capability_mode,
             tool_types::SubagentCapabilityMode::ReadWrite
         );
+    }
+
+    #[test]
+    fn explicit_reasoning_disable_does_not_inherit_definition_effort() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let mut definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        definition.effort = Some(Effort::High);
+
+        let runtime = resolve_runtime_config(
+            &SubagentRuntimeOverrides {
+                reasoning_effort: Some(None),
+                ..Default::default()
+            },
+            &definition,
+        );
+
+        assert_eq!(runtime.reasoning_effort, Some(None));
     }
 
     #[test]

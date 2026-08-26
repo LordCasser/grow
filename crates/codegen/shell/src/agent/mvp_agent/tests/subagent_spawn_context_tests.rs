@@ -163,3 +163,65 @@ async fn subagent_spawn_context_inherits_parent_process_scope() {
         "the child sees the owner enrolled through the parent scope"
     );
 }
+
+/// Nested delegation keeps lifecycle persistence on the root session while
+/// inheriting every workspace/authority-bearing route from the immediate
+/// spawning child.
+#[tokio::test]
+async fn nested_spawn_context_uses_immediate_parent_workspace_and_route() {
+    let agent = build_minimal_agent_for_tests();
+    let root_sid = acp::SessionId::new("root-lifecycle");
+    let mut root = make_test_handle("root-model", None);
+    root.info.id = root_sid.clone();
+    root.info.cwd = "/tmp".to_owned();
+    let root_scope = tty_utils::ProcessScope::new();
+    root.tool_context.process_scope = Some(root_scope.clone());
+    agent.sessions.borrow_mut().insert(root_sid.clone(), root);
+
+    let immediate_dir = tempfile::tempdir().expect("immediate workspace");
+    let immediate_cwd = immediate_dir.path().to_path_buf();
+    let mut immediate = make_test_handle("immediate-model", None);
+    immediate.info.id = acp::SessionId::new("immediate-child");
+    immediate.info.cwd = immediate_cwd.to_string_lossy().into_owned();
+    immediate.permission_mode = crate::util::config::PermissionMode::Auto;
+    immediate.ask_user_question_enabled = false;
+    immediate.agent_name = "immediate-agent".to_owned();
+    immediate.tool_context = crate::tools::ToolContext::new_local_context(
+        paths::AbsPathBuf::new(immediate_cwd.clone()).expect("absolute immediate cwd"),
+        std::sync::Arc::new(workspace::file_system::LocalFs::new(immediate_cwd.clone())),
+        std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
+    );
+    immediate.tool_context.subagent_depth = 2;
+
+    let mut ctx = agent.build_subagent_spawn_context(root_sid.0.as_ref());
+    agent
+        .apply_immediate_delegation_context(
+            &mut ctx,
+            immediate.info.id.0.to_string(),
+            &immediate,
+        )
+        .await;
+
+    assert_eq!(ctx.parent_session_id, root_sid.0.as_ref());
+    assert_eq!(
+        ctx.parent_session_info.as_ref().map(|info| info.cwd.as_str()),
+        Some("/tmp"),
+        "canonical lifecycle storage must remain rooted"
+    );
+    assert!(ctx.process_scope.is_some(), "root process scope must remain shared");
+    assert_eq!(ctx.security_parent_session_id, "immediate-child");
+    assert_eq!(
+        ctx.delegation_session_info
+            .as_ref()
+            .map(|info| info.cwd.as_str()),
+        Some(immediate.info.cwd.as_str())
+    );
+    assert_eq!(ctx.parent_cwd, immediate_cwd);
+    assert_eq!(ctx.model_id.0.as_ref(), "immediate-model");
+    assert_eq!(ctx.sampling_config.model, "immediate-model");
+    assert_eq!(ctx.permission_mode, crate::util::config::PermissionMode::Auto);
+    assert_eq!(ctx.parent_depth, 2);
+    assert!(!ctx.ask_user_question_enabled);
+    assert_eq!(ctx.parent_agent_name.as_deref(), Some("immediate-agent"));
+    assert!(ctx.delegation_chat_state.is_some());
+}

@@ -37,7 +37,13 @@ fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::Timelin
         {
             Err(crate::TimelineError::InvalidMessageShape)
         }
-        ConversationItem::User(_) => Ok(MessageCause::User),
+        ConversationItem::User(user) => Ok(match user.permission_evidence {
+            Some(sampling_types::PermissionEvidence::DirectUser { .. }) => MessageCause::DirectUser,
+            Some(sampling_types::PermissionEvidence::Interjection { .. }) => {
+                MessageCause::Interjection
+            }
+            None => MessageCause::User,
+        }),
         ConversationItem::Assistant(_)
         | ConversationItem::BackendToolCall(_)
         | ConversationItem::Reasoning(_) => Ok(MessageCause::Assistant),
@@ -627,9 +633,9 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::ContextPressureUpdated { projected_tokens });
     }
 
-    /// Commit target-model ImageShadows as one log-only Timeline fact. Source
-    /// images remain canonical and become visible again when the model route
-    /// changes; validation rejects stale or unproven descriptions.
+    /// Commit irreversible model-facing ImageShadows as one Timeline Surface
+    /// mutation. Source message events remain immutable evidence, while every
+    /// Surface consumer observes only the replacement text after this point.
     pub(super) async fn record_image_projection(
         &mut self,
         projection: crate::ImageProjectionEvent,
@@ -641,21 +647,25 @@ impl ChatStateActor {
                 actual,
             });
         }
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        let surface_before = serde_json::to_value(self.state.timeline.surface())
+            .expect("conversation surface must serialize");
         let mut candidate = self.state.timeline.clone();
         let event = candidate.record(crate::TimelineEventKind::ImageProjection(
             projection.clone(),
         ))?;
         self.commit_timeline_event(event).await?;
+        if surface_before
+            != serde_json::to_value(self.state.timeline.surface())
+                .expect("conversation surface must serialize")
+        {
+            self.finish_surface_replacement(surface_tokens_before);
+        }
         let mut report = crate::commands::ImageProjectionReport::default();
         for shadow in projection.shadows {
-            match shadow.provenance {
-                crate::ImageShadowSource::Description { .. } => {
-                    report.described_images += shadow.image_count;
-                }
-                crate::ImageShadowSource::Unavailable => {
-                    report.unavailable_images += shadow.image_count;
-                }
-            }
+            let crate::ImageShadowSource::Description { .. } = shadow.provenance;
+            report.described_images += shadow.image_count;
         }
         Ok(report)
     }

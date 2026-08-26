@@ -64,10 +64,8 @@ async fn configured_auxiliary_does_not_preempt_unknown_current_model() {
 
             let result = run_image_result(&actor).await;
 
-            assert_eq!(
-                result.content.as_ref(),
-                "Read image file: /workspace/image.png"
-            );
+            assert_eq!(result.content.as_ref(), "Read image file.");
+            assert!(!result.content.contains("/workspace/image.png"));
             assert_eq!(result.images.len(), 1);
         })
         .await;
@@ -88,9 +86,11 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
                 "read_file must keep ImageContent"
             );
 
-            let report = actor.project_images_for_known_text_model().await.unwrap();
-            assert_eq!(report.described_images, 0);
-            assert_eq!(report.unavailable_images, 1);
+            let error = actor
+                .project_images_for_known_text_model()
+                .await
+                .expect_err("a permanent shadow requires a durable description");
+            assert!(format!("{error:?}").contains("untranslated"));
             let conversation = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 sampling_types::conversation::conversation_image_groups(&conversation).len(),
@@ -101,26 +101,51 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
             };
             assert_eq!(result.tool_call_id, "read-image-1");
             assert_eq!(result.images.len(), 1);
-            assert_eq!(
-                result.content.as_ref(),
-                "Read image file: /workspace/image.png"
-            );
+            assert_eq!(result.content.as_ref(), "Read image file.");
+            assert!(!result.content.contains("/workspace/image.png"));
 
             let request = actor
                 .chat_state_handle
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
-            assert!(
-                sampling_types::conversation::conversation_image_groups(&request.items).is_empty()
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&request.items).len(),
+                1,
+                "failed translation must leave the canonical model view untouched"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_refuses_to_erase_images_when_text_projection_is_unavailable() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = Arc::new(test_actor().await);
+            mark_current_model_as_text_only(&actor).await;
+            run_image_result(&actor).await;
+
+            let error = actor
+                .run_compact(None)
+                .await
+                .expect_err("compaction must fail before replacing an untranslated image");
+
+            assert!(format!("{error:?}").contains("untranslated"));
+            let timeline_events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert!(
-                request
-                    .items
-                    .last()
-                    .unwrap()
-                    .text_content()
-                    .contains("Images omitted")
+                !timeline_events.iter().any(|event| matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Compaction(_)
+                )),
+                "ImageProjection is an admission gate and must run before Compaction::Started"
+            );
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1,
+                "failed projection must leave the canonical image untouched"
             );
         })
         .await;
@@ -176,8 +201,10 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
             actor.chat_state_handle.push_user_message(deferred[0].clone());
 
             mark_current_model_as_text_only(&actor).await;
-            let report = actor.project_images_for_known_text_model().await.unwrap();
-            assert_eq!(report.unavailable_images, 2);
+            actor
+                .project_images_for_known_text_model()
+                .await
+                .expect_err("PDF images may not be permanently omitted");
             let conversation = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 sampling_types::conversation::conversation_image_groups(&conversation).len(),
@@ -192,9 +219,9 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
-            assert!(
-                sampling_types::conversation::conversation_image_groups(&text_request.items)
-                    .is_empty()
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&text_request.items).len(),
+                1
             );
 
             let mut vision_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -257,6 +284,64 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
             assert_eq!(actor.compaction.threshold_percent.get(), 73);
             let next_turn = actor.reconstruct_full_config().await;
             assert_eq!(next_turn.max_retries, Some(2));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = test_actor().await;
+            actor.state.lock().await.foreground = ForegroundState::Compaction;
+            let original_model = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .unwrap()
+                .model;
+            let mut sampling = sampler::SamplerConfig::default();
+            sampling.base_url = "https://deferred.example/v2".into();
+            sampling.model = "deferred-model".into();
+            sampling.context_window = 32_000;
+            let (responds_to, mut response) = tokio::sync::oneshot::channel();
+
+            actor
+                .admit_model_config_reload(
+                    acp::ModelId::new("provider/deferred"),
+                    sampling,
+                    None,
+                    std::time::Duration::from_secs(88),
+                    3,
+                    71,
+                    responds_to,
+                )
+                .await;
+
+            assert!(matches!(
+                response.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .unwrap()
+                    .model,
+                original_model,
+                "the admitted foreground must retain its provider route"
+            );
+
+            actor.state.lock().await.foreground = ForegroundState::Idle;
+            actor.apply_pending_model_reload_if_idle().await;
+            response.await.unwrap().unwrap();
+            let applied = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            assert_eq!(applied.model, "deferred-model");
+            assert_eq!(actor.inference_idle_timeout.get().as_secs(), 88);
+            assert_eq!(actor.max_retries.get(), 3);
+            assert_eq!(actor.compaction.threshold_percent.get(), 71);
         })
         .await;
 }

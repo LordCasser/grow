@@ -280,7 +280,6 @@ impl WorkflowWorkspace {
                 WorkflowScope::Session => 0,
                 WorkflowScope::Project => 1,
                 WorkflowScope::User => 2,
-                WorkflowScope::Builtin => 3,
             };
             (!exact, !focused, scope, definition.name.clone())
         });
@@ -346,7 +345,7 @@ impl WorkflowWorkspace {
                 let resolved = registry::resolve_by_path(Path::new(&path), cwd, None)?;
                 let source_path = match &resolved.source {
                     WorkflowSource::File(path) => path.display().to_string(),
-                    WorkflowSource::Builtin | WorkflowSource::Inline => {
+                    WorkflowSource::Inline => {
                         return Err(WorkspaceError::InvalidState(
                             "trusted draft file did not resolve to a file source".into(),
                         ));
@@ -564,7 +563,7 @@ impl WorkflowWorkspace {
     fn definition_from_saved(&self, resolved: ResolvedWorkflow) -> WorkflowDefinition {
         let path = match &resolved.source {
             WorkflowSource::File(path) => Some(path.display().to_string()),
-            WorkflowSource::Builtin | WorkflowSource::Inline => None,
+            WorkflowSource::Inline => None,
         };
         let validated = self
             .state
@@ -629,7 +628,6 @@ impl WorkflowWorkspace {
             definition_id: draft.definition_id.clone(),
             scope: WorkflowScope::Session,
             content_hash: hash.clone(),
-            private: false,
             meta,
             script,
             source: WorkflowSource::File(path.clone()),
@@ -979,7 +977,7 @@ fn validate_state(state: &WorkspaceState) -> Result<(), WorkspaceError> {
         let Some((scope, local)) = id.0.split_once(':') else {
             return false;
         };
-        matches!(scope, "session" | "project" | "user" | "builtin")
+        matches!(scope, "session" | "project" | "user")
             && !local.is_empty()
             && local
                 .bytes()
@@ -1465,6 +1463,19 @@ mod tests {
         std::fs::write(root.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
         assert!(matches!(
             WorkflowWorkspace::open(session.path(), project.path()),
+            Err(WorkspaceError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_rejects_removed_builtin_definition_ids() {
+        let state = WorkspaceState {
+            focused_definition_id: Some(WorkflowDefinitionId::new("builtin:deep-research")),
+            ..WorkspaceState::default()
+        };
+
+        assert!(matches!(
+            validate_state(&state),
             Err(WorkspaceError::InvalidState(_))
         ));
     }

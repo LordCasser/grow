@@ -77,6 +77,7 @@ async fn resume_reconciles_orphaned_running_subagent() {
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                     subagent_id: sub_id.into(),
                     child_session_id: "child-orphan".into(),
+                    security_parent_session_id: session_id.to_string(),
                     subagent_type: "general-purpose".into(),
                     description: "stuck task".into(),
                     prompt: "do work".into(),
@@ -94,6 +95,12 @@ async fn resume_reconciles_orphaned_running_subagent() {
                     child_cwd: workdir.workspace().to_string_lossy().into_owned(),
                     worktree_path: None,
                     effective_model_id: "test-model".into(),
+                    model_transport_key: sampling_types::ModelImageInputKey::new(
+                        "test-model",
+                        "responses",
+                        "test-endpoint",
+                    ),
+                    reasoning_effort: None,
                 }),
             ))
             .expect("record orphan spawn");

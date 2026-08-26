@@ -26,6 +26,16 @@ impl AgentView {
     /// first structured projection arrives; callers must not derive their own
     /// capability rules from the slash-command registry.
     pub(crate) fn behavior_supported(&self, behavior: tools::types::BehaviorId) -> bool {
+        if !matches!(
+            behavior,
+            tools::types::BehaviorId::Normal
+                | tools::types::BehaviorId::Clarify
+                | tools::types::BehaviorId::Plan
+                | tools::types::BehaviorId::Workflow
+                | tools::types::BehaviorId::Goal
+        ) {
+            return false;
+        }
         if let Some(availability) = self.session.tracker.behavior_availability() {
             return availability
                 .choice(behavior)
@@ -38,11 +48,6 @@ impl AgentView {
                 &self.session.available_commands,
                 !self.session.workflow_runs.is_empty(),
             ),
-            tools::types::BehaviorId::DeepResearch => self
-                .session
-                .available_commands
-                .iter()
-                .any(|command| command.name == "deep-research"),
             tools::types::BehaviorId::Goal => self
                 .session
                 .available_commands
@@ -61,6 +66,16 @@ impl AgentView {
         &self,
         behavior: tools::types::BehaviorId,
     ) -> Option<String> {
+        if !matches!(
+            behavior,
+            tools::types::BehaviorId::Normal
+                | tools::types::BehaviorId::Clarify
+                | tools::types::BehaviorId::Plan
+                | tools::types::BehaviorId::Workflow
+                | tools::types::BehaviorId::Goal
+        ) {
+            return Some("Behavior is unavailable".to_string());
+        }
         if let Some(availability) = self.session.tracker.behavior_availability() {
             let Some(choice) = availability.choice(behavior) else {
                 return Some(format!(
@@ -437,7 +452,6 @@ impl AgentView {
         self.session.workflow_run_revisions.clear();
         self.session.cleared_workflow_runs.clear();
         self.session.workflow_runs.clear();
-        self.session.private_workflow_runs.clear();
     }
     /// Open a reconnect reload window: stash the current transcript/tracker
     /// and point the live fields at fresh state for the incoming
@@ -483,7 +497,6 @@ impl AgentView {
             todo: std::mem::take(&mut self.todo),
             workflow_blocks: std::mem::take(&mut self.workflow_blocks),
             workflow_runs: std::mem::take(&mut self.session.workflow_runs),
-            private_workflow_runs: std::mem::take(&mut self.session.private_workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.session.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.session.cleared_workflow_runs),
             last_seen_event_id: self.session.last_seen_event_id.clone(),
@@ -655,27 +668,6 @@ impl AgentView {
                 merged.retain(|run| !self.session.cleared_workflow_runs.contains(&run.run_id));
                 self.session.workflow_runs = merged;
             }
-            {
-                let mut live_by_id: HashMap<String, _> =
-                    std::mem::take(&mut self.session.private_workflow_runs)
-                        .into_iter()
-                        .map(|run| (run.run_id.clone(), run))
-                        .collect();
-                let mut merged =
-                    Vec::with_capacity(reload.private_workflow_runs.len() + live_by_id.len());
-                for run in reload.private_workflow_runs {
-                    if let Some(live) = live_by_id.remove(&run.run_id) {
-                        merged.push(live);
-                    } else {
-                        merged.push(run);
-                    }
-                }
-                let mut live_only: Vec<_> = live_by_id.into_values().collect();
-                live_only.sort_by_key(|run| run.received_at);
-                merged.extend(live_only);
-                merged.retain(|run| !self.session.cleared_workflow_runs.contains(&run.run_id));
-                self.session.private_workflow_runs = merged;
-            }
             for (run_id, rev) in reload.workflow_run_revisions {
                 self.session
                     .workflow_run_revisions
@@ -698,7 +690,6 @@ impl AgentView {
             self.todo = reload.todo;
             self.workflow_blocks = reload.workflow_blocks;
             self.session.workflow_runs = reload.workflow_runs;
-            self.session.private_workflow_runs = reload.private_workflow_runs;
             self.session.workflow_run_revisions = reload.workflow_run_revisions;
             self.session.cleared_workflow_runs = reload.cleared_workflow_runs;
             self.session.last_seen_event_id = reload.last_seen_event_id;
@@ -1750,7 +1741,6 @@ mod reconnect_workflow_maps_tests {
             objective: "obj".to_string(),
             status: status.to_string(),
             management_available: true,
-            builtin: false,
             phases: Vec::new(),
             current_phase: None,
             agents: Vec::new(),

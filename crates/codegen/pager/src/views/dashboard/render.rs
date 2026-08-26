@@ -2918,7 +2918,6 @@ fn paint_dispatch_config_badge(
         tools::types::BehaviorId::Clarify => "clarify",
         tools::types::BehaviorId::Plan => "plan",
         tools::types::BehaviorId::Workflow => "workflow",
-        tools::types::BehaviorId::DeepResearch => "deep-research",
         tools::types::BehaviorId::Goal => "goal",
     };
     let permission = state.pending_permission.as_canonical();

@@ -6,12 +6,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sampling_types::{ContentPart, ConversationItem, DanglingToolCallReason, SyntheticReason};
+use sampling_types::{
+    ContentPart, ConversationItem, DanglingToolCallReason, PermissionEvidence, SyntheticReason,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 15;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 20;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
@@ -88,12 +90,12 @@ pub struct SurfaceRange {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageShadowSource {
     Description { result_ref: crate::TimelineRangeRef },
-    Unavailable,
 }
 
-/// One target-model shadow for an image-bearing Surface item. The source item
-/// remains unchanged; request projection replaces its images only when the
-/// active runtime matches the owning [`ImageProjectionEvent`].
+/// One irreversible replacement for an image-bearing Surface item. Acceptance
+/// consumes `source` and creates a new text-only Surface identity owned by the
+/// enclosing `ImageProjection` event. The immutable source event remains raw
+/// causal evidence, but no later Surface view can recover its image bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageShadow {
@@ -104,18 +106,35 @@ pub struct ImageShadow {
     pub provenance: ImageShadowSource,
 }
 
+/// Assistant response consumed together with image-bearing ToolResults. Tool
+/// call identity remains, while the Assistant content, original arguments,
+/// and exact ordered Reasoning/BackendToolCall carriers are irreversibly
+/// replaced in the model-facing Surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageToolCallShadow {
+    pub source: SurfaceId,
+    pub tool_call_ids: Vec<String>,
+    pub carrier_sources: Vec<SurfaceId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageProjectionEvent {
-    pub runtime: sampling_types::ModelImageInputKey,
+    /// Runtime whose rejection triggered the conversion. Provenance only: it
+    /// never scopes or reverses the installed shadows.
+    pub trigger_runtime: sampling_types::ModelImageInputKey,
     pub source_revision: u64,
     pub shadows: Vec<ImageShadow>,
+    pub tool_calls: Vec<ImageToolCallShadow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageCause {
     Seed,
+    DirectUser,
+    Interjection,
     User,
     Assistant,
     ToolResult,
@@ -306,7 +325,6 @@ pub enum WorkflowEvent {
         execution_epoch: u64,
         name: String,
         objective: String,
-        private: bool,
     },
     Resumed {
         run_id: String,
@@ -507,6 +525,9 @@ pub enum SubagentContextSource {
 pub struct SubagentSpawnEvent {
     pub subagent_id: String,
     pub child_session_id: String,
+    /// Immediate security parent. Lifecycle ownership may independently be
+    /// rooted at the primary Session for presentation and cancellation.
+    pub security_parent_session_id: String,
     pub subagent_type: String,
     pub description: String,
     pub prompt: String,
@@ -536,6 +557,12 @@ pub struct SubagentSpawnEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub effective_model_id: String,
+    /// Secret-free identity of the exact provider/model/endpoint route used
+    /// by this child. A resumed child must resolve to the same route; matching
+    /// only the user-facing model ID is insufficient.
+    pub model_transport_key: sampling_types::ModelImageInputKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<sampling_types::ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,6 +609,10 @@ pub struct SubagentSeedEvent {
     pub parent_timeline_id: String,
     pub parent_spawn_seq: u64,
     pub subagent_id: String,
+    /// Direct security parent of the child. This is intentionally separate
+    /// from the lifecycle-root Timeline id so sibling children cannot reuse
+    /// one another's resume authority.
+    pub security_parent_session_id: String,
     pub context_source: SubagentContextSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<crate::TimelineRangeRef>,
@@ -782,6 +813,18 @@ pub enum NotificationEvent {
         /// surfaced by a tool result in this turn.
         input: Option<ConversationItem>,
     },
+    /// Resolve receipts that must remain observable Timeline evidence but are
+    /// forbidden from opening a model turn.
+    Dismissed {
+        notification_ids: Vec<String>,
+        reason: NotificationDismissReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDismissReason {
+    GoalOwnedAutostart { goal_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,7 +972,6 @@ struct WorkflowFold {
 pub struct WorkflowLifecycle {
     pub name: String,
     pub objective: String,
-    pub private: bool,
     pub execution_epoch: u64,
     pub status: Option<WorkflowExecutionStatus>,
     pub message: Option<String>,
@@ -1218,30 +1260,6 @@ impl Timeline {
         &self.surface_ids
     }
 
-    /// Current target-model image shadows keyed by their still-live Surface
-    /// identity. Replacements invalidate shadows structurally because they
-    /// create new Surface IDs; ordinary appends leave prior shadows active.
-    pub fn active_image_projections(
-        &self,
-    ) -> BTreeMap<sampling_types::ModelImageInputKey, BTreeMap<SurfaceId, ImageShadow>> {
-        let current = self.surface_ids.iter().copied().collect::<BTreeSet<_>>();
-        let mut active =
-            BTreeMap::<sampling_types::ModelImageInputKey, BTreeMap<SurfaceId, ImageShadow>>::new();
-        for event in &self.events {
-            let TimelineEventKind::ImageProjection(projection) = &event.kind else {
-                continue;
-            };
-            let runtime = active.entry(projection.runtime.clone()).or_default();
-            for shadow in &projection.shadows {
-                if current.contains(&shadow.source) {
-                    runtime.insert(shadow.source, shadow.clone());
-                }
-            }
-        }
-        active.retain(|_, shadows| !shadows.is_empty());
-        active
-    }
-
     /// Effective model context for each Control layer, whether or not its
     /// anchor is still present on the current Surface.
     ///
@@ -1316,6 +1334,7 @@ impl Timeline {
         if seed.parent_timeline_id != parent_timeline_id
             || seed.parent_spawn_seq != parent_spawn_seq.get()
             || seed.subagent_id != spawn.subagent_id
+            || seed.security_parent_session_id != spawn.security_parent_session_id
             || seed.context_source != spawn.context_source
             || seed.source_ref != spawn.source_ref
             || seed.normalized != spawn.context_normalized
@@ -1382,60 +1401,11 @@ impl Timeline {
     /// to record the exact subset sent to a provider instead of pretending
     /// that a whole frozen branch was materialized.
     pub fn branch_transcript_with_ids(&self) -> (Vec<SurfaceId>, Vec<ConversationItem>) {
-        let mut branch = Vec::<(SurfaceId, ConversationItem)>::new();
-        let mut active_turn = false;
-        let mut pending_control_contexts = BTreeMap::new();
-        for event in &self.events {
-            if let Some(items) = event.appended_message_items() {
-                branch.extend(items.iter().cloned().enumerate().map(|(item, value)| {
-                    (
-                        SurfaceId {
-                            event: event.seq,
-                            item: item as u32,
-                        },
-                        value,
-                    )
-                }));
-                continue;
-            }
-            for (source, value) in fold_control_context_activation(
-                &mut active_turn,
-                &mut pending_control_contexts,
-                event,
-            ) {
-                branch.push((
-                    SurfaceId {
-                        event: source,
-                        item: 0,
-                    },
-                    value,
-                ));
-            }
-            let TimelineEventKind::Messages(messages) = &event.kind else {
-                continue;
-            };
-            match (&messages.surface, messages.cause) {
-                (SurfaceOp::Replace { .. }, MessageCause::Rewind) => {
-                    branch = message_entries(event.seq, &messages.items);
-                }
-                (SurfaceOp::Replace { .. }, MessageCause::IntegrityRepair) => {
-                    let mut repaired = branch
-                        .iter()
-                        .map(|(_, item)| item.clone())
-                        .collect::<Vec<_>>();
-                    let _ = crate::compaction_utils::repair_history(&mut repaired);
-                    branch = reconcile_repaired_entries(event.seq, &branch, repaired);
-                }
-                (SurfaceOp::Replace { .. }, MessageCause::ContextRebuild) => {
-                    // ContextRebuild is accepted only before the first turn. It
-                    // finalizes the deferred session preamble as one atomic
-                    // projection, so the branch must adopt the whole result.
-                    branch = message_entries(event.seq, &messages.items);
-                }
-                (SurfaceOp::Replace { .. }, _) | (SurfaceOp::Append, _) => {}
-            }
-        }
-        branch.into_iter().unzip()
+        let fold = fold_branch_provenance(self);
+        fold.leaf_order
+            .into_iter()
+            .filter_map(|id| fold.leaf_values.get(&id).cloned().map(|value| (id, value)))
+            .unzip()
     }
 
     /// Original branch leaves unloaded by completed compaction transactions.
@@ -1450,122 +1420,7 @@ impl Timeline {
     ///
     /// Failed or half-written transactions never become recall evidence.
     pub fn completed_compaction_unloaded_branch_ids(&self) -> Vec<SurfaceId> {
-        let completed = self
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                TimelineEventKind::Compaction(CompactionEvent::Completed { id, .. }) => {
-                    Some(id.as_str())
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut surface = Vec::<BranchProvenance>::new();
-        let mut unloaded = BTreeSet::new();
-        let mut active_turn = false;
-        let mut pending_control_contexts = BTreeMap::new();
-
-        for event in &self.events {
-            if let Some(items) = event.appended_message_items() {
-                surface.extend(items.iter().cloned().enumerate().map(|(item, value)| {
-                    let id = SurfaceId {
-                        event: event.seq,
-                        item: item as u32,
-                    };
-                    BranchProvenance {
-                        id,
-                        value,
-                        leaves: vec![id],
-                    }
-                }));
-                continue;
-            }
-            for (source, value) in fold_control_context_activation(
-                &mut active_turn,
-                &mut pending_control_contexts,
-                event,
-            ) {
-                let id = SurfaceId {
-                    event: source,
-                    item: 0,
-                };
-                surface.push(BranchProvenance {
-                    id,
-                    value,
-                    leaves: vec![id],
-                });
-            }
-            match &event.kind {
-                TimelineEventKind::Messages(messages) => match &messages.surface {
-                    SurfaceOp::Append => {}
-                    SurfaceOp::Replace { start, end, .. } => {
-                        let Some(start_index) = surface.iter().position(|entry| entry.id == *start)
-                        else {
-                            continue;
-                        };
-                        let Some(end_index) = surface.iter().position(|entry| entry.id == *end)
-                        else {
-                            continue;
-                        };
-                        if start_index > end_index {
-                            continue;
-                        }
-                        let replaced = surface[start_index..=end_index].to_vec();
-                        let leaves = replacement_branch_leaves(
-                            event.seq,
-                            messages.cause,
-                            &replaced,
-                            &messages.items,
-                        );
-                        let replacement = messages
-                            .items
-                            .iter()
-                            .cloned()
-                            .zip(leaves)
-                            .enumerate()
-                            .map(|(item, (value, leaves))| BranchProvenance {
-                                id: SurfaceId {
-                                    event: event.seq,
-                                    item: item as u32,
-                                },
-                                value,
-                                leaves,
-                            })
-                            .collect::<Vec<_>>();
-                        surface.splice(start_index..=end_index, replacement);
-                    }
-                },
-                TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. })
-                    if completed.contains(id.as_str()) =>
-                {
-                    let Some(start_index) =
-                        surface.iter().position(|entry| entry.id == target.start)
-                    else {
-                        continue;
-                    };
-                    let Some(end_index) = surface.iter().position(|entry| entry.id == target.end)
-                    else {
-                        continue;
-                    };
-                    if start_index > end_index
-                        || surface[start_index..=end_index]
-                            .iter()
-                            .map(|entry| entry.id)
-                            .ne(target.shadowed.iter().copied())
-                    {
-                        continue;
-                    }
-                    unloaded.extend(
-                        surface[start_index..=end_index]
-                            .iter()
-                            .flat_map(|entry| entry.leaves.iter().copied()),
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        unloaded.into_iter().collect()
+        fold_branch_provenance(self).unloaded.into_iter().collect()
     }
 
     /// Build the uncompressed current branch and cut it before prompt `target`.
@@ -1625,6 +1480,51 @@ impl Timeline {
             }
         }
         prompts.into_values().collect()
+    }
+
+    pub fn direct_user_permission_evidence(&self) -> Vec<ConversationItem> {
+        self.branch_transcript()
+            .into_iter()
+            .filter_map(|item| {
+                let ConversationItem::User(user) = item else {
+                    return None;
+                };
+                let evidence = user.permission_evidence?;
+                if evidence.text().trim().is_empty() {
+                    return None;
+                }
+                let mut authority = ConversationItem::user(evidence.text());
+                authority.set_permission_evidence(evidence);
+                Some(authority)
+            })
+            .collect()
+    }
+
+    /// Ordered permission-classifier context for the selected branch.
+    ///
+    /// User entries are rendered exclusively from typed, sanitized authority
+    /// evidence. Assistant entries retain only tool calls downstream; neither
+    /// projected user text nor assistant prose/tool results can become
+    /// authorization evidence.
+    pub fn permission_classifier_context(&self) -> Vec<ConversationItem> {
+        self.branch_transcript()
+            .into_iter()
+            .filter_map(|item| match item {
+                ConversationItem::User(user) => {
+                    let evidence = user.permission_evidence?;
+                    if evidence.text().trim().is_empty() {
+                        return None;
+                    }
+                    let mut authority = ConversationItem::user(evidence.text());
+                    authority.set_permission_evidence(evidence);
+                    Some(authority)
+                }
+                ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
+                    Some(ConversationItem::Assistant(assistant))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Next branch-local prompt coordinate, derived only from accepted turn
@@ -1692,6 +1592,20 @@ impl Timeline {
         latest
     }
 
+    /// Whether crash recovery may legally close a compaction that linked its
+    /// durable sideband summary but had not yet committed the Surface shadow.
+    /// Consumers validating cross-ledger provenance must permit only this
+    /// exact open state; completed or otherwise malformed transactions remain
+    /// fail-closed.
+    pub fn compaction_summary_awaits_recovery(&self, id: &str, target: &SurfaceRange) -> bool {
+        self.lifecycle.open_compaction.as_ref().is_some_and(|open| {
+            open.id == id
+                && open.summaries == 1
+                && open.replacements == 0
+                && open.target.as_ref() == Some(target)
+        })
+    }
+
     pub fn surface_len(&self) -> usize {
         self.surface.len()
     }
@@ -1727,17 +1641,15 @@ impl Timeline {
     /// Consumers must not reconstruct Workflow state by scanning raw events.
     pub fn workflow_lifecycle(&self, run_id: &str) -> Option<WorkflowLifecycle> {
         let fold = self.lifecycle.workflows.get(run_id)?;
-        let (name, objective, private) =
-            self.events.iter().find_map(|event| match &event.kind {
-                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
-                    run_id: candidate,
-                    name,
-                    objective,
-                    private,
-                    ..
-                }) if candidate == run_id => Some((name.clone(), objective.clone(), *private)),
-                _ => None,
-            })?;
+        let (name, objective) = self.events.iter().find_map(|event| match &event.kind {
+            TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: candidate,
+                name,
+                objective,
+                ..
+            }) if candidate == run_id => Some((name.clone(), objective.clone())),
+            _ => None,
+        })?;
         let terminal = (!fold.open).then(|| {
             self.events
                 .iter()
@@ -1764,7 +1676,6 @@ impl Timeline {
         Some(WorkflowLifecycle {
             name,
             objective,
-            private,
             execution_epoch: fold.execution_epoch,
             status,
             message,
@@ -2043,44 +1954,15 @@ impl Timeline {
     }
 
     pub fn turn_items_since(&self, start: EventSeq) -> Vec<ConversationItem> {
-        let mut captured = Vec::<(SurfaceId, ConversationItem)>::new();
-        for event in self.events.iter().skip(start.get() as usize) {
-            if let Some(items) = event.appended_message_items() {
-                captured.extend(items.iter().cloned().enumerate().map(|(item, value)| {
-                    (
-                        SurfaceId {
-                            event: event.seq,
-                            item: item as u32,
-                        },
-                        value,
-                    )
-                }));
-                continue;
-            }
-            let Some(messages) = event.messages() else {
-                continue;
-            };
-            match &messages.surface {
-                SurfaceOp::Append => {}
-                SurfaceOp::Replace { shadowed, .. } if shadowed.len() == messages.items.len() => {
-                    for (replacement_index, (shadowed_id, replacement)) in
-                        shadowed.iter().zip(messages.items.iter()).enumerate()
-                    {
-                        if let Some((id, item)) =
-                            captured.iter_mut().find(|(id, _)| id == shadowed_id)
-                        {
-                            *id = SurfaceId {
-                                event: event.seq,
-                                item: replacement_index as u32,
-                            };
-                            *item = replacement.clone();
-                        }
-                    }
-                }
-                SurfaceOp::Replace { .. } => {}
-            }
-        }
-        captured.into_iter().map(|(_, item)| item).collect()
+        let fold = fold_branch_provenance(self);
+        fold.leaf_order
+            .into_iter()
+            .filter(|id| {
+                fold.leaf_birth.get(id).is_some_and(|birth| *birth >= start)
+                    && fold.leaf_is_message.get(id).copied().unwrap_or(false)
+            })
+            .filter_map(|id| fold.leaf_values.get(&id).cloned())
+            .collect()
     }
 
     pub fn append(
@@ -2195,6 +2077,122 @@ impl Timeline {
         let lifecycle = self.validate(&event)?;
         match &event.kind {
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
+            TimelineEventKind::ImageProjection(projection) => {
+                let branch = fold_branch_provenance(self);
+                for (item, shadow) in projection.shadows.iter().enumerate() {
+                    let Some(source_leaf) = branch.leaf_values.get(&shadow.source) else {
+                        continue;
+                    };
+                    let Some(current_source) = branch
+                        .surface
+                        .iter()
+                        .find(|entry| entry.leaves.contains(&shadow.source))
+                        .map(|entry| entry.id)
+                    else {
+                        continue;
+                    };
+                    let Some(index) = self
+                        .surface_ids
+                        .iter()
+                        .position(|source| source == &current_source)
+                    else {
+                        continue;
+                    };
+                    let projected = sampling_types::conversation::replace_item_images_with_text(
+                        &mut self.surface[index],
+                        &shadow.replacement,
+                    );
+                    let derived_redacted =
+                        sampling_types::conversation::redact_projected_image_compaction_references(
+                            &mut self.surface[index],
+                            source_leaf,
+                            &shadow.replacement,
+                        );
+                    if projected > 0 || derived_redacted {
+                        if projected > 0 {
+                            debug_assert_eq!(projected, shadow.image_count);
+                        }
+                        self.surface_ids[index] = SurfaceId {
+                            event: event.seq,
+                            item: item as u32,
+                        };
+                    }
+                }
+                let mut replacement_item = projection.shadows.len() as u32;
+                for tool_call in &projection.tool_calls {
+                    let Some(source_leaf) = branch.leaf_values.get(&tool_call.source) else {
+                        continue;
+                    };
+                    let Some(current_source) = branch
+                        .surface
+                        .iter()
+                        .find(|entry| entry.leaves.contains(&tool_call.source))
+                        .map(|entry| entry.id)
+                    else {
+                        continue;
+                    };
+                    let Some(index) = self
+                        .surface_ids
+                        .iter()
+                        .position(|source| source == &current_source)
+                    else {
+                        continue;
+                    };
+                    let redacted = tool_call
+                        .tool_call_ids
+                        .iter()
+                        .filter(|id| {
+                            sampling_types::conversation::redact_projected_image_tool_call(
+                                &mut self.surface[index],
+                                id,
+                            )
+                        })
+                        .count();
+                    let derived_redacted = sampling_types::conversation::redact_projected_image_tool_call_compaction_references(
+                        &mut self.surface[index],
+                        source_leaf,
+                        &tool_call.tool_call_ids,
+                    );
+                    if redacted > 0 || derived_redacted {
+                        if redacted > 0 {
+                            debug_assert_eq!(redacted, tool_call.tool_call_ids.len());
+                        }
+                        self.surface_ids[index] = SurfaceId {
+                            event: event.seq,
+                            item: replacement_item,
+                        };
+                    }
+                    replacement_item = replacement_item.saturating_add(1);
+                    for carrier_source in &tool_call.carrier_sources {
+                        let carrier_item = replacement_item;
+                        replacement_item = replacement_item.saturating_add(1);
+                        let Some(current_source) = branch
+                            .surface
+                            .iter()
+                            .find(|entry| entry.leaves.contains(carrier_source))
+                            .map(|entry| entry.id)
+                        else {
+                            continue;
+                        };
+                        let Some(index) = self
+                            .surface_ids
+                            .iter()
+                            .position(|source| source == &current_source)
+                        else {
+                            continue;
+                        };
+                        if sampling_types::conversation::redact_projected_image_response_carrier(
+                            &mut self.surface[index],
+                        ) {
+                            self.surface_ids[index] = SurfaceId {
+                                event: event.seq,
+                                item: carrier_item,
+                            };
+                        }
+                    }
+                }
+                self.surface_revision = self.surface_revision.saturating_add(1);
+            }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: Some(input),
                 ..
@@ -2202,6 +2200,7 @@ impl Timeline {
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => {}
+            TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => {}
             TimelineEventKind::Control(ControlEvent {
                 model_context: Some(context),
                 ..
@@ -2319,6 +2318,9 @@ impl Timeline {
             }
             NotificationEvent::Consumed {
                 notification_ids, ..
+            }
+            | NotificationEvent::Dismissed {
+                notification_ids, ..
             } => {
                 for id in notification_ids {
                     let removed = self.pending_notifications.remove(id);
@@ -2393,22 +2395,34 @@ impl Timeline {
             self.validate_surface_range(target)?;
         }
         if let TimelineEventKind::ImageProjection(projection) = &event.kind {
-            if !projection.runtime.is_valid()
+            let replacement_count = projection.tool_calls.iter().try_fold(
+                projection.shadows.len(),
+                |count, tool_call| {
+                    count
+                        .checked_add(1)
+                        .and_then(|count| count.checked_add(tool_call.carrier_sources.len()))
+                },
+            );
+            if !projection.trigger_runtime.is_valid()
                 || projection.source_revision != self.surface_revision
                 || projection.shadows.is_empty()
+                || replacement_count.is_none_or(|count| count > u32::MAX as usize)
             {
                 return Err(TimelineError::InvalidImageProjection);
             }
-            let groups = sampling_types::conversation::conversation_image_groups(&self.surface)
+            let (branch_ids, branch_items) = self.branch_transcript_with_ids();
+            let groups = sampling_types::conversation::conversation_image_groups(&branch_items)
                 .into_iter()
                 .filter_map(|group| {
-                    self.surface_ids
+                    branch_ids
                         .get(group.item_index)
                         .copied()
                         .map(|source| (source, group))
                 })
                 .collect::<BTreeMap<_, _>>();
             let mut sources = BTreeSet::new();
+            let mut expected_tool_calls =
+                BTreeMap::<SurfaceId, (BTreeSet<String>, Vec<SurfaceId>)>::new();
             for shadow in &projection.shadows {
                 let group = groups.get(&shadow.source);
                 if !sources.insert(shadow.source)
@@ -2420,25 +2434,96 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidImageProjection);
                 }
-                if let ImageShadowSource::Description { result_ref } = &shadow.provenance {
-                    let valid_ref = result_ref.validate().is_ok()
-                        && result_ref.first_seq == result_ref.last_seq
-                        && self.events.iter().any(|event| {
-                            matches!(
-                                &event.kind,
-                                TimelineEventKind::Sideband(spawn)
-                                    if spawn.sideband_id == result_ref.timeline_id
-                                        && spawn.purpose == crate::SidebandPurpose::ImageDescription
-                            )
-                        });
-                    if !valid_ref {
-                        return Err(TimelineError::InvalidImageProjection);
-                    }
+                let ImageShadowSource::Description { result_ref } = &shadow.provenance;
+                let valid_ref = result_ref.validate().is_ok()
+                    && result_ref.first_seq == result_ref.last_seq
+                    && self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Sideband(spawn)
+                                if spawn.sideband_id == result_ref.timeline_id
+                                    && spawn.purpose == crate::SidebandPurpose::ImageDescription
+                                    && spawn.source_refs.iter().any(|source| {
+                                        source.first_seq <= shadow.source.event.get()
+                                            && shadow.source.event.get() <= source.last_seq
+                                    })
+                        )
+                    });
+                if !valid_ref {
+                    return Err(TimelineError::InvalidImageProjection);
                 }
+                if let Some(tool_call) = group.and_then(|group| group.tool_call.as_ref()) {
+                    let Some(source) = branch_ids.get(tool_call.item_index).copied() else {
+                        return Err(TimelineError::InvalidImageProjection);
+                    };
+                    expected_tool_calls
+                        .entry(source)
+                        .or_default()
+                        .0
+                        .insert(tool_call.tool_call_id.clone());
+                }
+            }
+            for (source, (_, carrier_sources)) in &mut expected_tool_calls {
+                let Some(assistant_index) = branch_ids.iter().position(|id| id == source) else {
+                    return Err(TimelineError::InvalidImageProjection);
+                };
+                if !branch_items
+                    .get(assistant_index)
+                    .is_some_and(|item| matches!(item, ConversationItem::Assistant(_)))
+                {
+                    return Err(TimelineError::InvalidImageProjection);
+                }
+                let Some(sources) =
+                    sampling_types::conversation::assistant_response_carrier_indices(
+                        &branch_items,
+                        assistant_index,
+                    )
+                    .into_iter()
+                    .map(|index| branch_ids.get(index).copied())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return Err(TimelineError::InvalidImageProjection);
+                };
+                *carrier_sources = sources;
+            }
+            let mut projected_tool_calls =
+                BTreeMap::<SurfaceId, (BTreeSet<String>, Vec<SurfaceId>)>::new();
+            for tool_call in &projection.tool_calls {
+                if tool_call.tool_call_ids.is_empty()
+                    || projected_tool_calls.contains_key(&tool_call.source)
+                    || tool_call
+                        .carrier_sources
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        != tool_call.carrier_sources.len()
+                {
+                    return Err(TimelineError::InvalidImageProjection);
+                }
+                let ids = tool_call
+                    .tool_call_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if ids.len() != tool_call.tool_call_ids.len() {
+                    return Err(TimelineError::InvalidImageProjection);
+                }
+                projected_tool_calls
+                    .insert(tool_call.source, (ids, tool_call.carrier_sources.clone()));
+            }
+            if projected_tool_calls != expected_tool_calls {
+                return Err(TimelineError::InvalidImageProjection);
             }
         }
         if let TimelineEventKind::Messages(messages) = &event.kind {
-            if messages.cause == MessageCause::ContextRebuild && self.next_prompt_index() != 0 {
+            if messages.cause == MessageCause::ContextRebuild
+                && (self.next_prompt_index() != 0
+                    || self
+                        .events
+                        .iter()
+                        .any(|event| matches!(event.kind, TimelineEventKind::ImageProjection(_))))
+            {
                 return Err(TimelineError::ContextRebuildAfterTurn);
             }
             self.validate_messages(messages)?;
@@ -2569,11 +2654,13 @@ impl Timeline {
                 SubagentEvent::Spawned(spawn) => {
                     if spawn.subagent_id.trim().is_empty()
                         || spawn.child_session_id.trim().is_empty()
+                        || spawn.security_parent_session_id.trim().is_empty()
                         || spawn.subagent_type.trim().is_empty()
                         || spawn.description.trim().is_empty()
                         || spawn.prompt.trim().is_empty()
                         || spawn.child_cwd.trim().is_empty()
                         || spawn.effective_model_id.trim().is_empty()
+                        || !spawn.model_transport_key.is_valid()
                     {
                         return Err(TimelineError::InvalidSubagent);
                     }
@@ -2685,7 +2772,10 @@ impl Timeline {
             if already_seeded {
                 return Err(TimelineError::DuplicateSubagentSeed);
             }
-            if seed.parent_timeline_id.trim().is_empty() || seed.subagent_id.trim().is_empty() {
+            if seed.parent_timeline_id.trim().is_empty()
+                || seed.subagent_id.trim().is_empty()
+                || seed.security_parent_session_id.trim().is_empty()
+            {
                 return Err(TimelineError::InvalidSubagent);
             }
             if let Some(source_ref) = &seed.source_ref {
@@ -2811,6 +2901,41 @@ impl Timeline {
                     }
                 }
             }
+            NotificationEvent::Dismissed {
+                notification_ids,
+                reason,
+            } => {
+                if notification_ids.is_empty() || notification_ids.len() > u32::MAX as usize {
+                    return Err(TimelineError::InvalidNotification);
+                }
+                let goal_id = match reason {
+                    NotificationDismissReason::GoalOwnedAutostart { goal_id }
+                        if valid_notification_identifier(goal_id) =>
+                    {
+                        goal_id
+                    }
+                    _ => return Err(TimelineError::InvalidNotification),
+                };
+                let mut unique = BTreeSet::new();
+                for id in notification_ids {
+                    if !unique.insert(id)
+                        || !self.received_notification_ids.contains(id)
+                        || !self
+                            .pending_notifications
+                            .get(id)
+                            .is_some_and(|notification| {
+                                matches!(
+                                    notification.source.owner(),
+                                    NotificationOwner::Goal {
+                                        goal_id: owner_goal_id
+                                    } if owner_goal_id.as_str() == goal_id.as_str()
+                                )
+                            })
+                    {
+                        return Err(TimelineError::InvalidNotification);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2843,18 +2968,25 @@ impl Timeline {
                                     == Some(SyntheticReason::MemoryContext)
                         ) && !messages.items[0].text_content().trim().is_empty()
                     }
+                    MessageCause::DirectUser => self.valid_direct_user_append(&messages.items),
+                    MessageCause::Interjection => self.valid_interjection_append(&messages.items),
                     MessageCause::User => messages.items.iter().all(|item| {
                         matches!(
                             item,
                             ConversationItem::User(user)
-                                if !matches!(
-                                    user.synthetic_reason.as_ref(),
-                                    Some(
-                                        SyntheticReason::ProjectInstructions
-                                            | SyntheticReason::SessionRules
-                                            | SyntheticReason::MemoryContext
+                                if user.permission_evidence.is_none()
+                                    && !matches!(
+                                        user.synthetic_reason,
+                                        Some(SyntheticReason::Interjection)
                                     )
-                                )
+                                    && !matches!(
+                                        user.synthetic_reason.as_ref(),
+                                        Some(
+                                            SyntheticReason::ProjectInstructions
+                                                | SyntheticReason::SessionRules
+                                                | SyntheticReason::MemoryContext
+                                        )
+                                    )
                         )
                     }),
                     MessageCause::Assistant => messages.items.iter().all(|item| {
@@ -2904,13 +3036,21 @@ impl Timeline {
                     return Err(TimelineError::InvalidMessageShape);
                 }
                 match messages.cause {
-                    MessageCause::Compaction if !messages.items.is_empty() => {}
+                    MessageCause::Compaction
+                        if !messages.items.is_empty()
+                            && valid_compaction_replacement(&messages.items) => {}
                     MessageCause::ToolResultPrune if replaces_all => {
                         validate_tool_result_prune(replaced, messages)?;
                     }
                     MessageCause::ContextRebuild if replaces_all => {}
-                    MessageCause::IntegrityRepair | MessageCause::Rewind if replaces_all => {}
+                    MessageCause::IntegrityRepair
+                        if replaces_all
+                            && valid_integrity_repair(&self.surface, &messages.items) => {}
+                    MessageCause::Rewind
+                        if replaces_all && self.valid_rewind_replacement(&messages.items) => {}
                     MessageCause::Seed
+                    | MessageCause::DirectUser
+                    | MessageCause::Interjection
                     | MessageCause::User
                     | MessageCause::Assistant
                     | MessageCause::ToolResult
@@ -2926,6 +3066,80 @@ impl Timeline {
             }
         }
         Ok(())
+    }
+
+    fn valid_direct_user_append(&self, items: &[ConversationItem]) -> bool {
+        let Some(active) = self.lifecycle.active_turn else {
+            return false;
+        };
+        let Some((identity, prompt_index)) =
+            self.events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    TimelineEventKind::Turn(TurnEvent::Started {
+                        id,
+                        identity,
+                        prompt_index,
+                        ..
+                    }) if *id == active => Some((identity, *prompt_index)),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        matches!(
+            items,
+            [ConversationItem::User(user)]
+                if identity.origin == "user"
+                    && user.synthetic_reason.is_none()
+                    && user.prompt_index == Some(prompt_index)
+                    && matches!(
+                        user.permission_evidence,
+                        Some(PermissionEvidence::DirectUser { ref text })
+                            if if text.trim().is_empty() {
+                                user.content.iter().any(|part| {
+                                    matches!(part, sampling_types::ContentPart::Image { .. })
+                                })
+                            } else {
+                                user.content.iter().any(|part| {
+                                    matches!(part, sampling_types::ContentPart::Text { text }
+                                        if !text.trim().is_empty())
+                                })
+                            }
+                    )
+        )
+    }
+
+    fn valid_interjection_append(&self, items: &[ConversationItem]) -> bool {
+        self.lifecycle.active_turn.is_some()
+            && matches!(
+                items,
+                [ConversationItem::User(user)]
+                    if user.synthetic_reason == Some(SyntheticReason::Interjection)
+                        && user.prompt_index.is_none()
+                        && matches!(
+                            user.permission_evidence,
+                            Some(PermissionEvidence::Interjection { ref text })
+                                if if text.trim().is_empty() {
+                                    user.content.iter().any(|part| {
+                                        matches!(part, sampling_types::ContentPart::Image { .. })
+                                    })
+                                } else {
+                                    user.content.iter().any(|part| {
+                                        matches!(part, sampling_types::ContentPart::Text { text }
+                                            if !text.trim().is_empty())
+                                    })
+                                }
+                        )
+            )
+    }
+
+    fn valid_rewind_replacement(&self, replacement: &[ConversationItem]) -> bool {
+        (0..self.next_prompt_index()).any(|target| {
+            self.rewind_surface(target)
+                .is_ok_and(|expected| conversation_slices_match(&expected, replacement))
+        })
     }
 
     fn validate_surface_range(&self, target: &SurfaceRange) -> Result<(), TimelineError> {
@@ -3422,6 +3636,54 @@ fn valid_notification_identifier(value: &str) -> bool {
         && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
+fn valid_compaction_replacement(items: &[ConversationItem]) -> bool {
+    matches!(
+        items,
+        [ConversationItem::User(user)]
+            if user.synthetic_reason == Some(SyntheticReason::CompactionMeta)
+                && user.permission_evidence.is_none()
+                && user.goal_directive.is_none()
+                && user.cwd_generation.is_none()
+                && user.prior_turn_interrupt.is_none()
+                && user.prompt_index.is_none()
+                && !user.content.is_empty()
+                && user.content.iter().all(|part| matches!(part, ContentPart::Text { .. }))
+                && !items[0].text_content().trim().is_empty()
+    )
+}
+
+fn valid_integrity_repair(before: &[ConversationItem], replacement: &[ConversationItem]) -> bool {
+    let mut user_cancelled = before.to_vec();
+    sampling_types::dedup_duplicate_tool_results(&mut user_cancelled);
+    sampling_types::repair_dangling_tool_calls(
+        &mut user_cancelled,
+        DanglingToolCallReason::UserCancelled,
+    );
+    if conversation_slices_match(&user_cancelled, replacement) {
+        return true;
+    }
+
+    let mut interrupted = before.to_vec();
+    crate::compaction_utils::repair_history_with_reason(
+        &mut interrupted,
+        DanglingToolCallReason::ProcessInterrupted,
+    );
+    if conversation_slices_match(&interrupted, replacement) {
+        return true;
+    }
+
+    let mut explicit = before.to_vec();
+    crate::compaction_utils::repair_history(&mut explicit);
+    conversation_slices_match(&explicit, replacement)
+}
+
+fn conversation_slices_match(left: &[ConversationItem], right: &[ConversationItem]) -> bool {
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn valid_blake3(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -3490,26 +3752,6 @@ fn valid_goal_notification_input(item: &ConversationItem) -> Option<&str> {
     .then_some(tag.goal_id.as_str())
 }
 
-fn message_entries(
-    event: EventSeq,
-    items: &[ConversationItem],
-) -> Vec<(SurfaceId, ConversationItem)> {
-    items
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(item, value)| {
-            (
-                SurfaceId {
-                    event,
-                    item: item as u32,
-                },
-                value,
-            )
-        })
-        .collect()
-}
-
 fn is_valid_control_context(item: &ConversationItem) -> bool {
     let ConversationItem::User(user) = item else {
         return false;
@@ -3574,40 +3816,371 @@ fn take_pending_control_contexts(
     contexts
 }
 
-fn reconcile_repaired_entries(
-    event: EventSeq,
-    previous: &[(SurfaceId, ConversationItem)],
-    repaired: Vec<ConversationItem>,
-) -> Vec<(SurfaceId, ConversationItem)> {
-    let mut next_previous = 0;
-    repaired
-        .into_iter()
-        .enumerate()
-        .map(|(item_index, item)| {
-            let matched = previous[next_previous..]
-                .iter()
-                .position(|(_, previous_item)| conversation_items_match(previous_item, &item))
-                .map(|offset| next_previous + offset);
-            let id = matched.map_or(
-                SurfaceId {
-                    event,
-                    item: item_index as u32,
-                },
-                |index| {
-                    next_previous = index + 1;
-                    previous[index].0
-                },
-            );
-            (id, item)
-        })
-        .collect()
-}
-
 #[derive(Debug, Clone)]
 struct BranchProvenance {
     id: SurfaceId,
     value: ConversationItem,
     leaves: Vec<SurfaceId>,
+}
+
+#[derive(Default)]
+struct BranchFold {
+    surface: Vec<BranchProvenance>,
+    leaf_order: Vec<SurfaceId>,
+    leaf_values: BTreeMap<SurfaceId, ConversationItem>,
+    leaf_birth: BTreeMap<SurfaceId, EventSeq>,
+    leaf_is_message: BTreeMap<SurfaceId, bool>,
+    unloaded: BTreeSet<SurfaceId>,
+}
+
+fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
+    let completed = timeline
+        .events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            TimelineEventKind::Compaction(CompactionEvent::Completed { id, .. }) => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut fold = BranchFold::default();
+    let mut active_turn = false;
+    let mut pending_control_contexts = BTreeMap::new();
+
+    for event in &timeline.events {
+        if let Some(items) = event.appended_message_items() {
+            append_branch_leaves(&mut fold, event.seq, items, true);
+            continue;
+        }
+        let activated =
+            fold_control_context_activation(&mut active_turn, &mut pending_control_contexts, event);
+        for (source, value) in activated {
+            append_branch_leaves(&mut fold, source, std::slice::from_ref(&value), false);
+        }
+        match &event.kind {
+            TimelineEventKind::Messages(messages) => match &messages.surface {
+                SurfaceOp::Append => {}
+                SurfaceOp::Replace { start, end, .. } => {
+                    if matches!(
+                        messages.cause,
+                        MessageCause::Rewind | MessageCause::ContextRebuild
+                    ) {
+                        reset_branch(&mut fold, event.seq, &messages.items);
+                        continue;
+                    }
+                    let Some(start_index) =
+                        fold.surface.iter().position(|entry| entry.id == *start)
+                    else {
+                        continue;
+                    };
+                    let Some(end_index) = fold.surface.iter().position(|entry| entry.id == *end)
+                    else {
+                        continue;
+                    };
+                    if start_index > end_index {
+                        continue;
+                    }
+                    let replaced = fold.surface[start_index..=end_index].to_vec();
+                    let leaves = replacement_branch_leaves(
+                        event.seq,
+                        messages.cause,
+                        &replaced,
+                        &messages.items,
+                    );
+                    let replacement = messages
+                        .items
+                        .iter()
+                        .cloned()
+                        .zip(leaves)
+                        .enumerate()
+                        .map(|(item, (value, leaves))| BranchProvenance {
+                            id: SurfaceId {
+                                event: event.seq,
+                                item: item as u32,
+                            },
+                            value,
+                            leaves,
+                        })
+                        .collect::<Vec<_>>();
+                    fold.surface.splice(start_index..=end_index, replacement);
+                    if messages.cause == MessageCause::IntegrityRepair {
+                        rebuild_integrity_branch(&mut fold, event.seq, &messages.items);
+                    }
+                }
+            },
+            TimelineEventKind::ImageProjection(projection) => {
+                for (item, shadow) in projection.shadows.iter().enumerate() {
+                    let Some(source_leaf) = fold.leaf_values.get(&shadow.source).cloned() else {
+                        continue;
+                    };
+                    let mut projected_leaf = source_leaf.clone();
+                    let removed = sampling_types::conversation::replace_item_images_with_text(
+                        &mut projected_leaf,
+                        &shadow.replacement,
+                    );
+                    debug_assert_eq!(removed, shadow.image_count);
+                    let replacement_id = SurfaceId {
+                        event: event.seq,
+                        item: item as u32,
+                    };
+                    replace_branch_leaves(
+                        &mut fold,
+                        std::slice::from_ref(&shadow.source),
+                        replacement_id,
+                        projected_leaf,
+                    );
+                    if fold.unloaded.remove(&shadow.source) {
+                        fold.unloaded.insert(replacement_id);
+                    }
+                    for entry in &mut fold.surface {
+                        let owns_source = entry.leaves.contains(&shadow.source);
+                        if !owns_source {
+                            continue;
+                        }
+                        for leaf in &mut entry.leaves {
+                            if *leaf == shadow.source {
+                                *leaf = replacement_id;
+                            }
+                        }
+                        let projected = sampling_types::conversation::replace_item_images_with_text(
+                            &mut entry.value,
+                            &shadow.replacement,
+                        );
+                        let derived_redacted = sampling_types::conversation::redact_projected_image_compaction_references(
+                            &mut entry.value,
+                            &source_leaf,
+                            &shadow.replacement,
+                        );
+                        if projected > 0 || derived_redacted {
+                            if projected > 0 {
+                                debug_assert_eq!(projected, shadow.image_count);
+                            }
+                            entry.id = replacement_id;
+                        }
+                    }
+                }
+                let mut replacement_item = projection.shadows.len() as u32;
+                for tool_call in &projection.tool_calls {
+                    let Some(source_leaf) = fold.leaf_values.get(&tool_call.source).cloned() else {
+                        continue;
+                    };
+                    let mut projected_leaf = source_leaf.clone();
+                    let redacted = tool_call
+                        .tool_call_ids
+                        .iter()
+                        .filter(|id| {
+                            sampling_types::conversation::redact_projected_image_tool_call(
+                                &mut projected_leaf,
+                                id,
+                            )
+                        })
+                        .count();
+                    debug_assert_eq!(redacted, tool_call.tool_call_ids.len());
+                    let replacement_id = SurfaceId {
+                        event: event.seq,
+                        item: replacement_item,
+                    };
+                    replacement_item = replacement_item.saturating_add(1);
+                    replace_branch_leaves(
+                        &mut fold,
+                        std::slice::from_ref(&tool_call.source),
+                        replacement_id,
+                        projected_leaf,
+                    );
+                    if fold.unloaded.remove(&tool_call.source) {
+                        fold.unloaded.insert(replacement_id);
+                    }
+                    for entry in &mut fold.surface {
+                        if !entry.leaves.contains(&tool_call.source) {
+                            continue;
+                        }
+                        for leaf in &mut entry.leaves {
+                            if *leaf == tool_call.source {
+                                *leaf = replacement_id;
+                            }
+                        }
+                        let redacted = tool_call
+                            .tool_call_ids
+                            .iter()
+                            .filter(|id| {
+                                sampling_types::conversation::redact_projected_image_tool_call(
+                                    &mut entry.value,
+                                    id,
+                                )
+                            })
+                            .count();
+                        let derived_redacted = sampling_types::conversation::redact_projected_image_tool_call_compaction_references(
+                            &mut entry.value,
+                            &source_leaf,
+                            &tool_call.tool_call_ids,
+                        );
+                        if redacted > 0 || derived_redacted {
+                            if redacted > 0 {
+                                debug_assert_eq!(redacted, tool_call.tool_call_ids.len());
+                            }
+                            entry.id = replacement_id;
+                        }
+                    }
+                    for carrier_source in &tool_call.carrier_sources {
+                        let replacement_id = SurfaceId {
+                            event: event.seq,
+                            item: replacement_item,
+                        };
+                        replacement_item = replacement_item.saturating_add(1);
+                        let Some(mut projected_leaf) =
+                            fold.leaf_values.get(carrier_source).cloned()
+                        else {
+                            continue;
+                        };
+                        let redacted =
+                            sampling_types::conversation::redact_projected_image_response_carrier(
+                                &mut projected_leaf,
+                            );
+                        debug_assert!(redacted);
+                        replace_branch_leaves(
+                            &mut fold,
+                            std::slice::from_ref(carrier_source),
+                            replacement_id,
+                            projected_leaf,
+                        );
+                        if fold.unloaded.remove(carrier_source) {
+                            fold.unloaded.insert(replacement_id);
+                        }
+                        for entry in &mut fold.surface {
+                            if !entry.leaves.contains(carrier_source) {
+                                continue;
+                            }
+                            for leaf in &mut entry.leaves {
+                                if *leaf == *carrier_source {
+                                    *leaf = replacement_id;
+                                }
+                            }
+                            if sampling_types::conversation::redact_projected_image_response_carrier(
+                                &mut entry.value,
+                            ) {
+                                entry.id = replacement_id;
+                            }
+                        }
+                    }
+                }
+            }
+            TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. })
+                if completed.contains(id.as_str()) =>
+            {
+                let Some(start_index) = fold
+                    .surface
+                    .iter()
+                    .position(|entry| entry.id == target.start)
+                else {
+                    continue;
+                };
+                let Some(end_index) = fold.surface.iter().position(|entry| entry.id == target.end)
+                else {
+                    continue;
+                };
+                if start_index <= end_index
+                    && fold.surface[start_index..=end_index]
+                        .iter()
+                        .map(|entry| entry.id)
+                        .eq(target.shadowed.iter().copied())
+                {
+                    fold.unloaded.extend(
+                        fold.surface[start_index..=end_index]
+                            .iter()
+                            .flat_map(|entry| entry.leaves.iter().copied()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    fold
+}
+
+fn append_branch_leaves(
+    fold: &mut BranchFold,
+    event: EventSeq,
+    items: &[ConversationItem],
+    is_message: bool,
+) {
+    for (item, value) in items.iter().cloned().enumerate() {
+        let id = SurfaceId {
+            event,
+            item: item as u32,
+        };
+        fold.surface.push(BranchProvenance {
+            id,
+            value: value.clone(),
+            leaves: vec![id],
+        });
+        fold.leaf_order.push(id);
+        fold.leaf_values.insert(id, value);
+        fold.leaf_birth.insert(id, event);
+        fold.leaf_is_message.insert(id, is_message);
+    }
+}
+
+fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
+    *fold = BranchFold::default();
+    append_branch_leaves(fold, event, items, true);
+}
+
+fn rebuild_integrity_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
+    let referenced = fold
+        .surface
+        .iter()
+        .flat_map(|entry| entry.leaves.iter().copied())
+        .collect::<BTreeSet<_>>();
+    fold.leaf_order.retain(|id| referenced.contains(id));
+    fold.leaf_values.retain(|id, _| referenced.contains(id));
+    fold.leaf_birth.retain(|id, _| referenced.contains(id));
+    fold.leaf_is_message.retain(|id, _| referenced.contains(id));
+    for (item, entry) in fold.surface.iter().enumerate() {
+        if entry.leaves.len() == 1 {
+            fold.leaf_values
+                .insert(entry.leaves[0], items[item].clone());
+        } else if entry.leaves.is_empty() {
+            let id = SurfaceId {
+                event,
+                item: item as u32,
+            };
+            fold.leaf_order.push(id);
+            fold.leaf_values.insert(id, items[item].clone());
+            fold.leaf_birth.insert(id, event);
+            fold.leaf_is_message.insert(id, true);
+        }
+    }
+}
+
+fn replace_branch_leaves(
+    fold: &mut BranchFold,
+    replaced: &[SurfaceId],
+    replacement: SurfaceId,
+    value: ConversationItem,
+) {
+    let replaced = replaced.iter().copied().collect::<BTreeSet<_>>();
+    let birth = replaced
+        .iter()
+        .filter_map(|id| fold.leaf_birth.get(id).copied())
+        .min()
+        .unwrap_or(replacement.event);
+    let is_message = replaced
+        .iter()
+        .any(|id| fold.leaf_is_message.get(id).copied().unwrap_or(false));
+    let insert_at = fold
+        .leaf_order
+        .iter()
+        .position(|id| replaced.contains(id))
+        .unwrap_or(fold.leaf_order.len());
+    fold.leaf_order.retain(|id| !replaced.contains(id));
+    fold.leaf_order.insert(insert_at, replacement);
+    fold.leaf_values.retain(|id, _| !replaced.contains(id));
+    fold.leaf_values.insert(replacement, value);
+    fold.leaf_birth.retain(|id, _| !replaced.contains(id));
+    fold.leaf_birth.insert(replacement, birth);
+    fold.leaf_is_message.retain(|id, _| !replaced.contains(id));
+    fold.leaf_is_message.insert(replacement, is_message);
 }
 
 fn replacement_branch_leaves(
@@ -3656,6 +4229,8 @@ fn replacement_branch_leaves(
                 .collect()
         }
         MessageCause::Seed
+        | MessageCause::DirectUser
+        | MessageCause::Interjection
         | MessageCause::User
         | MessageCause::Assistant
         | MessageCause::ToolResult
@@ -3806,6 +4381,29 @@ mod tests {
             shadowed: timeline.surface_ids().to_vec(),
         };
         record_compaction_summary_for(timeline, id, target)
+    }
+
+    fn record_image_description(
+        timeline: &mut Timeline,
+        source: SurfaceId,
+    ) -> crate::TimelineRangeRef {
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let event = timeline
+            .record(TimelineEventKind::Sideband(crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::ImageDescription,
+                source_refs: vec![crate::TimelineRangeRef {
+                    timeline_id: "test-timeline".into(),
+                    first_seq: source.event.get(),
+                    last_seq: source.event.get(),
+                }],
+            }))
+            .unwrap();
+        crate::TimelineRangeRef {
+            timeline_id: sideband_id,
+            first_seq: event.seq.get(),
+            last_seq: event.seq.get(),
+        }
     }
 
     fn user_identity() -> TurnIdentity {
@@ -4305,7 +4903,6 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "find the cause".into(),
-                private: false,
             }))
             .unwrap();
         assert_eq!(
@@ -4317,7 +4914,6 @@ mod tests {
             Some(WorkflowLifecycle {
                 name: "research".into(),
                 objective: "find the cause".into(),
-                private: false,
                 execution_epoch: 0,
                 status: None,
                 message: None,
@@ -4382,7 +4978,6 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "recover causality".into(),
-                private: true,
             }))
             .unwrap();
 
@@ -4439,7 +5034,6 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "wait for input".into(),
-                private: false,
             }))
             .unwrap();
         timeline
@@ -4489,7 +5083,6 @@ mod tests {
                 execution_epoch: 0,
                 name: "owner".into(),
                 objective: "spawn one child".into(),
-                private: false,
             }))
             .unwrap();
         timeline
@@ -4506,7 +5099,6 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "join children".into(),
-                private: false,
             }))
             .unwrap();
         let mut spawn = subagent_spawn("sa-child", "child-session");
@@ -4575,7 +5167,7 @@ mod tests {
         };
         record_compaction_summary_for(&mut timeline, "compact", target.clone());
         timeline
-            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
             .unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
@@ -4842,15 +5434,14 @@ mod tests {
                 prompt_index: 3,
             }))
             .unwrap();
-        let target = record_compaction_summary(&mut timeline, "compact");
+        let target = SurfaceRange {
+            start: timeline.surface_ids()[1],
+            end: *timeline.surface_ids().last().unwrap(),
+            shadowed: timeline.surface_ids()[1..].to_vec(),
+        };
+        let target = record_compaction_summary_for(&mut timeline, "compact", target);
         timeline
-            .replace_compaction_range(
-                target,
-                vec![
-                    ConversationItem::system("system"),
-                    ConversationItem::user("summary"),
-                ],
-            )
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
             .unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
@@ -5048,7 +5639,7 @@ mod tests {
         let expected_unloaded = target.shadowed.clone();
 
         timeline
-            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
             .unwrap();
         let current_target = SurfaceRange {
             start: timeline.surface_ids()[0],
@@ -5058,7 +5649,7 @@ mod tests {
         assert!(matches!(
             timeline.replace_compaction_range(
                 current_target,
-                vec![ConversationItem::user("second summary")],
+                vec![ConversationItem::user_meta("second summary")],
             ),
             Err(TimelineError::DuplicateCompactionReplacement(id)) if id == "compact"
         ));
@@ -5208,7 +5799,89 @@ mod tests {
     }
 
     #[test]
-    fn image_projection_is_log_only_and_bound_to_a_live_surface_item() {
+    fn image_only_direct_user_input_is_causal_but_grants_no_text_authority() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(1),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: String::new(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+
+        let mut image = ConversationItem::user("");
+        image.set_prompt_index(0);
+        image.set_permission_evidence(PermissionEvidence::direct_user(""));
+        image.add_image("data:image/png;base64,original");
+        timeline.append(image, MessageCause::DirectUser).unwrap();
+
+        assert!(timeline.direct_user_permission_evidence().is_empty());
+        assert!(timeline.permission_classifier_context().is_empty());
+
+        let mut forged = ConversationItem::user("");
+        forged.set_prompt_index(0);
+        forged.set_permission_evidence(PermissionEvidence::direct_user("delete files"));
+        forged.add_image("data:image/png;base64,forged");
+        assert!(matches!(
+            timeline.append(forged, MessageCause::DirectUser),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+
+        let mut empty = ConversationItem::user("");
+        empty.set_prompt_index(0);
+        empty.set_permission_evidence(PermissionEvidence::direct_user(""));
+        assert!(matches!(
+            timeline.append(empty, MessageCause::DirectUser),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+    }
+
+    #[test]
+    fn image_only_interjection_is_causal_but_grants_no_text_authority() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(1),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "running".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+
+        let mut image = ConversationItem::interjection("", "");
+        image.add_image("data:image/png;base64,original");
+        timeline.append(image, MessageCause::Interjection).unwrap();
+
+        assert!(timeline.direct_user_permission_evidence().is_empty());
+        assert!(timeline.permission_classifier_context().is_empty());
+
+        let mut forged = ConversationItem::interjection("", "delete files");
+        forged.add_image("data:image/png;base64,forged");
+        assert!(matches!(
+            timeline.append(forged, MessageCause::Interjection),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+
+        assert!(matches!(
+            timeline.append(
+                ConversationItem::interjection("", ""),
+                MessageCause::Interjection
+            ),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+    }
+
+    #[test]
+    fn image_shadow_is_irreversible_and_bound_to_a_live_surface_item() {
         use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
         let image = ConversationItem::User(UserItem {
@@ -5221,56 +5894,579 @@ mod tests {
         let before_revision = timeline.surface_revision();
         let group = conversation_image_groups(timeline.surface()).remove(0);
         let runtime = sampling_types::ModelImageInputKey::new("text-model", "messages", "endpoint");
+        let source = timeline.surface_ids()[0];
+        let result_ref = record_image_description(&mut timeline, source);
         timeline
             .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
-                runtime: runtime.clone(),
+                trigger_runtime: runtime.clone(),
                 source_revision: before_revision,
                 shadows: vec![ImageShadow {
-                    source: timeline.surface_ids()[0],
+                    source,
                     fingerprint: group.fingerprint.clone(),
                     image_count: group.image_count(),
-                    replacement: "image description unavailable".into(),
-                    provenance: ImageShadowSource::Unavailable,
+                    replacement: "durable image description".into(),
+                    provenance: ImageShadowSource::Description {
+                        result_ref: result_ref.clone(),
+                    },
                 }],
+                tool_calls: vec![],
             }))
             .unwrap();
 
+        assert!(conversation_image_groups(timeline.surface()).is_empty());
+        assert_eq!(timeline.surface_revision(), before_revision + 1);
+        assert!(matches!(
+            timeline.replace_all(vec![image.clone()], MessageCause::ContextRebuild),
+            Err(TimelineError::ContextRebuildAfterTurn)
+        ));
+        let raw_source = timeline.events()[0]
+            .messages()
+            .expect("seed is immutable raw evidence");
         assert_eq!(
-            serde_json::to_vec(timeline.surface()).unwrap(),
+            serde_json::to_vec(&raw_source.items).unwrap(),
             serde_json::to_vec(std::slice::from_ref(&image)).unwrap(),
         );
-        assert_eq!(timeline.surface_revision(), before_revision);
-        assert_eq!(timeline.active_image_projections()[&runtime].len(), 1);
+        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+        record_prompt(&mut timeline, 9, 1, "next");
+        assert!(matches!(
+            timeline.replace_all(vec![image.clone()], MessageCause::Rewind),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+        assert!(matches!(
+            timeline.replace_all(vec![image.clone()], MessageCause::IntegrityRepair),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+        let rewound = timeline.rewind_surface(1).unwrap();
+        assert!(conversation_image_groups(&rewound).is_empty());
+        assert!(
+            rewound[0]
+                .text_content()
+                .contains("durable image description")
+        );
+        assert!(matches!(
+            timeline.replace_all(rewound, MessageCause::Rewind),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+        assert!(conversation_image_groups(timeline.surface()).is_empty());
 
         let source = timeline.surface_ids()[0];
         assert!(matches!(
             timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
-                runtime,
+                trigger_runtime: runtime,
                 source_revision: before_revision,
                 shadows: vec![ImageShadow {
                     source,
                     fingerprint: "wrong-source".into(),
                     image_count: 1,
                     replacement: "forged".into(),
-                    provenance: ImageShadowSource::Unavailable,
+                    provenance: ImageShadowSource::Description {
+                        result_ref: result_ref.clone(),
+                    },
                 }],
+                tool_calls: vec![],
             })),
             Err(TimelineError::InvalidImageProjection)
         ));
         assert!(matches!(
             timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
-                runtime: sampling_types::ModelImageInputKey::new("", "messages", "endpoint"),
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "", "messages", "endpoint",
+                ),
                 source_revision: before_revision,
                 shadows: vec![ImageShadow {
                     source,
                     fingerprint: group.fingerprint.clone(),
                     image_count: group.image_count(),
                     replacement: "forged".into(),
-                    provenance: ImageShadowSource::Unavailable,
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![],
+            })),
+            Err(TimelineError::InvalidImageProjection)
+        ));
+    }
+
+    #[test]
+    fn image_projection_atomically_redacts_parallel_tool_call_paths() {
+        use sampling_types::conversation::{
+            BackendToolCallItem, BackendToolKind, ContentPart, ToolCall, conversation_image_groups,
+        };
+
+        let mut assistant = ConversationItem::assistant_tool_calls(vec![
+            ToolCall {
+                id: "call_a".into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"/secret/a.png"}"#.into(),
+            },
+            ToolCall {
+                id: "call_b".into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"/secret/b.png"}"#.into(),
+            },
+        ]);
+        let ConversationItem::Assistant(assistant_item) = &mut assistant else {
+            unreachable!()
+        };
+        assistant_item.content = "Reading /secret/from-assistant.png".into();
+        let seed = vec![
+            ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
+                "Reading /secret/from-reasoning.png",
+            )),
+            ConversationItem::BackendToolCall(BackendToolCallItem {
+                kind: BackendToolKind::CodeInterpreter(
+                    sampling_types::rs::CodeInterpreterToolCall {
+                        code: Some("open('/secret/from-backend-tool.png')".into()),
+                        container_id: "container_1".into(),
+                        id: "ci_1".into(),
+                        outputs: None,
+                        status: sampling_types::rs::CodeInterpreterToolCallStatus::Completed,
+                    },
+                ),
+            }),
+            ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
+                "Continuing /secret/from-reasoning-2.png",
+            )),
+            assistant,
+            ConversationItem::tool_result_with_images(
+                "call_a",
+                "Read /secret/a.png",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,a".into(),
+                }],
+            ),
+            ConversationItem::tool_result_with_images(
+                "call_b",
+                "Read /secret/b.png",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,b".into(),
+                }],
+            ),
+        ];
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let before_revision = timeline.surface_revision();
+        let groups = conversation_image_groups(timeline.surface());
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|group| {
+            group
+                .tool_call
+                .as_ref()
+                .is_some_and(|call| call.item_index == 3)
+        }));
+
+        let shadows = groups
+            .iter()
+            .map(|group| {
+                let source = timeline.surface_ids()[group.item_index];
+                ImageShadow {
+                    source,
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: format!("description for {}", group.item_index),
+                    provenance: ImageShadowSource::Description {
+                        result_ref: record_image_description(&mut timeline, source),
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: before_revision,
+                shadows: shadows.clone(),
+                tool_calls: vec![ImageToolCallShadow {
+                    source: timeline.surface_ids()[3],
+                    tool_call_ids: vec!["call_a".into(), "call_b".into()],
+                    carrier_sources: vec![timeline.surface_ids()[0], timeline.surface_ids()[2],],
                 }],
             })),
             Err(TimelineError::InvalidImageProjection)
         ));
+
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: before_revision,
+                shadows,
+                tool_calls: vec![ImageToolCallShadow {
+                    source: timeline.surface_ids()[3],
+                    tool_call_ids: vec!["call_a".into(), "call_b".into()],
+                    carrier_sources: vec![
+                        timeline.surface_ids()[0],
+                        timeline.surface_ids()[1],
+                        timeline.surface_ids()[2],
+                    ],
+                }],
+            }))
+            .unwrap();
+
+        let serialized_surface = serde_json::to_string(timeline.surface()).unwrap();
+        assert!(!serialized_surface.contains("/secret/a.png"));
+        assert!(!serialized_surface.contains("/secret/b.png"));
+        assert!(!serialized_surface.contains("/secret/from-assistant.png"));
+        assert!(!serialized_surface.contains("/secret/from-reasoning.png"));
+        assert!(!serialized_surface.contains("/secret/from-backend-tool.png"));
+        assert!(!serialized_surface.contains("/secret/from-reasoning-2.png"));
+        let serialized_branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        assert!(!serialized_branch.contains("/secret/a.png"));
+        assert!(!serialized_branch.contains("/secret/b.png"));
+        assert!(!serialized_branch.contains("/secret/from-assistant.png"));
+        assert!(!serialized_branch.contains("/secret/from-reasoning.png"));
+        assert!(!serialized_branch.contains("/secret/from-backend-tool.png"));
+        assert!(!serialized_branch.contains("/secret/from-reasoning-2.png"));
+        let raw_events = serde_json::to_string(timeline.events()).unwrap();
+        assert!(raw_events.contains("/secret/a.png"));
+        assert!(raw_events.contains("/secret/b.png"));
+        assert!(raw_events.contains("/secret/from-assistant.png"));
+        assert!(raw_events.contains("/secret/from-reasoning.png"));
+        assert!(raw_events.contains("/secret/from-backend-tool.png"));
+        assert!(raw_events.contains("/secret/from-reasoning-2.png"));
+        assert!(raw_events.contains("\"carrier_sources\""));
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(replayed.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.branch_transcript()).unwrap()
+        );
+    }
+
+    #[test]
+    fn image_projection_scrubs_tool_source_paths_from_completed_compaction_summary() {
+        use sampling_types::conversation::{ContentPart, ToolCall, conversation_image_groups};
+
+        let seed = vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_image".into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"/secret/tool-image.png","query":"keep-this-query"}"#
+                    .into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call_image",
+                "image loaded",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,tool".into(),
+                }],
+            ),
+        ];
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let assistant_source = timeline.surface_ids()[0];
+        let result_source = timeline.surface_ids()[1];
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact-tool-image".into(),
+                source_items: 2,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-tool-image");
+        timeline
+            .replace_compaction_range(
+                target,
+                vec![ConversationItem::user_meta(
+                    "Keep architecture decision keep-this-query; image was /secret/tool-image.png",
+                )],
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-tool-image".into(),
+                source_items: 2,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let group = conversation_image_groups(&timeline.branch_transcript()).remove(0);
+        let image_count = group.image_count();
+        let result_ref = record_image_description(&mut timeline, result_source);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: result_source,
+                    fingerprint: group.fingerprint,
+                    image_count,
+                    replacement: "a tool-produced diagram".into(),
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![ImageToolCallShadow {
+                    source: assistant_source,
+                    tool_call_ids: vec!["call_image".into()],
+                    carrier_sources: vec![],
+                }],
+            }))
+            .unwrap();
+
+        let summary = timeline.surface()[0].text_content();
+        assert!(summary.contains("Keep architecture decision keep-this-query"));
+        assert!(!summary.contains("/secret/tool-image.png"));
+        assert!(summary.contains("Image tool source projected to durable text"));
+        assert!(
+            timeline
+                .branch_transcript()
+                .iter()
+                .all(|item| !item.text_content().contains("/secret/tool-image.png"))
+        );
+        let raw_events = serde_json::to_string(timeline.events()).unwrap();
+        assert!(raw_events.contains("/secret/tool-image.png"));
+    }
+
+    #[test]
+    fn image_projection_survives_intermediate_surface_identity_replacement_and_rewind() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(40),
+                identity: user_identity(),
+                model_id: "vision-model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "inspect".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        let mut image = ConversationItem::User(UserItem {
+            content: vec![
+                ContentPart::Text {
+                    text: "inspect".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,original".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        image.set_prompt_index(0);
+        timeline.append(image, MessageCause::User).unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: TurnId(40),
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        record_prompt(&mut timeline, 41, 1, "later");
+
+        let original_source = timeline.surface_ids()[0];
+        timeline
+            .replace_all(timeline.surface().to_vec(), MessageCause::IntegrityRepair)
+            .unwrap();
+        let replacement_source = timeline.surface_ids()[0];
+        assert_ne!(replacement_source, original_source);
+        let group = conversation_image_groups(timeline.surface()).remove(0);
+        let image_count = group.image_count();
+        let result_ref = record_image_description(&mut timeline, original_source);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: original_source,
+                    fingerprint: group.fingerprint,
+                    image_count,
+                    replacement: "durable image description".into(),
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+        let rewound = timeline.rewind_surface(1).unwrap();
+        assert!(conversation_image_groups(&rewound).is_empty());
+        assert!(
+            rewound[0]
+                .text_content()
+                .contains("durable image description")
+        );
+    }
+
+    #[test]
+    fn latent_image_projection_updates_completed_compaction_recall_coordinates() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let image = ConversationItem::User(UserItem {
+            content: vec![ContentPart::Image {
+                url: "data:image/png;base64,original".into(),
+            }],
+            ..Default::default()
+        });
+        let mut timeline = Timeline::from_seed(vec![image]).unwrap();
+        let original_source = timeline.surface_ids()[0];
+
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact-image".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-image");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-image".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let group = conversation_image_groups(&timeline.branch_transcript()).remove(0);
+        let image_count = group.image_count();
+        let result_ref = record_image_description(&mut timeline, original_source);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: original_source,
+                    fingerprint: group.fingerprint,
+                    image_count,
+                    replacement: "durable image description".into(),
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        assert_eq!(timeline.surface()[0].text_content(), "summary");
+        let (branch_ids, branch) = timeline.branch_transcript_with_ids();
+        assert_eq!(branch_ids.len(), 1);
+        assert_ne!(branch_ids[0], original_source);
+        assert!(conversation_image_groups(&branch).is_empty());
+        assert!(
+            branch[0]
+                .text_content()
+                .contains("durable image description")
+        );
+        assert_eq!(
+            timeline.completed_compaction_unloaded_branch_ids(),
+            branch_ids,
+            "recall must address the translated leaf rather than its retired image identity"
+        );
+    }
+
+    #[test]
+    fn image_projection_scrubs_exact_asset_paths_from_completed_compaction_summary() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let asset = "/sessions/example/assets/image-secret.png";
+        let image = ConversationItem::User(UserItem {
+            content: vec![
+                ContentPart::Text {
+                    text: format!(
+                        "<image_files>\nThe following images were provided by the user and saved to the workspace for future use:\n1. {asset}\n\nThese images can be copied for use in other locations.\n</image_files>\ninspect this"
+                    )
+                    .into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,original".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let mut timeline = Timeline::from_seed(vec![image]).unwrap();
+        let original_source = timeline.surface_ids()[0];
+
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact-image-path".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-image-path");
+        timeline
+            .replace_compaction_range(
+                target,
+                vec![ConversationItem::user_meta(format!(
+                    "Keep the architecture notes. The image remains at {asset}."
+                ))],
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-image-path".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let group = conversation_image_groups(&timeline.branch_transcript()).remove(0);
+        let image_count = group.image_count();
+        let result_ref = record_image_description(&mut timeline, original_source);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: original_source,
+                    fingerprint: group.fingerprint,
+                    image_count,
+                    replacement: "a diagram of the architecture".into(),
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        let summary = timeline.surface()[0].text_content();
+        assert!(summary.contains("Keep the architecture notes."));
+        assert!(summary.contains("a diagram of the architecture"));
+        assert!(!summary.contains(asset));
+        assert!(
+            timeline
+                .branch_transcript()
+                .iter()
+                .all(|item| !item.text_content().contains(asset))
+        );
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            replayed.surface()[0].text_content(),
+            timeline.surface()[0].text_content()
+        );
+        assert!(!replayed.surface()[0].text_content().contains(asset));
     }
 
     #[test]
@@ -5320,8 +6516,10 @@ mod tests {
         };
 
         assert!(matches!(
-            timeline
-                .replace_compaction_range(wrong_target, vec![ConversationItem::user("summary")],),
+            timeline.replace_compaction_range(
+                wrong_target,
+                vec![ConversationItem::user_meta("summary")],
+            ),
             Err(TimelineError::CompactionTargetMismatch)
         ));
         assert_eq!(timeline.surface().len(), 2);
@@ -5403,7 +6601,7 @@ mod tests {
             .unwrap();
         let target = record_compaction_summary(&mut timeline, "compact");
         timeline
-            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
             .unwrap();
 
         assert!(matches!(
@@ -5436,7 +6634,7 @@ mod tests {
             .unwrap();
         let target = record_compaction_summary(&mut timeline, "compact");
         timeline
-            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
             .unwrap();
 
         let repairs = timeline.recover_interrupted().unwrap();
@@ -5598,6 +6796,7 @@ mod tests {
         SubagentSpawnEvent {
             subagent_id: id.into(),
             child_session_id: child.into(),
+            security_parent_session_id: "parent-session".into(),
             subagent_type: "explore".into(),
             description: "inspect architecture".into(),
             prompt: "trace the canonical state".into(),
@@ -5615,7 +6814,38 @@ mod tests {
             child_cwd: "/workspace".into(),
             worktree_path: None,
             effective_model_id: "grow-3".into(),
+            model_transport_key: sampling_types::ModelImageInputKey::new(
+                "grow-3",
+                "responses",
+                "test-endpoint",
+            ),
+            reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn subagent_security_parent_must_be_nonempty_in_both_ledgers() {
+        let mut parent = Timeline::default();
+        let mut spawn = subagent_spawn("sa-1", "child-1");
+        spawn.security_parent_session_id = "  ".into();
+        assert!(matches!(
+            parent.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))),
+            Err(TimelineError::InvalidSubagent)
+        ));
+
+        let mut child = Timeline::default();
+        assert!(matches!(
+            child.record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-1".into(),
+                parent_spawn_seq: 1,
+                subagent_id: "sa-1".into(),
+                security_parent_session_id: String::new(),
+                context_source: SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            })),
+            Err(TimelineError::InvalidSubagent)
+        ));
     }
 
     #[test]
@@ -5632,6 +6862,7 @@ mod tests {
                 parent_timeline_id: "parent-1".into(),
                 parent_spawn_seq: spawn.seq.get(),
                 subagent_id: "sa-1".into(),
+                security_parent_session_id: "parent-session".into(),
                 context_source: SubagentContextSource::Forked,
                 source_ref: None,
                 normalized: false,
@@ -5708,6 +6939,7 @@ mod tests {
                 parent_timeline_id: "other-parent".into(),
                 parent_spawn_seq: 7,
                 subagent_id: "sa-1".into(),
+                security_parent_session_id: "parent-session".into(),
                 context_source: SubagentContextSource::Forked,
                 source_ref: None,
                 normalized: false,
@@ -5752,6 +6984,7 @@ mod tests {
                 parent_timeline_id: "parent-1".into(),
                 parent_spawn_seq: 7,
                 subagent_id: "sa-1".into(),
+                security_parent_session_id: "parent-session".into(),
                 context_source: SubagentContextSource::Forked,
                 source_ref: None,
                 normalized: false,
@@ -5824,6 +7057,7 @@ mod tests {
                 parent_timeline_id: "parent-1".into(),
                 parent_spawn_seq: 4,
                 subagent_id: "sa-1".into(),
+                security_parent_session_id: "parent-session".into(),
                 context_source: SubagentContextSource::New,
                 source_ref: None,
                 normalized: false,
@@ -5992,6 +7226,94 @@ mod tests {
             )),
             Err(TimelineError::NotificationAlreadyConsumed(_))
         ));
+    }
+
+    #[test]
+    fn dismissed_notification_replays_as_resolved_without_surface_input() {
+        let mut timeline = Timeline::default();
+        let source = NotificationSource::TaskCompleted {
+            task_id: "goal-task".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Goal {
+                goal_id: "goal-1".into(),
+            },
+        };
+        let version = NotificationSourceVersion::Ordinal { value: 1 };
+        let id = receive_notification(&mut timeline, source.clone(), version.clone(), "done");
+
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Dismissed {
+                    notification_ids: vec![id.clone()],
+                    reason: NotificationDismissReason::GoalOwnedAutostart {
+                        goal_id: "goal-1".into(),
+                    },
+                },
+            ))
+            .unwrap();
+
+        assert!(timeline.pending_notifications().is_empty());
+        assert!(timeline.surface().is_empty());
+        assert_eq!(
+            timeline.received_notification_id(&source, &version),
+            Some(id.as_str())
+        );
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert!(replayed.surface().is_empty());
+    }
+
+    #[test]
+    fn goal_dismissal_rejects_session_or_foreign_goal_receipts() {
+        let mut timeline = Timeline::default();
+        let session_source = NotificationSource::TaskCompleted {
+            task_id: "session-task".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Session,
+        };
+        let session_id = receive_notification(
+            &mut timeline,
+            session_source,
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "done",
+        );
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Notification(
+                NotificationEvent::Dismissed {
+                    notification_ids: vec![session_id],
+                    reason: NotificationDismissReason::GoalOwnedAutostart {
+                        goal_id: "goal-1".into(),
+                    },
+                },
+            )),
+            Err(TimelineError::InvalidNotification)
+        ));
+
+        let goal_source = NotificationSource::TaskCompleted {
+            task_id: "goal-task".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Goal {
+                goal_id: "goal-2".into(),
+            },
+        };
+        let goal_id = receive_notification(
+            &mut timeline,
+            goal_source,
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "done",
+        );
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Notification(
+                NotificationEvent::Dismissed {
+                    notification_ids: vec![goal_id],
+                    reason: NotificationDismissReason::GoalOwnedAutostart {
+                        goal_id: "goal-1".into(),
+                    },
+                },
+            )),
+            Err(TimelineError::InvalidNotification)
+        ));
+        assert_eq!(timeline.pending_notifications().len(), 2);
     }
 
     #[test]

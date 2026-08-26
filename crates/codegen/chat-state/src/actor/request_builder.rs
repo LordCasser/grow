@@ -59,8 +59,6 @@ impl ChatStateActor {
             }
         }
         let mut items = self.state.timeline.surface().to_vec();
-        let runtime = sampling_types::model_image_input_key(&self.state.sampling_config);
-        project_image_shadows(&self.state.timeline, &runtime, &mut items);
         items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
 
         // Measure the exact serialized body and evict only once it approaches
@@ -125,36 +123,6 @@ impl ChatStateActor {
         self.apply_request_projection(request_input_tokens);
         Ok(request)
     }
-}
-
-/// Apply durable, target-model ImageShadows to a request projection. Source
-/// images stay on Timeline Surface and no projection for another model route
-/// can affect this request.
-fn project_image_shadows(
-    timeline: &crate::Timeline,
-    runtime: &sampling_types::ModelImageInputKey,
-    items: &mut [ConversationItem],
-) -> usize {
-    use sampling_types::conversation::{conversation_image_groups, replace_item_images_with_text};
-
-    let active = timeline.active_image_projections();
-    let Some(shadows) = active.get(runtime) else {
-        return 0;
-    };
-    let groups = conversation_image_groups(items)
-        .into_iter()
-        .map(|group| (group.item_index, group))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut projected = 0usize;
-    for (index, source) in timeline.surface_ids().iter().copied().enumerate() {
-        let (Some(shadow), Some(group)) = (shadows.get(&source), groups.get(&index)) else {
-            continue;
-        };
-        if shadow.fingerprint == group.fingerprint && shadow.image_count == group.image_count() {
-            projected += replace_item_images_with_text(&mut items[index], &shadow.replacement);
-        }
-    }
-    projected
 }
 
 /// Build the sticky provider route from causal lineage and model identity.

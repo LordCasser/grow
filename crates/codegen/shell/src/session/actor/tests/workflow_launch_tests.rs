@@ -89,12 +89,23 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
                 tokio::sync::mpsc::unbounded_channel().0,
                 actor.chat_state_handle.clone(),
                 Default::default(),
+                crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                    "test-model",
+                    Some(sampling_types::ReasoningEffort::Medium),
+                    sampling_types::ModelImageInputKey::new(
+                        "test-model",
+                        "responses",
+                        "test-endpoint",
+                    ),
+                )
+                .unwrap(),
             );
             actor.workflow_manager = Arc::new(tokio::sync::Mutex::new(manager));
             actor
                 .behavior
                 .lock()
                 .select_behavior(tool_types::BehaviorId::Workflow);
+            actor.background_workflows_enabled = true;
             let actor = Arc::new(actor);
 
             let response = tokio::time::timeout(
@@ -125,6 +136,33 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
                     .await
                     .script_copy_for(&runs[0].run_id)
                     .map(|script| crate::session::workflow::registry::content_hash(&script))
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handwritten_workflow_launch_cannot_bypass_disabled_feature_gate() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, _gateway_rx) = super::support::build_actor().await;
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Workflow);
+
+            let response = actor.launch_named_workflow("deep-research", "").await;
+
+            assert!(response.contains("disabled for this session"), "{response}");
+            assert!(
+                actor
+                    .workflow_manager
+                    .lock()
+                    .await
+                    .tracker()
+                    .lock()
+                    .list()
+                    .is_empty()
             );
         })
         .await;

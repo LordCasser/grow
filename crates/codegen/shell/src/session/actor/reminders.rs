@@ -524,12 +524,23 @@ fn format_workflow_completion_notification(
         );
     }
     if let Some(report_path) = report_path {
-        let _ = writeln!(
-            buf,
-            "  Full report: {} (use {} on that path to view it)",
-            report_path.display(),
-            read_tool_name.unwrap_or("Read"),
-        );
+        match read_tool_name {
+            Some(read_tool_name) => {
+                let _ = writeln!(
+                    buf,
+                    "  Full report: {} (use {} on that path to view it)",
+                    report_path.display(),
+                    read_tool_name,
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    buf,
+                    "  Full report stored at {}. This Agent has no file-read tool; report the path to the user if the inline summary is insufficient.",
+                    report_path.display(),
+                );
+            }
+        }
     }
     buf.push_str(
         "\nReport this outcome to the user and take the appropriate next action. Keep the run id internal; the user knows the run by display name.",
@@ -578,6 +589,15 @@ fn format_running_task_checkpoint_notification(
         "Check whether it is still running and inspect its output log to determine whether it completed successfully.",
     );
     body
+}
+
+fn running_task_notification_owner(
+    task: &tools::computer::types::TaskSnapshot,
+) -> chat_state::NotificationOwner {
+    task.goal_id
+        .clone()
+        .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
+        .unwrap_or(chat_state::NotificationOwner::Session)
 }
 /// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
 /// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
@@ -674,7 +694,7 @@ impl SessionActor {
             let source = chat_state::NotificationSource::TaskStillRunning {
                 task_id: task.task_id.clone(),
                 task_kind,
-                owner: chat_state::NotificationOwner::Session,
+                owner: running_task_notification_owner(&task),
             };
             let body = format_running_task_checkpoint_notification(&task, checkpoint_time);
             match self
@@ -769,17 +789,24 @@ impl SessionActor {
 #[cfg(test)]
 mod workflow_reminder_tests {
     use super::*;
-    use crate::session::workflow::tracker::{WorkflowRunState, WorkflowRunStatus};
+    use crate::session::workflow::tracker::{
+        WorkflowRunState, WorkflowRunStatus, WorkflowRuntimeRoute,
+    };
     fn failed_run(detail: String) -> WorkflowRunState {
         WorkflowRunState {
             run_id: "wf_1".to_owned(),
             definition_id: None,
             definition_scope: None,
             definition_hash: None,
-            private: false,
             save_prompt: false,
             revision: 2,
             execution_epoch: 0,
+            runtime_route: WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
             name: "demo".to_owned(),
             objective: "exercise formatter".to_owned(),
             status: WorkflowRunStatus::Failed,
@@ -875,5 +902,41 @@ mod workflow_reminder_tests {
         assert!(!notification.contains("internal isolation wrapper"));
         assert!(notification.contains("/tmp/monitor-1.log"));
         assert!(notification.contains("may still be in progress"));
+    }
+
+    #[test]
+    fn running_task_checkpoint_keeps_immutable_goal_owner() {
+        let mut task = tools::computer::types::TaskSnapshot {
+            task_id: "goal-monitor".into(),
+            command: "watch".into(),
+            display_command: None,
+            cwd: "/workspace".into(),
+            start_time: std::time::UNIX_EPOCH,
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/goal-monitor.log".into(),
+            truncated: false,
+            exit_code: None,
+            signal: None,
+            completed: false,
+            kind: tools::computer::types::TaskKind::Monitor,
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: Some("session-1".into()),
+            goal_id: Some("goal-1".into()),
+            description: None,
+            is_backgrounded: true,
+        };
+        assert_eq!(
+            running_task_notification_owner(&task),
+            chat_state::NotificationOwner::Goal {
+                goal_id: "goal-1".into()
+            }
+        );
+        task.goal_id = None;
+        assert_eq!(
+            running_task_notification_owner(&task),
+            chat_state::NotificationOwner::Session
+        );
     }
 }

@@ -2,8 +2,8 @@ use super::*;
 
 fn completed_goal_control_cancel_trigger(
     control: Option<&'static str>,
-    before_goal: Option<(String, String, crate::session::goal_tracker::GoalStatus)>,
-    after_goal: Option<(String, String, crate::session::goal_tracker::GoalStatus)>,
+    before_goal: Option<(String, u64, crate::session::goal_tracker::GoalStatus)>,
+    after_goal: Option<(String, u64, crate::session::goal_tracker::GoalStatus)>,
     behavior_changed: bool,
 ) -> Option<&'static str> {
     match control? {
@@ -13,8 +13,17 @@ fn completed_goal_control_cancel_trigger(
             .then_some("goal_set"),
         "goal_edit" => before_goal
             .zip(after_goal)
-            .is_some_and(|(before, after)| before.0 == after.0 && before.1 != after.1)
+            .is_some_and(|(before, after)| {
+                before.2 == crate::session::goal_tracker::GoalStatus::Active
+                    && (before.0 != after.0 || before.1 != after.1)
+            })
             .then_some("goal_edit"),
+        "goal_budget" => before_goal
+            .zip(after_goal)
+            .is_some_and(|(before, after)| {
+                before.2 == crate::session::goal_tracker::GoalStatus::Active && before.1 != after.1
+            })
+            .then_some("goal_budget"),
         "goal_enter" => behavior_changed.then_some("goal_enter"),
         "goal_pause" => before_goal
             .zip(after_goal)
@@ -23,7 +32,10 @@ fn completed_goal_control_cancel_trigger(
                     && after.2 != crate::session::goal_tracker::GoalStatus::Active
             })
             .then_some("goal_pause"),
-        "goal_clear" => (before_goal.is_some() && after_goal.is_none() || behavior_changed)
+        "goal_clear" => (before_goal
+            .is_some_and(|goal| goal.2 == crate::session::goal_tracker::GoalStatus::Active)
+            && after_goal.is_none()
+            || behavior_changed)
             .then_some("goal_clear"),
         _ => None,
     }
@@ -103,17 +115,17 @@ impl SessionActor {
                     BuiltinAction::GoalEnter => Some("goal_enter"),
                     BuiltinAction::GoalPause => Some("goal_pause"),
                     BuiltinAction::GoalClear => Some("goal_clear"),
+                    BuiltinAction::GoalBudget { .. } => Some("goal_budget"),
                     BuiltinAction::GoalStatus
                     | BuiltinAction::GoalUsage
-                    | BuiltinAction::GoalRestart
-                    | BuiltinAction::GoalBudget { .. } => None,
+                    | BuiltinAction::GoalRestart => None,
                     _ => unreachable!("match arm accepts only Goal controls"),
                 };
                 let before_goal = self
                     .goal_tracker
                     .lock()
                     .snapshot()
-                    .map(|goal| (goal.goal_id.clone(), goal.updated_at.clone(), goal.status));
+                    .map(|goal| (goal.goal_id.clone(), goal.definition_revision, goal.status));
                 let before_mode = self.behavior.lock().behavior();
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
                     command: "goal".to_string(),
@@ -126,7 +138,7 @@ impl SessionActor {
                     .goal_tracker
                     .lock()
                     .snapshot()
-                    .map(|goal| (goal.goal_id.clone(), goal.updated_at.clone(), goal.status));
+                    .map(|goal| (goal.goal_id.clone(), goal.definition_revision, goal.status));
                 let behavior_changed = before_mode != self.behavior.lock().behavior();
                 Ok(completed_goal_control_cancel_trigger(
                     control,
@@ -155,27 +167,28 @@ impl SessionActor {
 
     pub(super) async fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
         let previous = self.goal_tracker.lock().snapshot().cloned();
-        let Some(budget) = token_budget else {
-            return "Usage: /goal budget <tokens>".to_string();
-        };
+        let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
         let was_budget_limited = {
             let mut tracker = self.goal_tracker.lock();
             if tracker.snapshot().is_none() {
                 return "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string();
             }
             if tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Complete) {
-                return "Goal is already complete. Use /goal set <objective> to start a new one."
+                return "Goal is already complete. Clear it before starting a new Goal."
                     .to_string();
             }
             let was_budget_limited =
                 tracker.status() == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
             if tracker
                 .snapshot()
-                .is_some_and(|goal| goal.token_budget == Some(budget))
+                .is_some_and(|goal| goal.token_budget == token_budget)
             {
-                return format!("Goal token budget is already {budget} tokens.");
+                return token_budget.map_or_else(
+                    || "Goal token budget is already unlimited.".to_string(),
+                    |budget| format!("Goal token budget is already {budget} tokens."),
+                );
             }
-            if !tracker.set_token_budget(Some(budget)) {
+            if !tracker.set_token_budget(token_budget) {
                 return "Goal token budget must be a positive integer.".to_string();
             }
             was_budget_limited
@@ -185,13 +198,20 @@ impl SessionActor {
         {
             return format!("Goal budget was not changed: {error}");
         }
+        if let Some(goal_id) = retired_goal_id {
+            self.cancel_goal_owned_work(&goal_id).await;
+        }
         let tokens_used = self.goal_tokens_used();
         self.goal_notify_sender()
             .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+        let budget_label = token_budget.map_or_else(
+            || "unlimited".to_string(),
+            |budget| format!("{budget} tokens"),
+        );
         if was_budget_limited {
-            format!("User set current Goal budget to {budget} tokens. Restart it to continue.")
+            format!("User set current Goal budget to {budget_label}. Restart it to continue.")
         } else {
-            format!("User set current goal budget to {budget} tokens.")
+            format!("User set current Goal budget to {budget_label}.")
         }
     }
 
@@ -972,15 +992,9 @@ impl SessionActor {
                 objective,
                 token_budget,
             } => {
-                use crate::session::goal_tracker::GoalStatus;
-                if self
-                    .goal_tracker
-                    .lock()
-                    .status()
-                    .is_some_and(|status| status != GoalStatus::Complete)
-                {
+                if self.goal_tracker.lock().snapshot().is_some() {
                     self.send_host_turn_slash_command_output(
-                        "An unfinished Goal already exists. Use /goal edit <objective>, or /goal clear first.",
+                        "A Goal already exists. Use /goal edit <objective>, or /goal clear first.",
                     )
                     .await;
                     return ok_end_turn(0, None);
@@ -1003,6 +1017,8 @@ impl SessionActor {
                 }
                 let used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
+                let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
+                let previous_revision = previous.as_ref().map(|goal| goal.definition_revision);
                 let effective_budget = token_budget.or_else(|| {
                     self.goal_tracker
                         .lock()
@@ -1014,29 +1030,54 @@ impl SessionActor {
                     .lock()
                     .revise_goal(objective.clone(), effective_budget);
                 if revised {
-                    if let Err(error) = self.commit_goal_activation_or_restore(previous).await {
+                    let active = self.goal_tracker.lock().status()
+                        == Some(crate::session::goal_tracker::GoalStatus::Active);
+                    let committed = if active {
+                        self.commit_goal_activation_or_restore(previous).await
+                    } else if let Some(previous) = previous {
+                        self.commit_goal_mutation_or_restore(previous).await
+                    } else {
+                        Err("Goal state disappeared while it was being edited.".to_string())
+                    };
+                    if let Err(error) = committed {
                         self.send_host_turn_slash_command_output(&format!(
                             "Goal edit was not applied: {error}"
                         ))
                         .await;
                         return ok_end_turn(0, None);
                     }
+                    let definition_changed =
+                        self.goal_tracker.lock().snapshot().is_some_and(|goal| {
+                            Some(goal.definition_revision) != previous_revision
+                        });
+                    if definition_changed && let Some(goal_id) = retired_goal_id {
+                        self.cancel_goal_owned_work(&goal_id).await;
+                    }
                     self.goal_notify_sender()
                         .emit_goal_updated(&self.goal_tracker.lock(), used);
-                    self.idle_arbiter.notify_one();
+                    if active {
+                        self.idle_arbiter.notify_one();
+                    }
+                    let lifecycle = if active {
+                        "automatic continuation is active"
+                    } else {
+                        "the Goal remains stopped; use /goal restart when ready"
+                    };
                     self.send_host_turn_slash_command_output(&format!(
-                        "Goal objective revised; automatic continuation is active.\nObjective: {objective}"
+                        "Goal objective revised; {lifecycle}.\nObjective: {objective}"
                     ))
+                    .await;
+                } else {
+                    self.send_host_turn_slash_command_output(
+                        "Goal already has that objective and token budget; nothing changed.",
+                    )
                     .await;
                 }
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalEnter => {
                 use crate::session::behavior::BehaviorChangeOutcome;
-                let message = match self
-                    .request_behavior_change(acp::SessionModeId::new("goal"))
-                    .await
-                {
+                let message = match self.request_goal_behavior_entry().await {
                     BehaviorChangeOutcome::Applied => {
                         if self.goal_tracker.lock().snapshot().is_some() {
                             "Goal behavior selected. Use /goal status, /goal restart, or send additional context."
@@ -1054,41 +1095,9 @@ impl SessionActor {
             }
             BuiltinAction::GoalUsage => {
                 self.send_host_turn_slash_command_output(
-                    "Usage: /goal set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | restart | clear",
+                    "Usage: /goal set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens|unlimited> | status | pause | restart | clear",
                 )
                 .await;
-                ok_end_turn(0, None)
-            }
-            BuiltinAction::DeepResearch { query } => {
-                use crate::session::behavior::BehaviorChangeOutcome;
-                let outcome = self
-                    .request_behavior_change(acp::SessionModeId::new("deep_research"))
-                    .await;
-                match outcome {
-                    BehaviorChangeOutcome::Applied if query.is_empty() => {
-                        self.send_host_turn_slash_command_output(
-                            "Deep Research behavior selected. Send a non-empty research query to start.",
-                        )
-                        .await;
-                    }
-                    BehaviorChangeOutcome::Applied => {
-                        match self.launch_deep_research(query).await {
-                            Ok(run_id) => {
-                                self.send_host_turn_slash_command_output(&format!(
-                                "Deep Research started in the background ({run_id}). A terminal report will be delivered here. This private Run is managed by Deep Research Behavior and does not appear in the public Workflow workspace."
-                            ))
-                            .await;
-                            }
-                            Err(message) => {
-                                self.send_host_turn_slash_command_output(&message).await;
-                            }
-                        }
-                    }
-                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                    | BehaviorChangeOutcome::Rejected { message } => {
-                        self.send_host_turn_slash_command_output(&message).await;
-                    }
-                }
                 ok_end_turn(0, None)
             }
             BuiltinAction::WorkflowManage { run_id, op } => {
@@ -1136,6 +1145,7 @@ impl SessionActor {
                 use crate::session::goal_tracker::{GoalPauseReason, GoalStatus};
                 let tokens_used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
+                let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
                 let (msg, changed) = {
                     let mut tracker = self.goal_tracker.lock();
                     match tracker.status() {
@@ -1149,14 +1159,13 @@ impl SessionActor {
                         Some(GoalStatus::BudgetLimited) => ("Goal is budget-limited.", false),
                         Some(GoalStatus::Paused) => ("Goal is already paused.", false),
                         Some(GoalStatus::Blocked) => ("Goal is blocked.", false),
-                        Some(GoalStatus::UsageLimited) => ("Goal is usage-limited.", false),
                         Some(GoalStatus::Complete) => ("Goal is already complete.", false),
                         None => ("No goal is currently set.", false),
                     }
                 };
                 if changed {
                     if let Some(previous) = previous
-                        && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
+                        && let Err(error) = self.commit_goal_stop_or_restore(previous).await
                     {
                         self.send_host_turn_slash_command_output(&format!(
                             "Goal was not paused: {error}"
@@ -1166,6 +1175,9 @@ impl SessionActor {
                     }
                     self.goal_notify_sender()
                         .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+                    if let Some(goal_id) = retired_goal_id {
+                        self.cancel_goal_owned_work(&goal_id).await;
+                    }
                 }
                 self.send_host_turn_slash_command_output(msg).await;
                 ok_end_turn(0, None)
@@ -1176,14 +1188,24 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalClear => {
-                if self
-                    .persist_behavior_transition_durably(
-                        crate::session::behavior::BehaviorSnapshot::normal(),
-                        None,
-                    )
-                    .await
-                    .is_err()
-                {
+                let retired_goal_id = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .map(|goal| goal.goal_id.clone());
+                let selected = self.behavior.lock().behavior();
+                let behavior = if selected == tool_types::BehaviorId::Goal {
+                    crate::session::behavior::BehaviorSnapshot::normal()
+                } else {
+                    self.behavior.lock().snapshot()
+                };
+                let persisted = if selected == tool_types::BehaviorId::Goal {
+                    self.persist_behavior_transition_durably(behavior, None)
+                        .await
+                } else {
+                    self.persist_control_snapshot_durably(behavior, None).await
+                };
+                if persisted.is_err() {
                     self.send_host_turn_slash_command_output(
                         "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
                     )
@@ -1191,13 +1213,17 @@ impl SessionActor {
                     return ok_end_turn(0, None);
                 }
                 self.goal_tracker.lock().clear();
-                self.subagent_token_records.lock().clear();
-                self.behavior
-                    .lock()
-                    .select_behavior(tool_types::BehaviorId::Normal);
-                self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                    tools::types::BehaviorId::Normal.as_id(),
-                ));
+                if let Some(goal_id) = retired_goal_id {
+                    self.cancel_goal_owned_work(&goal_id).await;
+                }
+                if selected == tool_types::BehaviorId::Goal {
+                    self.behavior
+                        .lock()
+                        .select_behavior(tool_types::BehaviorId::Normal);
+                    self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+                        tools::types::BehaviorId::Normal.as_id(),
+                    ));
+                }
                 self.send_available_commands_update().await;
                 self.send_grow_notification(crate::session::goal_notification::build_goal_cleared())
                     .await;
@@ -1219,8 +1245,8 @@ mod out_of_band_goal_control_tests {
     use super::*;
     use crate::session::goal_tracker::GoalStatus;
 
-    fn goal(id: &str, revision: u64, status: GoalStatus) -> Option<(String, String, GoalStatus)> {
-        Some((id.to_string(), revision.to_string(), status))
+    fn goal(id: &str, revision: u64, status: GoalStatus) -> Option<(String, u64, GoalStatus)> {
+        Some((id.to_string(), revision, status))
     }
 
     #[test]
@@ -1242,6 +1268,16 @@ mod out_of_band_goal_control_tests {
                 false,
             ),
             Some("goal_pause")
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_budget"),
+                goal("g", 2, GoalStatus::Active),
+                goal("g", 3, GoalStatus::Active),
+                false,
+            ),
+            Some("goal_budget"),
+            "a budget edit invalidates the active turn's frozen Goal definition"
         );
         assert_eq!(
             completed_goal_control_cancel_trigger(
@@ -1282,6 +1318,26 @@ mod out_of_band_goal_control_tests {
             None,
             "resume does not invalidate the running user turn"
         );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_edit"),
+                goal("g", 1, GoalStatus::Paused),
+                goal("g", 2, GoalStatus::Paused),
+                false,
+            ),
+            None,
+            "editing a stopped Goal must not cancel unrelated foreground work"
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_clear"),
+                goal("g", 2, GoalStatus::Blocked),
+                None,
+                false,
+            ),
+            None,
+            "clearing a stopped Goal must not cancel unrelated foreground work"
+        );
     }
 
     #[tokio::test]
@@ -1300,6 +1356,14 @@ mod out_of_band_goal_control_tests {
                         "2026-08-25T00:00:00Z".into(),
                     )
                     .unwrap();
+                // A Goal mutation is only valid while Goal Behavior owns the
+                // active Goal in the control snapshot. The production slash
+                // path establishes this atomically; mirror that invariant in
+                // this direct actor fixture.
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
                 while gateway_rx.try_recv().is_ok() {}
 
                 let revision = actor
@@ -1328,7 +1392,11 @@ mod out_of_band_goal_control_tests {
 
                 assert_eq!(
                     actor.update_goal_token_budget(Some(200)).await,
-                    "User set current goal budget to 200 tokens."
+                    "User set current Goal budget to 200 tokens."
+                );
+                assert_eq!(
+                    actor.update_goal_token_budget(None).await,
+                    "User set current Goal budget to unlimited."
                 );
                 let mut projected = false;
                 while let Ok(message) = gateway_rx.try_recv() {

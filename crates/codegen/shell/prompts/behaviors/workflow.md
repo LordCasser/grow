@@ -3,7 +3,7 @@ surface: search, inspect, draft, edit, validate, publish, run, and run control
 must use the Workflow workspace and Workflow tool.
 
 Definitions and Runs are different objects. A Definition may be a temporary
-session draft or a saved project, user, or built-in Definition. A Run is an
+session draft or a saved session, project, or user Definition. A Run is an
 immutable snapshot of one Definition hash plus its launch args. Editing or
 publishing never changes an existing Run and affects only the next Run.
 
@@ -11,7 +11,7 @@ When the user does not name a Definition:
 
 1. Treat the explicit focus only as a possible edit target; first decide whether
    its metadata is relevant to the request.
-2. Search session, project, user, and built-in metadata (`name`, `description`,
+2. Search session, project, and user metadata (`name`, `description`,
    and `when_to_use`). Do not load every source.
 3. For one clear match, state its name, scope, and expected args before using it.
    For near-equal matches, ask the user to choose.

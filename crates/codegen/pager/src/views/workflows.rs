@@ -1335,7 +1335,6 @@ mod tests {
             objective: "Research the thing thoroughly".to_string(),
             status: status.to_string(),
             management_available: true,
-            builtin: false,
             phases: vec![
                 ("Plan".to_string(), "done".to_string()),
                 ("Research".to_string(), "active".to_string()),

@@ -55,6 +55,13 @@ impl ChatStateHandle {
         Self::new(cmd_tx, tokio_util::sync::CancellationToken::new())
     }
 
+    /// Whether the actor mailbox has closed. A permanent Timeline writer
+    /// failure closes it to prevent a later fact from reusing an uncommitted
+    /// sequence number.
+    pub fn is_closed(&self) -> bool {
+        self.cmd_tx.is_closed()
+    }
+
     // ═══ Fire-and-forget mutations ═══
 
     /// Push a user message into the conversation.
@@ -321,8 +328,9 @@ impl ChatStateHandle {
         .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
-    /// Durably record target-model ImageShadows while leaving source images on
-    /// the canonical Surface. The actor rejects stale source revisions.
+    /// Durably record irreversible model-facing ImageShadows while preserving
+    /// source images only as immutable Timeline evidence. The actor rejects
+    /// stale source revisions.
     pub async fn record_image_projection_and_ack(
         &self,
         projection: crate::ImageProjectionEvent,

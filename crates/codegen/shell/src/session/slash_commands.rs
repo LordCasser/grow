@@ -216,16 +216,6 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::SessionInfo,
     },
     BuiltinCommand {
-        name: "deep-research",
-        description: "[behavior] Research with bounded parallel agents and deliver a cited report",
-        argument_hint: Some("<query>"),
-        aliases: &[],
-        gate: BuiltinGate::WorkflowLaunches,
-        resolve: |args| BuiltinAction::DeepResearch {
-            query: args.trim().to_string(),
-        },
-    },
-    BuiltinCommand {
         name: "workflows",
         description: "Show the Workflow workspace (Definitions and Runs)",
         argument_hint: None,
@@ -272,7 +262,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "goal",
         description: "[behavior] Set, manage, or check an autonomous goal",
         argument_hint: Some(
-            "set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | restart | clear",
+            "set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens|unlimited> | status | pause | restart | clear",
         ),
         aliases: &[],
         gate: BuiltinGate::Goal,
@@ -320,21 +310,24 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                         && (trimmed.len() == 6 || trimmed[6..].starts_with(char::is_whitespace))
                     {
                         // `budget` subcommand: standalone mid-run re-budget.
-                        // Only a pure positive integer is accepted; anything
-                        // missing/invalid resolves with `None` so the handler
-                        // can surface the usage message.
+                        // A valid action carries `None` specifically for an
+                        // unlimited budget; malformed input stays a usage
+                        // action so validity is never encoded ambiguously.
                         let value = trimmed[6..].trim();
-                        let token_budget = if !value.is_empty()
+                        if matches!(value.to_ascii_lowercase().as_str(), "unlimited" | "none") {
+                            BuiltinAction::GoalBudget { token_budget: None }
+                        } else if !value.is_empty()
                             && !value.contains(char::is_whitespace)
                             && value.bytes().all(|b| b.is_ascii_digit())
                             && let Ok(budget) = value.parse::<i64>()
                             && budget > 0
                         {
-                            Some(budget)
+                            BuiltinAction::GoalBudget {
+                                token_budget: Some(budget),
+                            }
                         } else {
-                            None
-                        };
-                        BuiltinAction::GoalBudget { token_budget }
+                            BuiltinAction::GoalUsage
+                        }
                     } else {
                         BuiltinAction::GoalUsage
                     }
@@ -918,9 +911,6 @@ pub(super) enum BuiltinAction {
     GoalBudget {
         token_budget: Option<i64>,
     },
-    DeepResearch {
-        query: String,
-    },
     WorkflowManage {
         run_id: String,
         op: String,
@@ -964,7 +954,6 @@ impl BuiltinAction {
             | BuiltinAction::GoalRestart
             | BuiltinAction::GoalClear
             | BuiltinAction::GoalBudget { .. } => "goal",
-            BuiltinAction::DeepResearch { .. } => "deep-research",
             BuiltinAction::WorkflowManage { .. } => "workflow-run",
             BuiltinAction::WorkflowWorkspace => "workflows",
             BuiltinAction::WorkflowLaunch { .. } => "workflow-run",
@@ -1001,8 +990,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalRestart
             | BuiltinAction::GoalClear => false,
-            BuiltinAction::GoalBudget { token_budget } => token_budget.is_some(),
-            BuiltinAction::DeepResearch { .. } => true,
+            BuiltinAction::GoalBudget { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowWorkspace => false,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
@@ -1688,7 +1676,6 @@ mod tests {
                 "plugins",
                 "reload-plugins",
                 "session-info",
-                "deep-research",
                 "workflows",
                 "workflow-run",
                 "goal",
@@ -2849,7 +2836,8 @@ mod tests {
     #[test]
     fn goal_budget_missing_or_invalid_value() {
         // Missing, non-numeric, zero, negative, or whitespace-containing
-        // values all resolve with `None` so the handler can surface usage.
+        // values stay on the usage action instead of masquerading as
+        // `unlimited`.
         for text in [
             "budget",
             "budget abc",
@@ -2857,12 +2845,20 @@ mod tests {
             "budget -5",
             "budget 5 5",
         ] {
-            match resolve_goal(text) {
-                BuiltinAction::GoalBudget { token_budget } => {
-                    assert_eq!(token_budget, None, "no budget must be parsed from {text:?}");
-                }
-                other => panic!("expected GoalBudget, got {}", other.command_name()),
-            }
+            assert!(
+                matches!(resolve_goal(text), BuiltinAction::GoalUsage),
+                "invalid budget must show usage for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_budget_can_be_removed_explicitly() {
+        for text in ["budget unlimited", "budget NONE"] {
+            assert!(matches!(
+                resolve_goal(text),
+                BuiltinAction::GoalBudget { token_budget: None }
+            ));
         }
     }
 
@@ -2919,7 +2915,7 @@ mod tests {
             }
             .args_provided()
         );
-        assert!(!BuiltinAction::GoalBudget { token_budget: None }.args_provided());
+        assert!(BuiltinAction::GoalBudget { token_budget: None }.args_provided());
     }
     #[test]
     fn goal_tracker_status_with_no_goal_returns_none() {
@@ -2974,7 +2970,7 @@ mod tests {
         assert!(tracker.snapshot().is_none());
     }
     #[test]
-    fn goal_tracker_refuses_to_replace_unfinished_goal() {
+    fn goal_tracker_requires_clear_before_replacement_even_after_completion() {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
         tracker
@@ -2986,6 +2982,16 @@ mod tests {
                 .is_err()
         );
         assert_eq!(tracker.objective(), Some("first"));
+        assert!(tracker.complete());
+        assert!(
+            tracker
+                .create_goal("g2".into(), "second".into(), None, "later".into())
+                .is_err()
+        );
+        tracker.clear();
+        tracker
+            .create_goal("g2".into(), "second".into(), None, "later".into())
+            .unwrap();
     }
     #[test]
     fn goal_tracker_account_elapsed_flushes_delta() {

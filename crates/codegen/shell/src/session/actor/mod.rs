@@ -186,6 +186,11 @@ struct AdmissionState {
     pub(crate) foreground: ForegroundState,
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
+    /// Latest validated catalog snapshot waiting behind the immutable route of
+    /// an admitted foreground. Multiple watcher notifications coalesce to the
+    /// newest snapshot, while every caller remains attached to its eventual
+    /// application result.
+    pending_model_reload: Option<PendingModelReload>,
     pub(crate) pending_inputs: VecDeque<InputItem>,
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
     pub(crate) combine_edit_holds: std::collections::HashSet<String>,
@@ -206,9 +211,26 @@ struct AdmissionState {
     pub(crate) recent_terminals: VecDeque<crate::session::prompt_queue::RecentPromptTerminal>,
 }
 
+struct PendingModelReload {
+    model_id: acp::ModelId,
+    sampling_config: sampler::SamplerConfig,
+    image_description_model: Option<String>,
+    inference_idle_timeout: std::time::Duration,
+    max_retries: u32,
+    auto_compact_threshold_percent: u8,
+    responders: Vec<tokio::sync::oneshot::Sender<Result<(), acp::Error>>>,
+}
+
 pub(crate) enum ForegroundState {
     Idle,
     RegularTurn(AgentTask),
+    /// The runner has returned, but its canonical Timeline terminal has not
+    /// completed the durable barrier yet.  This is still foreground
+    /// ownership: admitting another turn here would let the successor's
+    /// `TurnStarted` overtake its predecessor's `TurnEnded`.
+    Settling {
+        prompt_id: String,
+    },
     Compaction,
 }
 
@@ -220,7 +242,7 @@ impl ForegroundState {
     pub(crate) fn regular(&self) -> Option<&AgentTask> {
         match self {
             Self::RegularTurn(task) => Some(task),
-            Self::Idle | Self::Compaction => None,
+            Self::Idle | Self::Settling { .. } | Self::Compaction => None,
         }
     }
 
@@ -243,6 +265,31 @@ impl ForegroundState {
             }
         }
     }
+
+    /// Transfer the regular runner's payload to settlement while retaining a
+    /// non-idle foreground fence until the durable terminal is committed.
+    pub(crate) fn begin_settling(&mut self) -> Option<AgentTask> {
+        match std::mem::replace(self, Self::Idle) {
+            Self::RegularTurn(task) => {
+                let prompt_id = task.prompt_id.clone();
+                *self = Self::Settling { prompt_id };
+                Some(task)
+            }
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn finish_settling(&mut self, prompt_id: &str) -> bool {
+        if matches!(self, Self::Settling { prompt_id: active } if active == prompt_id) {
+            *self = Self::Idle;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl AdmissionState {
@@ -250,7 +297,11 @@ impl AdmissionState {
     /// and the FIFO share this lock, so completion and queue mutations compare
     /// against one race-free identity.
     pub(crate) fn running_prompt_id(&self) -> Option<&str> {
-        self.foreground.regular().map(|t| t.prompt_id.as_str())
+        match &self.foreground {
+            ForegroundState::RegularTurn(task) => Some(task.prompt_id.as_str()),
+            ForegroundState::Settling { prompt_id } => Some(prompt_id.as_str()),
+            ForegroundState::Idle | ForegroundState::Compaction => None,
+        }
     }
 
     pub(crate) fn record_recent_terminal(
@@ -593,10 +644,9 @@ pub(crate) struct SessionActor {
     /// path). Uses `OnceLock` for lock-free reads, set-once semantics, and
     /// `&self` mutability (SessionActor is behind `Arc`).
     pub(crate) display_cwd: std::sync::OnceLock<String>,
-    /// Actor-owned stable catalog selection. Provider wire routing lives in
-    /// ChatState's SamplingConfig; keeping the catalog axis here prevents UI
-    /// mirrors from inventing the `from` side of durable model transitions.
-    pub(crate) selected_model_id: std::cell::RefCell<acp::ModelId>,
+    /// Single actor-committed catalog/provider route shared with handle-side
+    /// readers. Every update replaces the complete snapshot atomically.
+    pub(crate) model_route: crate::session::handle::SessionModelRoute,
     /// First skill the current prompt activated via its slash-skill path,
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.
@@ -613,6 +663,10 @@ pub(crate) struct SessionActor {
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,
     goal_runtime_available: std::sync::atomic::AtomicBool,
+    /// Session-owned asynchronous Goal admission preparation. Keeping its
+    /// JoinHandle in a TaskSlot makes shutdown cancellation explicit while
+    /// preparation stays off the mailbox path.
+    goal_drive: TaskSlot<()>,
     /// Durable long-lived Goal state. Idle continuation authority is runtime
     /// state and is deliberately not persisted in this value.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
@@ -784,14 +838,10 @@ impl SessionActor {
         terminal: chat_state::TurnTerminal,
         category: Option<crate::session::events::CancellationCategory>,
         context: Option<serde_json::Value>,
-    ) -> Result<(), acp::Error> {
+    ) -> Result<(), chat_state::TimelineWriteError> {
         self.events
             .emit_turn_ended(outcome, terminal, category, context)
             .await
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("turn terminal was not durably recorded: {error}"))
-            })
     }
     /// Current model ID for structured tracing span attributes. Reads from chat_state_handle
     /// so it always reflects the latest model override — no stale cached field.
@@ -831,7 +881,7 @@ impl SessionActor {
     /// `send_available_commands_update`).
     async fn command_availability(&self) -> slash_commands::CommandAvailability {
         let tool_names = self.registered_tool_names().await;
-        let has_workflow_runs = self.workflow_tracker().await.lock().has_public_runs();
+        let has_workflow_runs = self.workflow_tracker().await.lock().has_runs();
         self.build_command_availability(&tool_names, has_workflow_runs)
     }
     /// Build the `CommandAvailability` snapshot from a precomputed slice

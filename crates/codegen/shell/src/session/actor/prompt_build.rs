@@ -7,31 +7,14 @@ use super::*;
 ///
 /// Replaces anything outside `[A-Za-z0-9._-]` with `_` so the result is a
 /// portable directory name on macOS/Linux.
-/// Whether `url` is an `http://` or `https://` URL — i.e. a remote URL the
-/// upstream API can fetch directly. `file://` and other local schemes are
-/// rejected by the API and must be inlined as a `data:` URL instead.
-pub(super) fn is_remote_image_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
-}
 /// Pick the URL value sent to the upstream API for a user-attached image.
 ///
-/// The remote API accepts a base64 `data:` URL or an HTTP(S) URL only;
-/// `file://` and other local schemes return 400. Inline bytes win when
-/// present (the canonical payload); `uri` is forwarded directly only
-/// when it is a remote URL with no inline bytes available.
-///
-/// Extracted so production and the regression tests assert against the
-/// same selector — a future change to the production rule cannot drift
-/// past the tests.
+/// Attachments are always content-addressable inline bytes by the time they
+/// reach this boundary. A mutable HTTP locator is never a valid image identity:
+/// it could change between the primary request and an irreversible Sideband
+/// transcription. `normalize_images` drops inputs without decodable bytes.
 pub(super) fn pick_user_image_url(image: &agent_client_protocol::ImageContent) -> String {
-    if let Some(uri) = image.uri.as_deref()
-        && image.data.is_empty()
-        && is_remote_image_url(uri)
-    {
-        uri.to_owned()
-    } else {
-        format!("data:{};base64,{}", image.mime_type, image.data)
-    }
+    format!("data:{};base64,{}", image.mime_type, image.data)
 }
 /// True iff `conversation` already contains a tagged project-instructions reminder.
 /// Read-only; used by `spawn_session_actor` for idempotent AGENTS.md injection

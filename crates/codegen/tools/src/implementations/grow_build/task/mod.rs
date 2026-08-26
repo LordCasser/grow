@@ -101,10 +101,11 @@ impl tool_runtime::Tool for TaskTool {
 
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
-            // Task delegates to a separately-authorized child actor. The
-            // exact Task identity and depth policy authorize delegation; the
-            // child's own Gate authorizes every reality-facing operation.
-            max_access: tool_protocol::ToolAccess::None,
+            // Task can delegate any RWX envelope, so its descriptor must cover
+            // the call-specific capability projection. The child still gets
+            // a separately-authorized ceiling and authorizes each operation;
+            // `All` here is the descriptor envelope, not an implicit grant.
+            max_access: tool_protocol::ToolAccess::All,
             ..Default::default()
         }
     }
@@ -136,7 +137,9 @@ impl tool_runtime::Tool for TaskTool {
             parent_session_id,
             parent_prompt_id,
             owner,
-            goal_context,
+            inherited_goal_context,
+            goal_turn_snapshot,
+            goal_runtime,
             foreground_wait,
         ) = {
             let res = resources.lock().await;
@@ -169,31 +172,15 @@ impl tool_runtime::Tool for TaskTool {
                 .get::<CurrentSubagentOwnerResource>()
                 .map(|owner| owner.0.clone())
                 .unwrap_or_default();
-            let goal_context = match &owner {
-                SubagentOwner::Goal { goal_id } => {
-                    let view = res
-                        .get::<crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource>()
-                        .and_then(|resource| resource.0.clone())
-                        .ok_or_else(|| {
-                            tool_runtime::ToolError::custom(
-                                "missing_goal_context",
-                                "Goal-owned subagents require an immutable Goal context snapshot.",
-                            )
-                        })?;
-                    if view.goal_id != *goal_id {
-                        return Err(tool_runtime::ToolError::custom(
-                            "stale_goal_context",
-                            "Goal subagent ownership and delegated Goal snapshot do not match.",
-                        ));
-                    }
-                    Some(
-                        crate::implementations::grow_build::update_goal::GoalContextSnapshot {
-                            view,
-                        },
-                    )
-                }
-                SubagentOwner::Task | SubagentOwner::Workflow { .. } => None,
-            };
+            let inherited_goal_context = res
+                .get::<crate::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
+                .and_then(|resource| resource.0.clone());
+            let goal_turn_snapshot = res
+                .get::<crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource>()
+                .and_then(|resource| resource.0.clone());
+            let goal_runtime = res
+                .get::<crate::implementations::grow_build::update_goal::GoalRuntimeHandle>()
+                .map(|runtime| runtime.0.clone());
             let foreground_wait = res.get::<SubagentForegroundWait>().cloned();
 
             (
@@ -204,9 +191,74 @@ impl tool_runtime::Tool for TaskTool {
                 parent_session_id,
                 parent_prompt_id,
                 owner,
-                goal_context,
+                inherited_goal_context,
+                goal_turn_snapshot,
+                goal_runtime,
                 foreground_wait,
             )
+        };
+
+        let goal_context = match &owner {
+            SubagentOwner::Goal { goal_id } => {
+                let view = if let Some(inherited) = inherited_goal_context {
+                    inherited.view
+                } else {
+                    let frozen = goal_turn_snapshot.ok_or_else(|| {
+                        tool_runtime::ToolError::custom(
+                            "missing_goal_context",
+                            "Goal-owned subagents require a Goal turn snapshot.",
+                        )
+                    })?;
+                    let runtime = goal_runtime.ok_or_else(|| {
+                        tool_runtime::ToolError::custom(
+                            "goal_not_available",
+                            "Goal runtime is unavailable at Task admission.",
+                        )
+                    })?;
+                    let (respond_to, response) = tokio::sync::oneshot::channel();
+                    runtime
+                        .send(
+                            crate::implementations::grow_build::update_goal::GoalCommand::Get {
+                                respond_to,
+                            },
+                        )
+                        .map_err(|_| {
+                            tool_runtime::ToolError::custom(
+                                "goal_channel_closed",
+                                "Goal runtime channel is closed.",
+                            )
+                        })?;
+                    let current = response
+                        .await
+                        .map_err(|_| {
+                            tool_runtime::ToolError::custom(
+                                "goal_channel_closed",
+                                "Goal runtime dropped the Task admission check.",
+                            )
+                        })?
+                        .map_err(|message| {
+                            tool_runtime::ToolError::custom("stale_goal_context", message)
+                        })?;
+                    if current.status != "active"
+                        || current.goal_id != frozen.goal_id
+                        || current.definition_revision != frozen.definition_revision
+                    {
+                        return Err(tool_runtime::ToolError::custom(
+                            "stale_goal_context",
+                            "The Goal changed or stopped before Task admission.",
+                        ));
+                    }
+                    current
+                };
+                if view.goal_id != *goal_id {
+                    return Err(tool_runtime::ToolError::custom(
+                        "stale_goal_context",
+                        "Goal subagent ownership and delegated Goal snapshot do not match.",
+                    ));
+                }
+                Some(crate::implementations::grow_build::update_goal::GoalContextSnapshot { view })
+            }
+            SubagentOwner::Task | SubagentOwner::Workflow { .. } => None,
         };
 
         if depth >= max_depth {
@@ -361,6 +413,7 @@ impl tool_runtime::Tool for TaskTool {
             cwd,
             runtime_overrides: SubagentRuntimeOverrides {
                 model,
+                model_transport_key: None,
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort: None,
                 capability_mode: input.capability_mode,
@@ -532,6 +585,7 @@ mod tests {
     fn goal_view() -> crate::implementations::grow_build::update_goal::GoalView {
         crate::implementations::grow_build::update_goal::GoalView {
             goal_id: "goal-123".into(),
+            definition_revision: 1,
             objective: "test objective".into(),
             status: "active".into(),
             token_budget: None,
@@ -541,6 +595,27 @@ mod tests {
             updated_at: "2026-08-24T00:00:00Z".into(),
             status_message: None,
         }
+    }
+
+    fn goal_runtime(
+        view: crate::implementations::grow_build::update_goal::GoalView,
+    ) -> (
+        crate::implementations::grow_build::update_goal::GoalRuntimeHandle,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::implementations::grow_build::update_goal::GoalCommand;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                if let GoalCommand::Get { respond_to } = command {
+                    let _ = respond_to.send(Ok(view.clone()));
+                }
+            }
+        });
+        (
+            crate::implementations::grow_build::update_goal::GoalRuntimeHandle(tx),
+            task,
+        )
     }
 
     /// Backend that replays `outcome` for every `ValidateType` event.
@@ -743,6 +818,10 @@ mod tests {
                 goal_view(),
             )),
         );
+        let mut fresh_goal = goal_view();
+        fresh_goal.tokens_used = 42;
+        let (goal_runtime, goal_runtime_task) = goal_runtime(fresh_goal);
+        resources.insert(goal_runtime);
 
         let tool = TaskTool;
         let shared = resources.into_shared();
@@ -760,6 +839,7 @@ mod tests {
                 .expect("Goal worker must receive its immutable snapshot");
             assert_eq!(context.view.goal_id, "goal-123");
             assert_eq!(context.view.objective, "test objective");
+            assert_eq!(context.view.tokens_used, 42);
             request
                 .respond_with(|request| SubagentResult {
                     success: true,
@@ -794,6 +874,7 @@ mod tests {
         .unwrap();
 
         handle.await.unwrap();
+        goal_runtime_task.abort();
 
         match result {
             ToolOutput::SubagentCompleted(sub) => {
@@ -822,6 +903,8 @@ mod tests {
                 goal_view(),
             )),
         );
+        let (goal_runtime, goal_runtime_task) = goal_runtime(goal_view());
+        resources.insert(goal_runtime);
 
         let result = tool_runtime::Tool::run(
             &TaskTool,
@@ -843,6 +926,7 @@ mod tests {
         .expect_err("mismatched Goal identity must not spawn");
 
         assert!(result.to_string().contains("do not match"), "{result}");
+        goal_runtime_task.abort();
     }
 
     #[tokio::test]
@@ -1369,6 +1453,7 @@ mod tests {
     fn runtime_overrides_struct_default_is_all_none() {
         let overrides = SubagentRuntimeOverrides::default();
         assert!(overrides.model.is_none());
+        assert!(overrides.model_transport_key.is_none());
         assert!(overrides.reasoning_effort.is_none());
         assert!(overrides.capability_mode.is_none());
     }

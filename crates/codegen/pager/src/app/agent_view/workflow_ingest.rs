@@ -3,29 +3,6 @@ use shell::extensions::notification::SessionUpdate as GrowSessionUpdate;
 use super::AgentView;
 use crate::scrollback::block::RenderBlock;
 
-pub(in crate::app) fn is_builtin_workflow_handle(
-    commands: &[agent_client_protocol::AvailableCommand],
-    display_name: &str,
-) -> bool {
-    let is_builtin = |command: &agent_client_protocol::AvailableCommand| {
-        command.meta.as_ref().is_some_and(|meta| {
-            meta.get("workflowSource")
-                .and_then(serde_json::Value::as_str)
-                == Some("builtin")
-        })
-    };
-    if let Some(exact) = commands.iter().find(|command| command.name == display_name) {
-        return is_builtin(exact);
-    }
-    commands.iter().any(|command| {
-        is_builtin(command)
-            && display_name
-                .strip_prefix(command.name.as_str())
-                .and_then(|suffix| suffix.strip_prefix('-'))
-                .is_some_and(|ordinal| ordinal.parse::<u32>().is_ok_and(|n| n >= 2))
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn upsert_workflow_block(
     agent: &mut AgentView,
@@ -107,32 +84,7 @@ fn upsert_workflow_block(
     }
 }
 
-/// Fields of a private `WorkflowUpdated` that keep a run visible while it
-/// stays out of every public Workflow management surface.
-struct PrivateWorkflowUpdate {
-    run_id: String,
-    definition_id: Option<String>,
-    definition_scope: Option<String>,
-    definition_hash: Option<String>,
-    revision: u64,
-    name: String,
-    objective: String,
-    status: String,
-    phases: Vec<shell::extensions::notification::WorkflowPhaseInfo>,
-    current_phase: Option<String>,
-    agent_budget: Option<u64>,
-    agents_used: u64,
-    agents_remaining: Option<u64>,
-    agent_usage_incomplete: bool,
-    elapsed_ms: u64,
-    agents: Vec<shell::extensions::notification::WorkflowAgentInfo>,
-    pause_message: Option<String>,
-    result_summary: Option<String>,
-}
-
-/// Shared snapshot mapping for public and private runs. The two paths differ
-/// only in `management_available`/`builtin` (private runs are never
-/// manageable and never rendered by definition views).
+/// Map a workflow update into the pager's common workflow snapshot.
 #[allow(clippy::too_many_arguments)]
 fn build_workflow_run_snapshot(
     run_id: String,
@@ -143,7 +95,6 @@ fn build_workflow_run_snapshot(
     objective: String,
     status: String,
     management_available: bool,
-    builtin: bool,
     phases: &[shell::extensions::notification::WorkflowPhaseInfo],
     current_phase: Option<String>,
     agents: &[shell::extensions::notification::WorkflowAgentInfo],
@@ -164,7 +115,6 @@ fn build_workflow_run_snapshot(
         objective,
         status,
         management_available,
-        builtin,
         phases: phases
             .iter()
             .map(|p| (p.title.clone(), p.state.clone()))
@@ -201,7 +151,6 @@ impl AgentView {
     pub(crate) fn ingest_workflow_update(&mut self, update: GrowSessionUpdate) -> bool {
         let GrowSessionUpdate::WorkflowUpdated {
             run_id,
-            private,
             definition_id,
             definition_scope,
             definition_hash,
@@ -227,28 +176,6 @@ impl AgentView {
         else {
             return false;
         };
-        if private {
-            return self.ingest_private_workflow_update(PrivateWorkflowUpdate {
-                run_id,
-                definition_id,
-                definition_scope,
-                definition_hash,
-                revision,
-                name,
-                objective,
-                status,
-                phases,
-                current_phase,
-                agent_budget,
-                agents_used,
-                agents_remaining,
-                agent_usage_incomplete,
-                elapsed_ms,
-                agents,
-                pause_message,
-                result_summary,
-            });
-        }
         if status != "cleared" {
             match self.session.workflow_run_revisions.get(&run_id).copied() {
                 Some(last) if revision == 0 && last > 0 => return false,
@@ -272,7 +199,6 @@ impl AgentView {
             .available_commands
             .iter()
             .any(|c| c.name == "workflow-run");
-        let builtin = is_builtin_workflow_handle(&self.session.available_commands, &name);
         if status == "cleared" {
             self.session
                 .workflow_runs
@@ -287,7 +213,6 @@ impl AgentView {
                 objective.clone(),
                 status.clone(),
                 management_available,
-                builtin,
                 &phases,
                 current_phase.clone(),
                 &agents,
@@ -316,123 +241,6 @@ impl AgentView {
             &name,
             &objective,
             &status,
-            &phases,
-            current_phase.as_deref(),
-            active,
-            elapsed_ms,
-        );
-        true
-    }
-
-    /// Private workflow runs (deep research) must stay visible while running but
-    /// never enter any public Workflow management surface. The shell keeps
-    /// publishing `WorkflowUpdated` for them; this path keeps the transcript
-    /// progress block, the tasks pane row and the activity projection alive while
-    /// `agent.session.workflow_runs` is never touched.
-    fn ingest_private_workflow_update(&mut self, update: PrivateWorkflowUpdate) -> bool {
-        let PrivateWorkflowUpdate {
-            run_id,
-            definition_id,
-            definition_scope,
-            definition_hash,
-            revision,
-            name,
-            objective,
-            status,
-            phases,
-            current_phase,
-            agent_budget,
-            agents_used,
-            agents_remaining,
-            agent_usage_incomplete,
-            elapsed_ms,
-            agents,
-            pause_message,
-            result_summary,
-        } = update;
-
-        // Same revision/cleared dedup guards as the public path. Run ids share the
-        // `wf_<uuid>` namespace, so the shared maps are collision-free.
-        if status != "cleared" {
-            match self.session.workflow_run_revisions.get(&run_id).copied() {
-                Some(last) if revision == 0 && last > 0 => return false,
-                Some(last) if revision > 0 && revision <= last => return false,
-                _ => {}
-            }
-            if revision == 0 && self.session.cleared_workflow_runs.contains(&run_id) {
-                return false;
-            }
-        }
-        if revision > 0 {
-            self.session
-                .workflow_run_revisions
-                .insert(run_id.clone(), revision);
-        }
-        if status == "cleared" {
-            self.session.cleared_workflow_runs.insert(run_id.clone());
-        }
-
-        // Settled = cleared, terminal, or budget-limited: private runs have no
-        // user clear path and can never be resumed, so nothing may accumulate in
-        // the tasks pane. `budget_limited` is grouped with terminal states here
-        // for the same reason.
-        let settled = status == "cleared"
-            || matches!(
-                status.as_str(),
-                "complete" | "failed" | "cancelled" | "interrupted" | "budget_limited"
-            );
-        if settled {
-            self.session
-                .private_workflow_runs
-                .retain(|run| run.run_id != run_id);
-        } else {
-            let snapshot = build_workflow_run_snapshot(
-                run_id.clone(),
-                definition_id,
-                definition_scope,
-                definition_hash,
-                name.clone(),
-                objective.clone(),
-                status.clone(),
-                false, // private runs are not manageable
-                false, // never rendered by definition views
-                &phases,
-                current_phase.clone(),
-                &agents,
-                agent_budget,
-                agents_used,
-                agents_remaining,
-                agent_usage_incomplete,
-                elapsed_ms,
-                pause_message,
-                result_summary,
-            );
-            match self
-                .session
-                .private_workflow_runs
-                .iter_mut()
-                .find(|run| run.run_id == run_id)
-            {
-                Some(existing) => *existing = snapshot,
-                None => self.session.private_workflow_runs.push(snapshot),
-            }
-        }
-
-        // `budget_limited` has no terminal `WorkflowBlockStatus`, and a private
-        // run can never be resumed, so the block converges to Failed instead of a
-        // misleading "paused".
-        let block_status = if status == "budget_limited" {
-            "failed"
-        } else {
-            status.as_str()
-        };
-        let active = agents.iter().filter(|a| a.state == "running").count() as u32;
-        upsert_workflow_block(
-            self,
-            &run_id,
-            &name,
-            &objective,
-            block_status,
             &phases,
             current_phase.as_deref(),
             active,

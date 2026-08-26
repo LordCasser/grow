@@ -1357,9 +1357,7 @@ pub fn load_timeline_by_id_at(
     let Some(opened) = storage.open_session_by_id(session_id)? else {
         return Ok(None);
     };
-    let timeline = chat_state::Timeline::from_events(opened.timeline_events()?)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(Some(timeline))
+    Ok(Some(opened.validated_timeline(session_id)?.timeline))
 }
 
 pub fn load_timeline_by_id(session_id: &str) -> io::Result<Option<chat_state::Timeline>> {
@@ -1876,6 +1874,8 @@ pub(crate) fn validate_sideband_ledgers(
 
     for event in parent.events() {
         let chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary {
+            id,
+            target,
             result_ref,
             summary_chars,
             ..
@@ -1897,6 +1897,172 @@ pub(crate) fn validate_sideband_ledgers(
                     result_ref.timeline_id, result_ref.first_seq
                 ),
             ));
+        }
+
+        let mut replacement = None;
+        let mut replacement_count = 0usize;
+        for candidate in parent.events() {
+            let chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+                cause: chat_state::MessageCause::Compaction,
+                items,
+                surface:
+                    chat_state::SurfaceOp::Replace {
+                        start,
+                        end,
+                        shadowed,
+                    },
+            }) = &candidate.kind
+            else {
+                continue;
+            };
+            if &(chat_state::SurfaceRange {
+                start: *start,
+                end: *end,
+                shadowed: shadowed.clone(),
+            }) != target
+            {
+                continue;
+            }
+            replacement_count += 1;
+            replacement = Some(items.as_slice());
+        }
+        let replacement = match (replacement_count, replacement) {
+            (1, Some(items)) => items,
+            (0, None) if parent.compaction_summary_awaits_recovery(id, target) => {
+                // A process may stop after the immutable Summary link but
+                // before the Surface replacement. Timeline recovery will
+                // append Compaction::Failed; accepting any terminal or
+                // target-mismatched state here would hide tampering.
+                continue;
+            }
+            (count, _) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compaction/summary references {count} matching replacements for sideband {}/{}",
+                        result_ref.timeline_id, result_ref.first_seq
+                    ),
+                ));
+            }
+        };
+        let [ConversationItem::User(user)] = replacement else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "compaction replacement for sideband {}/{} is not one user item",
+                    result_ref.timeline_id, result_ref.first_seq
+                ),
+            ));
+        };
+        let valid_metadata = user.synthetic_reason
+            == Some(sampling_types::SyntheticReason::CompactionMeta)
+            && user.permission_evidence.is_none()
+            && user.goal_directive.is_none()
+            && user.cwd_generation.is_none()
+            && user.prior_turn_interrupt.is_none()
+            && user.prompt_index.is_none()
+            && !user.content.is_empty()
+            && user
+                .content
+                .iter()
+                .all(|part| matches!(part, sampling_types::ContentPart::Text { .. }));
+        if !valid_metadata {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "compaction replacement for sideband {}/{} is not a pure CompactionMeta user item",
+                    result_ref.timeline_id, result_ref.first_seq
+                ),
+            ));
+        }
+        let expected_prefix = compaction::format_compact_summary_content(&result.raw_output);
+        let replacement_text = replacement[0].text_content();
+        let canonical_suffix = replacement_text
+            .strip_prefix(&expected_prefix)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with("\n\n"));
+        if !canonical_suffix {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "compaction replacement for sideband {}/{} does not preserve the canonical summary prefix",
+                    result_ref.timeline_id, result_ref.first_seq
+                ),
+            ));
+        }
+    }
+
+    for event in parent.events() {
+        let chat_state::TimelineEventKind::ImageProjection(projection) = &event.kind else {
+            continue;
+        };
+        for shadow in &projection.shadows {
+            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance;
+            let owner = "image projection";
+            let result = completed_sideband_result(
+                ledgers,
+                &result_ref.timeline_id,
+                result_ref.first_seq,
+                owner,
+            )?;
+            let expected = crate::session::image_describe::render_image_description_block(
+                result.raw_output.trim(),
+            );
+            if expected != shadow.replacement {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "image projection text does not match sideband {}/{}",
+                        result_ref.timeline_id, result_ref.first_seq
+                    ),
+                ));
+            }
+            let attempt_seq = result.source_event_seqs[1];
+            let attempt = ledgers
+                .get(&result_ref.timeline_id)
+                .and_then(|events| {
+                    usize::try_from(attempt_seq)
+                        .ok()
+                        .and_then(|i| events.get(i))
+                })
+                .and_then(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "image projection references missing attempt {}/{}",
+                            result_ref.timeline_id, attempt_seq
+                        ),
+                    )
+                })?;
+            let source_is_selected = attempt
+                .assembly_manifest
+                .selected_surface_ids
+                .contains(&shadow.source)
+                && attempt
+                    .assembly_manifest
+                    .context_surface_ids
+                    .contains(&shadow.source)
+                && attempt.assembly_manifest.source_revision == Some(projection.source_revision)
+                && attempt.input_refs.iter().any(|source| {
+                    source.first_seq <= shadow.source.event.get()
+                        && shadow.source.event.get() <= source.last_seq
+                })
+                && result.evidence_refs.iter().any(|source| {
+                    source.first_seq <= shadow.source.event.get()
+                        && shadow.source.event.get() <= source.last_seq
+                });
+            if !source_is_selected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "image projection source is not proven by sideband {}/{}",
+                        result_ref.timeline_id, result_ref.first_seq
+                    ),
+                ));
+            }
         }
     }
 

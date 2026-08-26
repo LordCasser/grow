@@ -310,6 +310,7 @@ pub(crate) async fn create_test_actor_ex(
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
         pending_manual_compact: None,
+        pending_model_reload: None,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
         notifications_suppressed: false,
@@ -474,7 +475,15 @@ pub(crate) async fn create_test_actor_ex(
         owns_permission_manager: false,
         permission_audit_bridge: parking_lot::Mutex::new(None),
         display_cwd: std::sync::OnceLock::new(),
-        selected_model_id: std::cell::RefCell::new(acp::ModelId::new("test")),
+        model_route: crate::session::handle::SessionModelRoute::new(
+            acp::ModelId::new("test"),
+            sampler::SamplerConfig {
+                base_url: "http://localhost".into(),
+                model: "test".into(),
+                context_window,
+                ..Default::default()
+            },
+        ),
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(tool_types::BehaviorId::Normal)),
         behavior: Arc::new(parking_lot::Mutex::new(
@@ -484,6 +493,7 @@ pub(crate) async fn create_test_actor_ex(
         goal_enabled: false,
         background_workflows_enabled: false,
         goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
+        goal_drive: TaskSlot::new(),
         goal_tracker: Arc::new(parking_lot::Mutex::new(
             crate::session::goal_tracker::GoalTracker::new(),
         )),

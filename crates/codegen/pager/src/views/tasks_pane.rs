@@ -535,107 +535,6 @@ impl TaskEntry {
         }
     }
 
-    /// Status-only row for an active private workflow run (deep research).
-    ///
-    /// Reuses the `Workflow` entry kind so grouping, sorting, and filter
-    /// search behave identically, but the entry's `name` carries the run id
-    /// instead of the display name. The overlay, click, and kill paths all
-    /// resolve `Workflow` entries by looking `name` up in `workflow_runs`,
-    /// which private runs never enter — so this row can never drive a
-    /// management action. The label uses "Deep Research" (not "Workflow") to
-    /// avoid confusing the run with the public workspace.
-    fn from_private_workflow_run(
-        run: &crate::app::session::WorkflowRunSnapshot,
-        now: Instant,
-    ) -> Self {
-        let theme = Theme::current();
-        let running = run.is_active();
-
-        let raw_tag_color = if running {
-            theme.accent_running
-        } else if run.status == "complete" {
-            theme.accent_success
-        } else if run.is_terminal() {
-            theme.accent_error
-        } else {
-            theme.warning
-        };
-        let tag_color = if running {
-            raw_tag_color
-        } else {
-            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
-                .unwrap_or(raw_tag_color)
-        };
-        let name_style = if running {
-            Style::default().fg(theme.text_primary)
-        } else {
-            Style::default().fg(theme.gray_bright)
-        };
-
-        let suffix = if running {
-            let phase = run
-                .current_phase
-                .as_deref()
-                .map(str::trim)
-                .filter(|p| !p.is_empty());
-            let agents = match run.agents.iter().filter(|a| a.state == "running").count() {
-                0 => None,
-                1 => Some("1 agent".to_string()),
-                n => Some(format!("{n} agents")),
-            };
-            match (phase, agents) {
-                (Some(p), Some(a)) => format!("{p} · {a}"),
-                (Some(p), None) => p.to_string(),
-                (None, Some(a)) => a,
-                (None, None) => "running".to_string(),
-            }
-        } else {
-            run.status.replace('_', " ")
-        };
-
-        let mut spans = vec![
-            Span::styled("Deep Research ".to_string(), Style::default().fg(tag_color)),
-            Span::styled(run.name.clone(), name_style),
-        ];
-        if !suffix.is_empty() {
-            spans.push(Span::styled(
-                format!(" \u{2014} {suffix}"),
-                Style::default().fg(theme.gray),
-            ));
-        }
-        spans.push(Span::styled(
-            format!(
-                " ({})",
-                format_duration(std::time::Duration::from_millis(
-                    run.live_elapsed_ms_at(now),
-                ))
-            ),
-            Style::default().fg(theme.gray),
-        ));
-
-        let label = format!("Deep Research {} {suffix}", run.name);
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "workflow:".hash(&mut hasher);
-        run.run_id.hash(&mut hasher);
-        let id = hasher.finish();
-
-        TaskEntry::Workflow {
-            id,
-            // See the doc comment above: private rows route through the run id
-            // so overlay/click/kill lookups can never resolve them.
-            name: run.run_id.clone(),
-            label,
-            styled: Line::from(spans),
-            running,
-            stoppable: false,
-            started_at: now
-                .checked_sub(std::time::Duration::from_millis(
-                    run.live_elapsed_ms_at(now),
-                ))
-                .unwrap_or(now),
-        }
-    }
-
     fn from_scheduled(
         info: &ScheduledTaskInfo,
         linked: Option<(String, bool)>,
@@ -1008,7 +907,6 @@ impl TasksPane {
             subagents,
             scheduled,
             workflow_runs,
-            &[],
             crate::motion::FrameStamp::default(),
         );
     }
@@ -1020,7 +918,6 @@ impl TasksPane {
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
         workflow_runs: &[crate::app::session::WorkflowRunSnapshot],
-        private_workflow_runs: &[crate::app::session::WorkflowRunSnapshot],
         frame: crate::motion::FrameStamp,
     ) {
         // Detect theme switch and refresh caches.
@@ -1070,16 +967,6 @@ impl TasksPane {
             if self.show_done || !run.is_terminal() {
                 self.items
                     .push(TaskEntry::from_workflow_run(run, frame.now()));
-            }
-        }
-
-        // Active private runs (deep research) render as status-only rows.
-        // They are never stored in `self.workflow_runs`, so the overlay,
-        // click, and kill paths cannot resolve them into management actions.
-        for run in private_workflow_runs {
-            if self.show_done || !run.is_terminal() {
-                self.items
-                    .push(TaskEntry::from_private_workflow_run(run, frame.now()));
             }
         }
 
@@ -3298,7 +3185,6 @@ mod tests {
             objective: "obj".to_string(),
             status: status.to_string(),
             management_available: true,
-            builtin: false,
             phases: Vec::new(),
             current_phase: Some("Scan".to_string()),
             agents: Vec::new(),
@@ -3421,86 +3307,5 @@ mod tests {
             }
             _ => panic!("expected a workflow entry"),
         }
-    }
-
-    #[test]
-    fn private_workflow_rows_are_deep_research_and_unmanageable() {
-        let mut pane = TasksPane::new();
-        let mut run = make_workflow_run("deep-research", "active");
-        run.management_available = false;
-        run.agents = vec![crate::app::session::WorkflowAgentRowView {
-            agent_id: "a1".into(),
-            label: "researcher-0".into(),
-            phase: Some("Research".into()),
-            model: None,
-            state: "running".into(),
-            tokens_used: 0,
-            duration_ms: 0,
-        }];
-        pane.sync_at(
-            &BTreeMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &[run],
-            crate::motion::FrameStamp::default(),
-        );
-
-        let labels: Vec<&str> = pane.entries.iter().map(|e| e.search_text()).collect();
-        let row = labels
-            .iter()
-            .find(|l| l.contains("deep-research"))
-            .expect("private run must render a tasks pane row")
-            .to_string();
-        assert!(
-            row.starts_with("Deep Research "),
-            "private rows must use the Deep Research label: {row}"
-        );
-        assert!(
-            !row.starts_with("Workflow "),
-            "private rows must not use the public Workflow label: {row}"
-        );
-
-        // Management routing: the entry's `name` carries the run id, which can
-        // never resolve against `workflow_runs`, and the row is never stoppable.
-        let entry = pane
-            .items
-            .iter()
-            .find(|e| {
-                matches!(e, TaskEntry::Workflow { .. }) && e.search_text().contains("deep-research")
-            })
-            .unwrap();
-        match entry {
-            TaskEntry::Workflow {
-                name, stoppable, ..
-            } => {
-                assert_eq!(name, "wf_deep-research");
-                assert!(!stoppable, "private rows must never be stoppable");
-            }
-            _ => panic!("expected a workflow entry"),
-        }
-        assert!(
-            pane.workflow_runs.is_empty(),
-            "private runs must not be stored in the pane's public run cache"
-        );
-    }
-
-    #[test]
-    fn settled_private_runs_render_no_row() {
-        let mut pane = TasksPane::new();
-        let run = make_workflow_run("deep-research", "complete");
-        pane.sync_at(
-            &BTreeMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &[run],
-            crate::motion::FrameStamp::default(),
-        );
-        let labels: Vec<&str> = pane.entries.iter().map(|e| e.search_text()).collect();
-        assert!(
-            !labels.iter().any(|l| l.contains("deep-research")),
-            "settled private runs must not linger: {labels:?}"
-        );
     }
 }

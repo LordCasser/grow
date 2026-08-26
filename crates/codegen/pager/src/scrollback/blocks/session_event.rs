@@ -121,7 +121,6 @@ pub enum SessionEvent {
     GoalObjectiveUpdated,
     GoalPaused,
     GoalBlocked,
-    GoalUsageLimited,
     GoalBudgetLimited,
     GoalRestarted,
     GoalCleared,
@@ -242,7 +241,6 @@ impl SessionEvent {
             }
             SessionEvent::GoalPaused => "Goal paused.".to_string(),
             SessionEvent::GoalBlocked => "Goal blocked.".to_string(),
-            SessionEvent::GoalUsageLimited => "Goal stopped by a usage limit.".to_string(),
             SessionEvent::GoalBudgetLimited => "Goal token budget exhausted.".to_string(),
             SessionEvent::GoalRestarted => "Goal restarted.".to_string(),
             SessionEvent::GoalCleared => "Goal cleared.".to_string(),

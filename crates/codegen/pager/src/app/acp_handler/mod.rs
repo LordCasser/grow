@@ -621,13 +621,9 @@ pub(crate) fn refresh_workflow_run_capabilities(agent: &mut AgentView) {
         .session
         .available_commands
         .iter()
-        .any(|command| command.name == "workflow");
+        .any(|command| command.name == "workflow-run");
     for run in &mut agent.session.workflow_runs {
         run.management_available = management_available;
-        run.builtin = super::agent_view::is_builtin_workflow_handle(
-            &agent.session.available_commands,
-            &run.name,
-        );
     }
 }
 

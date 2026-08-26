@@ -116,10 +116,6 @@ pub enum RetryDecision {
         is_rate_limited: bool,
     },
 
-    /// Retry after stripping inline images from the request (413
-    /// Payload Too Large or image processing rejection).
-    RetryWithImageStrip,
-
     /// Retry after rebuilding the HTTP client with HTTP/1.1 (transport
     /// error, first retry only).
     RetryWithClientRebuild { backoff: Duration },
@@ -159,13 +155,6 @@ pub fn classify_error(
         return RetryDecision::Fatal(clone_error(err));
     }
 
-    // 413 Payload Too Large: strip inline images and try once. The
-    // caller checks if there are images left after the strip; if not,
-    // upgrade to Fatal.
-    if err.is_payload_too_large() {
-        return RetryDecision::RetryWithImageStrip;
-    }
-
     // Shared retry vetoes (`SamplingError::is_retry_vetoed`, also used by
     // one-shot callers like /btw):
     // - x-should-retry: false — trust the server, it knows if the error is
@@ -176,9 +165,6 @@ pub fn classify_error(
     // - Context-window / size overflow — deterministic, re-sending the same
     //   (or larger) payload always fails, whatever status the backend used.
     //
-    // Checked AFTER the payload-size image-strip guard: image stripping changes the
-    // request payload, so a server "don't retry" on the original
-    // request doesn't apply to the stripped request.
     if err.is_retry_vetoed() {
         return RetryDecision::Fatal(clone_error(err));
     }
@@ -524,11 +510,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_payload_too_large_strips_images() {
+    fn classify_payload_too_large_is_fatal() {
         let err = api_err(StatusCode::PAYLOAD_TOO_LARGE, "too big");
         assert!(matches!(
             classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
-            RetryDecision::RetryWithImageStrip
+            RetryDecision::Fatal(_)
         ));
     }
 

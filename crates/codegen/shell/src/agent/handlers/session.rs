@@ -171,10 +171,11 @@ async fn handle_session_info(
     });
 
     // Calculate the model's display name.
+    let route = session.model_route.snapshot();
     data.model_display_name = agent
         .models_manager
         .models()
-        .get(session.model_id.0.as_ref())
+        .get(route.model_id.0.as_ref())
         .and_then(|entry| entry.info.name.clone());
 
     // Construct `SessionInfoResponse`.

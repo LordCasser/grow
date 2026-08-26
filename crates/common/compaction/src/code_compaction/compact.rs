@@ -44,7 +44,7 @@ pub struct GeneratedSummary {
 
 /// Generate a summary for the host-selected range.
 ///
-/// The host owns the verbatim → fitted → lossy input ladder. A context
+/// The host owns the verbatim → fitted → simplified input ladder. A context
 /// overflow is returned as a deterministic, explicitly classified error so
 /// the host can rebuild a smaller request from the same frozen range.
 pub async fn generate_summary<T, S, O>(

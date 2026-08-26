@@ -1358,7 +1358,6 @@ impl AgentView {
             .session
             .behavior_mode_pending
             .unwrap_or(self.session.behavior_mode);
-        let deep_research = self.behavior_supported(tools::types::BehaviorId::DeepResearch);
         let goal = self.behavior_supported(tools::types::BehaviorId::Goal);
         let auto_permission = self
             .prompt
@@ -1376,7 +1375,6 @@ impl AgentView {
         self.prompt.slash_controller.set_selection_context(
             self.session.agent_name().map(str::to_owned),
             behavior,
-            deep_research,
             goal,
             self.session
                 .goal_state
@@ -1884,16 +1882,10 @@ mod leader_key_tests {
             .prompt
             .slash_controller
             .registry_mut()
-            .set_acp_commands(&[
-                agent_client_protocol::AvailableCommand::new(
-                    "deep-research".to_string(),
-                    "Deep Research".to_string(),
-                ),
-                agent_client_protocol::AvailableCommand::new(
-                    "goal".to_string(),
-                    "Goal".to_string(),
-                ),
-            ]);
+            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+                "goal".to_string(),
+                "Goal".to_string(),
+            )]);
 
         let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
         assert!(matches!(

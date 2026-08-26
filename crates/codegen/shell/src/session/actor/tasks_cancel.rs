@@ -162,6 +162,14 @@ impl<T> TaskSlot<T> {
             old.abort();
         }
     }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.handle.take().is_some_and(|handle| {
+            let running = !handle.is_finished();
+            self.handle.set(Some(handle));
+            running
+        })
+    }
 }
 
 async fn run_task(
@@ -553,6 +561,13 @@ impl SessionActor {
             .borrow()
             .tool_bridge()
             .update_resource(
+                tools::implementations::grow_build::update_goal::GoalMutationAuthorityResource::default(),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
                 tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource::default(),
             )
             .await;
@@ -568,6 +583,8 @@ impl SessionActor {
             "trigger": trigger.as_deref(),
             "pristine": rewound_input.is_some(),
         }));
+        let had_active_turn = self.events.current_turn().is_some();
+        let current_prompt_index = self.current_turn_number.get() as usize;
         let terminal_error = self
             .emit_turn_ended(
                 crate::session::events::TurnOutcomeLabel::Cancelled,
@@ -579,8 +596,7 @@ impl SessionActor {
                 cancellation_context,
             )
             .await
-            .err()
-            .map(|error| error.to_string());
+            .err();
         if terminal_error.is_none() && rewound_input.is_none() {
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
@@ -622,6 +638,30 @@ impl SessionActor {
         self.tool_context.blocking_wait_depth.reset();
         self.flush_pending_system_reminders().await;
 
+        // Aborting the producer bypasses `handle_prompt`'s ordinary epilogue.
+        // Retire the same session-local authorities here so cancellation cannot
+        // leave the idle detector or file tracker attached to a dead turn.
+        if had_active_turn {
+            if let Some(extension) = &self.idle_prompt_extension {
+                extension.on_turn_failed();
+            }
+            self.flush_to_disk().await;
+            self.file_state_tracker
+                .end_prompt(&self.tool_context.fs, current_prompt_index)
+                .await;
+            if rewound_input.is_none()
+                && let Some(rewind_point) = self
+                    .file_state_tracker
+                    .get_rewind_point(current_prompt_index)
+                    .await
+            {
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::RewindPoint(rewind_point));
+            }
+        }
+
         // No multi-second drain here (actor loop would block RecordSubagentUsage).
         // Same UsageDrainOutcome policy as freeze via finalize_usage_from_outcome.
         let cancelled_usage = if rewound_input.is_none() {
@@ -647,25 +687,20 @@ impl SessionActor {
         }
         if let Some(error) = terminal_error {
             tracing::error!(%error, "cancel stopped because its Timeline terminal was not durable");
-            let message = format!("cancel was not committed: {error}");
+            let boundary_error =
+                crate::session::commands::fatal_turn_boundary_error("terminal", error.to_string());
             if let Some(input) = rewound_input {
-                let _ = input
-                    .respond_to
-                    .send(Err(acp::Error::internal_error().data(message.clone())));
+                let _ = input.respond_to.send(Err(boundary_error.clone()));
             }
             for input in pending_inputs {
-                let _ = input
-                    .respond_to
-                    .send(Err(acp::Error::internal_error().data(message.clone())));
+                let _ = input.respond_to.send(Err(boundary_error.clone()));
             }
             let queued = {
                 let mut state = self.state.lock().await;
                 std::mem::take(&mut state.pending_inputs)
             };
             for input in queued {
-                let _ = input
-                    .respond_to
-                    .send(Err(acp::Error::internal_error().data(message.clone())));
+                let _ = input.respond_to.send(Err(boundary_error.clone()));
             }
             return;
         }

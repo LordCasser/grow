@@ -82,7 +82,6 @@ fn goal_transition_event(
             GoalDisplayStatus::Active => Some(SessionEvent::GoalRestarted),
             GoalDisplayStatus::Paused => Some(SessionEvent::GoalPaused),
             GoalDisplayStatus::Blocked => Some(SessionEvent::GoalBlocked),
-            GoalDisplayStatus::UsageLimited => Some(SessionEvent::GoalUsageLimited),
             GoalDisplayStatus::BudgetLimited => Some(SessionEvent::GoalBudgetLimited),
             GoalDisplayStatus::Complete => None,
         };

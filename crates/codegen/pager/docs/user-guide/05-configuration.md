@@ -355,16 +355,16 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`. `per
 
 ### Goal Behavior and workflow engine
 
-Goal is exposed when Goal mode is enabled and `create_goal`, `get_goal`, and `update_goal` are registered. Goal has no separate planner, verifier, blackboard, or summarizer configuration. An active Goal continues whenever the session becomes idle; each continuation audits the entire objective before either completing it or planning the next short-lived task/todo slice.
+Goal is exposed when `create_goal`, `get_goal`, `update_goal`, and `todo_write` are registered. Goal has no separate planner, verifier, blackboard, or summarizer configuration. An active Goal continues whenever the session becomes idle; each continuation audits the entire objective before either completing it or choosing the next short-lived task/todo slice. Paused, blocked, budget-limited, and complete Goals are durable stopped state and do not keep Goal Behavior selected.
 
-The workflow engine powers the Workflow Workspace, named `.grow/workflows/*.rhai` and `~/.grow/workflows/*.rhai` Definitions, immutable Runs, and the private Deep Research runner. It is **on by default**. Disable it with config, environment, or remote settings; Workflow and Deep Research then disappear from the Behavior picker.
+The workflow engine powers the Workflow Workspace, named `.grow/workflows/*.rhai` and `~/.grow/workflows/*.rhai` Definitions, and immutable Runs. It is **on by default**. Disable it with config, environment, or remote settings; Workflow then disappears from the Behavior picker.
 
 ```toml
 [workflows]
 enabled = false                       # disable background workflows (or GROW_WORKFLOWS=0)
 ```
 
-Project Definitions are discovered from `<repo-root>/.grow/workflows/`; user Definitions from `~/.grow/workflows/`. Registry snapshots include diagnostics for invalid scripts, filename/meta mismatches, same-scope duplicates, untrusted paths, and publish conflicts. Deep Research uses a private Definition and is never added to this public registry or Workspace.
+Project Definitions are discovered from `<repo-root>/.grow/workflows/`; user Definitions from `~/.grow/workflows/`. Registry snapshots include diagnostics for invalid scripts, filename/meta mismatches, same-scope duplicates, untrusted paths, and publish conflicts.
 
 Each launch gets a session-unique display handle. That handle is what you see in `/workflows` and pass to `/workflow-run pause`, `resume`, or `stop`; Definition publishing is a separate validated Workspace action with an explicit Project or User scope. See [Slash Commands](04-slash-commands.md) for examples.
 
@@ -708,7 +708,7 @@ Common variables are listed below.
 |----------|-------------|
 | `GROW_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
 | `GROW_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
-| `GROW_WORKFLOWS` | Enable (`1`) or disable (`0`) the Workflow and Deep Research runtimes; Goal keeps its single host-owned orchestration path |
+| `GROW_WORKFLOWS` | Enable (`1`) or disable (`0`) the Workflow runtime; Goal keeps its single host-owned orchestration path |
 | `GROW_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
 | `GROW_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROW_AGENT` | Custom agent definition path or name |

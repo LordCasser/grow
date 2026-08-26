@@ -152,6 +152,409 @@ pub struct WorkflowAgentRow {
 
 pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 
+/// Secret-free executable sampler captured for one catalog model.
+///
+/// `sampling` is the same durable, credential-free projection owned by the
+/// session Timeline. The remaining fields are request semantics that live on
+/// `sampler::SamplerConfig` rather than `sampling_types::SamplingConfig`.
+/// API keys and live callbacks are deliberately absent; they are attached by
+/// [`WorkflowRuntimeRoute::sampler_for`] at child admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowSamplerSnapshot {
+    /// Fingerprint of every credential-free sampler field before redaction.
+    /// This lets a restored Run reattach a live credential only when the
+    /// current catalog still describes the exact captured request contract.
+    contract_fingerprint: String,
+    transport_key: sampling_types::ModelImageInputKey,
+    /// Durable audit projection. Endpoint userinfo/query plus literal header
+    /// and query values are removed; their executable values live only in the
+    /// process-local runtime lease below.
+    sampling: sampling_types::SamplingConfig,
+    auth_scheme: sampler::AuthScheme,
+    force_http1: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idle_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_client: Option<sampler::OriginClientInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compactions_remaining: Option<sampling_types::CompactionsRemaining>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction_at_tokens: Option<sampling_types::CompactionAtTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doom_loop_recovery: Option<sampling_types::DoomLoopRecoveryPolicy>,
+}
+
+impl WorkflowSamplerSnapshot {
+    fn from_sampler(config: &sampler::SamplerConfig) -> Result<Self, &'static str> {
+        let context_window = std::num::NonZeroU64::new(config.context_window)
+            .ok_or("Workflow sampler context window must be non-zero")?;
+        if config.temperature.is_some_and(|value| !value.is_finite())
+            || config.top_p.is_some_and(|value| !value.is_finite())
+        {
+            return Err("Workflow sampler floating-point fields must be finite");
+        }
+        let mut credential_free = config.clone();
+        credential_free.api_key = None;
+        credential_free.attribution_callback = None;
+        credential_free.bearer_resolver = None;
+        let encoded = serde_json::to_vec(&credential_free)
+            .map_err(|_| "Workflow sampler contract could not be encoded")?;
+        if encoded.len() > 1024 * 1024 {
+            return Err("Workflow sampler contract exceeds the 1 MiB limit");
+        }
+        let contract_fingerprint = blake3::hash(&encoded).to_hex().to_string();
+        let transport_key = sampling_types::model_image_input_key_from_parts(
+            &config.model,
+            &config.api_backend,
+            &config.base_url,
+            &config.query_params,
+        );
+        Ok(Self {
+            contract_fingerprint,
+            transport_key,
+            sampling: sampling_types::SamplingConfig {
+                base_url: workflow_safe_endpoint_label(&config.base_url),
+                model: config.model.clone(),
+                output_limit: config.output_limit,
+                temperature: config.temperature,
+                top_p: config.top_p,
+                api_backend: config.api_backend.clone(),
+                extra_headers: config
+                    .extra_headers
+                    .keys()
+                    .map(|name| (name.clone(), "<runtime>".to_owned()))
+                    .collect(),
+                query_params: config
+                    .query_params
+                    .keys()
+                    .map(|name| (name.clone(), "<runtime>".to_owned()))
+                    .collect(),
+                env_http_headers: config.env_http_headers.clone(),
+                context_window,
+                reasoning_effort: config.reasoning_effort,
+                stream_tool_calls: Some(config.stream_tool_calls),
+            },
+            auth_scheme: config.auth_scheme,
+            force_http1: config.force_http1,
+            max_retries: config.max_retries,
+            idle_timeout_secs: config.idle_timeout_secs,
+            origin_client: config.origin_client.clone(),
+            compactions_remaining: config.compactions_remaining,
+            compaction_at_tokens: config.compaction_at_tokens,
+            doom_loop_recovery: config.doom_loop_recovery,
+        })
+    }
+
+    fn matches(&self, config: &sampler::SamplerConfig) -> bool {
+        Self::from_sampler(config).is_ok_and(|candidate| {
+            candidate.contract_fingerprint == self.contract_fingerprint
+                && candidate.transport_key == self.transport_key
+        })
+    }
+
+    fn rebuild(&self, runtime: &WorkflowSamplerRuntime) -> sampler::SamplerConfig {
+        sampler::SamplerConfig {
+            api_key: runtime.api_key.clone(),
+            base_url: runtime.base_url.clone(),
+            model: self.sampling.model.clone(),
+            output_limit: self.sampling.output_limit,
+            temperature: self.sampling.temperature,
+            top_p: self.sampling.top_p,
+            api_backend: self.sampling.api_backend.clone(),
+            auth_scheme: self.auth_scheme,
+            extra_headers: runtime.extra_headers.clone(),
+            query_params: runtime.query_params.clone(),
+            env_http_headers: self.sampling.env_http_headers.clone(),
+            context_window: self.sampling.context_window.get(),
+            force_http1: self.force_http1,
+            max_retries: self.max_retries,
+            stream_tool_calls: self.sampling.stream_tool_calls.unwrap_or(false),
+            idle_timeout_secs: self.idle_timeout_secs,
+            reasoning_effort: self.sampling.reasoning_effort,
+            origin_client: self.origin_client.clone(),
+            attribution_callback: runtime.attribution_callback.clone(),
+            bearer_resolver: runtime.bearer_resolver.clone(),
+            compactions_remaining: self.compactions_remaining,
+            compaction_at_tokens: self.compaction_at_tokens,
+            doom_loop_recovery: self.doom_loop_recovery,
+        }
+    }
+
+    fn transport_key(&self) -> sampling_types::ModelImageInputKey {
+        self.transport_key.clone()
+    }
+}
+
+fn workflow_safe_endpoint_label(base_url: &str) -> String {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return format!(
+            "opaque:blake3:{}",
+            blake3::hash(base_url.as_bytes()).to_hex()
+        );
+    };
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" {
+        format!(
+            "opaque:blake3:{}",
+            blake3::hash(base_url.as_bytes()).to_hex()
+        )
+    } else {
+        origin
+    }
+}
+
+/// Credential-bearing fields are process-local and intentionally skipped by
+/// Workflow Run serialization. Custom `Debug` prevents accidental key output.
+#[derive(Clone, Default)]
+struct WorkflowSamplerRuntime {
+    api_key: Option<String>,
+    base_url: String,
+    extra_headers: indexmap::IndexMap<String, String>,
+    query_params: indexmap::IndexMap<String, String>,
+    attribution_callback: Option<sampler::SharedAttributionCallback>,
+    bearer_resolver: Option<sampler::SharedBearerResolver>,
+}
+
+impl std::fmt::Debug for WorkflowSamplerRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkflowSamplerRuntime(<redacted>)")
+    }
+}
+
+impl From<&sampler::SamplerConfig> for WorkflowSamplerRuntime {
+    fn from(config: &sampler::SamplerConfig) -> Self {
+        Self {
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            extra_headers: config.extra_headers.clone(),
+            query_params: config.query_params.clone(),
+            attribution_callback: config.attribution_callback.clone(),
+            bearer_resolver: config.bearer_resolver.clone(),
+        }
+    }
+}
+
+/// Immutable model route captured when a Workflow Run is created.
+///
+/// Workflow Definitions, launch arguments, and this catalog form one
+/// execution snapshot. `samplers` is durable and credential-free;
+/// `runtime` is the volatile credential attachment for the same entries.
+/// A later catalog reload only affects future Runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRuntimeRoute {
+    model_id: String,
+    samplers: std::collections::BTreeMap<String, WorkflowSamplerSnapshot>,
+    #[serde(skip, default)]
+    runtime: std::collections::BTreeMap<String, WorkflowSamplerRuntime>,
+}
+
+impl PartialEq for WorkflowRuntimeRoute {
+    fn eq(&self, other: &Self) -> bool {
+        self.model_id == other.model_id && self.samplers == other.samplers
+    }
+}
+
+impl WorkflowRuntimeRoute {
+    pub(crate) fn capture(
+        model_id: impl Into<String>,
+        default_sampler: sampler::SamplerConfig,
+        models_manager: &crate::agent::models::ModelsManager,
+        alpha_test_key: Option<String>,
+    ) -> Result<Self, &'static str> {
+        let model_id = model_id.into();
+        let mut samplers = std::collections::BTreeMap::new();
+        let mut runtime = std::collections::BTreeMap::new();
+        // A Workflow Definition has the same explicit model authority as an
+        // ordinary Task. Snapshot only the canonical Task-selectable catalog;
+        // the Host intentionally resolves from this immutable Run route later.
+        for (catalog_id, entry) in models_manager.task_selectable_models() {
+            let credentials = crate::agent::config::resolve_credentials(&entry);
+            let mut config = crate::agent::config::sampling_config_for_model(
+                &entry,
+                credentials,
+                alpha_test_key.clone(),
+            );
+            config.bearer_resolver = entry
+                .effective_auth_provider()
+                .map(crate::auth::AuthProviderRef::bearer_resolver);
+            samplers.insert(
+                catalog_id.clone(),
+                WorkflowSamplerSnapshot::from_sampler(&config)?,
+            );
+            runtime.insert(catalog_id, WorkflowSamplerRuntime::from(&config));
+        }
+        samplers.insert(
+            model_id.clone(),
+            WorkflowSamplerSnapshot::from_sampler(&default_sampler)?,
+        );
+        runtime.insert(
+            model_id.clone(),
+            WorkflowSamplerRuntime::from(&default_sampler),
+        );
+        let route = Self {
+            model_id,
+            samplers,
+            runtime,
+        };
+        route.validate()?;
+        Ok(route)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        model_id: impl Into<String>,
+        reasoning_effort: Option<sampling_types::ReasoningEffort>,
+        transport_key: sampling_types::ModelImageInputKey,
+    ) -> Result<Self, &'static str> {
+        let model_id = model_id.into();
+        let config = sampler::SamplerConfig {
+            model: transport_key.model().to_owned(),
+            base_url: "https://workflow.test.invalid/v1".to_owned(),
+            api_backend: sampling_types::ApiBackend::Responses,
+            context_window: 200_000,
+            reasoning_effort,
+            ..Default::default()
+        };
+        let mut snapshot = WorkflowSamplerSnapshot::from_sampler(&config)?;
+        snapshot.transport_key = transport_key;
+        let route = Self {
+            model_id: model_id.clone(),
+            samplers: std::collections::BTreeMap::from([(model_id.clone(), snapshot)]),
+            runtime: std::collections::BTreeMap::from([(
+                model_id,
+                WorkflowSamplerRuntime::from(&config),
+            )]),
+        };
+        route.validate()?;
+        Ok(route)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_model(
+        mut self,
+        model_id: impl Into<String>,
+        reasoning_effort: Option<sampling_types::ReasoningEffort>,
+        transport_key: sampling_types::ModelImageInputKey,
+    ) -> Result<Self, &'static str> {
+        let model_id = model_id.into();
+        let config = sampler::SamplerConfig {
+            model: transport_key.model().to_owned(),
+            base_url: "https://workflow.test.invalid/v1".to_owned(),
+            api_backend: sampling_types::ApiBackend::Responses,
+            context_window: 200_000,
+            reasoning_effort,
+            ..Default::default()
+        };
+        let mut snapshot = WorkflowSamplerSnapshot::from_sampler(&config)?;
+        snapshot.transport_key = transport_key;
+        self.samplers.insert(model_id.clone(), snapshot);
+        self.runtime
+            .insert(model_id, WorkflowSamplerRuntime::from(&config));
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> Option<sampling_types::ReasoningEffort> {
+        self.reasoning_effort_for(&self.model_id).flatten()
+    }
+
+    pub(crate) fn transport_key(&self) -> sampling_types::ModelImageInputKey {
+        self.transport_for(&self.model_id)
+            .expect("validated Workflow route contains its default model")
+    }
+
+    pub(crate) fn transport_for(
+        &self,
+        model_id: &str,
+    ) -> Option<sampling_types::ModelImageInputKey> {
+        self.samplers
+            .get(model_id)
+            .map(WorkflowSamplerSnapshot::transport_key)
+    }
+
+    pub(crate) fn reasoning_effort_for(
+        &self,
+        model_id: &str,
+    ) -> Option<Option<sampling_types::ReasoningEffort>> {
+        self.samplers
+            .get(model_id)
+            .map(|snapshot| snapshot.sampling.reasoning_effort)
+    }
+
+    /// Resolve one Run-owned model without consulting live catalog routing.
+    /// A still-matching catalog entry may refresh only its credential-bearing
+    /// runtime fields. If the entry changed or disappeared, the original
+    /// process-local credential attachment remains authoritative.
+    pub(crate) fn sampler_for(
+        &self,
+        model_id: &str,
+        models_manager: &crate::agent::models::ModelsManager,
+        alpha_test_key: Option<String>,
+    ) -> Result<sampler::SamplerConfig, String> {
+        let snapshot = self.samplers.get(model_id).ok_or_else(|| {
+            format!("model '{model_id}' was not present in the Workflow Run sampler snapshot")
+        })?;
+        if let Some(entry) =
+            crate::agent::config::find_model_by_catalog_id(&models_manager.models(), model_id)
+        {
+            let credentials = crate::agent::config::resolve_credentials(entry);
+            let mut candidate =
+                crate::agent::config::sampling_config_for_model(entry, credentials, alpha_test_key);
+            candidate.bearer_resolver = entry
+                .effective_auth_provider()
+                .map(crate::auth::AuthProviderRef::bearer_resolver);
+            let refreshed = snapshot.rebuild(&WorkflowSamplerRuntime::from(&candidate));
+            if snapshot.matches(&refreshed) {
+                return Ok(refreshed);
+            }
+        }
+        self.runtime
+            .get(model_id)
+            .map(|runtime| snapshot.rebuild(runtime))
+            .ok_or_else(|| {
+                format!(
+                    "Workflow Run sampler '{model_id}' cannot be restored because its credential source is unavailable or its catalog contract changed"
+                )
+            })
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let durable_bytes = self.samplers.values().try_fold(0usize, |total, snapshot| {
+            serde_json::to_vec(snapshot)
+                .ok()
+                .and_then(|bytes| total.checked_add(bytes.len()))
+        });
+        if self.model_id.trim().is_empty()
+            || self.samplers.is_empty()
+            || self.samplers.len() > 512
+            // A route is only one field of the 512 KiB Workflow manifest. The
+            // complete initial manifest is checked again before Timeline spawn;
+            // this shared ceiling only rejects routes that can never fit.
+            || durable_bytes.is_none_or(|bytes| {
+                bytes > crate::session::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES as usize
+            })
+            || !self.samplers.contains_key(&self.model_id)
+            || self.samplers.iter().any(|(model_id, snapshot)| {
+                model_id.trim().is_empty()
+                    || snapshot.sampling.model.trim().is_empty()
+                    || !snapshot.transport_key.is_valid()
+                    || snapshot.contract_fingerprint.len() != 64
+            })
+        {
+            return Err("Workflow runtime route is incomplete");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRunState {
@@ -162,13 +565,13 @@ pub struct WorkflowRunState {
     pub definition_scope: Option<WorkflowScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_hash: Option<String>,
-    pub private: bool,
     pub save_prompt: bool,
     pub revision: u64,
     /// Monotonic identity of the current execution attempt. This is part of
     /// the durable run state because Timeline resume boundaries validate it
     /// across process restarts.
     pub execution_epoch: u64,
+    pub runtime_route: WorkflowRuntimeRoute,
     pub name: String,
     pub objective: String,
     pub status: WorkflowRunStatus,
@@ -196,6 +599,18 @@ fn default_max_concurrency() -> u16 {
 }
 
 impl WorkflowRunState {
+    /// Validate the durable projection after its lifecycle has been reconciled
+    /// against Timeline at the per-Run restore boundary.
+    pub(crate) fn validate_restored_projection(&self) -> Result<(), &'static str> {
+        self.runtime_route.validate()?;
+        if self.status == WorkflowRunStatus::Active {
+            return Err(
+                "Workflow restore received an active manifest instead of a Timeline-reconciled projection",
+            );
+        }
+        Ok(())
+    }
+
     fn advance_revision(&mut self) {
         self.revision = self.revision.saturating_add(1);
     }
@@ -252,7 +667,11 @@ impl WorkflowTracker {
         phases: Vec<PhaseMeta>,
         agent_budget: Option<u64>,
         journal_path: Option<String>,
+        runtime_route: WorkflowRuntimeRoute,
     ) -> WorkflowRunState {
+        runtime_route
+            .validate()
+            .expect("new Workflow Runs require a validated runtime route");
         let name = {
             let taken = |candidate: &str| self.runs.iter().any(|r| r.state.name == candidate);
             if !taken(&name) {
@@ -273,10 +692,10 @@ impl WorkflowTracker {
             definition_id: None,
             definition_scope: None,
             definition_hash: None,
-            private: false,
             save_prompt: false,
             revision: 0,
             execution_epoch: 0,
+            runtime_route,
             name,
             objective,
             status: WorkflowRunStatus::Active,
@@ -306,7 +725,6 @@ impl WorkflowTracker {
         definition_id: WorkflowDefinitionId,
         definition_scope: WorkflowScope,
         definition_hash: String,
-        private: bool,
     ) -> Option<WorkflowRunState> {
         let run = self
             .runs
@@ -315,12 +733,10 @@ impl WorkflowTracker {
         if run.state.definition_id.as_ref() != Some(&definition_id)
             || run.state.definition_scope != Some(definition_scope)
             || run.state.definition_hash.as_deref() != Some(definition_hash.as_str())
-            || run.state.private != private
         {
             run.state.definition_id = Some(definition_id);
             run.state.definition_scope = Some(definition_scope);
             run.state.definition_hash = Some(definition_hash);
-            run.state.private = private;
             run.state.advance_revision();
         }
         Some(run.state.clone())
@@ -634,14 +1050,14 @@ impl WorkflowTracker {
         self.runs.iter().map(|r| r.state.clone()).collect()
     }
 
-    pub(crate) fn has_active_public_run(&self) -> bool {
+    pub(crate) fn has_active_run(&self) -> bool {
         self.runs
             .iter()
-            .any(|run| run.state.status == WorkflowRunStatus::Active && !run.state.private)
+            .any(|run| run.state.status == WorkflowRunStatus::Active)
     }
 
-    pub(crate) fn has_public_runs(&self) -> bool {
-        self.runs.iter().any(|run| !run.state.private)
+    pub(crate) fn has_runs(&self) -> bool {
+        !self.runs.is_empty()
     }
 
     pub fn elapsed_ms(&self, run_id: &str) -> u64 {
@@ -653,13 +1069,8 @@ impl WorkflowTracker {
     }
 
     pub fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Result<Self, &'static str> {
-        if snapshots
-            .iter()
-            .any(|state| state.status == WorkflowRunStatus::Active)
-        {
-            return Err(
-                "Workflow restore received an active manifest instead of a Timeline-reconciled projection",
-            );
+        for state in &snapshots {
+            state.validate_restored_projection()?;
         }
         let runs = snapshots
             .into_iter()
@@ -694,7 +1105,7 @@ impl WorkflowTracker {
         let live: Vec<&TrackedRun> = self
             .runs
             .iter()
-            .filter(|r| !r.state.private && !r.state.status.is_completion_reportable())
+            .filter(|r| !r.state.status.is_completion_reportable())
             .collect();
         let moved = live.iter().any(|r| {
             self.status_reported_revisions.get(&r.state.run_id) != Some(&r.state.revision)
@@ -770,8 +1181,193 @@ fn summarize_result(result: &serde_json::Value) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn test_runtime_route() -> WorkflowRuntimeRoute {
+    WorkflowRuntimeRoute::for_test(
+        "test-model",
+        None,
+        sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+    )
+    .expect("valid Workflow test route")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager_with_model(
+        catalog_id: &str,
+        entry: crate::agent::config::ModelEntry,
+    ) -> crate::agent::models::ModelsManager {
+        crate::agent::models::ModelsManager::new(
+            indexmap::IndexMap::from([(catalog_id.to_owned(), entry)]),
+            agent_client_protocol::ModelId::new(catalog_id),
+            crate::agent::config::Config::default(),
+        )
+    }
+
+    fn workflow_model_entry(
+        wire_model: &str,
+        temperature: f32,
+    ) -> crate::agent::config::ModelEntry {
+        let mut entry = crate::agent::config::ModelEntry::baseline(wire_model);
+        entry.info.base_url = "https://api.example.test/v1".to_owned();
+        entry.info.temperature = Some(temperature);
+        entry.info.api_backend = sampling_types::ApiBackend::Responses;
+        entry
+    }
+
+    #[test]
+    fn runtime_route_serialization_redacts_credentials_and_literal_transport_values() {
+        let manager = crate::agent::models::ModelsManager::default();
+        let config = sampler::SamplerConfig {
+            api_key: Some("super-secret-api-key".to_owned()),
+            base_url: "https://user:password@example.test/v1?token=url-secret".to_owned(),
+            model: "wire-model".to_owned(),
+            api_backend: sampling_types::ApiBackend::Responses,
+            extra_headers: indexmap::IndexMap::from([(
+                "Authorization".to_owned(),
+                "Bearer header-secret".to_owned(),
+            )]),
+            query_params: indexmap::IndexMap::from([(
+                "api_key".to_owned(),
+                "query-secret".to_owned(),
+            )]),
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let route = WorkflowRuntimeRoute::capture("catalog/model", config, &manager, None).unwrap();
+        let encoded = serde_json::to_string(&route).unwrap();
+        for secret in [
+            "super-secret-api-key",
+            "password",
+            "url-secret",
+            "header-secret",
+            "query-secret",
+        ] {
+            assert!(!encoded.contains(secret), "serialized secret: {secret}");
+        }
+
+        let restored: WorkflowRuntimeRoute = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            restored
+                .sampler_for("catalog/model", &manager, None)
+                .unwrap_err()
+                .contains("credential source is unavailable")
+        );
+        let live = route.sampler_for("catalog/model", &manager, None).unwrap();
+        assert_eq!(live.api_key.as_deref(), Some("super-secret-api-key"));
+        assert_eq!(live.extra_headers["Authorization"], "Bearer header-secret");
+        assert_eq!(live.query_params["api_key"], "query-secret");
+    }
+
+    #[test]
+    fn existing_run_keeps_sampler_when_catalog_changes_or_removes_model() {
+        let original_entry = workflow_model_entry("wire-model", 0.2);
+        let original_manager = manager_with_model("catalog/model", original_entry.clone());
+        let original = crate::agent::config::sampling_config_for_model(
+            &original_entry,
+            crate::agent::config::resolve_credentials(&original_entry),
+            None,
+        );
+        let route =
+            WorkflowRuntimeRoute::capture("catalog/model", original, &original_manager, None)
+                .unwrap();
+
+        let changed_manager =
+            manager_with_model("catalog/model", workflow_model_entry("wire-model", 0.9));
+        assert_eq!(
+            route
+                .sampler_for("catalog/model", &changed_manager, None)
+                .unwrap()
+                .temperature,
+            Some(0.2)
+        );
+        assert_eq!(
+            route
+                .sampler_for(
+                    "catalog/model",
+                    &crate::agent::models::ModelsManager::default(),
+                    None,
+                )
+                .unwrap()
+                .temperature,
+            Some(0.2)
+        );
+    }
+
+    #[test]
+    fn runtime_route_excludes_models_rejected_by_task_selection() {
+        let allowed = workflow_model_entry("wire-allowed", 0.2);
+        let mut denied = workflow_model_entry("wire-denied", 0.2);
+        denied.info.user_selectable = false;
+        let manager = crate::agent::models::ModelsManager::new(
+            indexmap::IndexMap::from([
+                ("catalog/allowed".to_owned(), allowed.clone()),
+                ("catalog/denied".to_owned(), denied),
+            ]),
+            agent_client_protocol::ModelId::new("catalog/allowed"),
+            crate::agent::config::Config::default(),
+        );
+        let sampler = crate::agent::config::sampling_config_for_model(
+            &allowed,
+            crate::agent::config::resolve_credentials(&allowed),
+            None,
+        );
+        let route =
+            WorkflowRuntimeRoute::capture("catalog/allowed", sampler, &manager, None).unwrap();
+
+        assert!(route.sampler_for("catalog/allowed", &manager, None).is_ok());
+        assert!(
+            route
+                .sampler_for("catalog/denied", &manager, None)
+                .unwrap_err()
+                .contains("not present")
+        );
+    }
+
+    #[test]
+    fn restored_route_rehydrates_only_an_exact_catalog_contract() {
+        let entry = workflow_model_entry("wire-model", 0.2);
+        let manager = manager_with_model("catalog/model", entry.clone());
+        let sampler = crate::agent::config::sampling_config_for_model(
+            &entry,
+            crate::agent::config::resolve_credentials(&entry),
+            None,
+        );
+        let route =
+            WorkflowRuntimeRoute::capture("catalog/model", sampler, &manager, None).unwrap();
+        let restored: WorkflowRuntimeRoute =
+            serde_json::from_str(&serde_json::to_string(&route).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .sampler_for("catalog/model", &manager, None)
+                .unwrap()
+                .temperature,
+            Some(0.2)
+        );
+
+        let changed = manager_with_model("catalog/model", workflow_model_entry("wire-model", 0.9));
+        assert_eq!(
+            restored
+                .sampler_for("catalog/model", &changed, None)
+                .unwrap()
+                .temperature,
+            Some(0.2),
+            "durable sampler fields come from the Run snapshot"
+        );
+
+        let mut sensitive_change = workflow_model_entry("wire-model", 0.2);
+        sensitive_change.info.extra_headers.insert(
+            "Authorization".to_owned(),
+            "Bearer changed-secret".to_owned(),
+        );
+        let changed = manager_with_model("catalog/model", sensitive_change);
+        assert!(
+            restored
+                .sampler_for("catalog/model", &changed, None)
+                .is_err()
+        );
+    }
 
     fn tracker_with_run() -> (WorkflowTracker, String) {
         let mut t = WorkflowTracker::default();
@@ -782,6 +1378,7 @@ mod tests {
             vec![],
             Some(1000),
             None,
+            test_runtime_route(),
         );
         assert_eq!(state.status, WorkflowRunStatus::Active);
         (t, "wf_1".into())
@@ -828,6 +1425,7 @@ mod tests {
             vec![],
             Some(16),
             None,
+            test_runtime_route(),
         );
         let second = tracker.start_run(
             "wf_2".into(),
@@ -836,6 +1434,7 @@ mod tests {
             vec![],
             Some(16),
             None,
+            test_runtime_route(),
         );
         assert_eq!(first.name, "review");
         assert_eq!(second.name, "review-2");
@@ -858,54 +1457,30 @@ mod tests {
     }
 
     #[test]
-    fn private_runtime_never_counts_as_an_active_public_run() {
+    fn user_definition_is_a_normal_workflow_run() {
         let (mut tracker, run_id) = tracker_with_run();
-        assert!(tracker.has_active_public_run());
+        assert!(tracker.has_active_run());
+        assert!(tracker.has_runs());
         tracker
             .set_definition_provenance(
                 &run_id,
-                WorkflowDefinitionId::new("builtin:deep-research"),
-                WorkflowScope::Builtin,
+                WorkflowDefinitionId::new("user:deep-research"),
+                WorkflowScope::User,
                 "hash".into(),
-                true,
             )
             .unwrap();
-        assert!(!tracker.has_active_public_run());
-        assert!(!tracker.has_public_runs());
+        assert!(tracker.has_active_run());
+        assert!(tracker.has_runs());
+        let report = tracker.take_status_report();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].definition_scope, Some(WorkflowScope::User));
 
-        tracker
-            .set_definition_provenance(
-                &run_id,
-                WorkflowDefinitionId::new("project:review"),
-                WorkflowScope::Project,
-                "hash".into(),
-                false,
-            )
-            .unwrap();
         tracker.pause_user(&run_id, None).unwrap();
-        assert!(!tracker.has_active_public_run());
-        assert!(tracker.has_public_runs());
-
-        let (mut private_tracker, private_run_id) = tracker_with_run();
-        private_tracker
-            .set_definition_provenance(
-                &private_run_id,
-                WorkflowDefinitionId::new("builtin:deep-research"),
-                WorkflowScope::Builtin,
-                "hash".into(),
-                true,
-            )
-            .unwrap();
-        assert!(private_tracker.take_status_report().is_empty());
-        private_tracker
-            .apply_outcome(
-                &private_run_id,
-                &WorkflowOutcome::Completed {
-                    result: serde_json::json!("private result"),
-                },
-            )
-            .unwrap();
-        assert!(private_tracker.take_status_report().is_empty());
+        assert!(!tracker.has_active_run());
+        assert!(tracker.has_runs());
+        let report = tracker.take_status_report();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].status, WorkflowRunStatus::UserPaused);
     }
 
     #[test]
@@ -1306,6 +1881,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            test_runtime_route(),
         );
         t.reserve_agents(id, 20).ok();
         assert_eq!(t.get(id).unwrap().agents_used, 20);
@@ -1326,7 +1902,6 @@ mod tests {
                 WorkflowDefinitionId::new("project:scan"),
                 WorkflowScope::Project,
                 "definition-hash".into(),
-                false,
             )
             .unwrap()
             .revision;
@@ -1337,7 +1912,6 @@ mod tests {
                 WorkflowDefinitionId::new("project:scan"),
                 WorkflowScope::Project,
                 "definition-hash".into(),
-                false,
             )
             .unwrap()
             .revision,

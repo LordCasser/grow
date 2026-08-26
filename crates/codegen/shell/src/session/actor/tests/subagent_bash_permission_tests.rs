@@ -347,7 +347,7 @@ fn task_call(id: &str) -> crate::sampling::types::ToolCallResponse {
         kind: "function".to_owned(),
         function: crate::sampling::types::ToolCallFunction::new(
             "spawn_subagent",
-            r#"{"prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false}"#,
+            r#"{"prompt":"inspect the target","description":"inspect target","subagent_type":"explore","background":false,"capability_mode":"read-only"}"#,
         ),
     }
 }

@@ -529,8 +529,6 @@ pub(super) fn dispatch_send_prompt_inner(
                         .unwrap_or(agent.session.behavior_mode),
                     workflows_available: agent
                         .behavior_supported(tools::types::BehaviorId::Workflow),
-                    deep_research_available: agent
-                        .behavior_supported(tools::types::BehaviorId::DeepResearch),
                     goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
                     show_tips: show_tips_from_app,
                     auto_update: auto_update_from_app,

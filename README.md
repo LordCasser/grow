@@ -211,7 +211,7 @@ Headless 输出格式、stdin 和退出码见
 | `Ctrl+X`，然后 `A` | 切换当前主 Agent |
 | `Ctrl+X`，然后 `E` | 切换当前模型的 reasoning effort |
 | `Ctrl+X`，然后 `P` | 切换 Ask / Auto / Always Approve |
-| `Ctrl+X`，然后 `B` | 切换 Normal / Clarify / Plan / Workflow / Deep Research / Goal |
+| `Ctrl+X`，然后 `B` | 切换 Normal / Clarify / Plan / Workflow / Goal |
 | `Ctrl+R` | 重做输入框中的上一次撤销 |
 
 同样可以使用 `/model`、`/agent`、`/effort`、`/permission` 和 `/behavior`。`/agents` 打开

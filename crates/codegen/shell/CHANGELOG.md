@@ -1,22 +1,34 @@
 # Changelog
 
-# 2.0.0 — 2026-08-25
+# 2.0.0 — 2026-08-26
 
 ## Timeline runtime
 
+- Timeline schema v20 makes image projection consume the exact ordered
+  `Reasoning` and `BackendToolCall` carriers from the paired Responses output
+  and replace them with protocol-neutral text. Completed compaction summaries
+  also lose exact managed image references while retaining unrelated summary
+  text; earlier Timeline schemas are rejected.
 - Timeline 成为 session 的单一事实源；Control、Surface、Sideband、压缩、回忆和图像 shadow 使用同一套
-  稳定因果坐标。Timeline schema v15 直接拒绝旧日志，不保留兼容投影。
+  稳定因果坐标。Timeline schema v20 包含 notification `Dismissed` 终态、subagent 直接安全父级与 image tool-call 参数的不可逆 shadow，并直接拒绝旧日志，不保留兼容投影。
 - Auto-compaction pre-prune 是唯一的 ToolResult 减载机制；请求拷贝修剪、turn-age 清理与系统头改写路径已删除。
 - Context recall 使用有界当前需求和历史证据；Sideband 请求在持久化前固化路由、预算、尝试次数与
   输出 schema，并且协议级禁用工具。
+- fork、resume 与 copy 只消费同时通过 Timeline、prompt blob、Sideband 来源验证的实体；ImageShadow
+  的辅助请求不会接触本地 asset envelope。
 
 ## Behavior, Goal and tasks
 
 - Agent Role、Behavior 和 Permission 保持独立；Behavior 变更通过原子 Timeline Control 事实持久化。
 - Goal 收敛为一个长期目标及其生命周期。每次 continuation 先检查目标是否完成，再使用普通
   task/todo 执行下一个小步；旧 planner/verifier、board、Goal task type 和 finalization 阶段已删除。
+- foreground settlement 在 durable turn terminal 与客户端终态提交前保持 non-idle fence，避免首条
+  Goal objective 与自动 continuation 产生重叠 turn；自动 Goal stop 还会封闭精确 prompt 的迟到 child admission。
+- Plan/Goal lifecycle call 是工具批次屏障：只执行 provider 顺序中的第一个控制调用，其余调用统一取消并闭合后重新采样。
+- Deep Research 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，作为普通 User workflow 由统一 Registry 扫描；不再有 Builtin scope、Behavior 或重复的私有 Registry/Run 机制。
 - 子 Agent 权限由请求模式与直接父级不可变授权上限取交集；权限交互只保留 `ask`、`auto` 和
   `always-approve`。
+- nested child 恢复按直接安全父级隔离，Workflow 私有 child 也不能被模型按普通 Task id 取消。
 
 ## Runtime and observability
 
@@ -25,6 +37,12 @@
 - Trajectory 面向长会话重建 turn/step 聚合、因果导航、过滤和按需展开；流式 phase 噪声不持久化。
 - 已保存 Workflow 的动态命令在 Tokio blocking domain 执行同步 Rhai 预检，保留 Behavior admission 和
   Definition 快照契约，不再因 `blocking_recv()` 在 async worker 中 panic。
+- Workflow Run 冻结完整、无 credential 的 sampler route，敏感 transport 值只保留在 runtime lease；
+  route 只包含 Task-selectable models，catalog reload 不会使既有 Run 漂移，重启后无法安全重建
+  credential 时 fail closed。初始 manifest 在 Timeline spawn 前使用 writer 的 512 KiB canonical encoder
+  预检，语义坏 Run 在恢复时单独隔离。Session 以带 revision 的原子 model route 提交，明确关闭 reasoning
+  不会退化为继承；reload 在 mailbox 内顺序应用、busy session 合并最新 generation，等待 ACK 时不持有全局 publication lock。
+- task/loop/monitor/Workflow reminder 只引用当前实际注册能力；无 poll/output/read tool 时改用有界内联输出或真实 artifact 路径，不再生成虚假的恢复指令。
 
 ## Distribution
 
@@ -57,7 +75,7 @@
 - Ordinary sampling requests now carry a stable cache-lineage key derived from Timeline identity, rewind branch, and the full model route. Appends preserve it; fork, rewind, or model-route changes invalidate it.
 - A Behavior transition now atomically commits its Control snapshot and model-visible live-tail item. The item remains at its causal Surface position across requests, while later switches append a new transition and Normal explicitly retires older special protocols; system-head rewriting is gone.
 - Tool-result shedding now has one path: auto-compaction emits a pre-prune plan and the chat-state actor commits one validated Timeline replacement. Request-copy and turn-age pruning were removed.
-- Text-only model recovery now records route-scoped ImageShadows with Sideband provenance. Original images remain canonical, another model route sees them immediately, and only the request projection is image-free.
+- Text-only model recovery now records irreversible ImageShadows with Sideband provenance. Original bytes remain only as immutable Timeline evidence; model switching, resume, recall, fork and rewind keep the model-facing view text-only.
 - Context recall now applies the relevance gate even when the entire unloaded archive fits its evidence budget; a query with no lexical candidate returns locally instead of sampling unrelated history. Sideband replay also accepts Control-owned Behavior/Goal Surface coordinates as first-class context identities.
 - Recall Sidebands now materialize a bounded current-task need context from the same atomic Surface snapshot as the archive. Attempt refs cover both actual input planes, retry/refine requests are rechecked against the sideband window, and the final actor guard receives a frozen bound for the complete ToolResult rather than content alone.
 - Sideband schema v6 freezes one request-level budget policy before provider emission and makes `output_schema` enforceable. Every auxiliary purpose now durably caps its attempt count and per-attempt input/output configuration; routes use a closed backend type and are checked against the actual provider backend and explicit request model, schemas use one bounded self-contained validator, provider JSON constraints must match the recorded contract, and successful schema-bound results must carry conforming structured output.

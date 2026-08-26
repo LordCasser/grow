@@ -319,25 +319,6 @@ impl SamplingError {
         )
     }
 
-    /// `true` when the error looks like a connection reset or broken pipe
-    /// during request upload — the pattern nginx produces when it rejects an
-    /// oversized payload by closing the connection instead of responding 413.
-    ///
-    /// Timeouts and connect failures are excluded: those are unrelated to
-    /// payload size and stripping images on them would lose context for no
-    /// reason.
-    pub fn is_likely_body_rejected(&self) -> bool {
-        match self {
-            SamplingError::Http(err) => {
-                // `is_request()` covers broken-pipe / connection-reset during
-                // body upload.  `is_body()` covers stream-write failures.
-                // Exclude timeouts and connect errors — those are unrelated.
-                (err.is_request() || err.is_body()) && !err.is_timeout() && !err.is_connect()
-            }
-            _ => false,
-        }
-    }
-
     /// The server rejected the request because the conversation history
     /// contains `encrypted_content` from a different model family that the
     /// current model cannot decrypt. Never retryable — the user must start
@@ -424,10 +405,13 @@ impl SamplingError {
     /// a new veto lands everywhere at once:
     /// - `x-should-retry: false` — the server says the failure is
     ///   request-content-caused, not transient.
-    /// - Context-length overflow — deterministic; re-sending the same
-    ///   payload always fails.
+    /// - Context-length or HTTP payload overflow — deterministic; re-sending
+    ///   the same payload always fails. Request mutation belongs to the
+    ///   Session's durable projection layer, never the transport retry loop.
     pub fn is_retry_vetoed(&self) -> bool {
-        self.should_retry_header() == Some(false) || self.is_context_length_error()
+        self.should_retry_header() == Some(false)
+            || self.is_context_length_error()
+            || self.is_payload_too_large()
     }
 }
 

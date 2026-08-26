@@ -18,6 +18,26 @@ async fn foreground_snapshot_carries_origin_and_kind_without_parsing_its_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn completed_runner_keeps_foreground_fenced_until_terminal_settlement() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut foreground =
+                ForegroundState::RegularTurn(running_task_stub("turn-before-terminal"));
+            let task = foreground
+                .begin_settling()
+                .expect("regular turn enters settlement");
+            assert_eq!(task.prompt_id, "turn-before-terminal");
+            assert!(!foreground.is_idle());
+            assert!(foreground.regular().is_none());
+            assert!(!foreground.finish_settling("different-turn"));
+            assert!(!foreground.is_idle());
+            assert!(foreground.finish_settling("turn-before-terminal"));
+            assert!(foreground.is_idle());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn only_active_goal_keeps_an_idle_session_resident() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -36,7 +56,6 @@ async fn only_active_goal_keeps_an_idle_session_resident() {
             for stopped in [
                 crate::session::goal_tracker::GoalStatus::Paused,
                 crate::session::goal_tracker::GoalStatus::Blocked,
-                crate::session::goal_tracker::GoalStatus::UsageLimited,
                 crate::session::goal_tracker::GoalStatus::BudgetLimited,
                 crate::session::goal_tracker::GoalStatus::Complete,
             ] {
@@ -66,12 +85,67 @@ fn only_real_user_input_can_supply_an_implicit_goal_objective() {
         Some(crate::session::goal_tracker::GoalStatus::Active),
         "additional context",
     ));
-    assert!(should_capture_implicit_goal_objective(
-        &crate::session::PromptOrigin::User,
-        true,
-        Some(crate::session::goal_tracker::GoalStatus::Complete),
-        "start the next goal",
-    ));
+    assert!(
+        !should_capture_implicit_goal_objective(
+            &crate::session::PromptOrigin::User,
+            true,
+            Some(crate::session::goal_tracker::GoalStatus::Complete),
+            "start the next goal",
+        ),
+        "a completed Goal must be explicitly edited or cleared before another objective is captured"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn implicit_goal_objective_commits_its_turn_terminal_before_continuation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = std::sync::Arc::new(
+                create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+            );
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Goal);
+
+            let result = actor
+                .handle_prompt(
+                    "goal-objective",
+                    crate::session::PromptOrigin::User,
+                    Vec::new(),
+                    crate::session::TurnKind::User,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "finish the release audit",
+                    ))],
+                    tool_types::BehaviorId::Goal,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .expect("implicit Goal objective should be admitted");
+
+            assert!(matches!(
+                result.completion_kind,
+                crate::session::commands::PromptCompletionKind::Completed
+            ));
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active)
+            );
+            assert_eq!(
+                actor.events.current_turn(),
+                None,
+                "the Goal continuation may only be armed after its user turn is durably closed"
+            );
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

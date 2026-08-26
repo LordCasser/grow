@@ -150,7 +150,6 @@ pub(crate) fn build_workflow_updated(
 
     GrowSessionUpdate::WorkflowUpdated {
         run_id: state.run_id.clone(),
-        private: state.private,
         definition_id: state.definition_id.as_ref().map(ToString::to_string),
         definition_scope: state
             .definition_scope
@@ -204,6 +203,7 @@ mod tests {
             ],
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         t.set_phase("wf_1", "Execute");
         let state = t.get("wf_1").unwrap();
@@ -243,6 +243,7 @@ mod tests {
             ],
             None,
             None,
+            crate::session::workflow::tracker::test_runtime_route(),
         );
         t.set_phase("wf_2", "Verify");
         t.apply_outcome(

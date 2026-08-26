@@ -325,6 +325,7 @@ pub(super) async fn run_session(
             maybe_completion = completion_rx.recv() => {
                 let Some((prompt_id, result)) = maybe_completion else {
                     // Channel closed.
+                    session.goal_drive.cancel();
                     stop_permission_manager_and_drain_audit(&session).await;
                     shutdown_workflows(&session).await;
                     if !session.startup_hints.is_subagent {
@@ -355,15 +356,32 @@ pub(super) async fn run_session(
                         .filter(|task| task.prompt_id == prompt_id)
                         .map(|task| task.origin.clone())
                 };
-                let (_turn_succeeded, suppress_goal_continuation, goal_pause_message) =
+                if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(crate::session::commands::is_fatal_turn_boundary_error)
+                {
+                    tracing::error!(
+                        prompt_id,
+                        "closing session after fatal Timeline turn-boundary failure"
+                    );
+                    session.handle_fatal_completion(prompt_id, result).await;
+                    terminate_failed_timeline_writer(&session).await;
+                    return;
+                }
+                let (_turn_succeeded, suppress_goal_continuation, goal_stop) =
                     SessionActor::post_turn_goal_degradation_plan(
                         &result,
                         completed_origin.as_ref(),
                     );
-                session.handle_completion(prompt_id, result).await;
-                if let Some(message) = goal_pause_message {
-                    session.apply_goal_pause_after_turn_err(message).await;
+                session.handle_completion(prompt_id.clone(), result).await;
+                if let Some(message) = goal_stop {
+                    session.apply_goal_stop_after_turn(&prompt_id, message).await;
                 }
+                // Catalog watcher snapshots admitted during the turn must win
+                // the newly released idle boundary before any queued prompt,
+                // compaction, notification, or Goal continuation samples.
+                session.apply_pending_model_reload_if_idle().await;
                 if !maybe_start_pending_manual_compaction(
                     session.clone(),
                     completion_tx.clone(),
@@ -385,7 +403,7 @@ pub(super) async fn run_session(
                 .await;
                 if session.state.lock().await.foreground.is_idle() {
                     session
-                        .handle_turn_end(suppress_goal_continuation)
+                        .handle_turn_end(&prompt_id, suppress_goal_continuation)
                         .await;
                 }
                 session.emit_session_idle_if_idle().await;
@@ -403,9 +421,17 @@ pub(super) async fn run_session(
                         s.maybe_fire_laziness_check().await;
                     });
                 }
+                if session.chat_state_handle.is_closed() {
+                    tracing::error!(
+                        "closing session because the Timeline writer mailbox is unavailable"
+                    );
+                    terminate_failed_timeline_writer(&session).await;
+                    return;
+                }
             }
             maybe_cmd = cmd_rx.recv() => {
                 let Some(cmd) = maybe_cmd else {
+                    session.goal_drive.cancel();
                     stop_permission_manager_and_drain_audit(&session).await;
                     // ── session_end hook (channel-closed path) ────
                     // Fires BEFORE memory auto-save per plan contract.
@@ -730,6 +756,9 @@ pub(super) async fn run_session(
                         .await;
                         let _ = responds_to.send(outcome);
                     }
+                    SessionCommand::GoalControl { command } => {
+                        session.handle_goal_command(command).await;
+                    }
                     SessionCommand::SetSessionModel { model_id, sampling_config, auto_compact_threshold_percent, responds_to } => {
                         let updated_model_id = session.handle_set_session_model(model_id, sampling_config, auto_compact_threshold_percent).await;
                         let _ = responds_to.send(updated_model_id);
@@ -743,59 +772,21 @@ pub(super) async fn run_session(
                         auto_compact_threshold_percent,
                         responds_to,
                     } => {
-                        let result = session
-                            .handle_reload_model_config(
+                        session
+                            .admit_model_config_reload(
                                 model_id,
                                 sampling_config,
                                 image_description_model,
                                 inference_idle_timeout,
                                 max_retries,
                                 auto_compact_threshold_percent,
+                                responds_to,
                             )
                             .await;
-                        let _ = responds_to.send(result);
                     }
                     SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                         let outcome = session.handle_rebuild_agent_for_definition(definition).await;
                         let _ = responds_to.send(outcome);
-                    }
-                    SessionCommand::OverrideModelName { model_name, extra_headers, context_window } => {
-                        // Update the actor's SamplingConfig model + headers + context window.
-                        if let Some(mut cfg) = session.chat_state_handle.get_sampling_config().await {
-                            tracing::info!(
-                                target: SESSION_LOG,
-                                session_id = %session.session_info.id,
-                                old_model = %cfg.model,
-                                new_model = %model_name,
-                                extra_header_count = extra_headers.len(),
-                                old_context_window = cfg.context_window.get(),
-                                new_context_window = ?context_window.map(|cw| cw.get()),
-                                "OVERRIDE_MODEL: changing model name in sampling config"
-                            );
-                            // Update signals so primaryModelId and modelsUsed
-                            // reflect the model used after the override, not
-                            // the agent-level default (e.g. "grow-4.5").
-                            // set_primary_model also adds to models_used.
-                            session.signals_handle().set_primary_model(&model_name);
-                            cfg.model = model_name.clone();
-                            cfg.extra_headers.extend(extra_headers);
-                            if let Some(cw) = context_window
-                                && session.compaction.context_window_override.is_none()
-                            {
-                                cfg.context_window = cw;
-                            }
-                            session.chat_state_handle.update_sampling_config(cfg);
-
-                            let existing = session.chat_state_handle.get_credentials().await;
-                            if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str()) {
-                                session.chat_state_handle.update_credentials(chat_state::Credentials {
-                                    api_key: r.api_key,
-                                    alpha_test_key: existing.alpha_test_key,
-                                });
-                            }
-                            // Credentials changed under a possibly-unchanged model id.
-                            session.invalidate_model_auth_memo();
-                        }
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {
                         let model = session.chat_state_handle.get_sampling_config().await
@@ -1108,6 +1099,7 @@ pub(super) async fn run_session(
                         let transaction_incomplete = result.is_err();
                         let _ = respond_to.send(result);
                         if transaction_incomplete {
+                            session.goal_drive.cancel();
                             tracing::error!(
                                 session_id = %session.session_info.id,
                                 "rewind transaction is incomplete; stopping the actor for recovery"
@@ -1702,39 +1694,20 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::WorkflowCompleted {
                         state,
-                        outcome,
                         respond_to,
                     } => {
                         let run_id = state.run_id.clone();
-                        let admission = if state.private {
-                            let admission = session
-                                .finish_deep_research_run(&state, outcome)
-                                .await;
-                            // `finish_deep_research_run` admits the terminal
-                            // report before repairing Behavior. Surface that
-                            // durable receipt even if the later Control write
-                            // failed, otherwise the user sees only a log line
-                            // and the report can remain parked indefinitely.
+                        let admission = session
+                            .admit_public_workflow_completion(&state)
+                            .await;
+                        if admission.is_ok() {
+                            session.send_available_commands_update().await;
                             SessionActor::maybe_drain_notifications(
                                 session.clone(),
                                 completion_tx.clone(),
                             )
                             .await;
-                            admission
-                        } else {
-                            let admission = session
-                                .admit_public_workflow_completion(&state)
-                                .await;
-                            if admission.is_ok() {
-                                session.send_available_commands_update().await;
-                                SessionActor::maybe_drain_notifications(
-                                    session.clone(),
-                                    completion_tx.clone(),
-                                )
-                                .await;
-                            }
-                            admission
-                        };
+                        }
                         if let Err(error) = &admission {
                             tracing::error!(run_id, %error, "workflow terminal reconciliation failed");
                         }
@@ -1785,6 +1758,7 @@ pub(super) async fn run_session(
                             cmd_rx.close();
                             let _ = respond_to.send(true);
                         }
+                        session.goal_drive.cancel();
                         stop_permission_manager_and_drain_audit(&session).await;
                         shutdown_workflows(&session).await;
                         // Flush the actor-owned replay buffer so any
@@ -1895,8 +1869,22 @@ pub(super) async fn run_session(
                         return;
                     }
                 }
+                if session.chat_state_handle.is_closed() {
+                    tracing::error!(
+                        "closing session because the Timeline writer mailbox is unavailable"
+                    );
+                    terminate_failed_timeline_writer(&session).await;
+                    return;
+                }
             }
             _ = session.idle_arbiter.notified() => {
+                if session.chat_state_handle.is_closed() {
+                    tracing::error!(
+                        "closing session because the Timeline writer mailbox is unavailable"
+                    );
+                    terminate_failed_timeline_writer(&session).await;
+                    return;
+                }
                 arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
             }
         }

@@ -140,7 +140,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+X`, then `A` | Agent screen | Open the enabled-Agent picker |
 | `Ctrl+X`, then `E` | Agent screen | Open the reasoning-effort picker |
 | `Ctrl+X`, then `P` | Agent screen | Open the Permission picker |
-| `Ctrl+X`, then `B` | Agent screen | Open the Behavior picker (Normal / Clarify / Plan / Workflow / Deep Research / Goal) |
+| `Ctrl+X`, then `B` | Agent screen | Open the Behavior picker (Normal / Clarify / Plan / Workflow / Goal) |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
 **Note:** `Ctrl+X` is a two-key leader with a two-second timeout. While active, the draft is preserved and dimmed, the cursor is hidden, and the available continuation keys appear above the input. Esc, Backspace, an unknown continuation, or timeout cancels the leader without editing the draft. The five pickers share their catalogs and execution paths with `/model`, `/agent`, `/effort`, `/permission`, and `/behavior`.

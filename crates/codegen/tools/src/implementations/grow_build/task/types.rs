@@ -167,10 +167,20 @@ pub enum ModelOverrideProvenance {
 pub struct SubagentRuntimeOverrides {
     /// Override the model (e.g. "test-model").
     pub model: Option<String>,
+    /// Expected secret-free identity of the resolved model transport.
+    ///
+    /// Harness-owned long-lived executions use this to reject a catalogue
+    /// entry that kept the same public model ID while changing provider,
+    /// endpoint, or underlying model. Ordinary Task calls leave it unset.
+    pub model_transport_key: Option<crate::types::resources::ModelImageInputKey>,
     /// Whether `model` came from a model-facing Task call or internal harness logic.
     pub model_override_provenance: ModelOverrideProvenance,
-    /// Override reasoning effort (e.g. "low", "medium", "high").
-    pub reasoning_effort: Option<String>,
+    /// Override the reasoning policy.
+    ///
+    /// The outer `Option` records whether the caller supplied a policy. The
+    /// inner value is the policy itself: `Some(None)` deliberately disables
+    /// reasoning instead of inheriting a later Agent/model default.
+    pub reasoning_effort: Option<Option<String>>,
     /// Capability mode controlling tool access.
     pub capability_mode: Option<SubagentCapabilityMode>,
     /// Isolation mode for child execution environment.
@@ -416,6 +426,10 @@ pub enum SubagentCancelTarget {
     ParentPromptId(String),
     /// User Stop / Esc with cancel_subagents — prior-turn background too.
     ParentSession,
+    /// Revoke every descendant carrying the immutable Goal owner. The parent
+    /// session scope prevents one session from cancelling another session's
+    /// coincidentally equal identifier.
+    GoalId(String),
     WorkflowRunId(String),
 }
 

@@ -38,7 +38,13 @@ mod tests {
         ResumeSourceData {
             subagent_id: "source-id".into(),
             subagent_type: subagent_type.into(),
-            model_id: Some("grow-3".into()),
+            model_id: "grow-3".into(),
+            model_transport_key: sampling_types::ModelImageInputKey::new(
+                "grow-3",
+                "responses",
+                "test-endpoint",
+            ),
+            reasoning_effort: None,
             child_cwd: "/workspace".into(),
             worktree_path: None,
             snapshot_ref: None,

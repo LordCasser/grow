@@ -6,13 +6,15 @@
 
 Workflow 由四个所有权边界组成，而不是一段“可变的后台脚本”：
 
-1. **Workflow Behavior** 是公共 Workflow 的唯一协作协议。只有 turn 捕获的 Behavior 与
+1. **Workflow Behavior** 是 Workflow 的唯一协作协议。只有 turn 捕获的 Behavior 与
    实时 Behavior 都是 Workflow 时，Grow 才能搜索、创建、编辑、验证、发布、启动或管理
-   公共 Workflow。Deep Research 使用独立的私有 runtime。
+   Workflow。`deep-research` 由 builtin extractor version-managed 到
+   `~/.grow/workflows/deep-research.rhai`，随后按普通 User workflow 由 Registry 扫描；不会
+   引入额外的 scope、Behavior 或私有运行机制。
 2. **Workflow Workspace** 归 session 所有，持久化多个草稿、唯一 Definition 焦点、派生
    来源、基线、当前内容哈希、验证哈希、保存提示和发布冲突。它不持有运行中执行器。
 3. **Workflow Definition** 是可搜索、可编辑和可复用的 Rhai 定义，scope 为 Session、
-   Project、User 或 Builtin。修改已保存 Definition 时先派生 session 草稿；发布要求显式
+   Project 或 User。修改已保存 Definition 时先派生 session 草稿；发布要求显式
    选择 Project 或 User，并使用原子写入与基线哈希检查。
 4. **Workflow Run** 是 Definition 内容与启动参数的不可变快照。`WorkflowManager`、
    `WorkflowTracker` 和 `WorkflowRunStore` 分别拥有执行、状态和持久化；同一 Definition
@@ -24,17 +26,42 @@ journal；`agent()`、`parallel()`、`phase()`、`complete()`、`pause()`、`awa
 Run 快照，而不是重新解析当前 Definition。完整的脚本写作契约（meta、函数签名、Agent
 选项、限制与最小示例）见 [workflow-rhai.md](../workflow-rhai.md)。
 
-公共 Run 的启动从实时 Workflow Behavior 复核到预检、validated hash 提交和
+Run 的启动从实时 Workflow Behavior 复核到预检、validated hash 提交和
 `WorkflowManager::launch` 共用同一 admission 临界区。启动参数只解析一次；预检与 Run
 快照使用同一 JSON 值。Rhai 引擎及 Host 函数是同步协议，Host 返回值通过
 `blocking_recv` 等待，因此任何 async 启动入口都必须把完整预检放进阻塞线程域，不能在
 session runtime worker 上直接执行。阻塞任务异常、预检失败或 Definition hash 漂移均在
 validated hash 与 Run 生成之前 fail closed。
 
+每个 Run 在 admission 时冻结默认模型及完整 catalog sampler route。每个 catalog identity 的
+provider model、endpoint transport、backend、header/query 契约、输出与温度参数、context window、
+retry/stream/compaction/doom-loop policy 和 reasoning effort 属于同一快照；transport identity 与
+effort 只从这份 sampler 快照派生，不再维护第二套窄 route map。`None` 是明确关闭 reasoning，而不是
+“以后从 Agent Definition 或模型默认值继承”。Definition 显式选择其他模型以及 resume source model
+都只能使用该 Run 启动时存在且通过普通 Task model selection 契约的 sampler；hidden、disabled 或被
+`allowed_models` 排除的 catalog entry 不得借 Workflow 绕过。当前 session 默认 sampler 始终作为
+Run 的基线显式纳入。
+
+Run manifest 只持久化无 credential 的请求投影与完整契约指纹：API key、URL userinfo/query value、
+literal header/query value 和 live auth callback 留在进程内的 runtime lease。catalog 热更新只影响未来
+Run；已启动 Run 即使模型被删除也继续使用原 lease。进程重启后只有当前 catalog 能安全重建相同的
+sensitive transport contract 时才重新附着实时 credential，否则 fail closed，绝不换成相似模型或
+采入新的 sampler 字段。
+
+admission 在写入 `Workflow::Spawned` 之前，用 writer 自己的 canonical encoder 对初始完整 manifest
+执行一次精确预检；当前上限为 512 KiB。route、脚本、参数和 projection metadata 都计入同一真实字节
+边界，不存在较宽的 tracker 估算上限。预检失败时 Run 不注册、Timeline 不产生 spawn。恢复时每个
+manifest 在 Timeline lifecycle 调和后单独做语义校验；一个 fingerprint/route/status 无效的 Run 只被
+隔离并告警，不阻断同 session 其他有效 Run 的恢复，也不会把无效 source 注册进 tracker。
+
+`<session>/workflows/<run-id>/script.rhai` 是该 Run 的不可变执行快照，不是另一个可发现
+Definition，也不是自动释放到 `.grow/workflows` 或 `~/.grow/workflows` 的来源。Registry
+discovery、Workspace state 和 Run snapshot 只有单向所有权关系，不做双向同步。
+
 ## 发现与编辑
 
 未指定 Definition 时，主 Agent 先判断焦点是否与请求相关，再按 `name`、`description` 和
-`when_to_use` 搜索 session、project、user、builtin 元数据。唯一明确匹配可说明来源和参数
+`when_to_use` 搜索 session、project、user 元数据。唯一明确匹配可说明来源和参数
 后直接使用；歧义候选必须让用户选择。只有参数变化时复用 Definition；阶段、编排或 Agent
 提示变化时派生草稿；没有候选时才新建草稿。
 
@@ -52,8 +79,7 @@ Workflow 外只提供 `/workflow [prompt]` 与 `/behavior workflow` 快速入口
 Definitions 与 Runs：前者显示焦点、scope、临时/已保存、dirty、validated、conflicted；
 后者显示句柄、Definition scope/hash、状态、阶段与 Agent 进度。
 
-有 Active 公共 Run 时离开 Workflow 需要重复确认，Run 继续后台执行；重新进入 Workflow
-后才能管理。暂停、预算受限和未保存草稿不会阻止切换。Deep Research 不出现在公共列表、
-动态命令或管理入口中；其运行状态仍通过独立的 Pager 显示通道可见（transcript 进度块、
-tasks pane 的 Deep Research 状态行与 activity projection），这些显示面只消费 shell 发布的
-`WorkflowUpdated`，管理面数据（`workflow_runs`）不受私有 run 影响。
+有 Active Run 时离开 Workflow 需要重复确认，Run 继续后台执行；重新进入 Workflow 后
+才能管理。暂停、预算受限和未保存草稿不会阻止切换。`deep-research` 与其他 Definition
+一样出现在 Registry、动态命令、Workspace、Runs、transcript、tasks pane 和 activity
+projection 中；所有显示和管理面只消费统一的 `WorkflowUpdated` 投影。

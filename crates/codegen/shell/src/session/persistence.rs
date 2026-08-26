@@ -43,6 +43,8 @@ pub(crate) fn model_change_event(
     reasoning_effort: Option<ReasoningEffort>,
     previous_provider_model: &str,
     provider_model: &str,
+    previous_transport_key: &sampling_types::ModelImageInputKey,
+    transport_key: &sampling_types::ModelImageInputKey,
     reason: &str,
 ) -> chat_state::TimelineEventKind {
     chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
@@ -57,6 +59,8 @@ pub(crate) fn model_change_event(
             "to_reasoning_effort": reasoning_effort,
             "from_provider_model": previous_provider_model,
             "to_provider_model": provider_model,
+            "from_model_transport": previous_transport_key,
+            "to_model_transport": transport_key,
             "reason": reason,
         })),
     })
@@ -69,7 +73,12 @@ pub(crate) fn model_change_event(
 pub(crate) fn latest_model_selection(
     events: &[chat_state::TimelineEvent],
 ) -> io::Result<Option<(acp::ModelId, Option<ReasoningEffort>)>> {
-    let mut latest: Option<(String, Option<ReasoningEffort>, String)> = None;
+    let mut latest: Option<(
+        String,
+        Option<ReasoningEffort>,
+        String,
+        sampling_types::ModelImageInputKey,
+    )> = None;
     for event in events {
         let chat_state::TimelineEventKind::Observation(observation) = &event.kind else {
             continue;
@@ -88,13 +97,15 @@ pub(crate) fn latest_model_selection(
             .as_ref()
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| invalid_model_change(event, "data must be an object"))?;
-        const FIELDS: [&str; 7] = [
+        const FIELDS: [&str; 9] = [
             "from_model_id",
             "to_model_id",
             "from_reasoning_effort",
             "to_reasoning_effort",
             "from_provider_model",
             "to_provider_model",
+            "from_model_transport",
+            "to_model_transport",
             "reason",
         ];
         if data.len() != FIELDS.len() || FIELDS.iter().any(|field| !data.contains_key(*field)) {
@@ -122,20 +133,37 @@ pub(crate) fn latest_model_selection(
         let to_effort = effort("to_reasoning_effort")?;
         let from_provider = required_string("from_provider_model")?;
         let to_provider = required_string("to_provider_model")?;
+        let transport_key = |field: &str| -> io::Result<sampling_types::ModelImageInputKey> {
+            let key: sampling_types::ModelImageInputKey =
+                serde_json::from_value(data[field].clone()).map_err(|error| {
+                    invalid_model_change(event, &format!("invalid {field}: {error}"))
+                })?;
+            if !key.is_valid() {
+                return Err(invalid_model_change(
+                    event,
+                    &format!("{field} must be a complete model transport identity"),
+                ));
+            }
+            Ok(key)
+        };
+        let from_transport = transport_key("from_model_transport")?;
+        let to_transport = transport_key("to_model_transport")?;
         let _reason = required_string("reason")?;
-        if let Some((previous_model, previous_effort, previous_provider)) = &latest
+        if let Some((previous_model, previous_effort, previous_provider, previous_transport)) =
+            &latest
             && (previous_model != &from_model
                 || previous_effort != &from_effort
-                || previous_provider != &from_provider)
+                || previous_provider != &from_provider
+                || previous_transport != &from_transport)
         {
             return Err(invalid_model_change(
                 event,
                 "model change does not continue the preceding durable selection",
             ));
         }
-        latest = Some((to_model, to_effort, to_provider));
+        latest = Some((to_model, to_effort, to_provider, to_transport));
     }
-    Ok(latest.map(|(model, effort, _)| (acp::ModelId::new(model), effort)))
+    Ok(latest.map(|(model, effort, _, _)| (acp::ModelId::new(model), effort)))
 }
 
 fn invalid_model_change(event: &chat_state::TimelineEvent, reason: &str) -> io::Error {

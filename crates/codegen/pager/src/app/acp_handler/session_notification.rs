@@ -1280,6 +1280,20 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         );
         return false;
     };
+    if !matches!(
+        mode,
+        BehaviorId::Normal
+            | BehaviorId::Clarify
+            | BehaviorId::Plan
+            | BehaviorId::Workflow
+            | BehaviorId::Goal
+    ) {
+        tracing::warn!(
+            mode_id = %cmu.current_mode_id.0,
+            "ignoring CurrentModeUpdate for an unsupported pager Behavior"
+        );
+        return false;
+    }
     let previous = agent.session.behavior_mode;
     agent.session.behavior_mode = mode;
     if mode != BehaviorId::Workflow {
@@ -1347,7 +1361,17 @@ pub(super) fn behavior_mode_update_applied(update: &acp::SessionUpdate) -> bool 
     let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
         return false;
     };
-    if tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()).is_none() {
+    let Some(mode) = tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()) else {
+        return false;
+    };
+    if !matches!(
+        mode,
+        tools::types::BehaviorId::Normal
+            | tools::types::BehaviorId::Clarify
+            | tools::types::BehaviorId::Plan
+            | tools::types::BehaviorId::Workflow
+            | tools::types::BehaviorId::Goal
+    ) {
         return false;
     }
     match cmu

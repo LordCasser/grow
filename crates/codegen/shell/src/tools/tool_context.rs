@@ -176,7 +176,7 @@ pub struct ToolContext {
     pub(crate) unattributed_background_usage: Arc<std::sync::atomic::AtomicBool>,
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
     /// Used to format durable completion notifications with the correct tool name.
-    pub task_output_tool_name: String,
+    pub task_output_tool_name: Option<String>,
     /// Shared Goal wait-race marker inherited by subagents. It does not own
     /// notification admission; the session actor's durable inbox does.
     pub goal_loop_active_gate: Arc<std::sync::atomic::AtomicBool>,
@@ -243,8 +243,7 @@ impl ToolContext {
             lsp_server_names: Vec::new(),
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
-                .to_string(),
+            task_output_tool_name: None,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
@@ -278,8 +277,7 @@ impl ToolContext {
             lsp_server_names: Vec::new(),
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
-                .to_string(),
+            task_output_tool_name: None,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
@@ -366,8 +364,7 @@ mod tests {
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                task_output_tool_name: tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
-                    .to_string(),
+                task_output_tool_name: None,
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),
                 task_output_token_budget: None,
