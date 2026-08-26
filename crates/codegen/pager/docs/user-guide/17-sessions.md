@@ -287,7 +287,7 @@ Open the causal ledger for the most recent session in the current directory:
 grow trajectory
 ```
 
-Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page incrementally tails the main and Sideband timelines, shows aligned Input / Model / Tools lanes, pages backward through long ledgers, and exposes layer, actor, class, producer, visibility, and text filters plus a canonical event inspector. Each launch uses a random URL token, rejects non-loopback bind addresses and non-local Host headers, and never mutates the session.
+Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page incrementally tails the main and Sideband timelines, defaults to aligned Input / Model / Tools lanes, and can regroup the same filtered events by layer, actor, class, or producer. Scrolling away from the live tail pauses following and exposes a single **Jump to live** action; scrolling to the top pages backward automatically. Layer, actor, class, producer, visibility, and text filters remain separate from the timeline view, and every row opens a canonical event inspector. Each launch uses a random URL token, rejects non-loopback bind addresses and non-local Host headers, and never mutates the session.
 
 ### Persistence Format
 

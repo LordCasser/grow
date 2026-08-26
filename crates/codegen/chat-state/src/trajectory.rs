@@ -1065,13 +1065,18 @@ fn describe_message(event: &MessageEvent) -> ReturnTuple {
         SurfaceOp::Append => "appended",
         SurfaceOp::Replace { .. } => "replaced",
     };
+    let correlation_id = event.items.iter().find_map(|item| match item {
+        sampling_types::ConversationItem::ToolResult(result) => Some(result.tool_call_id.clone()),
+        sampling_types::ConversationItem::BackendToolCall(call) => Some(call.id().to_owned()),
+        _ => None,
+    });
     tuple(
         "message",
         &format!("{:?}", event.cause).to_lowercase(),
         state,
         None,
         None,
-        None,
+        correlation_id,
         None,
         if summary.is_empty() {
             format!("{} item(s)", event.items.len())
@@ -1670,6 +1675,42 @@ mod tests {
         let terminal = timeline.trajectory().rows.pop().unwrap();
         assert_eq!(terminal.turn_id.as_deref(), Some("9"));
         assert_eq!(terminal.step_index, Some(2));
+    }
+
+    #[test]
+    fn tool_calls_and_results_expose_the_same_pairing_identity() {
+        let turn = crate::TurnId(4);
+        let step = crate::StepId { turn, index: 1 };
+        let call = ToolEvent::Started {
+            call_id: "call-pair".into(),
+            turn,
+            step,
+            name: "read_file".into(),
+            input: None,
+        };
+        let result = ToolEvent::Completed {
+            call_id: "call-pair".into(),
+            name: "read_file".into(),
+            outcome: "completed".into(),
+            duration_ms: 3,
+            details: None,
+        };
+
+        assert_eq!(
+            describe_tool(&call, &BTreeMap::new()).5.as_deref(),
+            Some("call-pair")
+        );
+        assert_eq!(
+            describe_tool(&result, &BTreeMap::new()).5.as_deref(),
+            Some("call-pair")
+        );
+
+        let message = MessageEvent {
+            cause: MessageCause::ToolResult,
+            items: vec![ConversationItem::tool_result("call-pair", "done")],
+            surface: SurfaceOp::Append,
+        };
+        assert_eq!(describe_message(&message).5.as_deref(), Some("call-pair"));
     }
 
     #[test]

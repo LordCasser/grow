@@ -233,7 +233,19 @@ struct TrajectoryQuery {
     producer: Option<String>,
     visibility: Option<String>,
     search: Option<String>,
+    overview_by: Option<TrajectoryOverviewDimension>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TrajectoryOverviewDimension {
+    #[default]
+    Interaction,
+    Layer,
+    Actor,
+    Class,
+    Producer,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,9 +372,7 @@ struct TrajectoryOverviewBin {
     last_entry_id: Option<String>,
     start_ms: i64,
     end_ms: i64,
-    input: usize,
-    model: usize,
-    tools: usize,
+    counts: BTreeMap<String, usize>,
     failures: usize,
     turns: usize,
     steps: usize,
@@ -371,11 +381,10 @@ struct TrajectoryOverviewBin {
 
 #[derive(Debug, Clone, Default, Serialize)]
 struct TrajectoryOverview {
+    dimension: TrajectoryOverviewDimension,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
-    input_count: usize,
-    model_count: usize,
-    tools_count: usize,
+    counts: BTreeMap<String, usize>,
     bins: Vec<TrajectoryOverviewBin>,
 }
 
@@ -602,7 +611,12 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .iter()
         .filter(|row| matches_query(row))
         .collect::<Vec<_>>();
-    let overview = trajectory_overview(&matching);
+    let overview = trajectory_overview(
+        &matching,
+        query
+            .overview_by
+            .unwrap_or(TrajectoryOverviewDimension::Interaction),
+    );
     let matching_count = matching.len();
     let cursor_index = |entry_id: &str| {
         matching
@@ -1046,12 +1060,19 @@ fn trajectory_detail_preview(
     }
 }
 
-fn trajectory_overview(rows: &[&chat_state::TrajectoryRow]) -> TrajectoryOverview {
+fn trajectory_overview(
+    rows: &[&chat_state::TrajectoryRow],
+    dimension: TrajectoryOverviewDimension,
+) -> TrajectoryOverview {
     if rows.is_empty() {
-        return TrajectoryOverview::default();
+        return TrajectoryOverview {
+            dimension,
+            ..Default::default()
+        };
     }
     let bin_count = rows.len().min(TRAJECTORY_OVERVIEW_BINS);
     let mut overview = TrajectoryOverview {
+        dimension,
         start_ms: rows.iter().map(|row| trajectory_start_ms(row)).min(),
         end_ms: rows.iter().map(|row| row.at_ms).max(),
         bins: (0..bin_count)
@@ -1076,20 +1097,9 @@ fn trajectory_overview(rows: &[&chat_state::TrajectoryRow]) -> TrajectoryOvervie
         bin.failures += usize::from(matches!(row.state.as_str(), "failed" | "cancelled"));
         bin.turns += usize::from(row.kind == "turn.started");
         bin.steps += usize::from(row.kind == "step.started");
-        match trajectory_lane(row) {
-            0 => {
-                overview.input_count += 1;
-                bin.input += 1;
-            }
-            1 => {
-                overview.model_count += 1;
-                bin.model += 1;
-            }
-            _ => {
-                overview.tools_count += 1;
-                bin.tools += 1;
-            }
-        }
+        let lane = trajectory_overview_lane(row, dimension);
+        *overview.counts.entry(lane.clone()).or_default() += 1;
+        *bin.counts.entry(lane).or_default() += 1;
     }
     overview
 }
@@ -1099,18 +1109,33 @@ fn trajectory_start_ms(row: &chat_state::TrajectoryRow) -> i64 {
         .saturating_sub(i64::try_from(row.duration_ms.unwrap_or_default()).unwrap_or(i64::MAX))
 }
 
-fn trajectory_lane(row: &chat_state::TrajectoryRow) -> usize {
-    if row.layer.starts_with("tool") {
-        2
-    } else if row.layer == "assistant"
-        || row.producer.starts_with("model")
-        || row.kind.starts_with("request.")
-        || row.kind.starts_with("step.")
-    {
-        1
-    } else {
-        0
-    }
+fn trajectory_overview_lane(
+    row: &chat_state::TrajectoryRow,
+    dimension: TrajectoryOverviewDimension,
+) -> String {
+    let value = match dimension {
+        TrajectoryOverviewDimension::Interaction if row.layer.starts_with("tool") => "tools",
+        TrajectoryOverviewDimension::Interaction
+            if row.layer == "assistant"
+                || row.producer.starts_with("model")
+                || row.kind.starts_with("request.")
+                || row.kind.starts_with("step.") =>
+        {
+            "model"
+        }
+        TrajectoryOverviewDimension::Interaction => "input",
+        TrajectoryOverviewDimension::Layer => dimension_family(&row.layer),
+        TrajectoryOverviewDimension::Actor => dimension_family(&row.actor),
+        TrajectoryOverviewDimension::Class => &row.class,
+        TrajectoryOverviewDimension::Producer => dimension_family(&row.producer),
+    };
+    value.to_owned()
+}
+
+fn dimension_family(value: &str) -> &str {
+    value
+        .split_once(['.', ':'])
+        .map_or(value, |(family, _)| family)
 }
 
 fn read_summary_from_directory(
@@ -3344,7 +3369,8 @@ mod tests {
         assert_eq!(body["sessionId"], "canonical-session");
         assert_eq!(body["rows"].as_array().unwrap().len(), 1);
         assert!(body["rows"][0].get("details").is_none());
-        assert_eq!(body["overview"]["input_count"], 1);
+        assert_eq!(body["overview"]["dimension"], "interaction");
+        assert_eq!(body["overview"]["counts"]["input"], 1);
 
         let response = client
             .get(format!(
@@ -4499,11 +4525,15 @@ mod tests {
     }
 
     #[test]
-    fn page_exposes_timeline_overview_and_four_dimension_filters() {
+    fn page_separates_timeline_views_from_four_dimension_filters() {
         assert!(PAGE.contains("id=\"track\""));
-        assert!(PAGE.contains("<b>INPUT</b>"));
-        assert!(PAGE.contains("<b>MODEL</b>"));
-        assert!(PAGE.contains("<b>TOOLS</b>"));
+        assert!(PAGE.contains("id=\"overviewBy\""));
+        assert!(PAGE.contains("<option value=\"interaction\">Interaction flow</option>"));
+        assert!(PAGE.contains("<option value=\"layer\">Layer</option>"));
+        assert!(PAGE.contains("<option value=\"actor\">Actor</option>"));
+        assert!(PAGE.contains("<option value=\"class\">Class</option>"));
+        assert!(PAGE.contains("<option value=\"producer\">Producer</option>"));
+        assert!(PAGE.contains("aria-label=\"Trajectory filters\""));
         assert!(PAGE.contains("id=\"layer\""));
         assert!(PAGE.contains("id=\"actor\""));
         assert!(PAGE.contains("id=\"class\""));
@@ -4517,9 +4547,17 @@ mod tests {
         assert!(PAGE.contains("MAX_WINDOW_ROWS=1800"));
         assert!(PAGE.contains("params.set('before',displayRows[0].entry_id)"));
         assert!(PAGE.contains("params.set('after',displayRows.at(-1).entry_id)"));
-        assert!(PAGE.contains("id=\"later\""));
-        assert!(PAGE.contains("hasLater=data.hasLater"));
+        assert!(!PAGE.contains("id=\"older\""));
+        assert!(!PAGE.contains("id=\"later\""));
+        assert!(!PAGE.contains("Following live"));
+        assert!(!PAGE.contains("Resume tail"));
+        assert!(PAGE.contains("id=\"liveStatus\" role=\"status\""));
+        assert!(PAGE.contains("id=\"follow\"") && PAGE.contains("hidden><span class=\"live-dot\""));
+        assert!(PAGE.contains("Jump to live"));
+        assert!(PAGE.contains("event.deltaY<0"));
         assert!(PAGE.contains("boundary-label"));
+        assert!(PAGE.contains("paired-event"));
+        assert!(PAGE.contains("summaryCaption"));
         assert!(PAGE.contains("active · step"));
     }
 
@@ -4574,6 +4612,26 @@ mod tests {
         assert_eq!(response.rows[0].entry_id, "t:child/0");
         assert_eq!(response.rows[0].actor, "subagent:child");
         assert_eq!(response.rows[0].kind, "user.message");
+
+        let grouped = query_cached(
+            &state,
+            TrajectoryQuery {
+                overview_by: Some(TrajectoryOverviewDimension::Layer),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            grouped.overview.dimension,
+            TrajectoryOverviewDimension::Layer
+        );
+        assert_eq!(grouped.overview.counts.get("user"), Some(&1));
+        assert_eq!(grouped.overview.counts.get("assistant"), Some(&1));
+        assert!(grouped.overview.bins.iter().all(|bin| {
+            bin.counts
+                .keys()
+                .all(|key| matches!(key.as_str(), "user" | "assistant"))
+        }));
     }
 
     #[test]
