@@ -404,7 +404,8 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         .apply_config(merged_config.clone())
         .map_err(|error| acp::Error::invalid_request().data(error))?;
     *agent.cfg.borrow_mut() = merged_config.clone();
-    let published_revision = agent.models_manager.catalog_revision();
+    let published_catalog = std::sync::Arc::new(agent.models_manager.published_catalog());
+    let published_revision = published_catalog.revision;
 
     // Existing sessions adopt the same validated provider snapshot at their
     // actor mailbox boundary. A removed selection falls back to the newly
@@ -413,85 +414,16 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // later model producers are ordered after this generation. Acknowledgement
     // is deliberately outside the global lock: a busy foreground may defer its
     // own adoption, but must not freeze unrelated sessions.
-    let fallback_model = agent.models_manager.current_model_id();
-    let live_catalog = agent.models_manager.models();
-    let session_ids = agent.sessions.borrow().keys().cloned().collect::<Vec<_>>();
+    let reload_targets = agent.live_control_session_handles();
     let mut failed_sessions = Vec::<(acp::SessionId, String)>::new();
     let mut convergence = Vec::new();
-    for session_id in session_ids {
-        let Some((cmd_tx, route)) = agent
-            .sessions
-            .borrow()
-            .get(&session_id)
-            .map(|handle| (handle.cmd_tx.clone(), handle.model_route.snapshot()))
-        else {
-            continue;
-        };
-        let selected = if live_catalog.contains_key(route.model_id.0.as_ref()) {
-            route.model_id
-        } else {
-            fallback_model.clone()
-        };
-        let Some(mut sampling_config) = agent
-            .models_manager
-            .sampling_config_for_model(selected.0.as_ref())
-        else {
-            failed_sessions.push((
-                session_id.clone(),
-                format!(
-                    "session {} has no routable model after catalog reload",
-                    session_id.0
-                ),
-            ));
-            continue;
-        };
-        let selected_entry =
-            crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref());
-        if let Some(effort) = route.sampling_config.reasoning_effort {
-            if selected_entry.is_some_and(|entry| {
-                entry
-                    .info()
-                    .reasoning_efforts
-                    .iter()
-                    .any(|option| option.value == effort)
-            }) {
-                sampling_config.reasoning_effort = Some(effort);
-            } else {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    model_id = %selected.0,
-                    %effort,
-                    "catalog reload discarded a reasoning effort unsupported by the refreshed model"
-                );
-            }
-        } else {
-            sampling_config.reasoning_effort = None;
-        }
-        let inference_idle_timeout = {
-            let per_model = selected_entry.and_then(|entry| entry.info.inference_idle_timeout_secs);
-            let remote = merged_config
-                .remote_settings
-                .as_ref()
-                .and_then(|settings| settings.inference_idle_timeout_secs);
-            std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
-        };
-        let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
-        let auto_compact_threshold_percent =
-            crate::util::config::resolve_auto_compact_threshold_percent(
-                &merged_config,
-                selected.0.as_ref(),
-                selected_entry.map(|entry| &entry.info),
-            );
+    for (session_id, handle) in reload_targets {
+        let cmd_tx = handle.cmd_tx.clone();
         let (responds_to, response) = tokio::sync::oneshot::channel();
         if cmd_tx
             .send(
                 crate::session::commands::SessionCommand::ReloadModelConfig {
-                    model_id: selected,
-                    sampling_config,
-                    image_description_model: merged_config.image_description_model.clone(),
-                    inference_idle_timeout,
-                    max_retries,
-                    auto_compact_threshold_percent,
+                    catalog: published_catalog.clone(),
                     responds_to,
                 },
             )

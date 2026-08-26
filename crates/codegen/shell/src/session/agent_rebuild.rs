@@ -3,10 +3,8 @@
 //!
 //! INVARIANT: This is the **only** place in the shell crate that calls
 //! [`agent::AgentBuilder::new`]. Both initial session spawn
-//! ([`crate::session::actor::spawn_session_actor`]) and zero-turn
-//! harness rebuild
-//! ([`crate::session::actor::SessionActor::handle_rebuild_agent_for_definition`])
-//! go through [`AgentRebuildSpec::build_agent`].
+//! ([`crate::session::actor::spawn_session_actor`]) and next-step Agent
+//! selection go through [`AgentRebuildSpec::build_agent`].
 //!
 //! ## Why this exists
 //!
@@ -15,8 +13,7 @@
 //! backends, subagent senders, scheduler set, and plugin registry). The Agent
 //! is therefore session-bound — it cannot be shared
 //! across sessions and cannot be re-rendered from outside its session
-//! context. To rebuild it (e.g. when the user picks a model with a
-//! different `agent_type` before sending any user message), we need to
+//! context. To rebuild it when the user selects another Agent, we need to
 //! retain every input that the original `AgentBuilder` chain consumed.
 //! `AgentRebuildSpec` is exactly that retained bag of inputs.
 //!
@@ -77,10 +74,12 @@ pub(crate) struct AgentRebuildSpec {
     pub fs_backend: Arc<dyn AsyncFileSystem>,
     pub tools_notification_handle: ToolNotificationHandle,
     pub resources_persistence: Arc<tools::persistence::ResourcesPersistence>,
+    pub resource_domain: Arc<tools::registry::types::SessionResourceDomain>,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
-    pub memory_enabled: bool,
-    pub memory_backend: Option<Arc<dyn MemoryBackend>>,
+    /// Live session memory dependency. `/memory on|off` updates this cell, so
+    /// a later Agent rebuild cannot restore spawn-time memory state.
+    pub memory_runtime: Arc<parking_lot::RwLock<Option<Arc<dyn MemoryBackend>>>>,
     pub context_recall_backend:
         Arc<dyn tools::implementations::context_recall::ContextRecallBackend>,
     pub web_fetch_config: WebFetchConfig,
@@ -92,15 +91,30 @@ pub(crate) struct AgentRebuildSpec {
     pub ask_user_question_enabled: bool,
     pub prompt_audience: PromptAudience,
     pub skills_config: SkillsConfig,
-    pub context_window_tokens: u64,
+    pub context_window_tokens: Arc<std::sync::atomic::AtomicU64>,
     pub prompt_working_directory: Option<String>,
     pub lsp: Option<Arc<dyn LspBackend>>,
-    pub plugin_registry: Option<Arc<agent::plugins::PluginRegistry>>,
+    /// Session-authoritative plugin registry. Reload swaps this shared cell;
+    /// every later Agent rebuild snapshots it at the build boundary instead
+    /// of retaining the session's spawn-time registry.
+    pub plugin_registry: crate::session::workflow::tracker::SharedWorkflowPluginRegistry,
+    pub preloaded_subagent_names: Option<Vec<String>>,
+    /// Workflow Run-owned skill catalog. Ordinary sessions rediscover skills
+    /// on Agent rebuild; Workflow children must keep consuming the Run
+    /// snapshot after an Agent switch.
+    pub frozen_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
+    /// Session-operator file toolset clamp. It is re-applied to every Agent
+    /// definition before building so an Agent switch cannot silently restore
+    /// the definition's default file tools.
+    pub file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
     pub subagents_max_depth: u32,
+    /// Immutable child authority. `None` identifies a primary session.
+    pub initial_subagent_capability_mode: Option<tool_types::SubagentCapabilityMode>,
+    pub workflow_owned: bool,
     pub session_id_str: String,
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
     pub respect_gitignore: bool,
@@ -123,6 +137,11 @@ impl AgentRebuildSpec {
         self: &Arc<Self>,
         definition: AgentDefinition,
     ) -> Result<Agent, AgentBuildError> {
+        if self.resource_domain.scheduler_handle().is_none() {
+            return Err(AgentBuildError::InvalidConfig(
+                "Agent rebuild requested before the session resource domain was activated".into(),
+            ));
+        }
         self.build_agent_inner(definition, None, None).await
     }
     /// Build an agent with optional one-shot overrides for initial spawn.
@@ -135,20 +154,26 @@ impl AgentRebuildSpec {
     /// discovery in subagents.
     ///
     /// Both are consumed once — the rebuild path (`build_agent`) passes
-    /// `None` for both so zero-turn model switches get fresh discovery.
+    /// `None` for both so Agent selections get fresh discovery.
     pub async fn build_agent_with_initial_overrides(
         self: &Arc<Self>,
         definition: AgentDefinition,
         persisted_skill_names: Option<std::collections::HashSet<String>>,
         preloaded_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     ) -> Result<Agent, AgentBuildError> {
-        self.build_agent_inner(definition, persisted_skill_names, preloaded_skills)
+        let mut agent = self
+            .build_agent_inner(definition, persisted_skill_names, preloaded_skills)
+            .await?;
+        agent
+            .activate_resource_domain(&self.resource_domain)
             .await
+            .map_err(AgentBuildError::ToolError)?;
+        Ok(agent)
     }
     #[deny(unused_variables)]
     async fn build_agent_inner(
         self: &Arc<Self>,
-        definition: AgentDefinition,
+        mut definition: AgentDefinition,
         persisted_skill_names: Option<std::collections::HashSet<String>>,
         preloaded_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     ) -> Result<Agent, AgentBuildError> {
@@ -158,10 +183,10 @@ impl AgentRebuildSpec {
             fs_backend,
             tools_notification_handle,
             resources_persistence,
+            resource_domain,
             session_env,
             models_manager,
-            memory_enabled,
-            memory_backend,
+            memory_runtime,
             context_recall_backend,
             web_fetch_config,
             app_builder_deployer_config,
@@ -176,11 +201,16 @@ impl AgentRebuildSpec {
             prompt_working_directory,
             lsp,
             plugin_registry,
+            preloaded_subagent_names,
+            frozen_skills,
+            file_tool_overrides,
             tool_params_json,
             subagent_event_tx,
             user_question_tx,
             subagent_depth,
             subagents_max_depth,
+            initial_subagent_capability_mode,
+            workflow_owned,
             session_id_str,
             blocking_wait_depth,
             respect_gitignore,
@@ -190,19 +220,40 @@ impl AgentRebuildSpec {
             owner_session_id,
             parent_scheduler_handle,
         } = self.as_ref();
+        if let Some(file_tools) = file_tool_overrides {
+            definition.override_file_tools(file_tools.clone());
+        }
+        if let Some(initial_mode) = initial_subagent_capability_mode {
+            crate::agent::subagent::resolution::apply_child_profile_policy(
+                &mut definition,
+                *initial_mode,
+                subagent_depth < subagents_max_depth,
+                *workflow_owned,
+            );
+        }
+        let current_context_window =
+            context_window_tokens.load(std::sync::atomic::Ordering::Relaxed);
+        let memory_backend = memory_runtime.read().clone();
+        let scheduler_handle = parent_scheduler_handle
+            .clone()
+            .or_else(|| resource_domain.scheduler_handle());
         let mut builder = AgentBuilder::new(
             working_directory.clone(),
             terminal_backend.clone(),
             tools_notification_handle.clone(),
         )
         .from_definition(definition)
-        .with_memory_enabled(*memory_enabled)
+        .with_memory_enabled(memory_backend.is_some())
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
         .with_resources_persistence(resources_persistence.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
-        .with_web_fetch_config(web_fetch_config.clone())
+        .with_web_fetch_config(
+            web_fetch_config
+                .clone()
+                .with_context_window_tokens(current_context_window),
+        )
         .with_write_file_enabled(*write_file_enabled)
         .with_fs(fs_backend.clone())
         .with_subagents_enabled(*subagents_enabled)
@@ -218,24 +269,27 @@ impl AgentRebuildSpec {
         .with_ask_user_question_enabled(*ask_user_question_enabled)
         .with_prompt_audience(*prompt_audience)
         .with_skills_config(skills_config.clone())
-        .with_context_window(*context_window_tokens)
+        .with_context_window(current_context_window)
         .with_mcp_max_output_bytes(
             crate::util::config::resolve_max_mcp_output_bytes_for_cwd(working_directory),
         );
         if let Some(owner_session_id) = owner_session_id.clone() {
             builder = builder.with_owner_session_id(owner_session_id);
         }
-        if let Some(handle) = parent_scheduler_handle.clone() {
+        if let Some(handle) = scheduler_handle {
             builder = builder.with_parent_scheduler_handle(handle);
         }
-        if let Some(memory_backend) = memory_backend.clone() {
+        if let Some(memory_backend) = memory_backend {
             builder = builder.with_memory_backend(memory_backend);
         }
         if let Some(lsp) = lsp.clone() {
             builder = builder.with_lsp(lsp);
         }
-        if let Some(plugin_registry) = plugin_registry.clone() {
+        if let Some(plugin_registry) = plugin_registry.read().clone() {
             builder = builder.with_plugin_registry(plugin_registry);
+        }
+        if let Some(names) = preloaded_subagent_names.clone() {
+            builder = builder.with_preloaded_subagent_names(names);
         }
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
@@ -249,7 +303,7 @@ impl AgentRebuildSpec {
         if let Some(names) = persisted_skill_names {
             builder = builder.with_persisted_announced_skill_names(names);
         }
-        if let Some(skills) = preloaded_skills {
+        if let Some(skills) = preloaded_skills.or_else(|| frozen_skills.clone()) {
             builder = builder.with_preloaded_skills(skills);
         }
         let agent = builder.build().await?;
@@ -336,10 +390,10 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         fs_backend: Arc::new(tools::computer::local::LocalFs),
         tools_notification_handle: ToolNotificationHandle::noop(),
         resources_persistence: Arc::new(tools::persistence::ResourcesPersistence::noop()),
+        resource_domain: Arc::new(tools::registry::types::SessionResourceDomain::new()),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
-        memory_enabled: false,
-        memory_backend: None,
+        memory_runtime: Arc::new(parking_lot::RwLock::new(None)),
         context_recall_backend: crate::session::actor::context_recall::context_recall_channel().0,
         web_fetch_config: WebFetchConfig::Disabled,
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
@@ -350,15 +404,20 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         ask_user_question_enabled: true,
         prompt_audience: PromptAudience::Primary,
         skills_config: SkillsConfig::default(),
-        context_window_tokens: 256_000,
+        context_window_tokens: Arc::new(std::sync::atomic::AtomicU64::new(256_000)),
         prompt_working_directory: None,
         lsp: None,
-        plugin_registry: None,
+        plugin_registry: Arc::new(parking_lot::RwLock::new(None)),
+        preloaded_subagent_names: None,
+        frozen_skills: None,
+        file_tool_overrides: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,
         subagents_max_depth: tools::implementations::grow_build::task::MAX_SUBAGENT_DEPTH,
+        initial_subagent_capability_mode: None,
+        workflow_owned: false,
         session_id_str: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
@@ -409,7 +468,11 @@ mod tests {
                 models_manager
                     .insert_test_entry("private-unselectable-model", unselectable);
                 let first = spec
-                    .build_agent(AgentDefinition::default_grow_build())
+                    .build_agent_with_initial_overrides(
+                        AgentDefinition::default_grow_build(),
+                        None,
+                        None,
+                    )
                     .await
                     .expect("first agent build should succeed");
                 let first_description = task_description(&first);
@@ -447,6 +510,177 @@ mod tests {
                          - zeta-public"
                     )
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebuild_reuses_one_live_resource_domain_and_scheduler() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::types::resources::{State, WebCitationCounter};
+
+                let spec = test_rebuild_spec_default();
+                let first = spec
+                    .build_agent_with_initial_overrides(
+                        AgentDefinition::default_grow_build(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let first_resources = first.tool_bridge().toolset().resources.clone();
+                let first_scheduler = {
+                    let mut resources = first_resources.lock().await;
+                    resources
+                        .get_or_default::<State<WebCitationCounter>>()
+                        .counter = 9;
+                    resources
+                        .get::<tools::implementations::grow_build::scheduler::types::SchedulerHandle>()
+                        .cloned()
+                        .unwrap()
+                };
+
+                let mut replacement = spec
+                    .build_agent(AgentDefinition::default_grow_build())
+                    .await
+                    .unwrap();
+                assert!(
+                    !std::sync::Arc::ptr_eq(
+                        &first_resources,
+                        &replacement.tool_bridge().toolset().resources,
+                    ),
+                    "candidate construction must remain isolated until commit"
+                );
+                replacement
+                    .activate_resource_domain(&spec.resource_domain)
+                    .await
+                    .unwrap();
+                let replacement_resources = replacement.tool_bridge().toolset().resources.clone();
+                assert!(std::sync::Arc::ptr_eq(
+                    &first_resources,
+                    &replacement_resources
+                ));
+                let resources = replacement_resources.lock().await;
+                assert_eq!(
+                    resources
+                        .get::<State<WebCitationCounter>>()
+                        .unwrap()
+                        .counter,
+                    9,
+                    "live state must win over the replacement's disk snapshot"
+                );
+                let replacement_scheduler = resources
+                    .get::<tools::implementations::grow_build::scheduler::types::SchedulerHandle>()
+                    .unwrap();
+                assert!(first_scheduler.0.same_channel(&replacement_scheduler.0));
+                drop(resources);
+
+                drop(first);
+                assert!(!first_scheduler.0.is_closed());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workflow_rebuild_keeps_the_run_frozen_skill_body() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let project = tempfile::tempdir().unwrap();
+                let skill_dir = project.path().join(".grow/skills/frozen-rebuild");
+                std::fs::create_dir_all(&skill_dir).unwrap();
+                let skill_path = skill_dir.join("SKILL.md");
+                std::fs::write(
+                    &skill_path,
+                    "---\nname: frozen-rebuild\ndescription: frozen\n---\nORIGINAL REBUILD SKILL\n",
+                )
+                .unwrap();
+                let cwd = project.path().to_string_lossy();
+                let discovered =
+                    agent::prompt::skills::list_skills(Some(&cwd), &SkillsConfig::default()).await;
+                let frozen = discovered
+                    .into_iter()
+                    .find(|skill| skill.name == "frozen-rebuild")
+                    .unwrap();
+                let frozen = tools::implementations::skills::skill::load_skill_with_body(&frozen)
+                    .await
+                    .unwrap();
+                std::fs::write(
+                    &skill_path,
+                    "---\nname: frozen-rebuild\ndescription: mutated\n---\nMUTATED REBUILD SKILL\n",
+                )
+                .unwrap();
+
+                let mut spec = test_rebuild_spec_default();
+                let mutable = Arc::get_mut(&mut spec).unwrap();
+                mutable.working_directory = project.path().to_path_buf();
+                mutable.frozen_skills = Some(vec![frozen]);
+                let mut definition = AgentDefinition::default_grow_build();
+                definition.name = "workflow-child".to_owned();
+                definition.skills = vec!["frozen-rebuild".to_owned()];
+                let rebuilt = spec
+                    .build_agent_with_initial_overrides(definition, None, None)
+                    .await
+                    .unwrap();
+                let role = rebuilt
+                    .role_prompt()
+                    .expect("Workflow Agent has a rendered role");
+                assert!(role.contains("ORIGINAL REBUILD SKILL"), "{role}");
+                assert!(!role.contains("MUTATED REBUILD SKILL"), "{role}");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_child_rebuild_reapplies_immutable_owner_policy() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut spec = test_rebuild_spec_default();
+                let mutable = Arc::get_mut(&mut spec).unwrap();
+                mutable.initial_subagent_capability_mode =
+                    Some(tool_types::SubagentCapabilityMode::ReadOnly);
+                mutable.subagent_depth = mutable.subagents_max_depth;
+                mutable.workflow_owned = true;
+
+                let rebuilt = spec
+                    .build_agent_with_initial_overrides(
+                        AgentDefinition::default_grow_build(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let definition = rebuilt.definition();
+                assert_eq!(
+                    definition.capability_mode,
+                    Some(tool_types::SubagentCapabilityMode::ReadOnly)
+                );
+                let authored = definition
+                    .authored_capability_tools
+                    .as_ref()
+                    .expect("child policy freezes authored eligibility");
+                assert!(authored.tools.iter().all(|tool| {
+                    !matches!(
+                        tool.kind,
+                        Some(
+                            tools::types::tool::ToolKind::Task
+                                | tools::types::tool::ToolKind::GoalLifecycleUpdate
+                        )
+                    )
+                }));
+                for tools in [&definition.tool_config.tools, &authored.tools] {
+                    assert!(tools.iter().all(|tool| {
+                        !matches!(
+                            tool.id.rsplit(':').next(),
+                            Some(
+                                "workflow"
+                                    | "scheduler_create"
+                                    | "scheduler_list"
+                                    | "scheduler_delete"
+                            )
+                        )
+                    }));
+                }
             })
             .await;
     }

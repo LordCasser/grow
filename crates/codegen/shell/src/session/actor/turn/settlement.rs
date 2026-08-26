@@ -209,12 +209,16 @@ impl SessionActor {
                 );
                 return;
             }
-            let task = state
-                .foreground
-                .begin_settling()
-                .expect("running prompt id implies a regular foreground task");
-            let turn_origin = task.origin.clone();
-            let turn_kind = task.turn_kind;
+            let (turn_origin, turn_kind) = match state.foreground.settling_identity(&prompt_id) {
+                Some(identity) => identity,
+                None => {
+                    let task = state
+                        .foreground
+                        .begin_settling()
+                        .expect("running prompt id implies a regular or settling foreground task");
+                    (task.origin.clone(), task.turn_kind)
+                }
+            };
             let input = state
                 .pending_inputs
                 .front()
@@ -323,12 +327,14 @@ impl SessionActor {
         }
         // The terminal is durable before clients observe either a new running
         // owner or an idle queue snapshot.
-        let settled = self
-            .state
-            .lock()
-            .await
-            .foreground
-            .finish_settling(&prompt_id);
+        let settled = {
+            let mut state = self.state.lock().await;
+            let settled = state.foreground.finish_settling(&prompt_id);
+            if settled {
+                state.terminal_preemption_pending = false;
+            }
+            settled
+        };
         debug_assert!(
             settled,
             "settlement must release its exact foreground fence"
@@ -563,6 +569,7 @@ mod goal_degradation_tests {
         let result: PromptTurnResult = Err(acp::Error::invalid_request());
         let goal_origin = crate::session::PromptOrigin::GoalContinuation {
             goal_id: "goal-1".to_string(),
+            definition_revision: 1,
         };
 
         let (_, suppress, stop) =

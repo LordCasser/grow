@@ -1,13 +1,11 @@
 //! Trace-replay classifier.
 //!
-//! Reads an offline session trace JSON and replays the Layer-2
-//! `evaluate_todo_gate` and Layer-3 LazinessDetector classifier
-//! against every turn, emitting one JSONL record per turn so an
-//! operator can see what the gate and classifier *would have decided*
-//! at each turn-end.
+//! Reads an offline session trace JSON and replays the Layer-3
+//! LazinessDetector classifier against every turn, emitting one JSONL
+//! record per turn so an operator can inspect classifier decisions.
 //!
 //! Production wiring lives in
-//! `crate::session::actor::{maybe_fire_laziness_check, evaluate_todo_gate}`
+//! `crate::session::actor::maybe_fire_laziness_check`
 //! — this module is a thin replay harness around the same `pub(crate)`
 //! helpers. New crate-internal so we get visibility for free without
 //! widening the production surface.
@@ -21,14 +19,12 @@ use sampling_types::{ContentPart, ConversationItem, ConversationRequest, SystemI
 use serde::{Deserialize, Serialize};
 
 use crate::session::{
-    CollectedTodoGateInput, DebugDecision, LAZINESS_CLASSIFIER_PROMPT,
-    LAZINESS_CLASSIFIER_TIMEOUT_MS, LAZINESS_CONTEXT_ITEM_LIMIT, LAZINESS_DEFAULT_MIN_CONFIDENCE,
-    LAZINESS_INCLUDE_REASONING, LAZINESS_MIN_ASSISTANT_TURNS, LAZINESS_MIN_USER_TURNS,
-    LAZINESS_USER_PREAMBLE, TodoGateDecision, TodoGateReason, classify_debug_decision,
-    evaluate_todo_gate, flatten_transcript_for_classifier, format_runtime_state_line,
+    DebugDecision, LAZINESS_CLASSIFIER_PROMPT, LAZINESS_CLASSIFIER_TIMEOUT_MS,
+    LAZINESS_CONTEXT_ITEM_LIMIT, LAZINESS_DEFAULT_MIN_CONFIDENCE, LAZINESS_INCLUDE_REASONING,
+    LAZINESS_MIN_ASSISTANT_TURNS, LAZINESS_MIN_USER_TURNS, LAZINESS_USER_PREAMBLE,
+    classify_debug_decision, flatten_transcript_for_classifier, format_runtime_state_line,
     laziness_window_start, parse_classifier_output,
 };
-use crate::tools::todo::{TodoItem, TodoPriority, TodoState, TodoStatus};
 
 // Trace JSON shape
 
@@ -68,36 +64,6 @@ pub struct TurnMetadata {
 // Output schema. Borrowed slices throughout so we serialize once
 // straight from `process_turn`'s working state without any clones.
 // (N2/N12/N15.)
-
-#[derive(Debug, Serialize)]
-pub struct TodoSnapshotOut<'a> {
-    #[serde(serialize_with = "serialize_str_slice")]
-    pub pending: &'a [String],
-    #[serde(serialize_with = "serialize_str_slice")]
-    pub in_progress_unbacked: &'a [String],
-    #[serde(serialize_with = "serialize_str_slice")]
-    pub in_progress_backed: &'a [String],
-}
-
-#[derive(Debug, Serialize)]
-pub struct TodoGateOut<'a> {
-    pub decision: GateDecisionKind,
-    pub reason: Option<GateReasonKind>,
-    pub reminder: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateDecisionKind {
-    Continue,
-    Nudge,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateReasonKind {
-    InFlight,
-}
 
 #[derive(Debug, Serialize)]
 pub struct ParsedClassifierOut<'a> {
@@ -143,16 +109,10 @@ pub struct TurnLine<'a> {
     pub request_id: Option<&'a str>,
     pub items_in_history: usize,
     pub items_after_window_trim: usize,
-    /// Subagents + backgrounded terminal tasks outstanding at turn end.
-    /// This is the count fed to the Layer-2 TodoGate (production:
-    /// `collect_todo_gate_input.backing_task_count`).
-    pub gate_backing_task_count: usize,
     /// Backgrounded terminal tasks only (excludes subagents) — what
     /// the Layer-3 classifier `[runtime_state]` line carries
     /// (production: `snapshot_backing_task_count_for_debug_log`).
     pub classifier_backing_task_count: usize,
-    pub todo_state: TodoSnapshotOut<'a>,
-    pub todo_gate: TodoGateOut<'a>,
     pub laziness_classifier: LazinessOut<'a>,
     /// The resolved `include_reasoning` value used to render the
     /// classifier transcript for this turn. Lives next to
@@ -170,28 +130,11 @@ pub struct TurnLine<'a> {
     pub turn_elapsed_seconds: Option<u64>,
 }
 
-/// Serialize `&[String]` as a JSON array without allocating an
-/// intermediate `Vec<&str>` — `SerializeSeq` accepts borrowed `&str`s
-/// directly. (N12)
-fn serialize_str_slice<S: serde::Serializer>(
-    items: &&[String],
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    use serde::ser::SerializeSeq;
-    let mut seq = serializer.serialize_seq(Some(items.len()))?;
-    for item in *items {
-        seq.serialize_element(item.as_str())?;
-    }
-    seq.end()
-}
-
 // Summary counters
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub turns: usize,
-    pub gate_continue: usize,
-    pub gate_nudge: usize,
     pub laz_would_nudge: usize,
     pub laz_not_stalled: usize,
     pub laz_low_confidence: usize,
@@ -203,11 +146,8 @@ impl Summary {
         // Lead with the common (non-action) class for parity with the
         // laziness counter ordering. (F28)
         format!(
-            "Processed {} turns. TodoGate: {} Continue, {} Nudge. \
-             Laziness: {} NoNudge-NotStalled, {} NoNudge-LowConfidence, {} WouldNudge, {} Aborted.",
+            "Processed {} turns. Laziness: {} NoNudge-NotStalled, {} NoNudge-LowConfidence, {} WouldNudge, {} Aborted.",
             self.turns,
-            self.gate_continue,
-            self.gate_nudge,
             self.laz_not_stalled,
             self.laz_low_confidence,
             self.laz_would_nudge,
@@ -216,137 +156,7 @@ impl Summary {
     }
 }
 
-// TodoState reconstruction
-
-const TODO_WRITE_TOOL_NAME: &str = "todo_write";
-
-/// Replay every assistant `todo_write` call in order so the resulting
-/// `TodoState` matches what the production tool runtime would have
-/// held at turn-end.
-///
-/// Production's `TodoWriteTool` validates inputs (no duplicate IDs)
-/// before dispatching to `apply_replace` / `apply_merge`. We mirror
-/// that guard here so duplicate-id payloads don't drift the replay
-/// off the production trajectory. (F2)
-///
-/// If a call's `arguments` field fails to parse OR fails validation
-/// we skip the call (consistent with the "skip-on-malformed" policy)
-/// and keep going.
-pub fn reconstruct_todo_state(items: &[ConversationItem]) -> TodoState {
-    let mut state = TodoState::default();
-    for item in items {
-        let ConversationItem::Assistant(asst) = item else {
-            continue;
-        };
-        for tc in &asst.tool_calls {
-            if tc.name != TODO_WRITE_TOOL_NAME {
-                continue;
-            }
-            let Ok(parsed) = serde_json::from_str::<TodoWriteArgs>(&tc.arguments) else {
-                continue;
-            };
-            if has_duplicate_ids(&parsed.todos) {
-                tracing::debug!(
-                    tool_call_id = %tc.id,
-                    "trace_classifier: skipping todo_write with duplicate IDs",
-                );
-                continue;
-            }
-            if parsed.merge {
-                apply_merge(&mut state, parsed.todos);
-            } else {
-                apply_replace(&mut state, parsed.todos);
-            }
-        }
-    }
-    state
-}
-
-fn has_duplicate_ids(updates: &[TodoUpdateArgs]) -> bool {
-    use std::collections::HashSet;
-    let mut seen = HashSet::with_capacity(updates.len());
-    updates.iter().any(|u| !seen.insert(u.id.as_str()))
-}
-
-#[derive(Debug, Deserialize)]
-struct TodoWriteArgs {
-    #[serde(default = "default_merge")]
-    merge: bool,
-    #[serde(default)]
-    todos: Vec<TodoUpdateArgs>,
-}
-
-const fn default_merge() -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize)]
-struct TodoUpdateArgs {
-    id: String,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    status: Option<TodoStatus>,
-}
-
-/// `merge=false`: replace the state entirely. Mirrors production's
-/// `apply_replace`. Split out from the merge path to match the
-/// two-function shape in `tools` (F29).
-fn apply_replace(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
-    state.clear();
-    for u in updates {
-        push_new(state, u);
-    }
-}
-
-/// `merge=true`: upsert by id. Mirrors `apply_merge` in
-/// `tools` — existing items keep their prior content when
-/// the update omits `content`. (F29)
-fn apply_merge(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
-    for u in updates {
-        if state.update(&u.id, u.content.as_deref(), u.status) {
-            continue;
-        }
-        push_new(state, u);
-    }
-}
-
-fn push_new(state: &mut TodoState, u: TodoUpdateArgs) {
-    let TodoUpdateArgs {
-        id,
-        content,
-        status,
-    } = u;
-    let content = content
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| id.clone());
-    let status = status.unwrap_or(TodoStatus::Pending);
-    state.push(
-        id,
-        TodoItem {
-            content,
-            priority: TodoPriority::default(),
-            status,
-            meta: None,
-        },
-    );
-}
-
-// Backing-task counts.
-//
-// Production has TWO different counts (F1):
-//
-//   * Layer-2 (`TodoGate`): outstanding_subagents + incomplete
-//     terminal/monitor tasks. See `collect_todo_gate_input` in
-//     the session actor.
-//   * Layer-3 (`LazinessDetector` runtime_state line): incomplete
-//     terminal/monitor tasks ONLY (no subagents). See
-//     `snapshot_backing_task_count_for_debug_log` and the explanatory
-//     actor implementation ("the prompt-scoped
-//     subagent count isn't available without plumbing the prompt_id
-//     through").
-//
-// We mirror that asymmetry exactly.
+// Backing-task counts used by the LazinessDetector runtime-state line.
 
 /// Background-dispatching tool kinds. The `Option<BackgroundDispatchKind>`
 /// returned by [`background_kind`] makes "not a background dispatch"
@@ -434,80 +244,6 @@ pub fn count_outstanding_dispatches(items: &[ConversationItem]) -> BackingCounts
         }
     }
     counts
-}
-
-// TodoGate — partition + decision.
-
-/// Borrowed view over a `TodoState` partitioned the same way
-/// `CollectedTodoGateInput::as_input` does. Single source of truth
-/// for both the gate input AND the JSON-output snapshot. We still
-/// run the partition twice (here for the snapshot, and again inside
-/// `as_input` for the gate decision) because `TodoGateInput`'s fields
-/// are module-private to the session actor and the task brief forbids
-/// widening them — but the *logical* duplication is contained to
-/// `partition_todos`, which is unit-tested against the production
-/// heuristic.
-struct GateView<'a> {
-    pending: Vec<&'a str>,
-    in_progress_backed: Vec<&'a str>,
-    in_progress_unbacked: Vec<&'a str>,
-}
-
-fn partition_todos(state: &TodoState, backing_task_count: usize) -> GateView<'_> {
-    let mut pending = Vec::new();
-    let mut in_progress: Vec<&str> = Vec::new();
-    for (_, item) in state.todo_items_with_ids() {
-        match item.status {
-            TodoStatus::Pending => pending.push(item.content.as_str()),
-            TodoStatus::InProgress => in_progress.push(item.content.as_str()),
-            TodoStatus::Completed | TodoStatus::Cancelled => {}
-        }
-    }
-    let backed_count = in_progress.len().min(backing_task_count);
-    let in_progress_unbacked = in_progress.split_off(backed_count);
-    GateView {
-        pending,
-        in_progress_backed: in_progress,
-        in_progress_unbacked,
-    }
-}
-
-fn gate_reason_kind(reason: TodoGateReason) -> GateReasonKind {
-    match reason {
-        TodoGateReason::InFlight => GateReasonKind::InFlight,
-    }
-}
-
-/// Owned-string version of [`TodoGateOut`] held on [`TurnData`] —
-/// `as_line()` lends out a borrowed `TodoGateOut<'_>` view.
-#[derive(Debug)]
-pub struct TodoGateOwned {
-    pub decision: GateDecisionKind,
-    pub reason: Option<GateReasonKind>,
-    pub reminder: Option<String>,
-}
-
-fn run_todo_gate(state: &TodoState, gate_backing_task_count: usize) -> TodoGateOwned {
-    let collected = CollectedTodoGateInput {
-        todos: state
-            .todo_items_with_ids()
-            .map(|(id, item)| (id.clone(), item.content.clone(), item.status))
-            .collect(),
-        backing_task_count: gate_backing_task_count,
-    };
-    let input = collected.as_input();
-    match evaluate_todo_gate(&input) {
-        TodoGateDecision::Continue => TodoGateOwned {
-            decision: GateDecisionKind::Continue,
-            reason: None,
-            reminder: None,
-        },
-        TodoGateDecision::Nudge { reminder, reason } => TodoGateOwned {
-            decision: GateDecisionKind::Nudge,
-            reason: Some(gate_reason_kind(reason)),
-            reminder: Some(reminder),
-        },
-    }
 }
 
 // Laziness classifier.
@@ -711,10 +447,6 @@ async fn classify_turn(
 
 fn bump_summary(summary: &mut Summary, line: &TurnLine<'_>) {
     summary.turns += 1;
-    match line.todo_gate.decision {
-        GateDecisionKind::Continue => summary.gate_continue += 1,
-        GateDecisionKind::Nudge => summary.gate_nudge += 1,
-    }
     match line.laziness_classifier.decision {
         LazinessDecisionKind::WouldNudge => summary.laz_would_nudge += 1,
         LazinessDecisionKind::NoNudgeNotStalled => summary.laz_not_stalled += 1,
@@ -728,7 +460,7 @@ fn bump_summary(summary: &mut Summary, line: &TurnLine<'_>) {
 /// Per-turn working data. `turn_id` and `request_id` borrow from the
 /// source `TurnRecord` so we don't clone identifiers we already
 /// own elsewhere; the rest is owned because it's produced fresh
-/// (todo snapshot, classifier output) and outlives any single
+/// (classifier output) and outlives any single
 /// `as_line()` call.
 pub struct TurnData<'a> {
     pub turn_id: &'a str,
@@ -736,12 +468,7 @@ pub struct TurnData<'a> {
     pub request_id: Option<&'a str>,
     pub items_in_history: usize,
     pub items_after_window_trim: usize,
-    pub gate_backing_task_count: usize,
     pub classifier_backing_task_count: usize,
-    pub pending: Vec<String>,
-    pub in_progress_unbacked: Vec<String>,
-    pub in_progress_backed: Vec<String>,
-    pub todo_gate: TodoGateOwned,
     pub laziness: LazinessOwned,
     /// Resolved `include_reasoning` value the classifier ran with —
     /// CLI override winning over `LAZINESS_INCLUDE_REASONING`. Surfaced
@@ -763,18 +490,7 @@ impl<'a> TurnData<'a> {
             request_id: self.request_id,
             items_in_history: self.items_in_history,
             items_after_window_trim: self.items_after_window_trim,
-            gate_backing_task_count: self.gate_backing_task_count,
             classifier_backing_task_count: self.classifier_backing_task_count,
-            todo_state: TodoSnapshotOut {
-                pending: self.pending.as_slice(),
-                in_progress_unbacked: self.in_progress_unbacked.as_slice(),
-                in_progress_backed: self.in_progress_backed.as_slice(),
-            },
-            todo_gate: TodoGateOut {
-                decision: self.todo_gate.decision,
-                reason: self.todo_gate.reason,
-                reminder: self.todo_gate.reminder.as_deref(),
-            },
             laziness_classifier: LazinessOut {
                 model_id: self.laziness.model_id.as_str(),
                 elapsed_ms: self.laziness.elapsed_ms,
@@ -794,7 +510,7 @@ impl<'a> TurnData<'a> {
     }
 }
 
-/// Replay a single turn record against the gate + classifier. Pure
+/// Replay a single turn record against the classifier. Pure
 /// over `client`; the binary uses the sampler-backed implementation,
 /// tests use a recorded-response double.
 ///
@@ -820,10 +536,6 @@ pub async fn process_turn<'a>(
     // window). Counting over the windowed slice would silently miss
     // outstanding dispatches older than the window — which is wrong.
     let counts = count_outstanding_dispatches(history);
-
-    let todo_state = reconstruct_todo_state(history);
-    let view = partition_todos(&todo_state, counts.terminal_plus_subagents);
-    let todo_gate = run_todo_gate(&todo_state, counts.terminal_plus_subagents);
 
     // Trim to the classifier window without cloning the history —
     // the slice borrows directly out of the record. (F12)
@@ -853,20 +565,7 @@ pub async fn process_turn<'a>(
         request_id: record.trace.metadata.request_id.as_deref(),
         items_in_history,
         items_after_window_trim,
-        gate_backing_task_count: counts.terminal_plus_subagents,
         classifier_backing_task_count: counts.terminal_only,
-        pending: view.pending.iter().map(|&s| s.to_owned()).collect(),
-        in_progress_unbacked: view
-            .in_progress_unbacked
-            .iter()
-            .map(|&s| s.to_owned())
-            .collect(),
-        in_progress_backed: view
-            .in_progress_backed
-            .iter()
-            .map(|&s| s.to_owned())
-            .collect(),
-        todo_gate,
         laziness,
         include_reasoning,
         turn_elapsed_seconds,
@@ -1328,140 +1027,6 @@ mod tests {
         );
     }
 
-    /// 2. TodoState reconstruction.
-    #[test]
-    fn reconstructs_todo_state_replace_then_merge() {
-        let items = vec![
-            assistant_with_tool_calls(vec![tc(
-                "c1",
-                "todo_write",
-                r#"{"merge":false,"todos":[
-                    {"id":"a","content":"do A","status":"pending"},
-                    {"id":"b","content":"do B","status":"in_progress"}
-                ]}"#,
-            )]),
-            assistant_with_tool_calls(vec![tc(
-                "c2",
-                "todo_write",
-                r#"{"merge":true,"todos":[
-                    {"id":"b","status":"completed"},
-                    {"id":"c","content":"do C","status":"pending"}
-                ]}"#,
-            )]),
-        ];
-        let state = reconstruct_todo_state(&items);
-        let by_id: std::collections::HashMap<_, _> = state
-            .todo_items_with_ids()
-            .map(|(id, it)| (id.clone(), it.clone()))
-            .collect();
-        assert_eq!(by_id.len(), 3);
-        assert_eq!(by_id["a"].status, TodoStatus::Pending);
-        assert_eq!(by_id["b"].status, TodoStatus::Completed);
-        // F23: assert content is preserved across content-less merge.
-        assert_eq!(by_id["b"].content, "do B");
-        assert_eq!(by_id["c"].status, TodoStatus::Pending);
-        assert_eq!(by_id["c"].content, "do C");
-    }
-
-    /// N4 follow-up: turn_3 of the cumulative synthetic fixture should
-    /// show `a:completed` (seeded in turn_0, merged in turn_3).
-    #[test]
-    fn synthetic_turn_3_completes_seed_from_turn_0() {
-        let trace = parse_synthetic();
-        let state = reconstruct_todo_state(&trace[3].trace.after_state_history);
-        let by_id: std::collections::HashMap<_, _> = state
-            .todo_items_with_ids()
-            .map(|(id, it)| (id.clone(), it.clone()))
-            .collect();
-        assert_eq!(by_id["a"].status, TodoStatus::Completed);
-        // Content preserved across the content-less merge.
-        assert_eq!(by_id["a"].content, "step1");
-    }
-
-    #[test]
-    fn skips_malformed_todo_write_args() {
-        let items = vec![assistant_with_tool_calls(vec![tc(
-            "c1",
-            "todo_write",
-            "not json",
-        )])];
-        let state = reconstruct_todo_state(&items);
-        assert!(state.is_empty());
-    }
-
-    /// F2/F24: duplicate ids in one call → whole call is skipped.
-    #[test]
-    fn skips_todo_write_with_duplicate_ids() {
-        let items = vec![
-            assistant_with_tool_calls(vec![tc(
-                "c1",
-                "todo_write",
-                r#"{"merge":false,"todos":[{"id":"a","content":"first","status":"pending"}]}"#,
-            )]),
-            assistant_with_tool_calls(vec![tc(
-                "c2",
-                "todo_write",
-                r#"{"merge":false,"todos":[
-                    {"id":"x","content":"X","status":"pending"},
-                    {"id":"x","content":"X2","status":"in_progress"}
-                ]}"#,
-            )]),
-        ];
-        let state = reconstruct_todo_state(&items);
-        let ids: Vec<_> = state
-            .todo_items_with_ids()
-            .map(|(id, _)| id.clone())
-            .collect();
-        assert_eq!(ids, vec!["a".to_owned()]);
-    }
-
-    /// 3. TodoGateInput partition.
-    #[test]
-    fn partition_respects_backing_task_count() {
-        let mut state = TodoState::default();
-        for (id, content, status) in [
-            ("p1", "pending one", TodoStatus::Pending),
-            ("i1", "in flight one", TodoStatus::InProgress),
-            ("i2", "in flight two", TodoStatus::InProgress),
-            ("i3", "in flight three", TodoStatus::InProgress),
-            ("c1", "done one", TodoStatus::Completed),
-        ] {
-            state.push(
-                id.to_owned(),
-                TodoItem {
-                    content: content.to_owned(),
-                    priority: TodoPriority::default(),
-                    status,
-                    meta: None,
-                },
-            );
-        }
-        let view = partition_todos(&state, 1);
-        assert_eq!(view.pending, vec!["pending one"]);
-        assert_eq!(view.in_progress_backed, vec!["in flight one"]);
-        assert_eq!(
-            view.in_progress_unbacked,
-            vec!["in flight two", "in flight three"]
-        );
-    }
-
-    #[test]
-    fn partition_with_more_backing_than_in_progress_clamps() {
-        let mut state = TodoState::default();
-        state.push(
-            "i1".into(),
-            TodoItem {
-                content: "only".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::InProgress,
-                meta: None,
-            },
-        );
-        let view = partition_todos(&state, 5);
-        assert_eq!(view.in_progress_backed, vec!["only"]);
-        assert!(view.in_progress_unbacked.is_empty());
-    }
-
     /// F1: gate count includes subagents; classifier count does not.
     #[test]
     fn outstanding_dispatches_split_terminal_vs_subagents() {
@@ -1545,9 +1110,7 @@ mod tests {
         for line in body.lines() {
             let v: serde_json::Value = serde_json::from_str(line).expect("line is json");
             assert!(v.get("turn_id").is_some());
-            assert!(v.get("todo_gate").is_some());
             assert!(v.get("laziness_classifier").is_some());
-            assert!(v.get("gate_backing_task_count").is_some());
             assert!(v.get("classifier_backing_task_count").is_some());
             // The resolved `include_reasoning` is surfaced on every
             // per-turn record so two A/B runs can be diffed line by
@@ -1610,40 +1173,6 @@ mod tests {
                 assert_eq!(dec, wire_str, "decision wire-string for {expected_kind:?}");
             }
         }
-    }
-
-    /// F1 (in-pipeline): on the cumulative synthetic, turn_2 has a
-    /// `monitor` outstanding (m1) but turn_1's `spawn_subagent` (s1) is
-    /// already resolved by a `tool_result` — so the classifier count
-    /// (terminal_only) sees `m1` only, while the gate count
-    /// (terminal_plus_subagents) sees the same `m1` plus no
-    /// outstanding subagents → equal. The discriminating turn is
-    /// turn_1, where s1 is outstanding for the gate but invisible to
-    /// the classifier.
-    #[tokio::test]
-    async fn synthetic_turn_1_has_asymmetric_counts() {
-        let trace = parse_synthetic();
-        let stub = StubClient(
-            r#"{"category":"not_stalled_waiting_on_background","confidence":0.9,"evidence":"stub"}"#
-                .to_owned(),
-        );
-        let data = process_turn(
-            &trace[1],
-            "stub",
-            LAZINESS_DEFAULT_MIN_CONFIDENCE,
-            LAZINESS_INCLUDE_REASONING,
-            None,
-            &stub,
-        )
-        .await;
-        assert_eq!(
-            data.gate_backing_task_count, 1,
-            "gate sees the spawn_subagent"
-        );
-        assert_eq!(
-            data.classifier_backing_task_count, 0,
-            "classifier excludes subagents"
-        );
     }
 
     /// F22: parse-error line carries the right discriminator + detail.
@@ -2055,8 +1584,6 @@ mod tests {
     fn summary_render_format_is_pinned() {
         let s = Summary {
             turns: 4,
-            gate_continue: 3,
-            gate_nudge: 1,
             laz_would_nudge: 0,
             laz_not_stalled: 2,
             laz_low_confidence: 1,
@@ -2064,8 +1591,7 @@ mod tests {
         };
         assert_eq!(
             s.render(),
-            "Processed 4 turns. TodoGate: 3 Continue, 1 Nudge. \
-             Laziness: 2 NoNudge-NotStalled, 1 NoNudge-LowConfidence, 0 WouldNudge, 1 Aborted."
+            "Processed 4 turns. Laziness: 2 NoNudge-NotStalled, 1 NoNudge-LowConfidence, 0 WouldNudge, 1 Aborted."
         );
     }
 
@@ -2135,10 +1661,9 @@ mod tests {
         );
     }
 
-    /// F27: every decision pair is counted in the right bucket.
+    /// Every classifier decision is counted in the right bucket.
     #[test]
-    fn bump_summary_buckets_every_decision_pair() {
-        let gates = [GateDecisionKind::Continue, GateDecisionKind::Nudge];
+    fn bump_summary_buckets_every_decision() {
         let lazs = [
             LazinessDecisionKind::WouldNudge,
             LazinessDecisionKind::NoNudgeNotStalled,
@@ -2146,55 +1671,36 @@ mod tests {
             LazinessDecisionKind::Aborted,
         ];
 
-        for g in gates {
-            for l in lazs {
-                let mut s = Summary::default();
-                let empty: Vec<String> = Vec::new();
-                let line = TurnLine {
-                    turn_id: "t",
-                    turn_number: None,
-                    request_id: None,
-                    items_in_history: 0,
-                    items_after_window_trim: 0,
-                    gate_backing_task_count: 0,
-                    classifier_backing_task_count: 0,
-                    todo_state: TodoSnapshotOut {
-                        pending: empty.as_slice(),
-                        in_progress_unbacked: empty.as_slice(),
-                        in_progress_backed: empty.as_slice(),
-                    },
-                    todo_gate: TodoGateOut {
-                        decision: g,
-                        reason: None,
-                        reminder: None,
-                    },
-                    laziness_classifier: LazinessOut {
-                        model_id: "m",
-                        elapsed_ms: 0,
-                        parsed: None,
-                        decision: l,
-                        abort_reason: None,
-                        error_detail: None,
-                        raw_output: None,
-                    },
-                    include_reasoning: LAZINESS_INCLUDE_REASONING,
-                    turn_elapsed_seconds: None,
-                };
-                bump_summary(&mut s, &line);
-                let gate_bucket = match g {
-                    GateDecisionKind::Continue => s.gate_continue,
-                    GateDecisionKind::Nudge => s.gate_nudge,
-                };
-                let laz_bucket = match l {
-                    LazinessDecisionKind::WouldNudge => s.laz_would_nudge,
-                    LazinessDecisionKind::NoNudgeNotStalled => s.laz_not_stalled,
-                    LazinessDecisionKind::NoNudgeLowConfidence => s.laz_low_confidence,
-                    LazinessDecisionKind::Aborted => s.laz_aborted,
-                };
-                assert_eq!(gate_bucket, 1, "gate {g:?} bucket");
-                assert_eq!(laz_bucket, 1, "laz {l:?} bucket");
-                assert_eq!(s.turns, 1);
-            }
+        for l in lazs {
+            let mut s = Summary::default();
+            let line = TurnLine {
+                turn_id: "t",
+                turn_number: None,
+                request_id: None,
+                items_in_history: 0,
+                items_after_window_trim: 0,
+                classifier_backing_task_count: 0,
+                laziness_classifier: LazinessOut {
+                    model_id: "m",
+                    elapsed_ms: 0,
+                    parsed: None,
+                    decision: l,
+                    abort_reason: None,
+                    error_detail: None,
+                    raw_output: None,
+                },
+                include_reasoning: LAZINESS_INCLUDE_REASONING,
+                turn_elapsed_seconds: None,
+            };
+            bump_summary(&mut s, &line);
+            let laz_bucket = match l {
+                LazinessDecisionKind::WouldNudge => s.laz_would_nudge,
+                LazinessDecisionKind::NoNudgeNotStalled => s.laz_not_stalled,
+                LazinessDecisionKind::NoNudgeLowConfidence => s.laz_low_confidence,
+                LazinessDecisionKind::Aborted => s.laz_aborted,
+            };
+            assert_eq!(laz_bucket, 1, "laz {l:?} bucket");
+            assert_eq!(s.turns, 1);
         }
     }
 

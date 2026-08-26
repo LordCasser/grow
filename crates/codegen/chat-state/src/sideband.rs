@@ -741,13 +741,12 @@ fn surface_id_exists(parent: &crate::Timeline, id: crate::SurfaceId) -> bool {
                     .ok()
                     .is_some_and(|item| item < projection.shadows.len()),
                 // Control transitions and re-projections are first-class
-                // Surface facts. Their model context is one synthetic item
-                // anchored at item 0, including when a transition was held
-                // until the enclosing turn ended.
+                // Surface facts, one synthetic item per context.
                 crate::TimelineEventKind::Control(crate::ControlEvent {
-                    model_context: Some(_),
-                    ..
-                }) => id.item == 0,
+                    model_contexts, ..
+                }) => usize::try_from(id.item)
+                    .ok()
+                    .is_some_and(|item| item < model_contexts.len()),
                 _ => false,
             }
         })
@@ -1270,13 +1269,14 @@ mod tests {
             .record(crate::TimelineEventKind::Control(crate::ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "goal" }),
-                model_context: Some(crate::ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
                     layer: crate::ControlContextLayer::Behavior,
                     activation: crate::ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder(
                         "<behavior-context>goal</behavior-context>",
                     ),
-                }),
+                }],
             }))
             .unwrap();
         let control_context_id = *parent.surface_ids().last().unwrap();

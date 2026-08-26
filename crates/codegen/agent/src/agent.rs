@@ -98,6 +98,27 @@ impl Agent {
         &self.tool_bridge
     }
 
+    /// Activate this staged harness over the session-owned live tool state.
+    /// Agent construction keeps the bridge unique until this boundary so the
+    /// resource-domain swap cannot affect the currently sampling harness.
+    pub async fn activate_resource_domain(
+        &mut self,
+        domain: &tools::registry::types::SessionResourceDomain,
+    ) -> Result<(), String> {
+        let bridge = Arc::get_mut(&mut self.tool_bridge)
+            .ok_or_else(|| "staged Agent ToolBridge is already shared".to_string())?;
+        bridge.activate_resource_domain(domain).await
+    }
+
+    pub async fn prepare_resource_domain_activation(
+        &mut self,
+        domain: &tools::registry::types::SessionResourceDomain,
+    ) -> Result<tools::registry::types::PreparedResourceActivation, String> {
+        let bridge = Arc::get_mut(&mut self.tool_bridge)
+            .ok_or_else(|| "staged Agent ToolBridge is already shared".to_string())?;
+        bridge.prepare_resource_domain_activation(domain).await
+    }
+
     /// Cached AGENTS.md section (derived from prompt_context).
     pub fn agents_md_section(&self) -> Option<String> {
         self.prompt_context.format_agents_md_section()
@@ -113,10 +134,6 @@ impl Agent {
 
     /// Audience this agent's prompt was rendered for (Primary or Subagent).
     ///
-    /// Used by the runtime turn-end TodoGate together with
-    /// [`crate::AgentDefinition::carries_task_completion_discipline`] to
-    /// decide whether the active prompt actually carries the discipline
-    /// rules the gate's reminder text invokes.
     pub fn prompt_audience(&self) -> crate::prompt::context::PromptAudience {
         self.prompt_context.audience
     }

@@ -154,10 +154,11 @@ impl SessionActor {
                 )
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
-            match sampling_client
-                .conversation_collect(base_request.clone())
+            let settled = sideband
+                .run_provider(sampling_client.conversation_collect(base_request.clone()))
                 .await
-            {
+                .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+            match settled {
                 Err(error) if should_retry_side_question(&error) => {
                     let Some(delay) = backoff.next() else {
                         break Err(error);
@@ -176,6 +177,10 @@ impl SessionActor {
 
         match result {
             Ok(response) => {
+                let usage = self
+                    .settle_sideband_response_usage(&mut sideband, &response)
+                    .await
+                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
@@ -185,7 +190,6 @@ impl SessionActor {
                         .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                     return Err(err);
                 }
-                let usage = sideband_usage(&response);
                 let finish = sideband_finish(&response);
                 sideband
                     .complete(content.clone(), None, usage, finish, Vec::new())
@@ -360,10 +364,12 @@ impl SessionActor {
             }
             return;
         }
-
-        let response = match sampling_client.conversation_collect(request).await {
-            Ok(r) => r,
-            Err(e) => {
+        let response = match sideband
+            .run_provider(sampling_client.conversation_collect(request))
+            .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "recap: model call failed");
                 if let Err(record_error) = sideband
                     .fail(chat_state::SidebandOutcome::Failed, e.to_string())
@@ -373,6 +379,28 @@ impl SessionActor {
                 }
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.
+                if !auto {
+                    self.emit_recap_unavailable().await;
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "recap: provider admission failed");
+                clear_in_flight();
+                if !auto {
+                    self.emit_recap_unavailable().await;
+                }
+                return;
+            }
+        };
+        let usage = match self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(%error, "recap: failed to settle provider usage");
+                clear_in_flight();
                 if !auto {
                     self.emit_recap_unavailable().await;
                 }
@@ -401,7 +429,6 @@ impl SessionActor {
             return;
         }
 
-        let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         if let Err(error) = sideband
             .complete(
@@ -562,10 +589,13 @@ impl SessionActor {
             .attempt_all_sources(&request, sampling_client.api_backend(), None)
             .await
             .ok()?;
-
         let result = match sampling_client.api_backend() {
             crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = match sampling_client.conversation_stream(request).await {
+                let (raw, meta) = match sideband
+                    .run_provider(sampling_client.conversation_stream(request))
+                    .await
+                    .ok()?
+                {
                     Ok(stream) => stream,
                     Err(error) => {
                         let _ = sideband
@@ -578,22 +608,28 @@ impl SessionActor {
                 sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Responses => {
-                let (raw, meta, doom_loop) =
-                    match sampling_client.conversation_stream_responses(request).await {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            let _ = sideband
-                                .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                                .await;
-                            return None;
-                        }
-                    };
+                let (raw, meta, doom_loop) = match sideband
+                    .run_provider(sampling_client.conversation_stream_responses(request))
+                    .await
+                    .ok()?
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = sideband
+                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                            .await;
+                        return None;
+                    }
+                };
                 let events =
                     sampler::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);
                 sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = match sampling_client.conversation_stream_messages(request).await
+                let (raw, meta) = match sideband
+                    .run_provider(sampling_client.conversation_stream_messages(request))
+                    .await
+                    .ok()?
                 {
                     Ok(stream) => stream,
                     Err(error) => {
@@ -610,6 +646,10 @@ impl SessionActor {
 
         match result {
             Ok((response, _metrics)) => {
+                let usage = self
+                    .settle_sideband_response_usage(&mut sideband, &response)
+                    .await
+                    .ok()?;
                 let text = response.assistant_text();
                 if text.is_empty() {
                     let _ = sideband
@@ -620,7 +660,6 @@ impl SessionActor {
                         .await;
                     None
                 } else {
-                    let usage = sideband_usage(&response);
                     let finish = sideband_finish(&response);
                     sideband
                         .complete(text.clone(), None, usage, finish, Vec::new())
@@ -743,9 +782,12 @@ impl SessionActor {
             .attempt_all_sources(&request, sampling_client.api_backend(), None)
             .await
             .ok()?;
-
-        let response = match sampling_client.conversation_collect(request).await {
-            Ok(r) => r,
+        let response = match sideband
+            .run_provider(sampling_client.conversation_collect(request))
+            .await
+            .ok()?
+        {
+            Ok(response) => response,
             Err(e) => {
                 tracing::debug!(error = %e, "prompt suggest inference failed");
                 let _ = sideband
@@ -754,6 +796,10 @@ impl SessionActor {
                 return None;
             }
         };
+        let usage = self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+            .ok()?;
 
         let raw = response.assistant_text();
         let mut suggestion = prompt_suggest::sanitize_suggestion(&raw);
@@ -767,7 +813,6 @@ impl SessionActor {
             suggestion = None;
         }
         if let Some(accepted) = &suggestion {
-            let usage = sideband_usage(&response);
             let finish = sideband_finish(&response);
             sideband
                 .complete(

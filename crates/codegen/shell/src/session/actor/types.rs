@@ -16,9 +16,12 @@ pub(crate) enum McpReminderMode {
 /// `SessionActor::handle_sampling_failure` for the sampler-based
 /// turn loop.
 pub(crate) enum SamplerFailureRecovery {
-    /// Compaction ran. The turn loop should rebuild the request from
-    /// the compacted conversation and resubmit.
-    CompactAndResubmit,
+    /// Provider-attempt settlement closed the Goal spending window. No
+    /// recovery provider call may be admitted for this turn.
+    GoalSpendingStopped,
+    /// The failed request requires compaction before resubmission. The turn
+    /// loop performs it only after closing the current step.
+    CompactAndResubmit(compaction::AutoCompactTriggerInfo),
     /// The active runtime explicitly rejected image input. Its negative
     /// capability and irreversible ImageShadows were persisted; the turn
     /// should rebuild a text-only request projection over canonical evidence.
@@ -32,16 +35,16 @@ pub(crate) enum SamplerFailureRecovery {
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
-/// `CompactAndResubmit` short-circuits the outer turn loop with
-/// `continue` (the turn driver re-builds the request from the latest
-/// chat state).
+/// `CompactAndResubmit` carries a forced compaction request to the outer turn
+/// loop, which crosses StepEnded before executing it and rebuilding context.
 pub(crate) enum SamplerTurnOutcome {
     /// Model responded, with per-call latency stats for `shell.turn.inference_done`.
     Response(
         Box<ConversationResponse>,
         Box<sampler::InferenceLatencyStats>,
     ),
-    CompactAndResubmit,
+    GoalSpendingStopped,
+    CompactAndResubmit(compaction::AutoCompactTriggerInfo),
     ImageInputUnsupportedAndResubmit,
     RefreshByokAndResubmit {
         credential: sampling_types::SentCredential,
@@ -65,6 +68,18 @@ pub(crate) enum TurnOutcome {
         /// `Some(explanation)` marks a content-filter refusal (empty when the
         /// provider gave no message).
         refusal: Option<String>,
+    },
+    /// A lifecycle/control tool committed a new authority state. The current
+    /// turn must close at this tool-result boundary; completion recovery and
+    /// Stop hooks are not allowed to sample again under the old admission.
+    ControlBoundary {
+        snapshot: Box<Option<TurnDeltaSnapshot>>,
+    },
+    /// The active Goal crossed its token budget after a completed provider /
+    /// tool step. The response and tool results stay durable, but completion
+    /// recovery and the next model sample are forbidden.
+    GoalSpendingStopped {
+        snapshot: Box<Option<TurnDeltaSnapshot>>,
     },
     /// The turn was cancelled (user rejection, hook denial, doom loop, etc.).
     /// The category distinguishes the cause for analytics.
@@ -113,39 +128,10 @@ pub(crate) enum ToolLoop {
     },
 }
 
-/// Why the TodoGate fired. Single variant today; kept as an enum so
-/// any new reason has to go through the same `as_str` → `TODO_GATE_*`
-/// const mapping.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TodoGateReason {
-    /// The turn ended with pending or unbacked in-progress todos.
-    InFlight,
-}
-
-/// Outcome of `evaluate_todo_gate`. `Nudge` carries the rendered
-/// reminder text AND the typed reason so the producer can emit
-/// diagnostics without re-deriving the reason from the input.
-///
-/// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can match against the decision. Not part of
-/// the public API.
-#[doc(hidden)]
-pub enum TodoGateDecision {
-    /// Gate is satisfied — the turn may end.
-    Continue,
-    /// Inject `reminder` as a `<system-reminder>` and force another turn.
-    Nudge {
-        reminder: String,
-        reason: TodoGateReason,
-    },
-}
-
 /// Closed reason for why `maybe_fire_laziness_check` aborted before
 /// producing a verdict. Maps 1:1 to the `LAZINESS_ABORT_*` diagnostics
 /// consts via `as_const_str()` — exhaustive match, no wildcard, so a
 /// new variant forces a new const + arm. Mirrors the
-/// `TodoGateReason` pattern (closed-set producer-side closure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LazinessAbortReason {
     UserInput,

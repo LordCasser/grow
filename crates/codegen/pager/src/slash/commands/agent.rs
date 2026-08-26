@@ -18,6 +18,7 @@ pub(crate) fn agent_scope_label(scope: &str) -> &'static str {
         "user" => "user",
         "project" => "project",
         "bundled" => "bundled",
+        "workflow" => "workflow",
         _ => "user",
     }
 }

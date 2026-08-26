@@ -2217,27 +2217,24 @@ pub(crate) mod test_fixtures {
             "the acceptance generation resets with the reload"
         );
     }
-    /// A model switch stuck across a reconnect must not jam the drain, but a
-    /// switch started DURING the reload window must keep its model-switch hold. The
-    /// reload START (`begin_session_reload`) releases the hold (the disconnect
-    /// dropped the in-flight RPC); finalize (`apply_reload_outcome`) must NOT —
-    /// a window switch is live on the reconnected link.
+    /// A model switch crossing reconnect remains serialized and is reissued
+    /// after authoritative reload. A selection made during the reload queues
+    /// behind it instead of starting a duplicate RPC.
     #[test]
-    fn reconnect_reload_clears_stuck_model_switch_pending() {
+    fn reconnect_reload_preserves_and_rearms_model_switch_pending() {
         for success in [false, true] {
             let mut agent = make_agent();
-            agent.session.model_switch_pending = true;
+            agent.session.begin_model_switch_for_test();
             agent.begin_session_reload(1);
             assert!(
-                !agent.session.model_switch_pending,
-                "reload start must release the hold for the lost pre-outage switch"
+                agent.session.model_switch_pending(),
+                "reload start must preserve the lost-transport intent for reissue"
             );
-            agent.session.model_switch_pending = true;
+            agent.session.begin_model_switch_for_test();
             assert!(agent.finish_session_reload(1, success));
             assert!(
-                agent.session.model_switch_pending,
-                "finalize (success={success}) must NOT clear a switch started \
-                 during the reload window"
+                agent.session.model_switch_pending(),
+                "finalize (success={success}) must not discard serialized controls"
             );
         }
     }

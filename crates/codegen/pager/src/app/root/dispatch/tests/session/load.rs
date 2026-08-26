@@ -92,6 +92,121 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
         "SessionLoaded must store restore_degree on the session"
     );
 }
+
+#[test]
+fn session_loaded_models_do_not_overwrite_new_session_default() {
+    let mut app = test_app();
+    app.models = Some(acp::SessionModelState::new(
+        acp::ModelId::new("future-default"),
+        vec![acp::ModelInfo::new(
+            acp::ModelId::new("future-default"),
+            "Future Default",
+        )],
+    ))
+    .into();
+    dispatch(Action::LoadSession("session-exact".into(), None), &mut app);
+    let id = AgentId(0);
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("session-exact"),
+            models: Some(acp::SessionModelState::new(
+                acp::ModelId::new("exact-current"),
+                vec![acp::ModelInfo::new(
+                    acp::ModelId::new("exact-current"),
+                    "Exact Current",
+                )],
+            )),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            foreground: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.models.current_model_id_str(), Some("future-default"));
+    assert_eq!(
+        app.agents[&id].session.models.current_model_id_str(),
+        Some("exact-current")
+    );
+}
+
+#[test]
+fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-behavior-applied".into(), None),
+        &mut app,
+    );
+    let id = AgentId(0);
+    {
+        let session = &mut app.agents.get_mut(&id).unwrap().session;
+        session.behavior_mode = tools::types::BehaviorId::Plan;
+        session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-behavior-applied"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            foreground: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SwitchBehavior { mode, .. } if *mode == tools::types::BehaviorId::Plan
+    )));
+}
+
+#[test]
+fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-behavior-pending".into(), None),
+        &mut app,
+    );
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-behavior-pending"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            foreground: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
+    assert!(app.agents[&id].session.controls_pending());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SwitchBehavior { mode, .. } if *mode == tools::types::BehaviorId::Plan
+    )));
+}
 /// Title hydration for an auto-generated title keeps today's behavior:
 /// only `generated_session_title` is set, never `display_name` (no
 /// border title).

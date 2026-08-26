@@ -577,6 +577,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                goal_definition_revision: None,
                 subagent_id: "sa-resume".into(),
                 child_session_id: "child-resume".into(),
                 security_parent_session_id: "parent-session".into(),
@@ -637,9 +638,31 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
 
 #[test]
 fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
+    let mut definition = agent::AgentDefinition::default_grow_build();
+    definition.name = "reviewer".into();
+    let route = crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+        "grow-3",
+        None,
+        sampling_types::ModelImageInputKey::new("grow-3", "responses", "test-endpoint"),
+    )
+    .unwrap()
+    .with_test_agent(definition)
+    .unwrap();
+    let mut tracker = crate::session::workflow::tracker::WorkflowTracker::default();
+    tracker.start_run(
+        "workflow-1".into(),
+        "test".into(),
+        "projection".into(),
+        vec![],
+        None,
+        None,
+        route,
+    );
+    let tracker = std::sync::Arc::new(parking_lot::Mutex::new(tracker));
     let projection = spawn_from_fact(
         "parent-session",
         &chat_state::SubagentSpawnEvent {
+            goal_definition_revision: Some(1),
             subagent_id: "sa-projection".into(),
             child_session_id: "child-projection".into(),
             security_parent_session_id: "parent-session".into(),
@@ -667,6 +690,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
             ),
             reasoning_effort: None,
         },
+        Some(&tracker),
     );
 
     let SessionUpdate::SubagentSpawned {
@@ -682,6 +706,8 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
         permission_mode,
         effective_permission_mode,
         model,
+        model_state,
+        workflow_agent_names,
         resumed_from,
         workflow_run_id,
         goal_id,
@@ -701,6 +727,13 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
     assert_eq!(permission_mode.as_deref(), Some("ask"));
     assert_eq!(effective_permission_mode.as_deref(), Some("deny-writes"));
     assert_eq!(model.as_deref(), Some("grow-3"));
+    assert_eq!(
+        model_state
+            .as_ref()
+            .map(|state| state.current_model_id.0.as_ref()),
+        Some("grow-3")
+    );
+    assert_eq!(workflow_agent_names, Some(vec!["reviewer".into()]));
     assert_eq!(resumed_from.as_deref(), Some("sa-earlier"));
     assert_eq!(workflow_run_id.as_deref(), Some("workflow-1"));
     assert_eq!(goal_id.as_deref(), Some("goal-1"));
@@ -809,6 +842,8 @@ fn notification_subagent_spawned_includes_resumed_from() {
         permission_mode: None,
         effective_permission_mode: None,
         model: None,
+        model_state: None,
+        workflow_agent_names: None,
         resumed_from: Some("prev-agent-id".into()),
         workflow_run_id: None,
         goal_id: None,
@@ -830,6 +865,8 @@ fn notification_subagent_spawned_includes_resumed_from() {
         permission_mode: None,
         effective_permission_mode: None,
         model: None,
+        model_state: None,
+        workflow_agent_names: None,
         resumed_from: None,
         workflow_run_id: None,
         goal_id: None,
@@ -1571,73 +1608,4 @@ fn skills_inherited_count_matches_parent_skills_len() {
         0
     };
     assert_eq!(count, 2);
-}
-/// Both directions of the publisher→parent goal gate: flipping it
-/// would silently kill live-token wiring end-to-end.
-#[test]
-fn goal_tick_cmd_tx_gates_on_goal_enabled() {
-    let (tx, _rx) = mpsc::unbounded_channel::<SessionCommand>();
-    assert!(
-            goal_tick_cmd_tx(true, Some(&tx)).is_some(),
-            "goal on + channel present must wire ticks",
-        );
-    assert!(
-            goal_tick_cmd_tx(false, Some(&tx)).is_none(),
-            "goal off must not pay the per-tick send",
-        );
-    assert!(goal_tick_cmd_tx(true, None).is_none());
-    assert!(goal_tick_cmd_tx(false, None).is_none());
-}
-/// Producer side of the goal live-token wiring: a publisher tick must
-/// land on the parent command channel as a `SubagentProgress`
-/// notification carrying the child's signal values.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
-    use crate::session::signals::SessionSignalsHandle;
-    use crate::test_support::lsp_runtime::test_gateway;
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let signals = SessionSignalsHandle::new();
-            signals.increment_turn();
-            signals.record_tool_call("bash");
-            tokio::task::yield_now().await;
-            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-            let cancel = tokio_util::sync::CancellationToken::new();
-            spawn_progress_publisher(
-                signals,
-                test_gateway(),
-                "parent-1".to_string(),
-                "sub-1".to_string(),
-                "child-1".to_string(),
-                std::time::Instant::now(),
-                cancel.clone(),
-                Some(cmd_tx),
-            );
-            let cmd = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    cmd_rx.recv(),
-                )
-                .await
-                .expect("a tick must arrive within the publish interval")
-                .expect("channel open");
-            cancel.cancel();
-            let SessionCommand::GrowSessionNotification { notification } = cmd else {
-                panic!("expected GrowSessionNotification");
-            };
-            let SessionUpdate::SubagentProgress {
-                subagent_id,
-                parent_session_id,
-                turn_count,
-                tool_call_count,
-                ..
-            } = notification.update else {
-                panic!("expected SubagentProgress, got {:?}", notification.update);
-            };
-            assert_eq!(subagent_id, "sub-1");
-            assert_eq!(parent_session_id, "parent-1");
-            assert_eq!(turn_count, 1);
-            assert_eq!(tool_call_count, 1);
-        })
-        .await;
 }

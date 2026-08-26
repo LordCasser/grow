@@ -29,11 +29,12 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
         // but guard here just in case.
         return vec![];
     };
-
     if app.screen_mode.is_minimal() {
+        let revision = agent.session.begin_agent_metadata_read();
         vec![Effect::ShowSessionInfo {
             agent_id: id,
             session_id,
+            revision,
             show_resolved_model: app.show_resolved_model,
             nonce: 0,
         }]
@@ -131,6 +132,11 @@ fn open_usage_modal(
     session_id: &acp::SessionId,
 ) -> Vec<Effect> {
     let nonce = crate::views::usage_modal::next_fetch_nonce();
+    let revision = app
+        .agents
+        .get_mut(&agent_id)
+        .map(|agent| agent.session.begin_agent_metadata_read())
+        .unwrap_or_default();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.active_modal = Some(ActiveModal::Usage {
             state: UsageModalState::open(tab, nonce),
@@ -150,6 +156,7 @@ fn open_usage_modal(
         Effect::ShowSessionInfo {
             agent_id,
             session_id: session_id.clone(),
+            revision,
             show_resolved_model: app.show_resolved_model,
             nonce,
         },
@@ -297,6 +304,8 @@ pub(super) fn notify_session_ready(
 pub(super) fn handle_session_info_complete(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: acp::SessionId,
+    revision: u64,
     info: Box<shell::session::SessionInfoResponse>,
     text: String,
     title: Option<String>,
@@ -306,6 +315,11 @@ pub(super) fn handle_session_info_complete(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
+    if agent.session.session_id.as_ref() != Some(&session_id)
+        || !agent.session.agent_metadata_read_is_current(revision)
+    {
+        return vec![];
+    }
     agent.session.apply_agent_name(info.data.agent_name.clone());
     if let Some(modal) = agent.agents_modal.as_mut() {
         modal.active_agent = info.data.agent_name.clone();

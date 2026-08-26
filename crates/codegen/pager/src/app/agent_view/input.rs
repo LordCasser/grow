@@ -1321,10 +1321,25 @@ impl AgentView {
         InputOutcome::Unchanged
     }
     pub(crate) fn open_command_picker(&mut self, command: &str, args_query: &str) {
-        // Main-session switch catalog (native + plugin); no subagents.toggle.
-        self.prompt.slash_controller.set_agent_catalog(
-            crate::views::agents_modal::build_switch_agent_catalog(&self.session.cwd),
+        // Workflow children select only from the immutable Run snapshot that
+        // Shell will accept. Ordinary sessions keep live native/plugin
+        // discovery; `[subagents.toggle]` is unrelated to Agent switching.
+        let agent_catalog = self.session.workflow_agent_names.as_ref().map_or_else(
+            || crate::views::agents_modal::build_switch_agent_catalog(&self.session.cwd),
+            |names| {
+                names
+                    .iter()
+                    .map(|name| crate::slash::command::AgentArg {
+                        name: name.clone(),
+                        description: "Workflow Run snapshot".into(),
+                        scope: "workflow".into(),
+                    })
+                    .collect()
+            },
         );
+        self.prompt
+            .slash_controller
+            .set_agent_catalog(agent_catalog);
         self.sync_command_selection_context();
         let items = self
             .prompt
@@ -1354,10 +1369,7 @@ impl AgentView {
     }
 
     pub(super) fn sync_command_selection_context(&mut self) {
-        let behavior = self
-            .session
-            .behavior_mode_pending
-            .unwrap_or(self.session.behavior_mode);
+        let behavior = self.session.effective_behavior();
         let goal = self.behavior_supported(tools::types::BehaviorId::Goal);
         let auto_permission = self
             .prompt
@@ -1453,6 +1465,10 @@ impl AgentView {
                 command: "permission".to_string(),
                 args_query: String::new(),
             }),
+            ActionId::BehaviorPicker if self.is_subagent_view => {
+                self.show_toast("Behavior is owned by the parent session");
+                InputOutcome::Changed
+            }
             ActionId::BehaviorPicker => InputOutcome::Action(Action::OpenCommandPicker {
                 command: "behavior".to_string(),
                 args_query: String::new(),
@@ -1824,6 +1840,7 @@ mod leader_key_tests {
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
     use crate::app::root::InputOutcome;
+    use crate::views::modal::ActiveModal;
     use agent_client_protocol as acp;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -1873,6 +1890,26 @@ mod leader_key_tests {
     }
 
     #[test]
+    fn workflow_child_agent_picker_uses_only_run_snapshot_names() {
+        let mut agent = make_agent();
+        agent.session.workflow_agent_names = Some(vec!["reviewer".into(), "researcher".into()]);
+
+        agent.open_command_picker("agent", "");
+
+        let Some(ActiveModal::ArgPicker { items, .. }) = agent.active_modal.as_ref() else {
+            panic!("expected Agent argument picker");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.insert_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reviewer", "researcher"]
+        );
+        assert!(items.iter().all(|item| item.display.contains("(workflow)")));
+    }
+
+    #[test]
     fn ctrl_x_b_opens_behavior_picker() {
         let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
@@ -1893,6 +1930,21 @@ mod leader_key_tests {
             InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
                 if command == "behavior"
         ));
+    }
+
+    #[test]
+    fn ctrl_x_b_in_child_view_does_not_open_parent_behavior_control() {
+        let mut effects = Vec::new();
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.is_subagent_view = true;
+
+        let _ = agent.handle_input(&ctrl_x(), &registry, &mut effects);
+        assert!(matches!(
+            agent.handle_input(&bare('b'), &registry, &mut effects),
+            InputOutcome::Changed
+        ));
+        assert!(agent.active_modal.is_none());
     }
 
     #[test]

@@ -279,7 +279,11 @@ pub(super) async fn run_session(
                         // consumers query the actor directly when they need them.
                     }
                     None => {
-                        // Actor shut down — no more events.
+                        tracing::error!(
+                            "closing session because the Timeline writer actor stopped"
+                        );
+                        terminate_failed_timeline_writer(&session).await;
+                        return;
                     }
                 }
             }
@@ -326,6 +330,11 @@ pub(super) async fn run_session(
                 let Some((prompt_id, result)) = maybe_completion else {
                     // Channel closed.
                     session.goal_drive.cancel();
+                    if let Err(error) = session.settle_goal_usage_for_shutdown().await {
+                        tracing::error!(%error, "failed to settle Goal usage after completion channel closure");
+                        terminate_failed_timeline_writer(&session).await;
+                        return;
+                    }
                     stop_permission_manager_and_drain_audit(&session).await;
                     shutdown_workflows(&session).await;
                     if !session.startup_hints.is_subagent {
@@ -381,7 +390,7 @@ pub(super) async fn run_session(
                 // Catalog watcher snapshots admitted during the turn must win
                 // the newly released idle boundary before any queued prompt,
                 // compaction, notification, or Goal continuation samples.
-                session.apply_pending_model_reload_if_idle().await;
+                session.apply_pending_step_controls_if_idle().await;
                 if !maybe_start_pending_manual_compaction(
                     session.clone(),
                     completion_tx.clone(),
@@ -432,6 +441,11 @@ pub(super) async fn run_session(
             maybe_cmd = cmd_rx.recv() => {
                 let Some(cmd) = maybe_cmd else {
                     session.goal_drive.cancel();
+                    if let Err(error) = session.settle_goal_usage_for_shutdown().await {
+                        tracing::error!(%error, "failed to settle Goal usage after command channel closure");
+                        terminate_failed_timeline_writer(&session).await;
+                        return;
+                    }
                     stop_permission_manager_and_drain_audit(&session).await;
                     // ── session_end hook (channel-closed path) ────
                     // Fires BEFORE memory auto-save per plan contract.
@@ -629,13 +643,19 @@ pub(super) async fn run_session(
                         let result = session
                             .execute_out_of_band_slash_command(command)
                             .await;
-                        if let Ok(Some(trigger)) = result.as_ref() {
+                        if let Ok(Some(control)) = result.as_ref() {
                             // Preserve steering that reached the interjection
                             // buffer before the control invalidated this turn.
-                            session
-                                .cancel_turn_for_goal_control(trigger, &mut replay_buffer)
-                                .await;
+                            if let Err(error) = session
+                                .cancel_turn_for_goal_control(control, &mut replay_buffer)
+                                .await
+                            {
+                                let _ = respond_to.send(Err(format!("{error:?}")));
+                                terminate_failed_timeline_writer(&session).await;
+                                return;
+                            }
                         }
+                        session.apply_pending_step_controls_if_idle().await;
                         if !maybe_start_pending_manual_compaction(
                             session.clone(),
                             completion_tx.clone(),
@@ -749,6 +769,11 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::BehaviorChange { session_mode, responds_to } => {
                         let outcome = session.request_behavior_change(session_mode).await;
+                        if outcome.is_err() {
+                            let _ = responds_to.send(outcome);
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
                         super::idle_arbitration::arbitrate_idle_wake(
                             session.clone(),
                             completion_tx.clone(),
@@ -759,34 +784,84 @@ pub(super) async fn run_session(
                     SessionCommand::GoalControl { command } => {
                         session.handle_goal_command(command).await;
                     }
-                    SessionCommand::SetSessionModel { model_id, sampling_config, auto_compact_threshold_percent, responds_to } => {
-                        let updated_model_id = session.handle_set_session_model(model_id, sampling_config, auto_compact_threshold_percent).await;
-                        let _ = responds_to.send(updated_model_id);
+                    SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to } => {
+                        let _control = session.step_control_gate.lock().await;
+                        let result = session.apply_captured_goal_usage(&goal_id, tokens).await;
+                        let truly_idle = {
+                            let admission = session.state.lock().await;
+                            admission.foreground.is_idle()
+                                && admission.pending_step_controls.is_empty()
+                        };
+                        if matches!(result, Ok(true)) && truly_idle {
+                            let _ = session.enforce_goal_spending_limit().await;
+                        } else if matches!(result, Ok(false)) {
+                            tracing::debug!(
+                                %goal_id,
+                                tokens,
+                                "discarded Goal usage for a retired Goal identity"
+                            );
+                        }
+                        let fatal = result.is_err();
+                        let _ = respond_to.send(result);
+                        if fatal {
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
                     }
-                    SessionCommand::ReloadModelConfig {
-                        model_id,
-                        sampling_config,
-                        image_description_model,
-                        inference_idle_timeout,
-                        max_retries,
-                        auto_compact_threshold_percent,
-                        responds_to,
+                    SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
+                        let _control = session.step_control_gate.lock().await;
+                        let result = session
+                            .apply_captured_goal_usage_incomplete(&goal_id)
+                            .await;
+                        let fatal = result.is_err();
+                        let _ = respond_to.send(result);
+                        if fatal {
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
+                    }
+                    SessionCommand::SettleGoalUsageAttempt {
+                        attempt_id,
+                        respond_to,
                     } => {
+                        let _control = session.step_control_gate.lock().await;
+                        let result = session
+                            .settle_claimed_goal_usage_attempt(&attempt_id)
+                            .await;
+                        let truly_idle = {
+                            let admission = session.state.lock().await;
+                            admission.foreground.is_idle()
+                                && admission.pending_step_controls.is_empty()
+                        };
+                        if matches!(result, Ok(true)) && truly_idle {
+                            let _ = session.enforce_goal_spending_limit().await;
+                        }
+                        let fatal = result.is_err();
+                        let _ = respond_to.send(result);
+                        if fatal {
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
+                    }
+                    SessionCommand::SetSessionModel { route, catalog, responds_to } => {
                         session
-                            .admit_model_config_reload(
-                                model_id,
-                                sampling_config,
-                                image_description_model,
-                                inference_idle_timeout,
-                                max_retries,
-                                auto_compact_threshold_percent,
+                            .admit_session_model_selection(
+                                route,
+                                catalog,
                                 responds_to,
                             )
                             .await;
                     }
+                    SessionCommand::ReloadModelConfig {
+                        catalog,
+                        responds_to,
+                    } => {
+                        session
+                            .admit_model_catalog_reload(catalog, responds_to)
+                            .await;
+                    }
                     SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
-                        let outcome = session.handle_rebuild_agent_for_definition(definition).await;
-                        let _ = responds_to.send(outcome);
+                        session.admit_agent_selection(definition, responds_to).await;
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {
                         let model = session.chat_state_handle.get_sampling_config().await
@@ -873,7 +948,7 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(outcome);
                     }
                     SessionCommand::PluginsList { respond_to } => {
-                        let _ = respond_to.send(session.plugin_registry.borrow().clone());
+                        let _ = respond_to.send(session.plugin_registry.read().clone());
                     }
                     SessionCommand::DispatchNotificationHook {
                         notification_type,
@@ -890,8 +965,12 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
-                    SessionCommand::RecordGoalOwnedTaskIds { goal_id, task_ids } => {
-                        session.record_goal_owned_task_ids(&goal_id, task_ids);
+                    SessionCommand::RecordGoalOwnedTaskIds {
+                        goal_id,
+                        definition_revision,
+                        task_ids,
+                    } => {
+                        session.record_goal_owned_task_ids(&goal_id, definition_revision, task_ids);
                     }
                     SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
                         session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;
@@ -940,7 +1019,7 @@ pub(super) async fn run_session(
                             .discard_residual_interjections_at_turn_end()
                             .await;
                         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
-                        session
+                        let cancel_result = session
                             .cancel_running_task(
                                 cancel_subagents,
                                 kill_background_tasks,
@@ -948,6 +1027,12 @@ pub(super) async fn run_session(
                                 trigger,
                             )
                             .await;
+
+                        if let Err(error) = cancel_result {
+                            tracing::error!(?error, "closing session after fatal cancel boundary failure");
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
 
                         // Auto-pause the active Goal ONLY on an explicit
                         // user "Pause goal" intent (the Goal interrupt
@@ -958,6 +1043,12 @@ pub(super) async fn run_session(
                         // Goal untouched (it stays Active and may be
                         // continued by the next user input).
                         session.maybe_auto_pause_goal_on_cancel(pause_goal).await;
+
+                        // Accepted model/effort/Agent controls own the first
+                        // released turn boundary, exactly as on normal turn
+                        // completion. Only after they settle may compaction or
+                        // a queued prompt capture the next route/harness.
+                        session.apply_pending_step_controls_if_idle().await;
 
                         // Manual compaction admitted during the cancelled
                         // turn owns the next foreground slot; otherwise
@@ -1032,7 +1123,7 @@ pub(super) async fn run_session(
                         tokio::task::spawn_local(async move {
                             let cwd = s.tool_context.cwd.as_path().to_string_lossy();
                             let skills_config = crate::util::config::load_config().await.skills;
-                            let pr = s.plugin_registry.borrow().clone();
+                            let pr = s.plugin_registry.read().clone();
                             let new_skills = agent::prompt::skills::list_skills_with_plugins(
                                 Some(&cwd),
                                 &skills_config,
@@ -1664,12 +1755,14 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::SteerTurn { expected_turn_id, text, id, images, respond_to } => {
-                        let admitted = {
-                            let state = session.state.lock().await;
-                            state.foreground.regular().is_some_and(|task| {
-                                task.prompt_id == expected_turn_id && !task.is_finished()
-                            })
-                        };
+                        let image_count = images.len() as u32;
+                        let admitted = session
+                            .admit_mid_turn_interjection(
+                                &expected_turn_id,
+                                text.clone(),
+                                images,
+                            )
+                            .await;
                         if !admitted {
                             let _ = respond_to.send(Err("the target turn is no longer running".to_string()));
                             continue;
@@ -1685,10 +1778,9 @@ pub(super) async fn run_session(
                         // next drain point.
                         session.events.emit(crate::session::events::Event::Interjected {
                             source: crate::session::events::InterjectionSource::Direct,
-                            image_count: images.len() as u32,
+                            image_count,
                             redirect_kind: crate::session::events::RedirectKind::Interjection,
                         });
-                        session.queue_mid_turn_interjection(text, images);
                         let _ = respond_to.send(Ok(()));
                         tracing::info!(expected_turn_id, "Queued same-turn steering input");
                     }
@@ -1724,6 +1816,8 @@ pub(super) async fn run_session(
                     }
                     command @ (SessionCommand::Shutdown
                     | SessionCommand::UnloadIfIdle { .. }) => {
+                        let is_shutdown = matches!(&command, SessionCommand::Shutdown);
+                        let mut unload_respond_to = None;
                         if let SessionCommand::UnloadIfIdle { respond_to } = command {
                             // This decision and mailbox close are performed in
                             // one actor turn. Commands already ahead of this one
@@ -1756,9 +1850,47 @@ pub(super) async fn run_session(
                                 continue;
                             }
                             cmd_rx.close();
+                            unload_respond_to = Some(respond_to);
+                        }
+                        if is_shutdown {
+                            session.goal_drive.cancel();
+                            // Preserve the same stream-before-terminal order as
+                            // explicit Cancel. Shutdown is an actor mailbox
+                            // command too, so only this loop can flush its
+                            // replay buffer before `cancel_running_task`
+                            // commits the durable turn terminal.
+                            if let Some(notification) = replay_buffer.flush() {
+                                session.emit_buffered(notification).await;
+                            }
+                        }
+                        if is_shutdown
+                            && let Err(error) = session
+                                .cancel_running_task(
+                                    true,
+                                    true,
+                                    false,
+                                    Some("shutdown".to_owned()),
+                                )
+                                .await
+                        {
+                            tracing::error!(
+                                ?error,
+                                "closing session after shutdown turn terminal failed"
+                            );
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
+                        if let Err(error) = session.settle_goal_usage_for_shutdown().await {
+                            tracing::error!(%error, "failed to settle Goal usage at shutdown");
+                            if let Some(respond_to) = unload_respond_to {
+                                let _ = respond_to.send(false);
+                            }
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
+                        }
+                        if let Some(respond_to) = unload_respond_to {
                             let _ = respond_to.send(true);
                         }
-                        session.goal_drive.cancel();
                         stop_permission_manager_and_drain_audit(&session).await;
                         shutdown_workflows(&session).await;
                         // Flush the actor-owned replay buffer so any

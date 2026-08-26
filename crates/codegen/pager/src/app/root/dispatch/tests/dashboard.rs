@@ -467,7 +467,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
         agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.session.plan_mode_pending, Some(true));
+    assert!(agent.session.effective_plan_mode());
 }
 /// Images pasted into the dispatch input survive a worktree dispatch:
 /// stashed when the dialog opens, replayed onto the worktree agent's queued
@@ -1512,7 +1512,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
         agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.session.plan_mode_pending, Some(true));
+    assert!(agent.session.effective_plan_mode());
 }
 /// The `[+ New Agent]` button path (`DashboardCreateNewAgentWithDetail`,
 /// no queued prompt) applies the same staged model + mode as the dispatch
@@ -1553,7 +1553,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan),
     );
-    assert_eq!(agent.session.plan_mode_pending, Some(true));
+    assert!(agent.session.effective_plan_mode());
 }
 /// The deferred plan `BehaviorId` is emitted once the session exists and stays
 /// as the first-prompt admission token until the authoritative mode update.
@@ -1585,14 +1585,14 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. } if *s == session_id)),
-        "SessionCreated must emit SetSessionMode for the deferred plan mode"
+            .any(|e| matches!(e, Effect::SwitchBehavior { session_id: s, mode, .. } if *s == session_id && *mode == tools::types::BehaviorId::Plan)),
+        "SessionCreated must emit SwitchBehavior for the deferred plan mode"
     );
 }
 
 /// A Dashboard dispatch carries both a staged Behavior and its first prompt.
 /// The prompt must stay queued until the authoritative CurrentModeUpdate
-/// releases it; sibling SendPrompt/SetSessionMode tasks race at the ACP seam.
+/// releases it; the serialized control prevents an ACP seam race.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_deferred_behavior_parks_first_prompt_until_mode_applies() {
@@ -1615,13 +1615,11 @@ fn dashboard_deferred_behavior_parks_first_prompt_until_mode_applies() {
 
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::SetSessionMode { mode_id, .. } if mode_id.0.as_ref() == "plan"
+        Effect::SwitchBehavior { mode, .. } if *mode == tools::types::BehaviorId::Plan
     )));
     assert!(!effects.iter().any(|effect| matches!(
         effect,
-        Effect::SendPrompt { .. }
-            | Effect::SendPromptBlocks { .. }
-            | Effect::SetModeThenPrompt { .. }
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
     )));
     assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
     assert_eq!(

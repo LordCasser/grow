@@ -650,7 +650,7 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
     let effects = dispatch(
         Action::SwitchModel {
             model_id: model_id.clone(),
@@ -660,9 +660,43 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
     );
     assert_eq!(effects.len(), 1);
     assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
     assert!(app.agents[&id].session.state.is_idle());
 }
+
+#[test]
+fn model_selected_during_reconnect_is_sent_once_after_restore() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new("reconnect-model");
+    app.reconnect_pending = true;
+
+    let during_reconnect = dispatch(
+        Action::SwitchModel {
+            model_id: model_id.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    assert!(
+        during_reconnect.is_empty(),
+        "the replacement transport is not ready yet"
+    );
+    assert!(app.agents[&id].session.model_switch_pending());
+
+    app.reconnect_pending = false;
+    let after_restore =
+        reconcile_controls_after_reconnect(id, app.agents.get_mut(&id).unwrap(), None);
+    assert!(matches!(
+        after_restore.as_slice(),
+        [Effect::SwitchModel {
+            agent_id,
+            model_id: actual,
+            ..
+        }] if *agent_id == id && actual == &model_id
+    ));
+}
+
 #[test]
 fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     let mut app = test_app_with_agent();
@@ -691,6 +725,86 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
 }
 
 #[test]
+fn pending_agent_switch_fences_the_next_prompt_until_completion() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    assert!(super::super::queue::immediate_server_send_eligible(agent));
+
+    agent.session.begin_agent_switch("reviewer");
+    assert!(!super::super::queue::immediate_server_send_eligible(agent));
+
+    agent.session.state = AgentState::Idle;
+    agent.session.enqueue_prompt("next request".into());
+    assert!(maybe_drain_queue(agent).effects.is_empty());
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+
+    assert!(agent.session.complete_agent_switch());
+    assert!(matches!(
+        maybe_drain_queue(agent).effects.as_slice(),
+        [Effect::SendPrompt { text, .. }] if text == "next request"
+    ));
+}
+
+#[test]
+fn pending_behavior_fences_normal_prompts_until_authoritative_admission() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    assert!(matches!(
+        dispatch(
+            Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+            &mut app,
+        )
+        .as_slice(),
+        [Effect::SwitchBehavior { .. }]
+    ));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        assert!(
+            !super::super::queue::immediate_server_send_eligible(agent),
+            "a Behavior admission may not be bypassed through the server queue"
+        );
+        agent.session.state = AgentState::Idle;
+    }
+
+    let effects = dispatch(Action::SendPrompt("next request".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "prompt must remain held for mode admission"
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent.session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan),
+        "the parked prompt must remain tied to the requested Behavior"
+    );
+
+    // Mirror the authoritative applied CurrentModeUpdate boundary: it clears
+    // the optimistic mode + admission token before exactly one FIFO drain.
+    agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+    assert!(
+        agent
+            .session
+            .resolve_in_flight_behavior(
+                tools::types::BehaviorId::Plan,
+                crate::app::session::BehaviorControlResolution::Applied,
+                None,
+            )
+            .is_some()
+    );
+    agent.session.deferred_session_mode = None;
+    assert!(matches!(
+        maybe_drain_queue(agent).effects.as_slice(),
+        [Effect::SendPrompt { text, .. }] if text == "next request"
+    ));
+    assert!(agent.session.pending_prompts.is_empty());
+}
+
+#[test]
 fn switch_agent_soft_allows_unknown_name_for_shell_ssot() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -708,6 +822,116 @@ fn switch_agent_soft_allows_unknown_name_for_shell_ssot() {
     assert_eq!(
         app.agents[&id].session.agent_switch_target(),
         Some("software-engineering/software-architect")
+    );
+}
+
+#[test]
+fn model_and_agent_switches_target_the_visible_subagent_session() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_sid = "child-session";
+    let child_session = make_test_agent_session(&app, AgentId(99), child_sid);
+    let child = AgentView::new(child_session, ScrollbackState::new());
+    let root = app.agents.get_mut(&root_id).unwrap();
+    root.insert_subagent_view(child_sid.into(), Box::new(child));
+    root.active_subagent = Some(child_sid.into());
+
+    let model_id = acp::ModelId::new("catalog/child-model");
+    let model_effects = dispatch(
+        Action::SwitchModel {
+            model_id: model_id.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    let model_token = match model_effects.as_slice() {
+        [
+            Effect::SwitchModel {
+                agent_id,
+                session_id,
+                control_token,
+                model_id: selected,
+                ..
+            },
+        ] if *agent_id == root_id
+            && session_id.0.as_ref() == child_sid
+            && selected == &model_id =>
+        {
+            *control_token
+        }
+        other => panic!("expected child model control, got {other:?}"),
+    };
+    let root = app.agents.get(&root_id).unwrap();
+    assert!(!root.session.model_switch_pending());
+    assert!(
+        root.subagent_views[child_sid]
+            .session
+            .model_switch_pending()
+    );
+
+    let agent_effects = dispatch(
+        Action::SwitchAgent {
+            agent_name: "reviewer".into(),
+        },
+        &mut app,
+    );
+    assert!(
+        agent_effects.is_empty(),
+        "the child Agent control must wait behind its model control"
+    );
+    let agent_effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: root_id,
+            session_id: acp::SessionId::new(child_sid),
+            control_token: model_token,
+            model_id,
+            effort: None,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        agent_effects.as_slice(),
+        [Effect::SwitchAgent { agent_id, session_id, agent_name, .. }]
+            if *agent_id == root_id
+                && session_id.0.as_ref() == child_sid
+                && agent_name == "reviewer"
+    ));
+    let root = app.agents.get(&root_id).unwrap();
+    assert!(root.session.agent_switch_target().is_none());
+    assert_eq!(
+        root.subagent_views[child_sid].session.agent_switch_target(),
+        Some("reviewer")
+    );
+}
+
+#[test]
+fn behavior_selection_from_child_view_never_mutates_parent_session() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_sid = "child-session";
+    let child_session = make_test_agent_session(&app, AgentId(99), child_sid);
+    let child = AgentView::new(child_session, ScrollbackState::new());
+    let root = app.agents.get_mut(&root_id).unwrap();
+    root.insert_subagent_view(child_sid.into(), Box::new(child));
+    root.active_subagent = Some(child_sid.into());
+
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.agents[&root_id].session.behavior_mode,
+        tools::types::BehaviorId::Normal
+    );
+    assert!(
+        app.agents[&root_id]
+            .session
+            .behavior_control_target()
+            .is_none(),
+        "a child-local Behavior action must not enqueue against the parent"
     );
 }
 #[test]
@@ -729,7 +953,7 @@ fn test_helper_agent_uses_generation_zero() {
     let id = AgentId(0);
     assert!(app.agents[&id].session.available_commands.is_empty());
     assert_eq!(app.agents[&id].session.available_commands_generation, 0);
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 }
 #[test]
 fn slash_exit_dispatches_quit() {
@@ -1213,13 +1437,13 @@ fn all_constructor_paths_initialize_slash_fields() {
     {
         let s = &app.agents[&AgentId(0)].session;
         assert_eq!(s.available_commands_generation, 1);
-        assert!(!s.model_switch_pending);
+        assert!(!s.model_switch_pending());
     }
     dispatch(Action::LoadSession("sess-1".into(), None), &mut app);
     {
         let s = &app.agents[&AgentId(1)].session;
         assert_eq!(s.available_commands_generation, 1);
-        assert!(!s.model_switch_pending);
+        assert!(!s.model_switch_pending());
     }
     app.cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     app.cwd_has_git_ancestor = true;
@@ -1234,13 +1458,13 @@ fn all_constructor_paths_initialize_slash_fields() {
     {
         let s = &app.agents[&AgentId(2)].session;
         assert_eq!(s.available_commands_generation, 1);
-        assert!(!s.model_switch_pending);
+        assert!(!s.model_switch_pending());
     }
     let test_app = test_app_with_agent();
     {
         let s = &test_app.agents[&AgentId(0)].session;
         assert_eq!(s.available_commands_generation, 0);
-        assert!(!s.model_switch_pending);
+        assert!(!s.model_switch_pending());
     }
 }
 #[test]
@@ -1582,10 +1806,7 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                 );
             }
             ("behavior", SettingKind::Enum { default, .. }) => {
-                let effective = agent
-                    .session
-                    .behavior_mode_pending
-                    .unwrap_or(agent.session.behavior_mode);
+                let effective = agent.session.effective_behavior();
                 let expected = effective.as_id();
                 assert_eq!(
                     *default, expected,

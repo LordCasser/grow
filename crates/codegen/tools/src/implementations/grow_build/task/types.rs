@@ -33,6 +33,7 @@ pub enum SubagentOwner {
     Task,
     Goal {
         goal_id: String,
+        definition_revision: u64,
     },
     Workflow {
         run_id: String,
@@ -40,9 +41,10 @@ pub enum SubagentOwner {
 }
 
 impl SubagentOwner {
-    pub fn goal(goal_id: impl Into<String>) -> Self {
+    pub fn goal(goal_id: impl Into<String>, definition_revision: u64) -> Self {
         Self::Goal {
             goal_id: goal_id.into(),
+            definition_revision,
         }
     }
 
@@ -62,6 +64,16 @@ impl SubagentOwner {
     pub fn goal_id(&self) -> Option<&str> {
         match self {
             Self::Goal { goal_id, .. } => Some(goal_id),
+            Self::Task | Self::Workflow { .. } => None,
+        }
+    }
+
+    pub fn goal_definition_revision(&self) -> Option<u64> {
+        match self {
+            Self::Goal {
+                definition_revision,
+                ..
+            } => Some(*definition_revision),
             Self::Task | Self::Workflow { .. } => None,
         }
     }
@@ -429,7 +441,10 @@ pub enum SubagentCancelTarget {
     /// Revoke every descendant carrying the immutable Goal owner. The parent
     /// session scope prevents one session from cancelling another session's
     /// coincidentally equal identifier.
-    GoalId(String),
+    Goal {
+        goal_id: String,
+        definition_revision: u64,
+    },
     WorkflowRunId(String),
 }
 

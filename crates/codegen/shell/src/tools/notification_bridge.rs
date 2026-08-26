@@ -213,6 +213,28 @@ async fn emit_current_mode_update(
     ));
     config.gateway.forward_fire_and_forget(notification);
 }
+
+fn notification_owner(
+    goal_id: Option<String>,
+    goal_definition_revision: Option<u64>,
+    source: &str,
+) -> Result<chat_state::NotificationOwner, String> {
+    match (goal_id, goal_definition_revision) {
+        (None, None) => Ok(chat_state::NotificationOwner::Session),
+        (Some(goal_id), Some(definition_revision))
+            if !goal_id.trim().is_empty() && definition_revision > 0 =>
+        {
+            Ok(chat_state::NotificationOwner::Goal {
+                goal_id,
+                definition_revision,
+            })
+        }
+        _ => Err(format!(
+            "{source} carried an incomplete or invalid Goal owner"
+        )),
+    }
+}
+
 /// Handle a single notification by forwarding it to the appropriate shell system.
 async fn handle_notification_with_ack(
     config: &NotificationBridgeConfig,
@@ -298,19 +320,28 @@ async fn handle_notification_with_ack(
             );
         }
         ToolNotification::BashExecutionBackgrounded(bg) => {
-            if let Some(goal_id) = bg.goal_id.as_deref() {
-                // The backgrounded event is ordered before terminal receipts
-                // on this bridge channel. Register admission ownership now,
-                // rather than waiting for the tool result path.
-                config
-                    .session_cmd_tx
-                    .send(SessionCommand::RecordGoalOwnedTaskIds {
-                        goal_id: goal_id.to_owned(),
-                        task_ids: vec![bg.task_id.clone()],
-                    })
-                    .map_err(|_| {
-                        "session stopped before Goal task ownership admission".to_owned()
-                    })?;
+            match (bg.goal_id.as_deref(), bg.goal_definition_revision) {
+                (Some(goal_id), Some(definition_revision)) if definition_revision > 0 => {
+                    // The backgrounded event is ordered before terminal receipts
+                    // on this bridge channel. Register admission ownership now,
+                    // rather than waiting for the tool result path.
+                    config
+                        .session_cmd_tx
+                        .send(SessionCommand::RecordGoalOwnedTaskIds {
+                            goal_id: goal_id.to_owned(),
+                            definition_revision,
+                            task_ids: vec![bg.task_id.clone()],
+                        })
+                        .map_err(|_| {
+                            "session stopped before Goal task ownership admission".to_owned()
+                        })?;
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(
+                        "background task admission carried an incomplete Goal owner".to_owned()
+                    );
+                }
             }
             tracing::debug!(
                 tool_call_id = %bg.base.tool_call_id,
@@ -377,11 +408,11 @@ async fn handle_notification_with_ack(
         ToolNotification::TaskCompleted(task_snapshot) => {
             let is_monitor = task_snapshot.kind == tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
-            let owner = task_snapshot
-                .goal_id
-                .clone()
-                .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
-                .unwrap_or(chat_state::NotificationOwner::Session);
+            let owner = notification_owner(
+                task_snapshot.goal_id.clone(),
+                task_snapshot.goal_definition_revision,
+                "completed task",
+            )?;
             if !task_snapshot.block_waited && !task_snapshot.explicitly_killed {
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
                 let read_name = resolved_tool_name(&config.read_tool_name);
@@ -542,6 +573,11 @@ async fn handle_notification_with_ack(
                 );
                 return Ok(());
             }
+            let owner = notification_owner(
+                event.goal_id.clone(),
+                event.goal_definition_revision,
+                "monitor event",
+            )?;
             tracing::debug!(
                 task_id = %event.task_id,
                 description = %event.description,
@@ -572,10 +608,7 @@ async fn handle_notification_with_ack(
                 .send(SessionCommand::ReceiveNotification {
                     source: chat_state::NotificationSource::MonitorProgress {
                         task_id: event.task_id.clone(),
-                        owner: event
-                            .goal_id
-                            .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
-                            .unwrap_or(chat_state::NotificationOwner::Session),
+                        owner,
                     },
                     source_version: chat_state::NotificationSourceVersion::Opaque {
                         value: uuid::Uuid::now_v7().to_string(),
@@ -702,6 +735,7 @@ mod tests {
             explicitly_killed: false,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
             is_backgrounded: false,
         }
@@ -787,6 +821,7 @@ mod tests {
             .expect("slot is fresh in this test fixture");
         let mut snapshot = make_task_snapshot("instant-goal", TaskKind::Bash);
         snapshot.goal_id = Some("goal-fast".into());
+        snapshot.goal_definition_revision = Some(1);
         let mut offsets = HashMap::new();
         handle_notification(
             &config,
@@ -803,9 +838,32 @@ mod tests {
         assert_eq!(
             source.owner(),
             chat_state::NotificationOwner::Goal {
-                goal_id: "goal-fast".into()
+                goal_id: "goal-fast".into(),
+                definition_revision: 1,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_goal_task_owner_is_rejected_before_publication() {
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+        let mut snapshot = make_task_snapshot("invalid-goal-task", TaskKind::Bash);
+        snapshot.goal_id = Some("goal-1".into());
+        let mut offsets = HashMap::new();
+
+        let error = handle_notification_with_ack(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut offsets,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("incomplete or invalid Goal owner"));
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(gateway_rx.try_recv().is_err());
+        assert!(persistence_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1038,6 +1096,7 @@ mod tests {
                 raw_text: "done".into(),
                 owner_session_id: Some("test-session".into()),
                 goal_id: None,
+                goal_definition_revision: None,
             }),
             &mut offsets,
         )
@@ -1261,6 +1320,7 @@ mod tests {
                 output_file: PathBuf::from("/tmp/out.log"),
                 task_id: "task-bg".into(),
                 goal_id: Some("goal-1".into()),
+                goal_definition_revision: Some(1),
                 monitor_description: None,
                 description: None,
             },
@@ -1269,8 +1329,8 @@ mod tests {
         handle_notification(&config, notification, &mut offsets).await;
         assert!(matches!(
             cmd_rx.try_recv().expect("Goal ownership must be admitted first"),
-            SessionCommand::RecordGoalOwnedTaskIds { goal_id, task_ids }
-                if goal_id == "goal-1" && task_ids == vec!["task-bg"]
+            SessionCommand::RecordGoalOwnedTaskIds { goal_id, definition_revision, task_ids }
+                if goal_id == "goal-1" && definition_revision == 1 && task_ids == vec!["task-bg"]
         ));
         match persistence_rx.try_recv().expect("must persist") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
@@ -1379,6 +1439,7 @@ mod tests {
             raw_text: "boom".into(),
             owner_session_id: owner.map(str::to_string),
             goal_id: None,
+            goal_definition_revision: None,
         })
     }
 
@@ -1395,6 +1456,7 @@ mod tests {
                 raw_text: "ready".into(),
                 owner_session_id: Some("test-session".into()),
                 goal_id: Some("goal-1".into()),
+                goal_definition_revision: Some(1),
             }),
             &mut offsets,
         )
@@ -1404,11 +1466,43 @@ mod tests {
             Ok(SessionCommand::ReceiveNotification {
                 source: chat_state::NotificationSource::MonitorProgress {
                     task_id,
-                    owner: chat_state::NotificationOwner::Goal { goal_id },
+                    owner: chat_state::NotificationOwner::Goal {
+                        goal_id,
+                        definition_revision,
+                    },
                 },
                 ..
-            }) if task_id == "goal-monitor" && goal_id == "goal-1"
+            }) if task_id == "goal-monitor"
+                && goal_id == "goal-1"
+                && definition_revision == 1
         ));
+    }
+
+    #[tokio::test]
+    async fn incomplete_goal_monitor_owner_is_rejected_before_publication() {
+        let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+        let mut offsets = HashMap::new();
+
+        let error = handle_notification_with_ack(
+            &config,
+            ToolNotification::MonitorEvent(tools::notification::types::MonitorEvent {
+                task_id: "invalid-goal-monitor".into(),
+                description: "watch release".into(),
+                event_text: "<monitor-event>ready</monitor-event>".into(),
+                raw_text: "ready".into(),
+                owner_session_id: Some("test-session".into()),
+                goal_id: Some("goal-1".into()),
+                goal_definition_revision: None,
+            }),
+            &mut offsets,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("incomplete or invalid Goal owner"));
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(gateway_rx.try_recv().is_err());
     }
     #[tokio::test]
     async fn cross_session_monitor_event_is_dropped() {
@@ -1554,6 +1648,7 @@ mod tests {
     /// `output_file` path so the disk-pointer footer is exercised end-to-end.
     fn make_large_bash_snapshot(task_id: &str, output_file: PathBuf) -> TaskSnapshot {
         TaskSnapshot {
+            goal_definition_revision: None,
             task_id: task_id.into(),
             command: "yes hello | head -c 20000".into(),
             display_command: None,

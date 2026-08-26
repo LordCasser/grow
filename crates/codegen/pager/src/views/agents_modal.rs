@@ -408,14 +408,14 @@ fn load_config_agent_name() -> Option<String> {
 }
 
 pub fn resolve_default_agent_name(cwd: &Path) -> String {
+    let selection = load_agent_selection_config();
+    if let Some(name) = selection.name.as_ref().filter(|name| !name.is_empty()) {
+        return name.clone();
+    }
     shell::agent::mvp_agent::MvpAgent::resolve_agent_definition(
-        cwd,
-        None,
-        &load_agent_selection_config(),
-        None,
-        None,
+        cwd, None, None, &selection, None, None,
     )
-    .name
+    .selector_identity()
 }
 
 fn refresh_default_agent(state: &mut AgentsModalState) {

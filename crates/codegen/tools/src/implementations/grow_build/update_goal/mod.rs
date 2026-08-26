@@ -54,6 +54,7 @@ pub struct GoalView {
     pub status: String,
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
+    pub usage_incomplete: bool,
     pub elapsed_ms: u64,
     pub created_at: String,
     pub updated_at: String,

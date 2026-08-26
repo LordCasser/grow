@@ -376,6 +376,9 @@ pub struct GoalDisplayState {
     pub status: GoalDisplayStatus,
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
+    /// `tokens_used` is a lower bound because at least one admitted provider
+    /// attempt returned no usage. Shell pauses the Goal while this is true.
+    pub usage_incomplete: bool,
     pub elapsed_ms: u64,
     pub created_at: String,
     pub updated_at: String,
@@ -414,6 +417,7 @@ impl GoalDisplayState {
             status: GoalDisplayStatus::Active,
             token_budget: None,
             tokens_used: 0,
+            usage_incomplete: false,
             elapsed_ms: 0,
             created_at: "now".into(),
             updated_at: "now".into(),
@@ -644,6 +648,58 @@ impl WorkflowRunSnapshot {
 /// External code should use the facade methods (`handle_update`,
 /// `start_turn`, `finish_turn`, `turn_activity`) instead of accessing
 /// the tracker directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionControlToken {
+    pub(crate) generation: u64,
+    pub(crate) sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingSessionControl {
+    Model {
+        model_id: acp::ModelId,
+        effort: Option<ReasoningEffort>,
+    },
+    Agent {
+        agent_name: String,
+    },
+    Behavior {
+        mode: tools::types::BehaviorId,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct QueuedSessionControl {
+    token: SessionControlToken,
+    control: PendingSessionControl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionControlCompletion {
+    Stale,
+    Drained,
+    Next,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BehaviorControlResolution {
+    Applied,
+    Rejected,
+    ConfirmationRequired,
+}
+
+#[derive(Debug, Default)]
+struct SessionControlQueue {
+    generation: u64,
+    next_sequence: u64,
+    in_flight: Option<QueuedSessionControl>,
+    queued: VecDeque<QueuedSessionControl>,
+    /// Rearmed token corresponding to the sole RPC that may have reached the
+    /// previous transport. Locally queued followers were never sent and must
+    /// never be folded from restored state equality.
+    reconnect_applied_candidate: Option<SessionControlToken>,
+}
+
 pub struct AgentSession {
     pub id: AgentId,
     pub acp_tx: AcpAgentTx,
@@ -715,10 +771,23 @@ pub struct AgentSession {
     self_interjection_ids: HashSet<String>,
     /// Running agent definition reported for this ACP session.
     session_agent_name: Option<String>,
-    /// Local `/agent` switch target awaiting completion. The pending intent
-    /// survives an earlier `AgentChanged` notification so the eventual RPC
-    /// completion can still emit exactly one local success message.
-    agent_switch_pending: Option<String>,
+    /// Serialized next-step model/effort/Agent controls. Exactly one RPC is in
+    /// flight per session; queued controls and reconnect generations make the
+    /// prompt barrier safe under rapid repeated selection and stale task
+    /// completion.
+    controls: SessionControlQueue,
+    /// Latest server-authoritative model state observed while a local route
+    /// control is outstanding. Applying it immediately would make the local
+    /// completion appear unchanged; dropping it would let a second client leave
+    /// this view permanently stale. It is applied only once the serialized
+    /// control queue drains.
+    pending_authoritative_model_change: Option<(String, Option<String>)>,
+    /// Equivalent parked server-authoritative Agent state. Model and Agent
+    /// controls share one FIFO, but their authoritative state is independent,
+    /// so retain the latest value of each kind.
+    pending_authoritative_agent_change: Option<String>,
+    /// Monotonic token for asynchronous session metadata reads.
+    agent_metadata_revision: u64,
     /// Prompt currently being reconciled by the submission watchdog. This
     /// bounds status requests to one in flight per prompt.
     prompt_status_query_for: Option<String>,
@@ -767,12 +836,9 @@ pub struct AgentSession {
     /// `Some(_)` enables tool-gating in the slash registry; `None` keeps
     /// every command visible (avoids bootstrap flicker).
     pub available_tools: Option<HashSet<String>>,
-    /// Whether a `/model` switch is in flight. Dims the status-bar model name
-    /// and holds the queue drain (`maybe_drain_queue`) so a queued prompt isn't
-    /// sent on the old harness mid-switch. Cleared on
-    /// `SwitchModelComplete`, or by `begin_session_reload` when a reconnect
-    /// drops the in-flight RPC — else a lost completion jams the queue forever.
-    pub model_switch_pending: bool,
+    /// Agent names frozen by the owning Workflow Run. `None` means this
+    /// session follows ordinary live Agent discovery.
+    pub(crate) workflow_agent_names: Option<Vec<String>>,
     /// Model the user chose this session via `/model` / the model picker, or
     /// the last successfully applied live remote `ModelChanged` (leader-mode
     /// fan-out). Survives reconnect (`begin_session_reload` does **not** clear
@@ -787,13 +853,6 @@ pub struct AgentSession {
     pub(crate) plan_mode_active: bool,
     /// Confirmed user-facing Behavior. Permission policy is tracked separately.
     pub(crate) behavior_mode: tools::types::BehaviorId,
-    /// Optimistic Plan projection set immediately by a Behavior selection.
-    /// Cleared to `None` when `detect_plan_mode_change()` confirms real state.
-    /// Selectors use `plan_mode_pending.unwrap_or(plan_mode_active)` so the UI
-    /// remains responsive while waiting for ACP confirmation.
-    pub(crate) plan_mode_pending: Option<bool>,
-    /// Optimistic Behavior selection awaiting `CurrentModeUpdate`.
-    pub(crate) behavior_mode_pending: Option<tools::types::BehaviorId>,
     /// Current phase reported by the plan-mode runtime, when one is active.
     pub(crate) plan_phase: Option<String>,
     /// Session mode to apply once this agent's ACP session exists. Set when
@@ -1028,7 +1087,10 @@ impl AgentSession {
             mcp_init_progress: None,
             self_interjection_ids: HashSet::new(),
             session_agent_name: None,
-            agent_switch_pending: None,
+            controls: SessionControlQueue::default(),
+            pending_authoritative_model_change: None,
+            pending_authoritative_agent_change: None,
+            agent_metadata_revision: 0,
             prompt_status_query_for: None,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
@@ -1040,13 +1102,11 @@ impl AgentSession {
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
-            model_switch_pending: false,
+            workflow_agent_names: None,
             user_model_preference: None,
             deferred_model_switch: None,
             plan_mode_active: false,
             behavior_mode: tools::types::BehaviorId::Normal,
-            plan_mode_pending: None,
-            behavior_mode_pending: None,
             plan_phase: None,
             deferred_session_mode: None,
             bg_tasks: BTreeMap::new(),
@@ -1115,23 +1175,373 @@ impl AgentSession {
         self.session_agent_name.as_deref()
     }
 
+    pub(crate) fn begin_agent_metadata_read(&mut self) -> u64 {
+        self.agent_metadata_revision = self.agent_metadata_revision.saturating_add(1);
+        self.agent_metadata_revision
+    }
+
+    pub(crate) fn agent_metadata_read_is_current(&self, revision: u64) -> bool {
+        self.agent_metadata_revision == revision
+    }
+
     pub(crate) fn apply_agent_name(&mut self, name: Option<String>) -> bool {
         let changed = self.session_agent_name != name;
         self.session_agent_name = name;
+        self.agent_metadata_revision = self.agent_metadata_revision.saturating_add(1);
         changed
     }
 
-    pub(crate) fn begin_agent_switch(&mut self, name: impl Into<String>) {
-        self.agent_switch_pending = Some(name.into());
+    /// Queue a control in user-observed order. The first control becomes the
+    /// sole in-flight RPC; later controls remain local until its matching
+    /// completion advances the queue.
+    pub(crate) fn enqueue_control(
+        &mut self,
+        control: PendingSessionControl,
+    ) -> Option<(SessionControlToken, PendingSessionControl)> {
+        let token = SessionControlToken {
+            generation: self.controls.generation,
+            sequence: self.controls.next_sequence,
+        };
+        self.controls.next_sequence = self.controls.next_sequence.saturating_add(1);
+        let queued = QueuedSessionControl { token, control };
+        if self.controls.in_flight.is_none() {
+            self.controls.in_flight = Some(queued.clone());
+            Some((token, queued.control))
+        } else {
+            self.controls.queued.push_back(queued);
+            None
+        }
     }
 
-    pub(crate) fn complete_agent_switch(&mut self) -> bool {
-        self.agent_switch_pending.take().is_some()
+    pub(crate) fn complete_control(
+        &mut self,
+        token: SessionControlToken,
+    ) -> SessionControlCompletion {
+        if self
+            .controls
+            .in_flight
+            .as_ref()
+            .is_none_or(|pending| pending.token != token)
+        {
+            return SessionControlCompletion::Stale;
+        }
+        if self.controls.reconnect_applied_candidate == Some(token) {
+            self.controls.reconnect_applied_candidate = None;
+        }
+        self.controls.in_flight = None;
+        if let Some(next) = self.controls.queued.pop_front() {
+            self.controls.in_flight = Some(next);
+            SessionControlCompletion::Next
+        } else {
+            SessionControlCompletion::Drained
+        }
+    }
+
+    pub(crate) fn in_flight_control(&self) -> Option<(SessionControlToken, PendingSessionControl)> {
+        self.controls
+            .in_flight
+            .as_ref()
+            .map(|pending| (pending.token, pending.control.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_controls(&mut self) {
+        self.controls.generation = self.controls.generation.saturating_add(1);
+        self.controls.in_flight = None;
+        self.controls.queued.clear();
+        self.controls.reconnect_applied_candidate = None;
+        self.pending_authoritative_model_change = None;
+        self.pending_authoritative_agent_change = None;
+    }
+
+    /// Reissue user controls after the ACP transport has been replaced. Old
+    /// task results become stale through the generation bump, while the
+    /// original model/effort/Agent/Behavior order remains intact.
+    pub(crate) fn rearm_controls_for_reconnect(&mut self) {
+        self.controls.generation = self.controls.generation.saturating_add(1);
+        let had_in_flight = self.controls.in_flight.is_some();
+        let controls = self
+            .controls
+            .in_flight
+            .take()
+            .into_iter()
+            .chain(self.controls.queued.drain(..))
+            .map(|pending| pending.control)
+            .collect::<Vec<_>>();
+        for control in controls {
+            let token = SessionControlToken {
+                generation: self.controls.generation,
+                sequence: self.controls.next_sequence,
+            };
+            self.controls.next_sequence = self.controls.next_sequence.saturating_add(1);
+            let pending = QueuedSessionControl { token, control };
+            if self.controls.in_flight.is_none() {
+                if had_in_flight {
+                    self.controls.reconnect_applied_candidate = Some(token);
+                }
+                self.controls.in_flight = Some(pending);
+            } else {
+                self.controls.queued.push_back(pending);
+            }
+        }
+        // Replay reconstructs the authoritative server projection. Values
+        // parked behind the old transport's queue must not overwrite it.
+        self.pending_authoritative_model_change = None;
+        self.pending_authoritative_agent_change = None;
+    }
+
+    pub(crate) fn has_pending_model_control(
+        &self,
+        model_id: &acp::ModelId,
+        effort: Option<ReasoningEffort>,
+    ) -> bool {
+        self.controls
+            .in_flight
+            .iter()
+            .chain(self.controls.queued.iter())
+            .any(|pending| {
+                matches!(
+                    &pending.control,
+                    PendingSessionControl::Model {
+                        model_id: pending_model,
+                        effort: pending_effort,
+                    } if pending_model == model_id && *pending_effort == effort
+                )
+            })
+    }
+
+    pub(crate) fn has_pending_behavior_control(&self, mode: tools::types::BehaviorId) -> bool {
+        self.controls
+            .in_flight
+            .iter()
+            .chain(self.controls.queued.iter())
+            .any(|pending| {
+                matches!(
+                    &pending.control,
+                    PendingSessionControl::Behavior { mode: pending_mode }
+                        if *pending_mode == mode
+                )
+            })
+    }
+
+    /// Drop the applied prefix reconstructed by `session/load` before the
+    /// rearmed queue is sent to the replacement transport. A mismatch stops
+    /// the fold: later controls must never overtake it.
+    pub(crate) fn reconcile_rearmed_control_prefix(&mut self, _agent_name: Option<&str>) {
+        let Some(candidate) = self.controls.reconnect_applied_candidate.take() else {
+            return;
+        };
+        let Some(pending) = self
+            .controls
+            .in_flight
+            .as_ref()
+            .filter(|pending| pending.token == candidate)
+        else {
+            return;
+        };
+        let applied = match &pending.control {
+            PendingSessionControl::Model { model_id, effort } => {
+                let expected_effort = (*effort).or_else(|| {
+                    self.models.available.get(model_id).and_then(|info| {
+                        shell::sampling::types::parse_reasoning_effort_meta(info.meta.as_ref())
+                    })
+                });
+                self.models.current.as_ref() == Some(model_id)
+                    && self.models.reasoning_effort == expected_effort
+            }
+            // Re-selecting the same Agent intentionally rebuilds it from the
+            // newly published definition, so name equality is not proof that
+            // the old RPC committed.
+            PendingSessionControl::Agent { .. } => false,
+            // Mode equality cannot prove that a same-source selection reached
+            // the Shell, and that selection is the protocol for clearing an
+            // interrupt-confirmation latch. Reissue Behavior controls; the
+            // Shell handles same-mode selection idempotently.
+            PendingSessionControl::Behavior { .. } => false,
+        };
+        if applied {
+            let _ = self.complete_control(candidate);
+        }
+    }
+
+    /// Preserve the newest live model notification until the local serialized
+    /// control queue reaches its terminal state. The server is authoritative;
+    /// this only defers its projection to avoid racing our own RPC completion.
+    pub(crate) fn defer_authoritative_model_change(
+        &mut self,
+        model_id: String,
+        reasoning_effort: Option<String>,
+    ) {
+        self.pending_authoritative_model_change = Some((model_id, reasoning_effort));
+    }
+
+    /// A newer model event that can be applied immediately supersedes an
+    /// older catalog-blocked value. Without clearing the parked value here, a
+    /// later catalog publication could resurrect that stale event.
+    pub(crate) fn clear_deferred_authoritative_model_change(&mut self) {
+        self.pending_authoritative_model_change = None;
+    }
+
+    /// Preserve the newest live Agent notification for the same control barrier
+    /// as a model change.
+    pub(crate) fn defer_authoritative_agent_change(&mut self, agent_name: String) {
+        self.pending_authoritative_agent_change = Some(agent_name);
+    }
+
+    /// Take the authoritative values that were held behind a local control
+    /// queue. Callers must invoke this only after `complete_control` returns
+    /// `Drained`, so a following local control can never be overwritten.
+    pub(crate) fn take_deferred_authoritative_controls(
+        &mut self,
+    ) -> (Option<(String, Option<String>)>, Option<String>) {
+        (
+            self.pending_authoritative_model_change.take(),
+            self.pending_authoritative_agent_change.take(),
+        )
+    }
+
+    pub(crate) fn controls_pending(&self) -> bool {
+        self.controls.in_flight.is_some()
+    }
+
+    pub(crate) fn agent_switch_in_flight(&self) -> bool {
+        self.controls
+            .in_flight
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.control, PendingSessionControl::Agent { .. }))
+    }
+
+    /// The newest requested Behavior in this session's serialized control
+    /// queue. This is the sole optimistic Behavior projection; authoritative
+    /// `CurrentModeUpdate` remains the only committed state transition.
+    pub(crate) fn behavior_control_target(&self) -> Option<tools::types::BehaviorId> {
+        self.controls
+            .queued
+            .iter()
+            .rev()
+            .chain(self.controls.in_flight.iter())
+            .find_map(|pending| match &pending.control {
+                PendingSessionControl::Behavior { mode } => Some(*mode),
+                PendingSessionControl::Model { .. } | PendingSessionControl::Agent { .. } => None,
+            })
+    }
+
+    pub(crate) fn effective_behavior(&self) -> tools::types::BehaviorId {
+        self.behavior_control_target()
+            .or(self.deferred_session_mode)
+            .unwrap_or(self.behavior_mode)
+    }
+
+    pub(crate) fn effective_plan_mode(&self) -> bool {
+        self.effective_behavior().is_plan()
+    }
+
+    /// Consume the in-flight Behavior control only when the authoritative
+    /// session update resolves it. A plain unrelated CurrentModeUpdate never
+    /// advances the FIFO.
+    pub(crate) fn resolve_in_flight_behavior(
+        &mut self,
+        observed: tools::types::BehaviorId,
+        resolution: BehaviorControlResolution,
+        outcome_target: Option<tools::types::BehaviorId>,
+    ) -> Option<SessionControlCompletion> {
+        let (token, target) = match self.controls.in_flight.as_ref()? {
+            QueuedSessionControl {
+                token,
+                control: PendingSessionControl::Behavior { mode },
+            } => (*token, *mode),
+            _ => return None,
+        };
+        let settled = match resolution {
+            BehaviorControlResolution::Applied => target == observed,
+            BehaviorControlResolution::Rejected
+            | BehaviorControlResolution::ConfirmationRequired => outcome_target == Some(target),
+        };
+        settled.then(|| self.complete_control(token))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn model_switch_pending(&self) -> bool {
+        self.controls
+            .in_flight
+            .iter()
+            .chain(self.controls.queued.iter())
+            .any(|pending| matches!(pending.control, PendingSessionControl::Model { .. }))
     }
 
     #[cfg(test)]
     pub(crate) fn agent_switch_target(&self) -> Option<&str> {
-        self.agent_switch_pending.as_deref()
+        self.controls
+            .queued
+            .iter()
+            .rev()
+            .chain(self.controls.in_flight.iter())
+            .find_map(|pending| match &pending.control {
+                PendingSessionControl::Agent { agent_name } => Some(agent_name.as_str()),
+                PendingSessionControl::Model { .. } | PendingSessionControl::Behavior { .. } => {
+                    None
+                }
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_model_switch_for_test(&mut self) -> SessionControlToken {
+        let _ = self.enqueue_control(PendingSessionControl::Model {
+            model_id: acp::ModelId::new("test-model-control"),
+            effort: None,
+        });
+        self.controls
+            .queued
+            .back()
+            .or(self.controls.in_flight.as_ref())
+            .expect("test model control was queued")
+            .token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_agent_switch(&mut self, name: impl Into<String>) -> SessionControlToken {
+        let _ = self.enqueue_control(PendingSessionControl::Agent {
+            agent_name: name.into(),
+        });
+        self.controls
+            .queued
+            .back()
+            .or(self.controls.in_flight.as_ref())
+            .expect("test Agent control was queued")
+            .token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_behavior_switch(
+        &mut self,
+        mode: tools::types::BehaviorId,
+    ) -> SessionControlToken {
+        let _ = self.enqueue_control(PendingSessionControl::Behavior { mode });
+        self.controls
+            .queued
+            .back()
+            .or(self.controls.in_flight.as_ref())
+            .expect("test Behavior control was queued")
+            .token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_agent_switch(&mut self) -> bool {
+        let Some(token) = self.controls.in_flight.as_ref().and_then(|pending| {
+            matches!(pending.control, PendingSessionControl::Agent { .. }).then_some(pending.token)
+        }) else {
+            return false;
+        };
+        self.complete_control(token) != SessionControlCompletion::Stale
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_control_token_for_test(&self) -> SessionControlToken {
+        self.controls
+            .in_flight
+            .as_ref()
+            .expect("test requires an in-flight session control")
+            .token
     }
 
     pub(crate) fn prompt_status_query_matches(&self, prompt_id: &str) -> bool {
@@ -2188,6 +2598,148 @@ mod tests {
         assert_eq!(
             merged.combined_texts,
             vec!["hi /commit".to_string(), "go /push now".to_string()]
+        );
+    }
+
+    #[test]
+    fn behavior_controls_are_fifo_and_rejects_are_target_correlated() {
+        let mut s = test_session();
+        let first = s
+            .enqueue_control(PendingSessionControl::Behavior {
+                mode: tools::types::BehaviorId::Plan,
+            })
+            .expect("first Behavior is in flight");
+        assert!(
+            s.enqueue_control(PendingSessionControl::Behavior {
+                mode: tools::types::BehaviorId::Goal,
+            })
+            .is_none()
+        );
+        assert_eq!(s.effective_behavior(), tools::types::BehaviorId::Goal);
+
+        assert_eq!(
+            s.resolve_in_flight_behavior(
+                tools::types::BehaviorId::Plan,
+                BehaviorControlResolution::Applied,
+                None,
+            ),
+            Some(SessionControlCompletion::Next)
+        );
+        assert_eq!(s.effective_behavior(), tools::types::BehaviorId::Goal);
+
+        // A delayed terminal outcome for Plan must not consume the newer Goal
+        // request that has just become in-flight.
+        assert_eq!(
+            s.resolve_in_flight_behavior(
+                tools::types::BehaviorId::Plan,
+                BehaviorControlResolution::Rejected,
+                Some(tools::types::BehaviorId::Plan),
+            ),
+            None
+        );
+        assert_eq!(
+            s.resolve_in_flight_behavior(
+                tools::types::BehaviorId::Plan,
+                BehaviorControlResolution::Rejected,
+                Some(tools::types::BehaviorId::Goal),
+            ),
+            Some(SessionControlCompletion::Drained)
+        );
+        assert!(!s.controls_pending());
+        assert!(matches!(
+            first.1,
+            PendingSessionControl::Behavior {
+                mode: tools::types::BehaviorId::Plan
+            }
+        ));
+    }
+
+    #[test]
+    fn reconnect_rearms_fifo_and_reconciles_only_the_old_in_flight_control() {
+        let mut s = test_session();
+        let model_id = acp::ModelId::new("grow-test");
+        s.models.available.insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Grow Test".to_owned()),
+        );
+        s.models.set_current(model_id.clone(), None);
+        let old = s
+            .enqueue_control(PendingSessionControl::Model {
+                model_id: model_id.clone(),
+                effort: None,
+            })
+            .expect("first control is in flight")
+            .0;
+        assert!(
+            s.enqueue_control(PendingSessionControl::Model {
+                model_id: model_id.clone(),
+                effort: None,
+            })
+            .is_none()
+        );
+
+        s.rearm_controls_for_reconnect();
+        assert_eq!(
+            s.complete_control(old),
+            SessionControlCompletion::Stale,
+            "old-transport terminal must not mutate the rearmed queue"
+        );
+        s.reconcile_rearmed_control_prefix(None);
+
+        let (_, remaining) = s.in_flight_control().expect("queued follower remains");
+        assert!(matches!(
+            remaining,
+            PendingSessionControl::Model {
+                model_id: remaining_id,
+                effort: None,
+            } if remaining_id == model_id
+        ));
+    }
+
+    #[test]
+    fn reconnect_effort_none_compares_against_catalog_default() {
+        let mut s = test_session();
+        let model_id = acp::ModelId::new("grow-reasoning");
+        s.models.available.insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Grow Reasoning".to_owned()).meta(
+                serde_json::json!({ "reasoningEffort": "high" })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        s.models
+            .set_current(model_id.clone(), Some(ReasoningEffort::High));
+        s.enqueue_control(PendingSessionControl::Model {
+            model_id,
+            effort: None,
+        })
+        .expect("model control is in flight");
+
+        s.rearm_controls_for_reconnect();
+        s.reconcile_rearmed_control_prefix(None);
+
+        assert!(!s.controls_pending(), "loaded default effort proves apply");
+    }
+
+    #[test]
+    fn reconnect_never_inferrs_behavior_confirmation_from_mode_equality() {
+        let mut s = test_session();
+        s.enqueue_control(PendingSessionControl::Behavior {
+            mode: tools::types::BehaviorId::Normal,
+        })
+        .expect("Behavior control is in flight");
+
+        s.rearm_controls_for_reconnect();
+        s.reconcile_rearmed_control_prefix(None);
+
+        assert!(
+            matches!(
+                s.in_flight_control(),
+                Some((_, PendingSessionControl::Behavior { mode }))
+                    if mode == tools::types::BehaviorId::Normal
+            ),
+            "same-mode selection must be reissued to clear the Shell latch"
         );
     }
 }

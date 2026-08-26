@@ -112,6 +112,9 @@ pub struct TerminalRunRequest {
     pub owner_session_id: Option<String>,
     /// Immutable Goal owner captured when this process is created.
     pub goal_id: Option<String>,
+    /// Definition revision paired with `goal_id`; never match a Goal task by
+    /// id alone because edits create a new runtime epoch.
+    pub goal_definition_revision: Option<u64>,
     /// Model-supplied label for task UI / snapshots.
     pub description: Option<String>,
 }
@@ -221,6 +224,8 @@ pub struct TaskSnapshot {
     /// Immutable Goal owner captured when this task is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_definition_revision: Option<u64>,
     /// Model-supplied label for task UI / snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -240,9 +245,7 @@ impl TaskSnapshot {
     }
 
     /// True iff the task has NOT yet completed — covers bash AND
-    /// monitor task kinds (the `kind` field doesn't change this
-    /// predicate; the runtime turn-end TodoGate counts both as
-    /// backing work).
+    /// monitor task kinds (the `kind` field doesn't change this predicate).
     pub fn is_outstanding(&self) -> bool {
         !self.completed
     }

@@ -1409,18 +1409,15 @@ pub enum Effect {
     SwitchModel {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        control_token: super::session::SessionControlToken,
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
-        /// The model that was active before the optimistic UI update
-        /// in `set_default_model`. `None` for `Action::SwitchModel`
-        /// (no optimistic update). Threaded through to
-        /// `SwitchModelComplete` for optimistic selection rollback.
-        prev_model_id: Option<acp::ModelId>,
     },
     /// Switch the active prompt profile for an existing session.
     SwitchAgent {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        control_token: super::session::SessionControlToken,
         agent_name: String,
     },
     /// Fetch changelog from CDN (both markdown + structured JSON).
@@ -1537,22 +1534,14 @@ pub enum Effect {
         expected_version: u64,
         new_text: Option<String>,
     },
-    /// Set the session mode via ACP `session/set_mode`.
-    SetSessionMode {
-        session_id: acp::SessionId,
-        mode_id: acp::SessionModeId,
-    },
-    /// Set session mode then send a prompt, sequentially in one task.
-    /// Used by `/plan <desc>` to guarantee the mode switch ACP call
-    /// completes before the prompt is dispatched.
-    SetModeThenPrompt {
-        session_id: acp::SessionId,
-        mode_id: acp::SessionModeId,
+    /// A serialized per-exact-session Behavior request. Unlike the legacy
+    /// fire-and-forget mode effect, its token keeps rapid model/Agent/Behavior
+    /// changes in one FIFO and makes stale reconnect completions harmless.
+    SwitchBehavior {
         agent_id: AgentId,
-        text: String,
-        prompt_id: String,
-        /// See [`Effect::SendPrompt::skill_token_ranges`].
-        skill_token_ranges: Vec<std::ops::Range<usize>>,
+        session_id: acp::SessionId,
+        control_token: crate::app::session::SessionControlToken,
+        mode: tools::types::BehaviorId,
     },
     /// Fetch prompt history for the current session from the ACP agent.
     /// `session_id` scopes the canonical Timeline projection, so up-arrow
@@ -1566,6 +1555,7 @@ pub enum Effect {
     FetchSessionAgentName {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        revision: u64,
     },
     /// Fetch MCP server list from the shell (grow/mcp/list).
     FetchMcpsList {
@@ -1711,6 +1701,7 @@ pub enum Effect {
     ShowSessionInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        revision: u64,
         show_resolved_model: bool,
         nonce: u64,
     },
@@ -2110,25 +2101,14 @@ pub enum TaskResult {
         /// constructions that don't need gating.
         prompt_id: Option<String>,
     },
-    /// The `SetModeThenPrompt` RPC answered `confirmation_required`. The
-    /// prompt never ran and is returned to the ordinary local FIFO. The user
-    /// confirms only by selecting the same Behavior again; no Pager-owned
-    /// confirmation state or synthetic input can confirm the transition.
-    PromptRequiresBehaviorConfirmation {
+    /// Transport completion for [`Effect::SwitchBehavior`]. Success waits for
+    /// the authoritative CurrentModeUpdate; only an error advances the local
+    /// FIFO, while preserving any queued prompt admission latch.
+    SwitchBehaviorComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        mode_id: acp::SessionModeId,
-        text: String,
-        prompt_id: String,
-        skill_token_ranges: Vec<std::ops::Range<usize>>,
-        message: String,
-        remaining_ms: u64,
-    },
-    /// Completion of a standalone Behavior RPC. Deferred first prompts stay
-    /// queued until the authoritative mode update arrives, so a transport
-    /// failure must be visible instead of silently leaving that queue parked.
-    SessionModeSet {
-        session_id: acp::SessionId,
+        control_token: crate::app::session::SessionControlToken,
+        mode: tools::types::BehaviorId,
         result: Result<(), String>,
     },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer —
@@ -2171,15 +2151,17 @@ pub enum TaskResult {
     /// Model switch completed (effort, if any, was applied in the same request).
     SwitchModelComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        control_token: super::session::SessionControlToken,
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
         result: Result<(), String>,
-        /// Forwarded from `Effect::SwitchModel.prev_model_id`.
-        prev_model_id: Option<acp::ModelId>,
     },
     /// Agent profile switch completed.
     SwitchAgentComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        control_token: super::session::SessionControlToken,
         agent_name: String,
         result: Result<(), String>,
     },
@@ -2200,6 +2182,8 @@ pub enum TaskResult {
     /// Running agent name cached from `session/info` (for agents modal, etc.).
     SessionAgentNameResolved {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        revision: u64,
         agent_name: Option<String>,
     },
     /// MCP server list fetched from shell.
@@ -2298,6 +2282,8 @@ pub enum TaskResult {
     /// Session info fetched successfully.
     SessionInfoComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        revision: u64,
         info: Box<shell::session::SessionInfoResponse>,
         text: String,
         /// Session title from local persistence, if any (for the modal's rows).

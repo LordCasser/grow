@@ -1847,7 +1847,15 @@ impl tool_runtime::Tool for BashTool {
         let tool_call_id = ctx.call_id.clone();
 
         // --- Read resources ---
-        let (backend, session_folder, env, notification_handle, owner_session_id, goal_id) = {
+        let (
+            backend,
+            session_folder,
+            env,
+            notification_handle,
+            owner_session_id,
+            goal_id,
+            goal_definition_revision,
+        ) = {
             let res = resources.lock().await;
             (
                 res.require::<Terminal>()?.0.clone(),
@@ -1858,6 +1866,8 @@ impl tool_runtime::Tool for BashTool {
                     .map(|o| o.0.clone()),
                 res.get::<crate::implementations::grow_build::task::types::CurrentSubagentOwnerResource>()
                     .and_then(|owner| owner.0.goal_id().map(str::to_owned)),
+                res.get::<crate::implementations::grow_build::task::types::CurrentSubagentOwnerResource>()
+                    .and_then(|owner| owner.0.goal_definition_revision()),
             )
         };
 
@@ -2006,6 +2016,7 @@ impl tool_runtime::Tool for BashTool {
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
                 goal_id: goal_id.clone(),
+                goal_definition_revision,
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
@@ -2042,6 +2053,7 @@ impl tool_runtime::Tool for BashTool {
                 output_file: bg_output_file.clone(),
                 task_id: task_id.clone(),
                 goal_id: goal_id.clone(),
+                goal_definition_revision,
                 monitor_description: None,
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             });
@@ -2109,6 +2121,7 @@ impl tool_runtime::Tool for BashTool {
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
                 goal_id: goal_id.clone(),
+                goal_definition_revision,
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
@@ -2143,6 +2156,7 @@ impl tool_runtime::Tool for BashTool {
                     output_file: output_file.clone(),
                     task_id: tool_call_id.as_str().to_owned(),
                     goal_id: goal_id.clone(),
+                    goal_definition_revision,
                     monitor_description: None,
                     description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
                 });
@@ -2326,6 +2340,7 @@ mod tests {
             explicitly_killed: false,
             owner_session_id: Some("session".into()),
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
             is_backgrounded: true,
         };

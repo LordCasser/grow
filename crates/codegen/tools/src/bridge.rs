@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::computer::types::KillOutcome;
 use crate::computer::types::TerminalBackend;
 use crate::registry::types::{
-    FinalizedToolset, SessionContext, ToolRegistryBuilder, ToolServerConfig,
+    FinalizedToolset, SessionContext, SessionResourceDomain, ToolRegistryBuilder, ToolServerConfig,
 };
 use crate::types::TaskSnapshot;
 use crate::types::ToolInput;
@@ -316,6 +316,26 @@ impl ToolBridge {
         );
     }
 
+    /// Rebind every model-window-derived tool projection at a step boundary.
+    ///
+    /// This deliberately leaves skill discovery/announcement state and the
+    /// web-fetch cache intact. Calls already admitted by the previous step own
+    /// their cloned resource; future calls observe the new cap.
+    pub async fn set_context_window_tokens(&self, context_window_tokens: u64) {
+        let registry = &*self.registry;
+        let mut resources = registry.resources.lock().await;
+        if let Some(skills) =
+            resources.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
+        {
+            skills.set_context_window_tokens(context_window_tokens);
+        }
+        if let Some(web_fetch) =
+            resources.get_mut::<crate::implementations::grow_build::web_fetch::WebFetchClient>()
+        {
+            web_fetch.set_context_window_tokens(context_window_tokens);
+        }
+    }
+
     /// Seed the gitignore filter so `read_file` and `search_replace` refuse
     /// to access gitignored paths (matching `list_dir`/`grep` behavior).
     pub async fn seed_gitignore_filter(
@@ -524,6 +544,32 @@ impl ToolBridge {
     /// Used by the host session to inject `ToolIndex` for search_tool.
     pub async fn update_resource<T: Send + Sync + 'static>(&self, resource: T) {
         let _ = self.registry.update_resource(resource).await;
+    }
+
+    /// Commit this staged toolset into the session's single live resource
+    /// domain. This requires unique ownership and is therefore only available
+    /// during initial Agent construction or the step-boundary Agent swap.
+    pub async fn activate_resource_domain(
+        &mut self,
+        domain: &SessionResourceDomain,
+    ) -> Result<(), String> {
+        let registry = Arc::get_mut(&mut self.registry)
+            .ok_or_else(|| "staged ToolBridge is already shared".to_string())?;
+        domain.activate_toolset(registry).await
+    }
+
+    pub async fn prepare_resource_domain_activation(
+        &mut self,
+        domain: &SessionResourceDomain,
+    ) -> Result<crate::registry::types::PreparedResourceActivation, String> {
+        let registry = Arc::get_mut(&mut self.registry)
+            .ok_or_else(|| "staged ToolBridge is already shared".to_string())?;
+        domain.prepare_replacement(registry).await
+    }
+
+    /// Remove a live typed dependency from the session resource domain.
+    pub async fn remove_resource<T: Send + Sync + 'static>(&self) -> Option<T> {
+        self.registry.resources.lock().await.remove::<T>()
     }
 
     /// Persist a fresh snapshot of all session resources before returning.

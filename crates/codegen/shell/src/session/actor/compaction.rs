@@ -26,6 +26,96 @@ use std::sync::Arc;
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
 
+/// The terminal backend is shared by a primary session and its descendants.
+/// Compaction context is session-local, so never leak another session's
+/// background commands into this session's model-visible state.
+fn background_tasks_owned_by(
+    tasks: impl IntoIterator<Item = tools::computer::types::TaskSnapshot>,
+    owner_session_id: &str,
+) -> Vec<tools::computer::types::TaskSnapshot> {
+    tasks
+        .into_iter()
+        .filter(|task| task.owner_session_id.as_deref() == Some(owner_session_id))
+        .collect()
+}
+
+fn append_system_reminder_section(
+    reminder: Option<String>,
+    wrapper_tag: &str,
+    section: &str,
+) -> Option<String> {
+    if section.trim().is_empty() {
+        return reminder;
+    }
+    match reminder {
+        Some(mut existing) => {
+            let closing = format!("</{wrapper_tag}>");
+            if let Some(position) = existing.rfind(&closing) {
+                let separator = if existing[..position].ends_with("\n\n") {
+                    ""
+                } else if existing[..position].ends_with('\n') {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                existing.insert_str(position, &format!("{separator}{}\n", section.trim()));
+            } else {
+                existing.push_str(&format!(
+                    "\n\n<{wrapper_tag}>\n{}\n</{wrapper_tag}>",
+                    section.trim()
+                ));
+            }
+            Some(existing)
+        }
+        None => Some(format!(
+            "<{wrapper_tag}>\n{}\n</{wrapper_tag}>",
+            section.trim()
+        )),
+    }
+}
+
+fn format_scheduled_tasks_compaction_reminder(
+    tasks: &[tools::implementations::grow_build::scheduler::types::ScheduledTask],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let mut active = tasks
+        .iter()
+        .filter(|task| !task.is_expired(now))
+        .collect::<Vec<_>>();
+    active.sort_by(|left, right| {
+        left.next_fire_at()
+            .cmp(&right.next_fire_at())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if active.is_empty() {
+        return None;
+    }
+
+    let mut body = String::from(
+        "## Scheduled Tasks\n\
+         These tasks are already registered with this session and continue independently; do not recreate them after compaction.",
+    );
+    for task in active {
+        let prompt = task.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        let prompt = tools::util::truncate_str(&prompt, 256);
+        let cadence = if task.recurring {
+            format!("every {}s", task.interval_secs)
+        } else {
+            "one-shot".to_owned()
+        };
+        let _ = write!(
+            body,
+            "\n- \"{}\" ({cadence}, next {}): {}",
+            task.id,
+            task.next_fire_at().to_rfc3339(),
+            prompt
+        );
+    }
+    Some(body)
+}
+
 fn context_recall_hint(tool_name: &str) -> String {
     format!(
         "<context-recall>\n\
@@ -52,6 +142,7 @@ pub(crate) struct AutoCompactTriggerInfo {
 /// window. The overflow branch matches it and fails the turn instead of
 /// resampling in a loop (fail-safe).
 pub(crate) const COMPACT_CONVERGED_OVER_WINDOW: &str = "compact_converged_over_window";
+const COMPACT_IMAGE_INPUT_UNSUPPORTED: &str = "compact_image_input_unsupported";
 
 /// Whether `err` carries the [`COMPACT_CONVERGED_OVER_WINDOW`] marker.
 pub(crate) fn is_compact_converged_over_window(err: &acp::Error) -> bool {
@@ -60,6 +151,21 @@ pub(crate) fn is_compact_converged_over_window(err: &acp::Error) -> bool {
         .and_then(|d| d.get("compact_error"))
         .and_then(|v| v.as_str())
         == Some(COMPACT_CONVERGED_OVER_WINDOW)
+}
+
+fn is_compact_image_input_unsupported(err: &acp::Error) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|data| data.get("compact_error"))
+        .and_then(|value| value.as_str())
+        == Some(COMPACT_IMAGE_INPUT_UNSUPPORTED)
+}
+
+fn compact_image_input_unsupported_error(message: String) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "message": message,
+        "compact_error": COMPACT_IMAGE_INPUT_UNSUPPORTED,
+    }))
 }
 
 /// The convergence failure error: compaction succeeded (the history was
@@ -481,6 +587,58 @@ impl SessionActor {
         user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
+        let mut image_recovery_attempted = false;
+        loop {
+            let result = self
+                .run_compact_transaction(user_context.clone(), trigger)
+                .await;
+            if !image_recovery_attempted
+                && result
+                    .as_ref()
+                    .is_err_and(is_compact_image_input_unsupported)
+            {
+                let key = self.current_model_image_input_key().await.ok_or_else(|| {
+                    acp::Error::internal_error()
+                        .data("compaction image rejection had no model capability identity")
+                })?;
+                self.record_unsupported_model_image_input(key.clone())
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "failed to persist text-only model capability during compaction: {error}"
+                        ))
+                    })?;
+                let projected = self
+                    .project_conversation_images_for_text_model(&key)
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "failed to persist text-only image projection during compaction: {error}"
+                        ))
+                    })?;
+                if projected.total_images() == 0 {
+                    return result;
+                }
+                tracing::warn!(
+                    model = key.model(),
+                    described_images = projected.described_images,
+                    "compaction model rejected images; installed irreversible ImageShadows and retrying from the new Surface"
+                );
+                image_recovery_attempted = true;
+                continue;
+            }
+            return result;
+        }
+    }
+
+    /// One durable compaction transaction. Capability recovery starts a fresh
+    /// transaction because ImageShadow installation changes the authoritative
+    /// Surface and therefore invalidates the first transaction's frozen input.
+    async fn run_compact_transaction(
+        &self,
+        user_context: Option<String>,
+        trigger: ::diagnostics::events::CompactionTrigger,
+    ) -> Result<(), acp::Error> {
         let id = uuid::Uuid::now_v7().to_string();
         let source_items = self.chat_state_handle.get_conversation_len().await;
         let prompt_index = self.chat_state_handle.get_prompt_index().await;
@@ -787,15 +945,15 @@ impl SessionActor {
         let mut input_overflow_rejections: u32 = 0;
         let mut compact_summary: Option<String> = None;
         while compact_summary.is_none() {
-            match compaction::generate_summary(
+            let summary_result = compaction::generate_summary(
                 &sampler,
                 &request_turns,
                 user_context.as_deref(),
                 &summary_config,
                 &observer,
             )
-            .await
-            {
+            .await;
+            match summary_result {
                 Ok(summary) => {
                     compact_summary = Some(summary.summary);
                     break;
@@ -843,6 +1001,11 @@ impl SessionActor {
                                 ))
                             })?;
                         return self.emit_compact_cancelled(auto_trigger).await;
+                    }
+                    if sampler.take_image_input_unsupported() {
+                        last_failure_outcome = CompactionOutcome::Deterministic;
+                        last_error = Some(compact_image_input_unsupported_error(message));
+                        break;
                     }
                     if context_overflow {
                         let next_stage = match input_stage {
@@ -1034,7 +1197,10 @@ impl SessionActor {
                     .list_background_tasks()
                     .await;
                 let pending_tasks: Vec<_> =
-                    bridge_tasks.into_iter().filter(|t| !t.completed).collect();
+                    background_tasks_owned_by(bridge_tasks, self.session_id_string().as_str())
+                        .into_iter()
+                        .filter(|t| !t.completed)
+                        .collect();
                 let (execute_tool_name, monitor_tool_name) = if pending_tasks.is_empty() {
                     (None, None)
                 } else {
@@ -1219,7 +1385,7 @@ impl SessionActor {
             memory_backend_impl
                 .as_ref()
                 .map(|b| b as &dyn tools::types::memory_backend::MemoryBackend);
-        let system_reminder = to_system_reminder(
+        let mut system_reminder = to_system_reminder(
             &state_context,
             &discovered_agents_md,
             &all_skills_for_compaction,
@@ -1228,71 +1394,100 @@ impl SessionActor {
             mcp_tool_names.as_ref(),
         )
         .await;
-        let system_reminder = {
-            let plan = {
-                use crate::session::behavior::{BehaviorState, PlanPhase};
-                let controller = self.behavior.lock();
-                match controller.state() {
-                    BehaviorState::Plan(PlanPhase::Executing) => Some((
-                        crate::session::behavior::plan_execution_reminder_template(),
-                        controller.plan_artifact_hash().map(str::to_owned),
-                    )),
-                    BehaviorState::Plan(_) => Some((
-                        crate::session::behavior::plan_mode_reminder_full_template(),
-                        controller.plan_artifact_hash().map(str::to_owned),
-                    )),
-                    _ => None,
-                }
-            };
-            if let Some((template, artifact_hash)) = plan {
-                let plan_content = match artifact_hash {
-                    Some(hash) => {
-                        let session = self.session_directory.clone();
-                        tokio::task::spawn_blocking(move || {
-                            crate::session::behavior::read_plan_artifact(&session, &hash)
-                        })
-                        .await
-                        .map_err(|error| {
-                            acp::Error::internal_error()
-                                .data(format!("failed to join Plan artifact read: {error}"))
-                        })?
-                        .map_err(|error| {
-                            acp::Error::internal_error().data(format!(
-                                "active Plan artifact failed validation during compaction: {error}"
-                            ))
-                        })?
-                    }
-                    None => String::new(),
-                };
-                let wrapper = self.reminder_wrapper_tag();
-                let rendered = self.render_plan_template(template, &plan_content).await;
-                match (system_reminder, rendered) {
-                    (Some(mut existing), Some(plan_section)) => {
-                        if let Some(pos) = existing.rfind("</system-reminder>") {
-                            existing.insert_str(pos, &format!("\n\n{}\n", plan_section));
-                        } else {
-                            existing.push_str("\n\n");
-                            existing.push_str(&plan_section);
-                        }
-                        Some(existing)
-                    }
-                    (None, Some(plan_section)) => Some(format!(
-                        "<{tag}>\n{body}\n</{tag}>",
-                        tag = wrapper,
-                        body = plan_section,
-                    )),
-                    (existing, None) => {
-                        tracing::warn!(
-                            session_id = %self.session_info.id.0,
-                            "compaction: plan mode active but template render failed"
-                        );
-                        existing
-                    }
-                }
-            } else {
-                system_reminder
+        let reminder_wrapper = self.reminder_wrapper_tag();
+
+        // Workflow guidance is turn-scoped rather than a Control projection.
+        // The current turn's copy sits immediately before its causal prompt,
+        // inside the prefix that compaction replaces. Reinstall the same
+        // authoritative workspace/authoring contract in the replacement so a
+        // later step in this turn cannot sample without Workflow semantics.
+        if *self.turn_behavior.lock() == tool_types::BehaviorId::Workflow {
+            let workflow_context = self.workflow_behavior_context()?;
+            system_reminder = append_system_reminder_section(
+                system_reminder,
+                reminder_wrapper,
+                &workflow_context,
+            );
+        }
+
+        let workflow_runs = {
+            let tracker = self.workflow_tracker().await;
+            let snapshot = tracker.lock().live_status_snapshot();
+            snapshot
+        };
+        if !workflow_runs.is_empty() {
+            let section = format!(
+                "## Active Workflow Runs\n{}",
+                super::reminders::format_workflow_status_reminder(&workflow_runs)
+            );
+            system_reminder =
+                append_system_reminder_section(system_reminder, reminder_wrapper, &section);
+        }
+
+        if !self.startup_hints.is_subagent {
+            let scheduled_tasks = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .clone()
+                .list_scheduled_tasks()
+                .await;
+            if let Some(section) =
+                format_scheduled_tasks_compaction_reminder(&scheduled_tasks, chrono::Utc::now())
+            {
+                system_reminder =
+                    append_system_reminder_section(system_reminder, reminder_wrapper, &section);
+            }
+        }
+
+        let plan = {
+            use crate::session::behavior::{BehaviorState, PlanPhase};
+            let controller = self.behavior.lock();
+            match controller.state() {
+                BehaviorState::Plan(PlanPhase::Executing) => Some((
+                    crate::session::behavior::plan_execution_reminder_template(),
+                    controller.plan_artifact_hash().map(str::to_owned),
+                )),
+                BehaviorState::Plan(_) => Some((
+                    crate::session::behavior::plan_mode_reminder_full_template(),
+                    controller.plan_artifact_hash().map(str::to_owned),
+                )),
+                _ => None,
             }
         };
+        if let Some((template, artifact_hash)) = plan {
+            let plan_content = match artifact_hash {
+                Some(hash) => {
+                    let session = self.session_directory.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::session::behavior::read_plan_artifact(&session, &hash)
+                    })
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error()
+                            .data(format!("failed to join Plan artifact read: {error}"))
+                    })?
+                    .map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "active Plan artifact failed validation during compaction: {error}"
+                        ))
+                    })?
+                }
+                None => String::new(),
+            };
+            if let Some(plan_section) = self.render_plan_template(template, &plan_content).await {
+                system_reminder = append_system_reminder_section(
+                    system_reminder,
+                    reminder_wrapper,
+                    &plan_section,
+                );
+            } else {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    "compaction: plan mode active but template render failed"
+                );
+            }
+        }
         if let Some(ref recovery_backend) = memory_backend_impl {
             let n = recovery_backend
                 .search_counter
@@ -1650,7 +1845,8 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Record the current model for model-switch detection on the next turn.
+    /// Record the model governing the current step. A route change compares
+    /// against this snapshot before the next sample.
     pub(crate) async fn record_turn_model(&self) {
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             self.compaction.previous_model.set(Some(
@@ -1948,6 +2144,26 @@ impl SessionActor {
                     || e.data.as_ref().and_then(|d| d.as_str()).is_some_and(|s| {
                         s.contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
                     });
+                // Some failures happen before the summarizer/provider path
+                // classifies them (for example, no eligible closed Surface
+                // range). Route every auto-compaction failure through the
+                // same policy so one impossible plan cannot retry at every
+                // step of a long Goal turn.
+                if !cancelled
+                    && self
+                        .compaction
+                        .auto_compact_suppressed
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        == SUPPRESS_NONE
+                {
+                    let reason = Self::classify_suppress_reason(&Self::acp_error_message(&e));
+                    self.suppress_auto_compaction(
+                        reason,
+                        trigger_info.tokens_used,
+                        trigger_info.context_window,
+                    )
+                    .await;
+                }
                 if !cancelled
                     && self
                         .compaction
@@ -1969,6 +2185,154 @@ impl SessionActor {
 #[cfg(test)]
 mod context_recall_tests {
     use super::*;
+
+    fn task(task_id: &str, owner_session_id: Option<&str>) -> tools::computer::types::TaskSnapshot {
+        tools::computer::types::TaskSnapshot {
+            goal_definition_revision: None,
+            task_id: task_id.into(),
+            command: format!("command-{task_id}"),
+            display_command: None,
+            cwd: "/tmp".into(),
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/output".into(),
+            truncated: false,
+            exit_code: None,
+            signal: None,
+            completed: false,
+            kind: tools::computer::types::TaskKind::Bash,
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: owner_session_id.map(str::to_owned),
+            goal_id: None,
+            description: None,
+            is_backgrounded: true,
+        }
+    }
+
+    #[test]
+    fn background_task_snapshot_is_scoped_to_the_current_session_owner() {
+        let tasks = vec![
+            task("current", Some("session-current")),
+            task("parent", Some("session-parent")),
+            task("sibling", Some("session-sibling")),
+            task("unowned", None),
+        ];
+
+        let owned = background_tasks_owned_by(tasks, "session-current");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].task_id, "current");
+    }
+
+    #[test]
+    fn live_runtime_sections_share_one_system_reminder_envelope() {
+        let reminder = append_system_reminder_section(
+            Some("<system-reminder>\n## Existing\nstate\n</system-reminder>".into()),
+            "system-reminder",
+            "## Workflow\nactive",
+        )
+        .unwrap();
+
+        assert_eq!(reminder.matches("<system-reminder>").count(), 1);
+        assert_eq!(reminder.matches("</system-reminder>").count(), 1);
+        assert!(reminder.contains("## Existing\nstate\n\n## Workflow\nactive"));
+    }
+
+    #[test]
+    fn scheduled_task_recovery_is_bounded_and_excludes_expired_tasks() {
+        use tools::implementations::grow_build::scheduler::types::ScheduledTask;
+
+        let now = chrono::Utc::now();
+        let mut active =
+            ScheduledTask::new(60, "  inspect   the build output  ".into(), true, true);
+        active.id = "loop-1".into();
+        let mut expired = ScheduledTask::new(60, "stale task".into(), true, true);
+        expired.id = "loop-old".into();
+        expired.expires_at = Some(now - chrono::Duration::seconds(1));
+
+        let reminder = format_scheduled_tasks_compaction_reminder(&[expired, active], now).unwrap();
+        assert!(reminder.contains("## Scheduled Tasks"));
+        assert!(reminder.contains("\"loop-1\""));
+        assert!(reminder.contains("inspect the build output"));
+        assert!(reminder.contains("do not recreate"));
+        assert!(!reminder.contains("loop-old"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn impossible_auto_compaction_is_suppressed_for_the_rest_of_the_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use std::sync::atomic::Ordering;
+
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .chat_state_handle
+                    .record_provider_context_anchor(90_000);
+                let trigger = AutoCompactTriggerInfo {
+                    tokens_used: 90_000,
+                    context_window: 100_000,
+                    percentage: 90,
+                    source: "test",
+                };
+
+                let error = actor
+                    .run_compact_only(trigger)
+                    .await
+                    .expect_err("a Surface without a closed prompt range cannot compact");
+                assert!(
+                    SessionActor::acp_error_message(&error).contains("no closed Surface range"),
+                    "the fixture must exercise the pre-provider planner failure"
+                );
+                assert_eq!(
+                    actor
+                        .compaction
+                        .auto_compact_suppressed
+                        .load(Ordering::Relaxed),
+                    SUPPRESS_TURN
+                );
+                assert!(
+                    actor.check_auto_compact_needed().await.is_none(),
+                    "later steps in the same turn must not retry the impossible plan"
+                );
+                // Recovery/continuation wrappers reuse this durable turn. The
+                // per-turn suppression must survive another compaction check;
+                // only the next TurnStarted admission clears it.
+                let retry = actor.check_auto_compact_needed().await;
+                assert!(retry.is_none());
+                assert_eq!(
+                    actor
+                        .compaction
+                        .auto_compact_suppressed
+                        .load(Ordering::Relaxed),
+                    SUPPRESS_TURN,
+                    "same-turn recovery must not reset per-turn suppression"
+                );
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Compaction(
+                                chat_state::CompactionEvent::Started { .. }
+                            )
+                        ))
+                        .count(),
+                    1
+                );
+                assert!(
+                    !events.iter().any(|event| matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Sideband(_)
+                    )),
+                    "range planning must fail before spawning a summarizer Sideband"
+                );
+            })
+            .await;
+    }
 
     #[test]
     fn hint_explains_model_assisted_recall_without_expanding_surface() {

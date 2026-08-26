@@ -154,7 +154,9 @@ fn missing_delegation_parent_output(
     tools::implementations::grow_build::task::coordinator::ChildRunOutput {
         result: tools::implementations::grow_build::task::types::SubagentResult {
             success: false,
-            error: Some("Immediate delegation parent is unavailable; cannot spawn subagent.".to_owned()),
+            error: Some(
+                "Immediate delegation parent is unavailable; cannot spawn subagent.".to_owned(),
+            ),
             subagent_id: request.id.clone(),
             child_session_id: request.id,
             ..Default::default()
@@ -210,7 +212,8 @@ impl MvpAgent {
             (
                 ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
                     .unwrap_or_default(),
-                ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
+                ps.map(|h| h.agent_profile.subagent_filter())
+                    .unwrap_or_default(),
             )
         };
         let (cli_agent_names, subagent_toggle) = {
@@ -311,8 +314,9 @@ impl MvpAgent {
                     }),
                 ps.map(|h| h.tool_context.session_env.clone())
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
-                ps.map(|h| h.agent_name.clone()),
-                ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
+                ps.map(|h| h.agent_profile.name()),
+                ps.map(|h| h.agent_profile.subagent_filter())
+                    .unwrap_or_default(),
             )
         };
         let (
@@ -331,7 +335,7 @@ impl MvpAgent {
                 )
             })
         }?;
-        let available_models = self.models_manager.models();
+        let (catalog_revision, available_models) = self.models_manager.catalog_models_snapshot();
         let (parent_lsp, parent_process_scope) = {
             let sessions = self.sessions.borrow();
             let parent = sessions.get(&parent_sid);
@@ -382,6 +386,7 @@ impl MvpAgent {
             )
         };
         Some(crate::agent::subagent::SubagentSpawnContext {
+            active_child_sessions: self.active_child_sessions.clone(),
             lsp: parent_lsp,
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
@@ -420,6 +425,12 @@ impl MvpAgent {
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
             parent_cmd_tx: parent_cmd_tx.clone(),
+            goal_usage_window: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|handle| handle.goal_usage_window.clone())?
+            },
             parent_session_info: {
                 let sessions = self.sessions.borrow();
                 sessions
@@ -453,10 +464,10 @@ impl MvpAgent {
             },
             parent_max_turns,
             available_models,
+            catalog_revision,
             subagent_model_overrides,
             subagent_toggle,
             subagent_filter: parent_subagent_filter,
-            todo_gate: self.cfg.borrow().todo_gate,
             remote_settings: self.cfg.borrow().remote_settings.clone(),
             laziness_debug_log: self.cfg.borrow().laziness_debug_log.clone(),
             respect_gitignore: self.cfg.borrow().respect_gitignore,
@@ -534,8 +545,8 @@ impl MvpAgent {
         ctx.terminal = handle.tool_context.terminal.clone();
         ctx.session_env = handle.tool_context.session_env.clone();
         ctx.lsp = handle.tool_context.lsp.clone();
-        ctx.parent_agent_name = Some(handle.agent_name.clone());
-        ctx.subagent_filter = handle.subagent_filter.clone();
+        ctx.parent_agent_name = Some(handle.agent_profile.name());
+        ctx.subagent_filter = handle.agent_profile.subagent_filter();
         ctx.parent_max_turns = handle.max_turns;
         ctx.permission_prompt_timeout = handle.permission_prompt_timeout;
         ctx.ask_user_question_enabled = handle.ask_user_question_enabled;
@@ -549,11 +560,9 @@ impl MvpAgent {
         ctx.parent_notification_handle = handle.tools_notification_handle.clone();
         ctx.parent_scheduler_handle = handle.scheduler_handle.clone();
 
-        let per_model = config::find_model_by_catalog_id(
-            &ctx.available_models,
-            ctx.model_id.0.as_ref(),
-        )
-        .and_then(|entry| entry.info.inference_idle_timeout_secs);
+        let per_model =
+            config::find_model_by_catalog_id(&ctx.available_models, ctx.model_id.0.as_ref())
+                .and_then(|entry| entry.info.inference_idle_timeout_secs);
         let remote = self
             .cfg
             .borrow()

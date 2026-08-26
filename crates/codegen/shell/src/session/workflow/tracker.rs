@@ -171,6 +171,14 @@ struct WorkflowSamplerSnapshot {
     /// and query values are removed; their executable values live only in the
     /// process-local runtime lease below.
     sampling: sampling_types::SamplingConfig,
+    /// Canonical effort values admitted when the Run was captured. Display
+    /// labels remain client state; execution authority must not consult a
+    /// later process catalog.
+    reasoning_efforts: Vec<sampling_types::ReasoningEffort>,
+    /// Model-specific compaction policy resolved from the same catalog
+    /// generation as the sampler. A child must not re-read live config after
+    /// the Workflow Run has frozen its execution route.
+    auto_compact_threshold_percent: u8,
     auth_scheme: sampler::AuthScheme,
     force_http1: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +245,9 @@ impl WorkflowSamplerSnapshot {
                 reasoning_effort: config.reasoning_effort,
                 stream_tool_calls: Some(config.stream_tool_calls),
             },
+            reasoning_efforts: config.reasoning_effort.into_iter().collect(),
+            auto_compact_threshold_percent:
+                crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             auth_scheme: config.auth_scheme,
             force_http1: config.force_http1,
             max_retries: config.max_retries,
@@ -246,6 +257,29 @@ impl WorkflowSamplerSnapshot {
             compaction_at_tokens: config.compaction_at_tokens,
             doom_loop_recovery: config.doom_loop_recovery,
         })
+    }
+
+    fn with_reasoning_efforts(
+        mut self,
+        efforts: impl IntoIterator<Item = sampling_types::ReasoningEffort>,
+    ) -> Self {
+        self.reasoning_efforts.clear();
+        for effort in efforts {
+            if !self.reasoning_efforts.contains(&effort) {
+                self.reasoning_efforts.push(effort);
+            }
+        }
+        if let Some(default) = self.sampling.reasoning_effort
+            && !self.reasoning_efforts.contains(&default)
+        {
+            self.reasoning_efforts.push(default);
+        }
+        self
+    }
+
+    fn with_auto_compact_threshold_percent(mut self, threshold_percent: u8) -> Self {
+        self.auto_compact_threshold_percent = threshold_percent;
+        self
     }
 
     fn matches(&self, config: &sampler::SamplerConfig) -> bool {
@@ -337,24 +371,252 @@ impl From<&sampler::SamplerConfig> for WorkflowSamplerRuntime {
     }
 }
 
-/// Immutable model route captured when a Workflow Run is created.
+/// Immutable execution route captured when a Workflow Run is created.
 ///
-/// Workflow Definitions, launch arguments, and this catalog form one
-/// execution snapshot. `samplers` is durable and credential-free;
-/// `runtime` is the volatile credential attachment for the same entries.
-/// A later catalog reload only affects future Runs.
+/// Workflow Definitions, launch arguments, this model catalog, and the Agent's
+/// subagent admission policy form one execution snapshot. `samplers` is
+/// durable and credential-free; `runtime` is the volatile credential
+/// attachment for the same entries. Later model or Agent selections affect
+/// future Runs only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRuntimeRoute {
     model_id: String,
     samplers: std::collections::BTreeMap<String, WorkflowSamplerSnapshot>,
+    /// ACP/UI projection of the same Task-selectable catalog as `samplers`.
+    /// Keeping it in the Run snapshot prevents a child picker from drifting to
+    /// a later process catalog that the Run is not authorized to execute.
+    available_models: Vec<agent_client_protocol::ModelInfo>,
+    /// Auxiliary multimodal projection model captured with this Run. Changing
+    /// global config later may affect future Runs, never existing children.
+    image_description_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_description_sampler: Option<WorkflowSamplerSnapshot>,
+    subagent_filter: agent::config::SubagentFilter,
+    agent_definitions: std::collections::BTreeMap<String, WorkflowAgentDefinitionSnapshot>,
+    skill_catalog: Vec<tools::implementations::skills::types::SkillInfo>,
     #[serde(skip, default)]
     runtime: std::collections::BTreeMap<String, WorkflowSamplerRuntime>,
+    #[serde(skip, default)]
+    image_description_runtime: Option<WorkflowSamplerRuntime>,
 }
 
 impl PartialEq for WorkflowRuntimeRoute {
     fn eq(&self, other: &Self) -> bool {
-        self.model_id == other.model_id && self.samplers == other.samplers
+        self.model_id == other.model_id
+            && self.samplers == other.samplers
+            && self.available_models == other.available_models
+            && self.image_description_model == other.image_description_model
+            && self.image_description_sampler == other.image_description_sampler
+            && self.subagent_filter == other.subagent_filter
+            && self.agent_definitions == other.agent_definitions
+            && serde_json::to_value(&self.skill_catalog).ok()
+                == serde_json::to_value(&other.skill_catalog).ok()
+    }
+}
+
+/// Complete durable representation of one resolved Agent definition.
+///
+/// `AgentDefinition` intentionally skips builder-derived and source-identity
+/// fields in its public manifest format. A Workflow Run must retain those
+/// fields as well: re-reading an Agent file on a later phase or resume would
+/// make the Run mutable. JSON values keep this private snapshot independent
+/// from the public Agent manifest while remaining strict and comparable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowAgentDefinitionSnapshot {
+    manifest: serde_json::Value,
+    tool_config: serde_json::Value,
+    authored_capability_tools: Option<serde_json::Value>,
+    session_tools_allowlist: Option<Vec<String>>,
+    session_tools_denylist: Option<Vec<String>>,
+    prompt_body: Option<String>,
+    source_path: Option<std::path::PathBuf>,
+    scope: String,
+    plugin_name: Option<String>,
+}
+
+impl WorkflowAgentDefinitionSnapshot {
+    fn capture(definition: agent::config::AgentDefinition) -> Result<Self, &'static str> {
+        let manifest = serde_json::to_value(&definition)
+            .map_err(|_| "Workflow Agent manifest is not serializable")?;
+        let tool_config = serde_json::to_value(&definition.tool_config)
+            .map_err(|_| "Workflow Agent tool configuration is not serializable")?;
+        let authored_capability_tools = definition
+            .authored_capability_tools
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| "Workflow Agent capability configuration is not serializable")?;
+        Ok(Self {
+            manifest,
+            tool_config,
+            authored_capability_tools,
+            session_tools_allowlist: definition.session_tools_allowlist,
+            session_tools_denylist: definition.session_tools_denylist,
+            prompt_body: definition.prompt_body,
+            source_path: definition.source_path,
+            scope: definition.scope.label().to_owned(),
+            plugin_name: definition.plugin_name,
+        })
+    }
+
+    fn restore(&self) -> Result<agent::config::AgentDefinition, &'static str> {
+        let mut definition: agent::config::AgentDefinition =
+            serde_json::from_value(self.manifest.clone())
+                .map_err(|_| "Workflow Agent manifest is invalid")?;
+        definition.tool_config = serde_json::from_value(self.tool_config.clone())
+            .map_err(|_| "Workflow Agent tool configuration is invalid")?;
+        definition.authored_capability_tools = self
+            .authored_capability_tools
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "Workflow Agent capability configuration is invalid")?;
+        definition.session_tools_allowlist = self.session_tools_allowlist.clone();
+        definition.session_tools_denylist = self.session_tools_denylist.clone();
+        definition.prompt_body = self.prompt_body.clone();
+        definition.source_path = self.source_path.clone();
+        definition.scope = match self.scope.as_str() {
+            "project" => agent::config::AgentScope::Project,
+            "user" => agent::config::AgentScope::User,
+            "bundled" => agent::config::AgentScope::Bundled,
+            "built-in" => agent::config::AgentScope::BuiltIn,
+            _ => return Err("Workflow Agent scope is invalid"),
+        };
+        definition.plugin_name = self.plugin_name.clone();
+        Ok(definition)
+    }
+}
+
+pub(crate) type SharedWorkflowPluginRegistry =
+    std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<agent::plugins::PluginRegistry>>>>;
+
+/// Live inputs used exactly once when a new Run is admitted. The resulting
+/// definitions are moved into `WorkflowRuntimeRoute`; active and resumed Runs
+/// never consult this source again.
+#[derive(Clone)]
+pub(crate) struct WorkflowAgentCatalogSource {
+    cwd: std::path::PathBuf,
+    plugins: SharedWorkflowPluginRegistry,
+    cli_agents: Vec<agent::config::AgentDefinition>,
+    cli_overrides: crate::agent::config::CliAgentOverrides,
+    toggles: std::collections::HashMap<String, bool>,
+    file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
+    parent_agent_name: String,
+    skills_config: agent::prompt::skills::SkillsConfig,
+}
+
+impl WorkflowAgentCatalogSource {
+    pub(crate) fn new(
+        cwd: std::path::PathBuf,
+        plugins: SharedWorkflowPluginRegistry,
+        cli_agents: Vec<agent::config::AgentDefinition>,
+        cli_overrides: crate::agent::config::CliAgentOverrides,
+        toggles: std::collections::HashMap<String, bool>,
+        file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
+        parent_agent_name: String,
+        skills_config: agent::prompt::skills::SkillsConfig,
+    ) -> Self {
+        Self {
+            cwd,
+            plugins,
+            cli_agents,
+            cli_overrides,
+            toggles,
+            file_tool_overrides,
+            parent_agent_name,
+            skills_config,
+        }
+    }
+
+    pub(crate) fn plugin_registry(&self) -> SharedWorkflowPluginRegistry {
+        self.plugins.clone()
+    }
+
+    pub(crate) fn set_parent_agent_name(&mut self, name: String) {
+        self.parent_agent_name = name;
+    }
+
+    async fn capture(
+        &self,
+        filter: &agent::config::SubagentFilter,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<String, WorkflowAgentDefinitionSnapshot>,
+            Vec<tools::implementations::skills::types::SkillInfo>,
+        ),
+        String,
+    > {
+        let plugins = self.plugins.read().clone();
+        let context = crate::agent::subagent::resolution::DefinitionResolutionContext {
+            cwd: &self.cwd,
+            plugins: plugins.as_deref(),
+            cli_agents: &self.cli_agents,
+            toggles: &self.toggles,
+        };
+        let definitions = crate::agent::subagent::resolution::capture_agent_definitions(
+            &context,
+            filter,
+            &self.cli_overrides,
+        );
+        let harness_context = crate::agent::subagent::resolution::HarnessToolsetContext {
+            harness_override: None,
+            parent_agent_name: Some(&self.parent_agent_name),
+            file_tool_overrides: self.file_tool_overrides.as_deref(),
+        };
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, mut definition)| {
+                crate::agent::subagent::resolution::apply_harness_toolset(
+                    &name,
+                    &harness_context,
+                    &mut definition,
+                );
+                WorkflowAgentDefinitionSnapshot::capture(definition)
+                    .map(|snapshot| (name, snapshot))
+            })
+            .collect::<Result<_, _>>()
+            .map_err(str::to_owned)?;
+        let cwd = self.cwd.to_string_lossy();
+        let discovered = agent::prompt::skills::list_skills_with_plugins(
+            Some(&cwd),
+            &self.skills_config,
+            plugins.as_deref(),
+        )
+        .await;
+        let mut skills = Vec::with_capacity(discovered.len());
+        for skill in discovered {
+            if skill.body.is_some() || skill.path.contains("://") {
+                skills.push(skill);
+            } else {
+                skills.push(
+                    tools::implementations::skills::skill::load_skill_with_body(&skill)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "Workflow skill '{}' could not be frozen: {error}",
+                                skill.name
+                            )
+                        })?,
+                );
+            }
+        }
+        Ok((definitions, skills))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(cwd: std::path::PathBuf) -> Self {
+        Self::new(
+            cwd,
+            std::sync::Arc::new(parking_lot::RwLock::new(None)),
+            Vec::new(),
+            crate::agent::config::CliAgentOverrides::default(),
+            std::collections::HashMap::new(),
+            None,
+            "grow".to_owned(),
+            Default::default(),
+        )
     }
 }
 
@@ -364,41 +626,136 @@ impl WorkflowRuntimeRoute {
         default_sampler: sampler::SamplerConfig,
         models_manager: &crate::agent::models::ModelsManager,
         alpha_test_key: Option<String>,
+        subagent_filter: agent::config::SubagentFilter,
+    ) -> Result<Self, &'static str> {
+        Self::capture_from_catalog(
+            model_id,
+            default_sampler,
+            &models_manager.published_catalog(),
+            alpha_test_key,
+            subagent_filter,
+        )
+    }
+
+    pub(crate) fn capture_from_catalog(
+        model_id: impl Into<String>,
+        mut default_sampler: sampler::SamplerConfig,
+        published_catalog: &crate::agent::models::PublishedModelCatalog,
+        alpha_test_key: Option<String>,
+        subagent_filter: agent::config::SubagentFilter,
     ) -> Result<Self, &'static str> {
         let model_id = model_id.into();
+        let available_models =
+            crate::agent::config::to_acp_model_info(&published_catalog.task_selectable_models())
+                .into_values()
+                .collect();
         let mut samplers = std::collections::BTreeMap::new();
         let mut runtime = std::collections::BTreeMap::new();
         // A Workflow Definition has the same explicit model authority as an
         // ordinary Task. Snapshot only the canonical Task-selectable catalog;
         // the Host intentionally resolves from this immutable Run route later.
-        for (catalog_id, entry) in models_manager.task_selectable_models() {
+        for (catalog_id, entry) in published_catalog.task_selectable_models() {
             let credentials = crate::agent::config::resolve_credentials(&entry);
             let mut config = crate::agent::config::sampling_config_for_model(
                 &entry,
                 credentials,
                 alpha_test_key.clone(),
             );
+            let published_route = published_catalog
+                .resolve_session_route(
+                    &agent_client_protocol::ModelId::new(catalog_id.as_str()),
+                    None,
+                )
+                .filter(|route| route.model_id.0.as_ref() == catalog_id)
+                .ok_or("Workflow model route could not be resolved")?;
+            config.idle_timeout_secs = Some(published_route.inference_idle_timeout.as_secs());
+            config.max_retries = Some(published_route.max_retries);
+            config.origin_client = default_sampler.origin_client.clone();
+            config.attribution_callback = default_sampler.attribution_callback.clone();
+            config.doom_loop_recovery = default_sampler.doom_loop_recovery;
             config.bearer_resolver = entry
                 .effective_auth_provider()
                 .map(crate::auth::AuthProviderRef::bearer_resolver);
-            samplers.insert(
-                catalog_id.clone(),
-                WorkflowSamplerSnapshot::from_sampler(&config)?,
-            );
+            let snapshot = WorkflowSamplerSnapshot::from_sampler(&config)?
+                .with_reasoning_efforts(entry.info.reasoning_efforts.iter().map(|item| item.value))
+                .with_auto_compact_threshold_percent(
+                    published_route.auto_compact_threshold_percent,
+                );
+            samplers.insert(catalog_id.clone(), snapshot);
             runtime.insert(catalog_id, WorkflowSamplerRuntime::from(&config));
         }
+        let default_route = published_catalog
+            .resolve_session_route(
+                &agent_client_protocol::ModelId::new(model_id.as_str()),
+                default_sampler.reasoning_effort,
+            )
+            .filter(|route| route.model_id.0.as_ref() == model_id)
+            .ok_or("Workflow default model route could not be resolved")?;
+        default_sampler.idle_timeout_secs = Some(default_route.inference_idle_timeout.as_secs());
+        default_sampler.max_retries = Some(default_route.max_retries);
+        let image_description_model = default_route.image_description_model;
+        let default_efforts = published_catalog
+            .model_reasoning_efforts(&model_id)
+            .into_iter()
+            .map(|item| item.value);
         samplers.insert(
             model_id.clone(),
-            WorkflowSamplerSnapshot::from_sampler(&default_sampler)?,
+            WorkflowSamplerSnapshot::from_sampler(&default_sampler)?
+                .with_reasoning_efforts(default_efforts)
+                .with_auto_compact_threshold_percent(default_route.auto_compact_threshold_percent),
         );
         runtime.insert(
             model_id.clone(),
             WorkflowSamplerRuntime::from(&default_sampler),
         );
+        let (image_description_sampler, image_description_runtime) = if let Some(auxiliary_id) =
+            image_description_model.as_deref()
+        {
+            let models = published_catalog.models();
+            let (catalog_id, entry) = models
+                .iter()
+                .find(|(catalog_id, entry)| {
+                    catalog_id.as_str() == auxiliary_id || entry.info.model == auxiliary_id
+                })
+                .ok_or("Workflow image-description model could not be resolved")?;
+            let published_route = published_catalog
+                .resolve_session_route(
+                    &agent_client_protocol::ModelId::new(catalog_id.as_str()),
+                    None,
+                )
+                .filter(|route| route.model_id.0.as_ref() == catalog_id)
+                .ok_or("Workflow image-description route could not be resolved")?;
+            let credentials = crate::agent::config::resolve_credentials(entry);
+            let mut config =
+                crate::agent::config::sampling_config_for_model(entry, credentials, alpha_test_key);
+            config.idle_timeout_secs = Some(published_route.inference_idle_timeout.as_secs());
+            config.max_retries = Some(published_route.max_retries);
+            config.origin_client = default_sampler.origin_client.clone();
+            config.attribution_callback = default_sampler.attribution_callback.clone();
+            config.doom_loop_recovery = default_sampler.doom_loop_recovery;
+            config.bearer_resolver = entry
+                .effective_auth_provider()
+                .map(crate::auth::AuthProviderRef::bearer_resolver);
+            let snapshot = WorkflowSamplerSnapshot::from_sampler(&config)?
+                .with_reasoning_efforts(entry.info.reasoning_efforts.iter().map(|item| item.value))
+                .with_auto_compact_threshold_percent(
+                    published_route.auto_compact_threshold_percent,
+                );
+            (Some(snapshot), Some(WorkflowSamplerRuntime::from(&config)))
+        } else {
+            (None, None)
+        };
         let route = Self {
             model_id,
             samplers,
+            available_models,
+            image_description_model,
+            image_description_sampler,
+            subagent_filter,
+            agent_definitions: std::collections::BTreeMap::new(),
+            skill_catalog: Vec::new(),
             runtime,
+            image_description_runtime,
         };
         route.validate()?;
         Ok(route)
@@ -424,13 +781,64 @@ impl WorkflowRuntimeRoute {
         let route = Self {
             model_id: model_id.clone(),
             samplers: std::collections::BTreeMap::from([(model_id.clone(), snapshot)]),
+            available_models: vec![agent_client_protocol::ModelInfo::new(
+                agent_client_protocol::ModelId::new(model_id.clone()),
+                model_id.clone(),
+            )],
+            image_description_model: None,
+            image_description_sampler: None,
+            subagent_filter: agent::config::SubagentFilter::default(),
+            agent_definitions: std::collections::BTreeMap::new(),
+            skill_catalog: Vec::new(),
             runtime: std::collections::BTreeMap::from([(
                 model_id,
                 WorkflowSamplerRuntime::from(&config),
             )]),
+            image_description_runtime: None,
         };
         route.validate()?;
         Ok(route)
+    }
+
+    pub(crate) fn subagent_filter(&self) -> &agent::config::SubagentFilter {
+        &self.subagent_filter
+    }
+
+    pub(crate) fn set_subagent_filter(&mut self, filter: agent::config::SubagentFilter) {
+        self.subagent_filter = filter;
+    }
+
+    pub(crate) async fn capture_agent_definitions(
+        &mut self,
+        source: &WorkflowAgentCatalogSource,
+    ) -> Result<(), String> {
+        let (definitions, skills) = source.capture(&self.subagent_filter).await?;
+        self.agent_definitions = definitions;
+        self.skill_catalog = skills;
+        self.validate().map_err(str::to_owned)
+    }
+
+    /// Resolve one Run-owned Agent without consulting live discovery, toggles,
+    /// plugin state, or session CLI config.
+    pub(crate) fn agent_definition(
+        &self,
+        name: &str,
+    ) -> Result<agent::config::AgentDefinition, String> {
+        self.agent_definitions
+            .get(name)
+            .ok_or_else(|| {
+                format!("Agent '{name}' was not admitted into the Workflow Run definition snapshot")
+            })?
+            .restore()
+            .map_err(str::to_owned)
+    }
+
+    pub(crate) fn frozen_skills(&self) -> Vec<tools::implementations::skills::types::SkillInfo> {
+        self.skill_catalog.clone()
+    }
+
+    pub(crate) fn frozen_agent_names(&self) -> Vec<String> {
+        self.agent_definitions.keys().cloned().collect()
     }
 
     #[cfg(test)]
@@ -452,8 +860,25 @@ impl WorkflowRuntimeRoute {
         let mut snapshot = WorkflowSamplerSnapshot::from_sampler(&config)?;
         snapshot.transport_key = transport_key;
         self.samplers.insert(model_id.clone(), snapshot);
+        self.available_models
+            .push(agent_client_protocol::ModelInfo::new(
+                agent_client_protocol::ModelId::new(model_id.clone()),
+                model_id.clone(),
+            ));
         self.runtime
             .insert(model_id, WorkflowSamplerRuntime::from(&config));
+        self.validate()?;
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_agent(
+        mut self,
+        definition: agent::config::AgentDefinition,
+    ) -> Result<Self, &'static str> {
+        let name = definition.name.clone();
+        self.agent_definitions
+            .insert(name, WorkflowAgentDefinitionSnapshot::capture(definition)?);
         self.validate()?;
         Ok(self)
     }
@@ -487,6 +912,118 @@ impl WorkflowRuntimeRoute {
         self.samplers
             .get(model_id)
             .map(|snapshot| snapshot.sampling.reasoning_effort)
+    }
+
+    pub(crate) fn supports_reasoning_effort(
+        &self,
+        model_id: &str,
+        effort: sampling_types::ReasoningEffort,
+    ) -> bool {
+        self.samplers
+            .get(model_id)
+            .is_some_and(|snapshot| snapshot.reasoning_efforts.contains(&effort))
+    }
+
+    /// Exact client-facing catalog for a child owned by this Run. The current
+    /// effort is projected from the resolved child sampler rather than from a
+    /// later process default.
+    pub(crate) fn model_state_for(
+        &self,
+        model_id: &str,
+        reasoning_effort: Option<sampling_types::ReasoningEffort>,
+    ) -> Result<agent_client_protocol::SessionModelState, String> {
+        if !self.samplers.contains_key(model_id) {
+            return Err(format!(
+                "model '{model_id}' was not present in the Workflow Run sampler snapshot"
+            ));
+        }
+        let mut available_models = self.available_models.clone();
+        let current = available_models
+            .iter_mut()
+            .find(|info| info.model_id.0.as_ref() == model_id)
+            .ok_or_else(|| {
+                format!("model '{model_id}' was missing from the Workflow Run UI catalog")
+            })?;
+        if let Some(reasoning_effort) = reasoning_effort
+            && current
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.contains_key(sampling_types::REASONING_EFFORTS_META_KEY))
+        {
+            let mut meta = current.meta.clone().unwrap_or_default();
+            meta.insert(
+                sampling_types::REASONING_EFFORT_META_KEY.to_owned(),
+                sampling_types::reasoning_effort_meta_value(reasoning_effort),
+            );
+            current.meta = Some(meta);
+        }
+        Ok(agent_client_protocol::SessionModelState::new(
+            agent_client_protocol::ModelId::new(model_id),
+            available_models,
+        ))
+    }
+
+    /// Resolve the complete child route from the immutable Run snapshot.
+    /// Credential refresh may consult a matching live entry, but execution
+    /// knobs and multimodal projection authority remain Run-owned.
+    pub(crate) fn session_route_for(
+        &self,
+        model_id: &str,
+        models_manager: &crate::agent::models::ModelsManager,
+        alpha_test_key: Option<String>,
+    ) -> Result<crate::agent::models::PublishedSessionRoute, String> {
+        let snapshot = self.samplers.get(model_id).ok_or_else(|| {
+            format!("model '{model_id}' was not present in the Workflow Run sampler snapshot")
+        })?;
+        let sampling_config = self.sampler_for(model_id, models_manager, alpha_test_key)?;
+        Ok(crate::agent::models::PublishedSessionRoute {
+            model_id: agent_client_protocol::ModelId::new(model_id),
+            image_description_model: self.image_description_model.clone(),
+            inference_idle_timeout: std::time::Duration::from_secs(
+                sampling_config.idle_timeout_secs.unwrap_or(600).max(10),
+            ),
+            max_retries: sampler::resolve_max_retries(sampling_config.max_retries),
+            auto_compact_threshold_percent: snapshot.auto_compact_threshold_percent,
+            sampling_config,
+        })
+    }
+
+    pub(crate) fn image_description_sampler_for(
+        &self,
+        model_id: &str,
+        models_manager: &crate::agent::models::ModelsManager,
+        alpha_test_key: Option<String>,
+    ) -> Result<sampler::SamplerConfig, String> {
+        if self.image_description_model.as_deref() != Some(model_id) {
+            return Err(format!(
+                "model '{model_id}' is not the Workflow Run's image-description route"
+            ));
+        }
+        let snapshot = self.image_description_sampler.as_ref().ok_or_else(|| {
+            "Workflow Run image-description sampler snapshot is missing".to_owned()
+        })?;
+        if let Some(entry) =
+            crate::agent::config::find_model_by_catalog_id(&models_manager.models(), model_id)
+        {
+            let credentials = crate::agent::config::resolve_credentials(entry);
+            let mut candidate =
+                crate::agent::config::sampling_config_for_model(entry, credentials, alpha_test_key);
+            candidate.bearer_resolver = entry
+                .effective_auth_provider()
+                .map(crate::auth::AuthProviderRef::bearer_resolver);
+            let refreshed = snapshot.rebuild(&WorkflowSamplerRuntime::from(&candidate));
+            if snapshot.matches(&refreshed) {
+                return Ok(refreshed);
+            }
+        }
+        self.image_description_runtime
+            .as_ref()
+            .map(|runtime| snapshot.rebuild(runtime))
+            .ok_or_else(|| {
+                format!(
+                    "Workflow Run image-description sampler '{model_id}' cannot restore its credential source"
+                )
+            })
     }
 
     /// Resolve one Run-owned model without consulting live catalog routing.
@@ -527,11 +1064,19 @@ impl WorkflowRuntimeRoute {
     }
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        let durable_bytes = self.samplers.values().try_fold(0usize, |total, snapshot| {
-            serde_json::to_vec(snapshot)
-                .ok()
-                .and_then(|bytes| total.checked_add(bytes.len()))
-        });
+        let durable_bytes = serde_json::to_vec(&self.available_models)
+            .ok()
+            .map(|bytes| bytes.len())
+            .and_then(|initial| {
+                self.samplers
+                    .values()
+                    .chain(self.image_description_sampler.iter())
+                    .try_fold(initial, |total, snapshot| {
+                        serde_json::to_vec(snapshot)
+                            .ok()
+                            .and_then(|bytes| total.checked_add(bytes.len()))
+                    })
+            });
         if self.model_id.trim().is_empty()
             || self.samplers.is_empty()
             || self.samplers.len() > 512
@@ -542,11 +1087,29 @@ impl WorkflowRuntimeRoute {
                 bytes > crate::session::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES as usize
             })
             || !self.samplers.contains_key(&self.model_id)
+            || self.available_models.len() != self.samplers.len()
+            || self.available_models.iter().any(|info| {
+                !self.samplers.contains_key(info.model_id.0.as_ref())
+                    || self
+                        .available_models
+                        .iter()
+                        .filter(|candidate| candidate.model_id == info.model_id)
+                        .count()
+                        != 1
+            })
+            || self.image_description_model.is_some()
+                != self.image_description_sampler.is_some()
             || self.samplers.iter().any(|(model_id, snapshot)| {
                 model_id.trim().is_empty()
                     || snapshot.sampling.model.trim().is_empty()
                     || !snapshot.transport_key.is_valid()
                     || snapshot.contract_fingerprint.len() != 64
+            })
+            || self.agent_definitions.len() > 4096
+            || self.agent_definitions.iter().any(|(name, snapshot)| {
+                name.trim().is_empty()
+                    || !self.subagent_filter.allows(name)
+                    || snapshot.restore().is_err()
             })
         {
             return Err("Workflow runtime route is incomplete");
@@ -1101,35 +1664,41 @@ impl WorkflowTracker {
         self.list()
     }
 
-    pub fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
-        let live: Vec<&TrackedRun> = self
-            .runs
+    /// Snapshot every non-terminal Run for model-context recovery without
+    /// consuming the ordinary turn-reminder revision.
+    ///
+    /// Compaction can shadow the last status reminder even when no Run has
+    /// advanced.  It therefore needs the current authoritative projection,
+    /// not the edge-triggered [`Self::take_status_report`] view.
+    pub fn live_status_snapshot(&self) -> Vec<WorkflowRunState> {
+        self.runs
             .iter()
-            .filter(|r| !r.state.status.is_completion_reportable())
-            .collect();
-        let moved = live.iter().any(|r| {
-            self.status_reported_revisions.get(&r.state.run_id) != Some(&r.state.revision)
-        });
-        if !moved {
-            return Vec::new();
-        }
-        let report: Vec<WorkflowRunState> = live
-            .iter()
+            .filter(|run| !run.state.status.is_completion_reportable())
             .map(|run| {
                 let mut state = run.state.clone();
                 state.elapsed_ms_floor = run.live_elapsed_ms();
                 state
             })
-            .collect();
+            .collect()
+    }
+
+    pub fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
+        let live = self.live_status_snapshot();
+        let moved = live.iter().any(|state| {
+            self.status_reported_revisions.get(&state.run_id) != Some(&state.revision)
+        });
+        if !moved {
+            return Vec::new();
+        }
         let current_ids: std::collections::HashSet<&str> =
             self.runs.iter().map(|r| r.state.run_id.as_str()).collect();
         self.status_reported_revisions
             .retain(|id, _| current_ids.contains(id.as_str()));
-        for state in &report {
+        for state in &live {
             self.status_reported_revisions
                 .insert(state.run_id.clone(), state.revision);
         }
-        report
+        live
     }
 
     fn run_mut(&mut self, run_id: &str) -> Option<&mut TrackedRun> {
@@ -1218,7 +1787,7 @@ mod tests {
 
     #[test]
     fn runtime_route_serialization_redacts_credentials_and_literal_transport_values() {
-        let manager = crate::agent::models::ModelsManager::default();
+        let manager = manager_with_model("catalog/model", workflow_model_entry("wire-model", 0.0));
         let config = sampler::SamplerConfig {
             api_key: Some("super-secret-api-key".to_owned()),
             base_url: "https://user:password@example.test/v1?token=url-secret".to_owned(),
@@ -1235,7 +1804,14 @@ mod tests {
             context_window: 200_000,
             ..Default::default()
         };
-        let route = WorkflowRuntimeRoute::capture("catalog/model", config, &manager, None).unwrap();
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/model",
+            config,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
         let encoded = serde_json::to_string(&route).unwrap();
         for secret in [
             "super-secret-api-key",
@@ -1261,6 +1837,133 @@ mod tests {
     }
 
     #[test]
+    fn runtime_route_durably_freezes_workflow_subagent_admission() {
+        let manager = manager_with_model("catalog/model", workflow_model_entry("wire-model", 0.0));
+        let config = sampler::SamplerConfig {
+            model: "wire-model".to_owned(),
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut definition = agent::AgentDefinition::default_grow_build();
+        definition.subagents.deny = vec!["researcher".to_owned()];
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/model",
+            config,
+            &manager,
+            None,
+            definition.subagent_filter(),
+        )
+        .unwrap();
+        let restored: WorkflowRuntimeRoute =
+            serde_json::from_value(serde_json::to_value(route).unwrap()).unwrap();
+        assert!(!restored.subagent_filter().allows("researcher"));
+        assert!(restored.subagent_filter().allows("reviewer"));
+    }
+
+    #[tokio::test]
+    async fn runtime_route_freezes_complete_agent_definition_and_rejects_legacy_shape() {
+        let project = tempfile::tempdir().unwrap();
+        let agents = project.path().join(".grow/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let skill_dir = project.path().join(".grow/skills/frozen-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: frozen-skill\ndescription: frozen skill\n---\nORIGINAL SKILL BODY\n",
+        )
+        .unwrap();
+        let definition_path = agents.join("reviewer.md");
+        std::fs::write(
+            &definition_path,
+            "---\nname: reviewer\ndescription: frozen\ncapabilityMode: read-only\n---\nORIGINAL ROLE\n",
+        )
+        .unwrap();
+        let original = agent::discovery::by_name_in_cwd("reviewer", project.path()).unwrap();
+        let mut expected_definition = original.clone();
+        let frozen_file_tools = vec![tools::registry::types::ToolConfig {
+            id: "GrowHashline:hashline_read".to_owned(),
+            params: None,
+            name_override: Some("frozen_read".to_owned()),
+            params_name_overrides: None,
+            description_override: Some("frozen file-tool route".to_owned()),
+            kind: Some(tools::types::tool::ToolKind::Read),
+        }];
+        expected_definition.override_file_tools(frozen_file_tools.clone());
+        let frozen_tool_config = serde_json::to_value(&expected_definition.tool_config).unwrap();
+        let source = WorkflowAgentCatalogSource::new(
+            project.path().to_path_buf(),
+            std::sync::Arc::new(parking_lot::RwLock::new(None)),
+            Vec::new(),
+            crate::agent::config::CliAgentOverrides {
+                tools: Some(vec!["read_file".to_owned()]),
+                disallowed_tools: Some(vec!["bash".to_owned()]),
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+            Some(frozen_file_tools),
+            "grow".to_owned(),
+            Default::default(),
+        );
+        let mut route = test_runtime_route();
+        route.capture_agent_definitions(&source).await.unwrap();
+
+        std::fs::write(
+            &definition_path,
+            "---\nname: reviewer\ndescription: mutated\ncapabilityMode: all\n---\nMUTATED ROLE\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &skill_path,
+            "---\nname: frozen-skill\ndescription: mutated skill\n---\nMUTATED SKILL BODY\n",
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&route).unwrap();
+        let restored: WorkflowRuntimeRoute = serde_json::from_value(encoded.clone()).unwrap();
+        let frozen = restored.agent_definition("reviewer").unwrap();
+        assert_eq!(frozen.description, "frozen");
+        assert_eq!(frozen.prompt_body.as_deref(), Some("ORIGINAL ROLE"));
+        assert_eq!(
+            frozen.source_path.as_deref(),
+            Some(definition_path.as_path())
+        );
+        assert_eq!(frozen.scope, agent::config::AgentScope::Project);
+        assert_eq!(
+            serde_json::to_value(&frozen.tool_config).unwrap(),
+            frozen_tool_config
+        );
+        assert_eq!(
+            frozen.session_tools_allowlist.as_deref(),
+            Some(["read_file".to_owned()].as_slice())
+        );
+        assert_eq!(
+            frozen.session_tools_denylist.as_deref(),
+            Some(["bash".to_owned()].as_slice())
+        );
+        assert_eq!(
+            frozen.capability_mode,
+            Some(tool_types::SubagentCapabilityMode::ReadOnly)
+        );
+        let frozen_skill = restored
+            .frozen_skills()
+            .into_iter()
+            .find(|skill| skill.name == "frozen-skill")
+            .expect("project skill was captured into the Workflow Run route");
+        assert_eq!(frozen_skill.description, "frozen skill");
+        assert_eq!(frozen_skill.body.as_deref(), Some("ORIGINAL SKILL BODY\n"));
+
+        let mut denied = route.clone();
+        let mut primary = agent::AgentDefinition::default_grow_build();
+        primary.subagents.deny = vec!["reviewer".to_owned()];
+        denied.set_subagent_filter(primary.subagent_filter());
+        assert!(denied.validate().is_err());
+
+        let mut legacy = encoded;
+        legacy.as_object_mut().unwrap().remove("agent_definitions");
+        assert!(serde_json::from_value::<WorkflowRuntimeRoute>(legacy).is_err());
+    }
+
+    #[test]
     fn existing_run_keeps_sampler_when_catalog_changes_or_removes_model() {
         let original_entry = workflow_model_entry("wire-model", 0.2);
         let original_manager = manager_with_model("catalog/model", original_entry.clone());
@@ -1269,9 +1972,14 @@ mod tests {
             crate::agent::config::resolve_credentials(&original_entry),
             None,
         );
-        let route =
-            WorkflowRuntimeRoute::capture("catalog/model", original, &original_manager, None)
-                .unwrap();
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/model",
+            original,
+            &original_manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
 
         let changed_manager =
             manager_with_model("catalog/model", workflow_model_entry("wire-model", 0.9));
@@ -1296,6 +2004,142 @@ mod tests {
     }
 
     #[test]
+    fn restored_run_keeps_its_reasoning_effort_authority() {
+        let mut entry = workflow_model_entry("wire-model", 0.2);
+        entry.info.reasoning_efforts = vec![
+            sampling_types::ReasoningEffortOption {
+                id: "quick".into(),
+                value: sampling_types::ReasoningEffort::Low,
+                label: "Quick".into(),
+                description: Some("Fast pass".into()),
+                default: false,
+            },
+            sampling_types::ReasoningEffortOption {
+                id: "deep".into(),
+                value: sampling_types::ReasoningEffort::High,
+                label: "Deep".into(),
+                description: Some("Thorough pass".into()),
+                default: true,
+            },
+        ];
+        let manager = manager_with_model("catalog/model", entry.clone());
+        let sampler = crate::agent::config::sampling_config_for_model(
+            &entry,
+            crate::agent::config::resolve_credentials(&entry),
+            None,
+        );
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/model",
+            sampler,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
+        let restored: WorkflowRuntimeRoute =
+            serde_json::from_value(serde_json::to_value(route).unwrap()).unwrap();
+
+        assert!(
+            restored
+                .supports_reasoning_effort("catalog/model", sampling_types::ReasoningEffort::Low)
+        );
+        assert!(
+            restored
+                .supports_reasoning_effort("catalog/model", sampling_types::ReasoningEffort::High)
+        );
+        assert!(
+            !restored
+                .supports_reasoning_effort("catalog/model", sampling_types::ReasoningEffort::Max)
+        );
+        let state = restored
+            .model_state_for("catalog/model", Some(sampling_types::ReasoningEffort::Low))
+            .unwrap();
+        let info = state
+            .available_models
+            .iter()
+            .find(|info| info.model_id.0.as_ref() == "catalog/model")
+            .unwrap();
+        let options = sampling_types::parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap();
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["quick", "deep"],
+            "Run projection must preserve custom effort ids and order"
+        );
+        assert_eq!(
+            sampling_types::parse_reasoning_effort_meta(info.meta.as_ref()),
+            Some(sampling_types::ReasoningEffort::Low),
+            "child's actual effort overrides only the current projection"
+        );
+    }
+
+    #[test]
+    fn workflow_image_description_route_is_frozen_with_the_run() {
+        let primary = workflow_model_entry("text-wire", 0.2);
+        let mut vision = workflow_model_entry("vision-wire", 0.1);
+        vision.info.user_selectable = false;
+        let mut cfg = crate::agent::config::Config::default();
+        cfg.image_description_model = Some("catalog/vision".to_owned());
+        let manager = crate::agent::models::ModelsManager::new(
+            indexmap::IndexMap::from([
+                ("catalog/text".to_owned(), primary.clone()),
+                ("catalog/vision".to_owned(), vision),
+            ]),
+            agent_client_protocol::ModelId::new("catalog/text"),
+            cfg,
+        );
+        let sampler = crate::agent::config::sampling_config_for_model(
+            &primary,
+            crate::agent::config::resolve_credentials(&primary),
+            None,
+        );
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/text",
+            sampler,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            route
+                .image_description_sampler_for("catalog/vision", &manager, None)
+                .unwrap()
+                .model,
+            "vision-wire"
+        );
+
+        let manager_without_vision = manager_with_model("catalog/text", primary);
+        assert_eq!(
+            route
+                .image_description_sampler_for("catalog/vision", &manager_without_vision, None,)
+                .unwrap()
+                .model,
+            "vision-wire",
+            "the live Run keeps its process-local frozen credential attachment"
+        );
+
+        let restored: WorkflowRuntimeRoute =
+            serde_json::from_str(&serde_json::to_string(&route).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .image_description_sampler_for("catalog/vision", &manager, None)
+                .unwrap()
+                .model,
+            "vision-wire",
+            "a restored Run may reattach an exact matching credential source"
+        );
+        assert!(
+            restored
+                .image_description_sampler_for("catalog/vision", &manager_without_vision, None,)
+                .is_err(),
+            "a restored Run must fail closed when its credential source disappeared"
+        );
+    }
+
+    #[test]
     fn runtime_route_excludes_models_rejected_by_task_selection() {
         let allowed = workflow_model_entry("wire-allowed", 0.2);
         let mut denied = workflow_model_entry("wire-denied", 0.2);
@@ -1313,8 +2157,14 @@ mod tests {
             crate::agent::config::resolve_credentials(&allowed),
             None,
         );
-        let route =
-            WorkflowRuntimeRoute::capture("catalog/allowed", sampler, &manager, None).unwrap();
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/allowed",
+            sampler,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
 
         assert!(route.sampler_for("catalog/allowed", &manager, None).is_ok());
         assert!(
@@ -1334,8 +2184,14 @@ mod tests {
             crate::agent::config::resolve_credentials(&entry),
             None,
         );
-        let route =
-            WorkflowRuntimeRoute::capture("catalog/model", sampler, &manager, None).unwrap();
+        let route = WorkflowRuntimeRoute::capture(
+            "catalog/model",
+            sampler,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
         let restored: WorkflowRuntimeRoute =
             serde_json::from_str(&serde_json::to_string(&route).unwrap()).unwrap();
         assert_eq!(
@@ -1382,6 +2238,22 @@ mod tests {
         );
         assert_eq!(state.status, WorkflowRunStatus::Active);
         (t, "wf_1".into())
+    }
+
+    #[test]
+    fn live_status_snapshot_does_not_consume_turn_reminder_revision() {
+        let (mut tracker, run_id) = tracker_with_run();
+
+        let compact_snapshot = tracker.live_status_snapshot();
+        assert_eq!(compact_snapshot.len(), 1);
+        assert_eq!(compact_snapshot[0].run_id, run_id);
+
+        assert_eq!(
+            tracker.take_status_report().len(),
+            1,
+            "compaction recovery must not consume the next ordinary-turn status reminder"
+        );
+        assert!(tracker.take_status_report().is_empty());
     }
 
     #[test]

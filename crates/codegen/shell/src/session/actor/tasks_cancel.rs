@@ -3,6 +3,30 @@
 
 use super::*;
 
+tokio::task_local! {
+    /// Immutable provider-admission generation captured when a foreground
+    /// owner is installed. Stop advances the session generation, so any old
+    /// turn that survives until its next await can only present the retired
+    /// value and is rejected at the provider boundary.
+    static TURN_USAGE_EPOCH: u64;
+    /// Admission handshake owned by the task publisher. Stop holds the same
+    /// step-control gate until this sender reports that TurnStarted is durable,
+    /// so a visible foreground owner can never be cancelled as a phantom turn.
+    static TURN_DURABLE_START_ACK: std::cell::RefCell<Option<oneshot::Sender<bool>>>;
+}
+
+pub(super) fn turn_usage_epoch_or(current: u64) -> u64 {
+    TURN_USAGE_EPOCH.try_with(|epoch| *epoch).unwrap_or(current)
+}
+
+pub(super) fn signal_durable_turn_start(started: bool) {
+    let _ = TURN_DURABLE_START_ACK.try_with(|slot| {
+        if let Some(ack) = slot.borrow_mut().take() {
+            let _ = ack.send(started);
+        }
+    });
+}
+
 pub(super) struct TurnSubagentScopeGuard {
     current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     prompt_id: String,
@@ -58,7 +82,10 @@ pub(crate) struct AgentTask {
     pub(crate) origin: PromptOrigin,
     pub(crate) turn_kind: crate::session::TurnKind,
     pub(crate) turn_start_ms: u64,
+    pub(crate) usage_epoch: u64,
     pub(crate) handle: tokio::task::AbortHandle,
+    /// Closed atomically with the final same-turn steering drain.
+    pub(crate) steering_open: bool,
 }
 
 impl AgentTask {
@@ -75,10 +102,14 @@ impl AgentTask {
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
         start_gate: Option<oneshot::Receiver<()>>,
+        durable_start_ack: Option<oneshot::Sender<bool>>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
         persist_ack: Option<oneshot::Sender<()>>,
     ) -> Self {
         let pid = prompt_id.clone();
+        let usage_epoch = session
+            .goal_usage_window
+            .owner_epoch(&session.session_id_string());
         Self {
             prompt_id,
             origin: origin.clone(),
@@ -87,6 +118,7 @@ impl AgentTask {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            usage_epoch,
             handle: tokio::task::spawn_local(async move {
                 // Admission can install foreground ownership before async
                 // tool-resource publication. This one-shot keeps the task
@@ -96,24 +128,32 @@ impl AgentTask {
                 {
                     return;
                 }
-                run_task(
-                    session.clone(),
-                    input,
-                    admitted_behavior,
-                    client_identifier,
-                    screen_mode,
-                    verbatim,
-                    json_schema,
-                    pid,
-                    origin,
-                    notification_ids,
-                    turn_kind,
-                    completion_tx,
-                    persist_ack,
-                )
-                .await
+                TURN_DURABLE_START_ACK
+                    .scope(
+                        std::cell::RefCell::new(durable_start_ack),
+                        TURN_USAGE_EPOCH.scope(
+                            usage_epoch,
+                            run_task(
+                                session.clone(),
+                                input,
+                                admitted_behavior,
+                                client_identifier,
+                                screen_mode,
+                                verbatim,
+                                json_schema,
+                                pid,
+                                origin,
+                                notification_ids,
+                                turn_kind,
+                                completion_tx,
+                                persist_ack,
+                            ),
+                        ),
+                    )
+                    .await
             })
             .abort_handle(),
+            steering_open: true,
         }
     }
 
@@ -206,6 +246,17 @@ async fn run_task(
 }
 
 impl SessionActor {
+    /// Arm a turn-terminal fence after a lifecycle or Behavior transition has
+    /// become durable while a producer still owns the foreground. Callers hold
+    /// `step_control_gate`, so StepStarted observes either the old state or the
+    /// armed preemption, never the new authority without its terminal fence.
+    pub(super) async fn arm_terminal_preemption_if_running(&self) {
+        let mut state = self.state.lock().await;
+        if state.foreground.regular().is_some() {
+            state.terminal_preemption_pending = true;
+        }
+    }
+
     /// Turn-scoped: soft cancel / max-turns only (not user Stop).
     /// `parent_prompt_id` is the authoritative turn id from the turn runner.
     pub(super) fn cancel_running_turn_subagents(&self, parent_prompt_id: &str) {
@@ -250,13 +301,13 @@ impl SessionActor {
     /// clear/edit; unrelated session children and background tasks survive.
     pub(super) async fn cancel_turn_for_goal_control(
         &self,
-        trigger: &'static str,
+        control: &super::slash_exec::GoalControlCancellation,
         replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
-    ) {
+    ) -> Result<(), acp::Error> {
         let parent_prompt_id = {
             let state = self.state.lock().await;
             let Some(turn) = state.foreground.regular() else {
-                return;
+                return Ok(());
             };
             turn.prompt_id.clone()
         };
@@ -264,8 +315,18 @@ impl SessionActor {
         if let Some(notification) = replay_buffer.flush() {
             self.emit_buffered(notification).await;
         }
-        self.cancel_running_task(false, false, false, Some(trigger.to_string()))
-            .await;
+        self.cancel_running_task(false, false, false, Some(control.trigger.to_string()))
+            .await?;
+        if let Some((goal_id, definition_revision)) = control.retired_goal_owner.as_ref() {
+            // The first Goal-owner sweep happens while the foreground future is
+            // still alive. Repeat the terminal half after abort: a background
+            // run whose request crossed the TerminalActor mailbox but whose
+            // handle notification was cancelled is now observable by its
+            // immutable `goal_id` snapshot.
+            self.sweep_goal_owned_terminal_work(goal_id, *definition_revision)
+                .await;
+        }
+        Ok(())
     }
 
     /// Auto-pause an active Goal ONLY on an explicit user "Pause goal"
@@ -288,11 +349,39 @@ impl SessionActor {
         kill_background_tasks: bool,
         rewind_if_pristine: bool,
         trigger: Option<String>,
-    ) {
+    ) -> Result<(), acp::Error> {
         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+        // Close the current provider-admission epoch before cancellation is
+        // delivered. A sampler/Sideband that has not crossed its network edge
+        // yet is rejected even if its task observes Stop later; the next turn
+        // only waits for attempts that were already admitted in the old epoch.
+        self.goal_usage_window
+            .advance_owner_epoch(&self.session_id_string());
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();
+        // A route/Agent transition has a durable fact followed by a live-state
+        // swap. Never abort the owning turn between those halves. This mutex is
+        // uncontended during ordinary sampling/tool execution, so Stop keeps
+        // its fast path while waiting only for the rare in-progress boundary.
+        let _step_control_guard = self.step_control_gate.lock().await;
+        let already_settling = {
+            let mut state = self.state.lock().await;
+            let settling = matches!(&state.foreground, ForegroundState::Settling { .. });
+            if settling {
+                state.terminal_preemption_pending = false;
+            }
+            settling
+        };
+        if already_settling {
+            if trigger.as_deref() == Some("shutdown") {
+                self.events.wait_for_causal_idle().await;
+            }
+            tracing::debug!(
+                "Stop arrived after terminalization was admitted; preserving the existing terminal"
+            );
+            return Ok(());
+        }
         if suppress_task_wakes {
             let mut state = self.state.try_lock().expect("session state is actor-owned");
             state.notifications_suppressed = true;
@@ -338,16 +427,33 @@ impl SessionActor {
             );
         }
 
-        if cancel_subagents {
-            // Abort the producer first so it cannot enqueue more TaskTool work
-            // after the ParentSession sweep. Keep the task slot for prompt-id
-            // attribution below; cleanup will take+abort again (idempotent).
-            {
-                let state = self.state.lock().await;
-                if let Some(task) = state.foreground.regular() {
-                    task.abort();
-                }
+        // Stop the producer before any terminal/resource cleanup. The task
+        // slot stays in foreground for prompt attribution and is taken below;
+        // abort is idempotent. Without this early edge, an ordinary Stop could
+        // still append provider output or launch another tool while the cancel
+        // path was preparing its durable TurnEnded terminal.
+        {
+            let state = self.state.lock().await;
+            if let Some(task) = state.foreground.regular() {
+                task.abort();
             }
+        }
+        // Compaction::Started is a causal child of the active Step. Aborting
+        // the foreground future can otherwise strand it open and make the
+        // following StepEnded/TurnEnded invalid. The Timeline owner decides
+        // atomically whether a committed Summary+Replacement is Completed or
+        // whether the interrupted transaction is Failed.
+        self.chat_state_handle
+            .settle_open_compaction_durably("cancelled_by_stop")
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction cancellation terminal",
+                    error.to_string(),
+                )
+            })?;
+
+        if cancel_subagents {
             // Then cancel every non-workflow session child (incl. prior turns)
             // and close spawn admission until the next turn opens it.
             self.cancel_all_session_subagents();
@@ -357,14 +463,12 @@ impl SessionActor {
             self.signals_handle().record_cancellation();
         }
 
-        // Kill all running foreground terminal processes before aborting the task.
+        // Kill all running foreground terminal processes after aborting the
+        // producer, so no new command can enter behind this sweep.
         // Each TerminalBackend implementation knows how to kill its own processes.
         // Background tasks are left alive for interactive sessions but killed
         // during subagent teardown (kill_background_tasks = true).
         //
-        // Note: a narrow TOCTOU window exists — the running task could spawn a
-        // new terminal between this call and the abort() below. In practice this
-        // is negligible; abort() drops the future and any child handle it owns.
         if self.startup_hints.is_subagent {
             // Subagent: only kill foreground processes owned by this session,
             // not the parent's or sibling's on the shared backend.
@@ -402,6 +506,7 @@ impl SessionActor {
         let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         let (running_task, pending_inputs, rewound_input, had_queued_user_prompt) = {
             let mut state = self.state.lock().await;
+            state.terminal_preemption_pending = false;
             debug_assert!(
                 pinned_prompt_id.is_none()
                     || state.running_prompt_id().is_none()
@@ -597,6 +702,27 @@ impl SessionActor {
             )
             .await
             .err();
+        if terminal_error.is_none()
+            && rewound_input.is_none()
+            && let Some(prompt_id) = cancelled_prompt_id.as_ref()
+        {
+            // Turn::Ended is the durable user-visible boundary. Project it to
+            // clients immediately instead of keeping the TUI in `Cancelling`
+            // while post-turn rewind snapshots and diagnostic usage settle.
+            // The foreground admission fence remains held until this method
+            // returns, and the later PromptResponse merges the usage metadata
+            // into this exact prompt without finalizing it a second time.
+            self.emit_turn_completed(
+                prompt_id.clone(),
+                cancelled_identity
+                    .as_ref()
+                    .map(|(origin, turn_kind)| (origin, *turn_kind)),
+                &Ok(acp::StopReason::Cancelled),
+                None,
+                trigger.as_deref(),
+            )
+            .await;
+        }
         if terminal_error.is_none() && rewound_input.is_none() {
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
@@ -645,7 +771,13 @@ impl SessionActor {
             if let Some(extension) = &self.idle_prompt_extension {
                 extension.on_turn_failed();
             }
-            self.flush_to_disk().await;
+            // `cancel_running_task` executes inside `run_session`. Do not call
+            // `flush_to_disk` here: replay flushing is routed back through
+            // that same actor loop and waits for its acknowledgement, so the
+            // actor would wait on itself until the five-second timeout. The
+            // actor-owned replay buffer is flushed before entering this
+            // method; Timeline terminal persistence above remains the
+            // authoritative cancellation barrier.
             self.file_state_tracker
                 .end_prompt(&self.tool_context.fs, current_prompt_index)
                 .await;
@@ -666,7 +798,19 @@ impl SessionActor {
         // Same UsageDrainOutcome policy as freeze via finalize_usage_from_outcome.
         let cancelled_usage = if rewound_input.is_none() {
             if let Some(ref prompt_id) = cancelled_prompt_id {
-                let reply = self.outstanding_reply_for_prompt(prompt_id).await;
+                // Usage is diagnostic metadata, not part of the durable
+                // cancellation boundary. A busy coordinator must not hold the
+                // client in `Canceling` indefinitely after Turn::Ended is on
+                // disk; timeout folds the turn as usage-incomplete.
+                let reply = tokio::time::timeout(
+                    std::time::Duration::from_millis(250),
+                    self.outstanding_reply_for_prompt(prompt_id),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(prompt_id, "timed out querying cancelled-turn usage");
+                    None
+                });
                 let outcome =
                     super::turn::UsageDrainOutcome::from_outstanding_reply(reply.as_ref());
                 self.finalize_usage_from_outcome(prompt_id, outcome).await
@@ -702,24 +846,7 @@ impl SessionActor {
             for input in queued {
                 let _ = input.respond_to.send(Err(boundary_error.clone()));
             }
-            return;
-        }
-
-        if rewound_input.is_none()
-            && let Some(prompt_id) = cancelled_prompt_id
-        {
-            // Stamp `cancelTrigger` on the terminal `_meta` so clients can tell
-            // a send-now cancel from an interactive Ctrl+C/Esc.
-            self.emit_turn_completed(
-                prompt_id,
-                cancelled_identity
-                    .as_ref()
-                    .map(|(origin, turn_kind)| (origin, *turn_kind)),
-                &Ok(acp::StopReason::Cancelled),
-                cancelled_usage.clone(),
-                trigger.as_deref(),
-            )
-            .await;
+            return Err(boundary_error);
         }
 
         if let Some(input) = rewound_input {
@@ -735,7 +862,7 @@ impl SessionActor {
                     .send(Err(acp::Error::internal_error().data(format!(
                         "cancel terminal was committed but rewind was not: {error}"
                     ))));
-                return;
+                return Ok(());
             }
             self.file_state_tracker
                 .truncate_from(target_prompt_index)
@@ -748,7 +875,7 @@ impl SessionActor {
                 structured_output: None,
                 usage: None,
             }));
-            return;
+            return Ok(());
         }
 
         for (idx, input) in pending_inputs.into_iter().enumerate() {
@@ -807,6 +934,7 @@ impl SessionActor {
             )
             .await;
         }
+        Ok(())
     }
 }
 
@@ -814,7 +942,7 @@ impl SessionActor {
 mod task_slot_tests {
     // Exercises the shared `TaskSlot<T>` primitive that backs both the deferred
     // prefix and the idle-notification debounce: arm / take / cancel / re-arm.
-    use super::TaskSlot;
+    use super::{TURN_USAGE_EPOCH, TaskSlot, turn_usage_epoch_or};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -826,6 +954,19 @@ mod task_slot_tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
             f.fetch_add(by, Ordering::SeqCst);
         }));
+    }
+
+    #[tokio::test]
+    async fn foreground_usage_epoch_is_immutable_inside_the_turn_task() {
+        assert_eq!(turn_usage_epoch_or(9), 9);
+        TURN_USAGE_EPOCH
+            .scope(4, async {
+                assert_eq!(turn_usage_epoch_or(9), 4);
+                tokio::task::yield_now().await;
+                assert_eq!(turn_usage_epoch_or(10), 4);
+            })
+            .await;
+        assert_eq!(turn_usage_epoch_or(10), 10);
     }
 
     /// A task left armed runs to completion once its delay elapses.

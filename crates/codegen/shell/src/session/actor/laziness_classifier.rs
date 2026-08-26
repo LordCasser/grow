@@ -812,11 +812,9 @@ pub(crate) fn evaluate_laziness(
     }
 }
 
-/// Build the category-specific nudge text injected as a
-/// `<system-reminder>`. Each variant quotes the relevant
-/// `<task_completion_discipline>` rule by name so the model can ground
-/// the correction in the same vocabulary it already saw at turn-start.
-/// The trailing `evidence` sentence is the classifier's own one-liner.
+/// Build the category-specific, self-contained Goal continuation reminder.
+/// The trailing `evidence` sentence is the classifier's own one-liner; the
+/// correction never relies on a separate prompt contract or numbered rules.
 pub(crate) fn build_laziness_nudge(
     category: crate::session::events::LazinessCategory,
     evidence: &str,
@@ -825,28 +823,30 @@ pub(crate) fn build_laziness_nudge(
     use crate::session::events::LazinessCategory as L;
     let rule = match category {
         L::StalledNarration => {
-            "Per <task_completion_discipline> Rule 1, don't narrate progress in prose without \
-             a corresponding tool call. Make the next concrete tool call this turn or mark the \
-             affected todo cancelled with a reason."
+            "Don't narrate progress without advancing the active Goal. Make the next concrete \
+             tool call in the next continuation, or update the affected task with the specific \
+             reason it cannot proceed."
         }
         L::StalledPermissionAsking => {
-            "Per <task_completion_discipline> Rule 2, don't ask permission to continue a task \
-             that is in flight. Resume work in your next turn — only pause for genuine \
-             ambiguity that changes the approach."
+            "Don't ask permission merely to continue work already admitted by the Goal. Resume \
+             the next concrete task in the next continuation; pause only for a genuine blocker \
+             or a user decision that materially changes the approach."
         }
         L::StalledNoTodosButTaskInFlight => {
-            let tool = todo_tool.unwrap_or("plan/todo");
+            let tracking = todo_tool.map_or_else(
+                || "Track the remaining phases explicitly as small tasks.".to_string(),
+                |tool| format!("Use {tool} to record the remaining phases as small tasks."),
+            );
             return format!(
                 "Idle-stall detector flagged this session: {evidence}\n\n\
-                 Per <task_completion_discipline> Rule 3, a multi-step task is clearly in flight \
-                 — make the next concrete tool call now. A {tool} list of the remaining phases \
-                 can help you keep track, but the priority is to resume the work this turn."
+                 A multi-step Goal is still in flight. {tracking} Then make the next concrete \
+                 tool call in the next continuation instead of declaring the Goal finished."
             );
         }
         L::StalledFalseCompletion => {
-            "Per <task_completion_discipline>, you declared completion but evidence is missing \
-             in the transcript. Either run the tool_calls that back your claims, or correct the \
-             claim and continue the actual work."
+            "You declared completion but evidence is missing for this Goal. Run the checks or \
+             tool calls that support the claim, or correct the claim and continue the remaining \
+             task."
         }
         // Defensive: only the stalled_* variants reach this
         // function via `evaluate_laziness`, but exhaustive match keeps

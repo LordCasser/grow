@@ -16,7 +16,7 @@ impl SessionActor {
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
         &self,
-        subagent_id: &str,
+        _subagent_id: &str,
         by_model: &[(String, chat_state::UsageTotals)],
         parent_prompt_id: Option<&str>,
         incomplete: bool,
@@ -35,8 +35,6 @@ impl SessionActor {
         {
             return Err(());
         }
-        self.account_goal_subagent_usage(subagent_id, by_model)
-            .await?;
         Ok(if attributable {
             SubagentUsageApply::AttributedToPrompt
         } else {
@@ -44,65 +42,6 @@ impl SessionActor {
         })
     }
 
-    /// Fold delegated Goal usage at the same acknowledged boundary as the
-    /// parent usage ledger. This is the only subagent Goal-accounting writer;
-    /// progress and presentation notifications carry no budget authority.
-    async fn account_goal_subagent_usage(
-        &self,
-        subagent_id: &str,
-        by_model: &[(String, chat_state::UsageTotals)],
-    ) -> Result<(), ()> {
-        let current_goal = self.goal_tracker.lock().snapshot().cloned();
-        let Some(goal) = current_goal.as_ref() else {
-            self.subagent_token_records.lock().remove(subagent_id);
-            return Ok(());
-        };
-        let previous_record = {
-            let mut records = self.subagent_token_records.lock();
-            let Some(record) = records.get_mut(subagent_id) else {
-                return Ok(());
-            };
-            if record.goal_id.as_deref() != Some(goal.goal_id.as_str()) {
-                records.remove(subagent_id);
-                return Ok(());
-            }
-            if record.usage_accounted {
-                return Ok(());
-            }
-            let previous = record.clone();
-            record.usage_accounted = true;
-            previous
-        };
-        let tokens = by_model.iter().fold(0u64, |total, (_, usage)| {
-            total.saturating_add(usage.uncached_tokens())
-        });
-        let tokens = i64::try_from(tokens).unwrap_or(i64::MAX);
-        if tokens == 0 {
-            return Ok(());
-        }
-        let previous_goal = goal.clone();
-        if !self
-            .goal_tracker
-            .lock()
-            .settle_subagent_tokens(&goal.goal_id, tokens)
-        {
-            self.subagent_token_records
-                .lock()
-                .insert(subagent_id.to_string(), previous_record);
-            return Err(());
-        }
-        if let Err(error) = self.commit_goal_mutation_or_restore(previous_goal).await {
-            self.subagent_token_records
-                .lock()
-                .insert(subagent_id.to_string(), previous_record);
-            tracing::error!(%error, subagent_id, "failed to persist Goal subagent usage");
-            return Err(());
-        }
-        let tokens_used = self.goal_tokens_used();
-        self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-        Ok(())
-    }
     /// True-miss / unpinned fail-closed: sticky for freeze report + pin-aware
     /// ledger marks. Prompt ledger is stained only when the stamped pin is the
     /// live open prompt (never stain a different live turn). Session always.
@@ -530,23 +469,8 @@ impl SessionActor {
                         .snapshot()
                         .is_some_and(|goal| goal.goal_id == owner_goal_id)
                 });
-                if goal_id.is_some() {
-                    let mut records = self.subagent_token_records.lock();
-                    debug_assert!(
-                        !records.contains_key(subagent_id),
-                        "duplicate SubagentSpawned for {subagent_id}"
-                    );
-                    records.insert(
-                        subagent_id.clone(),
-                        SubagentTokenRecord {
-                            goal_id: goal_id.clone(),
-                            usage_accounted: false,
-                        },
-                    );
-                }
                 if self.goal_runtime_available() && goal_owned {
                     let tokens_used = self.goal_tokens_used();
-                    self.record_control_snapshot();
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
                 }
@@ -571,13 +495,10 @@ impl SessionActor {
                     .await;
                 }
             }
-            GrowSessionUpdate::SubagentFinished { subagent_id, .. } => {
-                self.finish_goal_subagent_accounting(subagent_id);
-            }
             GrowSessionUpdate::SubagentProgress { .. } => {
-                // Progress reports current child context pressure, not
-                // cumulative consumption. Goal accounting happens only from
-                // the terminal usage transaction.
+                // Progress reports current child context pressure and remains
+                // a transient UI hint. Model-settlement usage is delivered by
+                // the shared Goal usage window instead.
                 return;
             }
             _ => {}
@@ -945,7 +866,8 @@ mod grow_event_id_stamping_tests {
                     .await;
                 actor
                     .request_behavior_change(acp::SessionModeId::new("plan"))
-                    .await;
+                    .await
+                    .expect("entering plan mode must succeed in this fixture");
                 while let Ok(msg) = prx.try_recv() {
                     assert!(
                         !matches!(msg, PersistenceMsg::Update(_)),
@@ -1026,10 +948,12 @@ mod grow_event_id_stamping_tests {
                     .await;
                 actor
                     .request_behavior_change(acp::SessionModeId::new("normal"))
-                    .await;
+                    .await
+                    .expect("first normal-mode request must succeed in this fixture");
                 actor
                     .request_behavior_change(acp::SessionModeId::new("normal"))
-                    .await;
+                    .await
+                    .expect("confirming normal mode must succeed in this fixture");
                 while let Ok(msg) = prx.try_recv() {
                     assert!(
                         !matches!(msg, PersistenceMsg::Update(_)),
@@ -1116,17 +1040,17 @@ mod grow_event_id_stamping_tests {
                     .await;
                 assert!(matches!(
                     entered,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ));
                 // Leaving an active Plan interrupts work: the first request parks
                 // the switch and asks for explicit confirmation.
                 let first = actor
                     .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
-                let crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired {
+                let Ok(crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired {
                     message,
                     remaining_ms,
-                } = &first
+                }) = &first
                 else {
                     panic!("expected ConfirmationRequired, got {first:?}");
                 };
@@ -1145,7 +1069,7 @@ mod grow_event_id_stamping_tests {
                 assert!(
                     matches!(
                         second,
-                        crate::session::behavior::BehaviorChangeOutcome::Applied
+                        Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                     ),
                     "the same-target re-request must apply the switch, got {second:?}"
                 );
@@ -1176,7 +1100,8 @@ mod grow_event_id_stamping_tests {
                 let outcome = actor
                     .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
-                let crate::session::behavior::BehaviorChangeOutcome::Rejected { message } = outcome
+                let Ok(crate::session::behavior::BehaviorChangeOutcome::Rejected { message }) =
+                    outcome
                 else {
                     panic!("active foreground switch must be rejected");
                 };
@@ -1217,7 +1142,7 @@ mod grow_event_id_stamping_tests {
                     .await;
                 assert!(matches!(
                     normal,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ));
                 assert_eq!(
                     actor.goal_tracker.lock().status(),
@@ -1230,7 +1155,7 @@ mod grow_event_id_stamping_tests {
                     .await;
                 assert!(matches!(
                     ask,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ));
                 assert_eq!(
                     actor.goal_tracker.lock().status(),
@@ -1246,7 +1171,7 @@ mod grow_event_id_stamping_tests {
     }
 
     #[tokio::test]
-    async fn goal_subagent_usage_is_accounted_from_the_ledger_fold_once() {
+    async fn goal_usage_follows_active_pause_restart_windows() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
@@ -1263,51 +1188,34 @@ mod grow_event_id_stamping_tests {
                         "now".into(),
                     )
                     .unwrap();
-                // Direct tracker setup bypasses the normal Goal activation
-                // transaction; establish its corresponding Behavior owner so
-                // the durable usage fold is validated under real invariants.
                 actor
                     .behavior
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
-                actor.subagent_token_records.lock().insert(
-                    "sub-1".into(),
-                    SubagentTokenRecord {
-                        goal_id: Some("goal-1".into()),
-                        usage_accounted: false,
-                    },
-                );
-                *actor.current_prompt_id.lock().unwrap() = Some("prompt-1".into());
-                let usage = vec![(
-                    "model".into(),
-                    chat_state::UsageTotals {
-                        input_tokens: 1_000,
-                        cached_read_tokens: 700,
-                        output_tokens: 80,
-                        model_calls: 1,
-                        ..Default::default()
-                    },
-                )];
-
-                assert_eq!(
-                    actor
-                        .record_subagent_usage("sub-1", &usage, Some("prompt-1"), false)
-                        .await,
-                    Ok(SubagentUsageApply::AttributedToPrompt)
-                );
-                assert_eq!(actor.goal_tokens_used(), 380);
-                assert!(
-                    actor.subagent_token_records.lock()["sub-1"].usage_accounted,
-                    "the usage fold itself must own the exactly-once marker"
-                );
-
+                actor.sync_goal_usage_window();
                 actor
-                    .record_subagent_usage("sub-1", &usage, Some("prompt-1"), false)
+                    .record_goal_model_usage(Some("goal-1"), 380)
                     .await
                     .unwrap();
                 assert_eq!(actor.goal_tokens_used(), 380);
-                actor.finish_goal_subagent_accounting("sub-1");
-                assert!(!actor.subagent_token_records.lock().contains_key("sub-1"));
+
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .pause(crate::session::goal_tracker::GoalPauseReason::User)
+                );
+                actor.sync_goal_usage_window();
+                actor.record_goal_model_usage(None, 120).await.unwrap();
+                assert_eq!(actor.goal_tokens_used(), 380);
+
+                assert!(actor.goal_tracker.lock().restart());
+                actor.sync_goal_usage_window();
+                actor
+                    .record_goal_model_usage(Some("goal-1"), 25)
+                    .await
+                    .unwrap();
+                assert_eq!(actor.goal_tokens_used(), 405);
             })
             .await;
     }
@@ -1348,7 +1256,7 @@ mod synthetic_prompt_behavior_tests {
                     .await;
                 assert!(matches!(
                     entered,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ));
                 assert!(actor.behavior.lock().is_plan());
                 assert_eq!(
@@ -1434,13 +1342,15 @@ mod synthetic_prompt_behavior_tests {
                     actor
                         .request_behavior_change(acp::SessionModeId::new("plan"))
                         .await,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ));
                 assert!(matches!(
                     actor
                         .request_behavior_change(acp::SessionModeId::new("normal"))
                         .await,
-                    crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired { .. }
+                    Ok(
+                        crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired { .. }
+                    )
                 ));
                 assert!(
                     actor.behavior.lock().pending_switch().is_some(),

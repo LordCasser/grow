@@ -361,6 +361,23 @@ pub struct StartupHints {
     /// parent emits (which also key off the task type, not the resolved agent name).
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// Workflow Run whose immutable execution route owns this child.
+    #[serde(skip)]
+    pub workflow_run_id: Option<String>,
+    /// Process-local copy of the same Run-owned route for actor execution.
+    /// The durable source remains the root Workflow tracker; this avoids a
+    /// child consulting its unrelated local Workflow manager.
+    #[serde(skip)]
+    pub(crate) workflow_runtime_route:
+        Option<crate::session::workflow::tracker::WorkflowRuntimeRoute>,
+    /// Whether this child owns an immutable delegated Goal view. Agent
+    /// rebuilds must preserve its read-only lifecycle boundary.
+    #[serde(skip)]
+    pub(crate) delegated_goal: bool,
+    /// Root Goal activity/accounting route inherited by descendant sessions.
+    /// It is process-local runtime state and is never serialized.
+    #[serde(skip)]
+    pub(crate) goal_usage_window: Option<crate::session::actor::goal_support::GoalUsageWindow>,
     /// Internal-only permission route for child tool requests. The primary
     /// session also carries the configured value so it can host the child's
     /// auto-classifier side query before any child exists.

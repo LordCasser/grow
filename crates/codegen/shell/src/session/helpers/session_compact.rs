@@ -21,6 +21,10 @@ pub(crate) enum CompactFailure {
     /// Retrying the same payload will hit the same failure. The retry loop
     /// in `run_compact_inner` should bail without sleeping or re-issuing.
     Deterministic(acp::Error),
+    /// The selected model unconditionally rejected image input. The session
+    /// must durably install ImageShadows before retrying a fresh compaction
+    /// transaction; retrying this exact request is still deterministic.
+    ImageInputUnsupported(acp::Error),
     /// Failure may resolve on retry. The caller follows its existing
     /// N-attempt + backoff loop.
     Transient(acp::Error),
@@ -34,6 +38,37 @@ impl CompactFailure {
         acp::Error::internal_error().data(COMPACT_CANCELLED_MSG)
     }
 }
+
+pub(crate) type CompactUsageObserver =
+    std::sync::Arc<dyn Fn(Option<chat_state::SidebandUsage>) + Send + Sync>;
+
+/// Exactly-once attempt settlement guard. Once a provider request has been
+/// emitted, every exit reports the latest usage if the stream supplied it, or
+/// `None` when billing is unknowable. This includes timeout, cancellation,
+/// provider failure, empty output, and successful completion.
+struct CompactUsageMeter {
+    observer: CompactUsageObserver,
+    usage: Option<chat_state::SidebandUsage>,
+}
+
+impl CompactUsageMeter {
+    fn new(observer: CompactUsageObserver) -> Self {
+        Self {
+            observer,
+            usage: None,
+        }
+    }
+
+    fn observe(&mut self, usage: &chat_state::SidebandUsage) {
+        self.usage = Some(usage.clone());
+    }
+}
+
+impl Drop for CompactUsageMeter {
+    fn drop(&mut self) {
+        (self.observer)(self.usage.take());
+    }
+}
 pub(crate) use sampling_types::is_context_length_error;
 /// Classify an upstream `SamplingError` for the compaction retry loop.
 ///
@@ -43,8 +78,19 @@ pub(crate) use sampling_types::is_context_length_error;
 /// and stuck-model conditions all persist). 4xx API responses other than
 /// 408 (timeout) and 429 (rate limit) are likewise deterministic. Network
 /// transport errors, stream-level blips, and 5xx responses are transient.
-fn classify_sampling_error(err: SamplingError) -> CompactFailure {
+fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
+    if let SamplingError::Api {
+        status, message, ..
+    } = &err
+        && sampling_types::is_unconditional_image_input_unsupported(
+            Some(status.as_u16()),
+            message,
+            image_count,
+        )
+    {
+        return CompactFailure::ImageInputUnsupported(acp_err);
+    }
     let deterministic = match &err {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
@@ -80,11 +126,21 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
 /// `invalid_request_error` marker, which can appear in either field, always
 /// maps to `Deterministic` (schema violations cannot be fixed by re-sending
 /// the same payload).
-fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
+fn classify_response_event_error(
+    code: Option<&str>,
+    message: &str,
+    image_count: usize,
+) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(match code {
         Some(c) => format!("compact failed: {c}: {message}"),
         None => format!("compact failed: {message}"),
     });
+    let status_code = code
+        .and_then(|code| code.parse::<u16>().ok())
+        .or_else(|| matches!(code, Some("invalid_request_error")).then_some(400));
+    if sampling_types::is_unconditional_image_input_unsupported(status_code, message, image_count) {
+        return CompactFailure::ImageInputUnsupported(acp_err);
+    }
     if matches!(code, Some("invalid_request_error")) || message.contains("invalid_request_error") {
         return CompactFailure::Deterministic(acp_err);
     }
@@ -316,11 +372,21 @@ pub(crate) async fn generate_session_compact(
     idle_timeout: std::time::Duration,
     wall_clock_budget_secs: u64,
     cancel: &tokio_util::sync::CancellationToken,
+    usage_observer: CompactUsageObserver,
 ) -> Result<CompactOutput, CompactFailure> {
+    // The Sideband Attempt and provider admission are already established
+    // before this helper is entered. The exactly-once meter therefore covers
+    // cancellation races and every provider/preflight exit after emission;
+    // a cancellation observed before admission never reaches this helper.
+    let mut usage_meter = CompactUsageMeter::new(usage_observer);
     if cancel.is_cancelled() {
         return Err(CompactFailure::Cancelled);
     }
     let num_messages = input_surface.len();
+    let image_count = sampling_types::conversation_image_groups(&input_surface)
+        .iter()
+        .map(sampling_types::ConversationImageGroup::image_count)
+        .sum();
     let output = match sampling_config.api_backend {
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
@@ -336,7 +402,7 @@ pub(crate) async fn generate_session_compact(
                 await_unless_cancelled(cancel, client.chat_completion_stream(message)).await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
-                Err(e) => return Err(classify_sampling_error(e)),
+                Err(e) => return Err(classify_sampling_error(e, image_count)),
             };
             let mut timing = StreamTiming::new();
             let mut truncated = false;
@@ -384,6 +450,7 @@ pub(crate) async fn generate_session_compact(
                             usage = crate::session::actor::sideband::sideband_usage_from_tokens(
                                 &normalized,
                             );
+                            usage_meter.observe(&usage);
                         }
                         if let Some(choice) = chunk.choices.first() {
                             let delta = &choice.delta;
@@ -408,7 +475,7 @@ pub(crate) async fn generate_session_compact(
                             }
                         }
                     }
-                    Err(e) => return Err(classify_sampling_error(e)),
+                    Err(e) => return Err(classify_sampling_error(e, image_count)),
                 }
             }
             CompactOutput {
@@ -433,7 +500,7 @@ pub(crate) async fn generate_session_compact(
                     .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata, _doom_loop)) => s,
-                Err(e) => return Err(classify_sampling_error(e)),
+                Err(e) => return Err(classify_sampling_error(e, image_count)),
             };
             let mut timing = StreamTiming::new();
             let mut truncated = false;
@@ -500,9 +567,22 @@ pub(crate) async fn generate_session_compact(
                                             .into(),
                                         cache_write_tokens: 0,
                                     };
+                                    usage_meter.observe(&usage);
                                 }
                             }
                             ResponseStreamEvent::ResponseFailed(failed_event) => {
+                                if let Some(reported) = failed_event.response.usage.as_ref() {
+                                    usage = chat_state::SidebandUsage {
+                                        input_tokens: reported.input_tokens.into(),
+                                        output_tokens: reported.output_tokens.into(),
+                                        cache_read_tokens: reported
+                                            .input_tokens_details
+                                            .cached_tokens
+                                            .into(),
+                                        cache_write_tokens: 0,
+                                    };
+                                    usage_meter.observe(&usage);
+                                }
                                 let event_error = failed_event.response.error.as_ref();
                                 let code = event_error.map(|e| e.code.as_str());
                                 let message = event_error
@@ -514,7 +594,11 @@ pub(crate) async fn generate_session_compact(
                                     status = ?failed_event.response.status,
                                     "compact: response.failed event"
                                 );
-                                return Err(classify_response_event_error(code, message));
+                                return Err(classify_response_event_error(
+                                    code,
+                                    message,
+                                    image_count,
+                                ));
                             }
                             ResponseStreamEvent::ResponseError(error_event) => {
                                 let code = error_event.code.as_deref();
@@ -526,6 +610,7 @@ pub(crate) async fn generate_session_compact(
                                 return Err(classify_response_event_error(
                                     code,
                                     &error_event.message,
+                                    image_count,
                                 ));
                             }
                             ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
@@ -539,6 +624,7 @@ pub(crate) async fn generate_session_compact(
                                             .into(),
                                         cache_write_tokens: 0,
                                     };
+                                    usage_meter.observe(&usage);
                                 }
                                 let reason = incomplete_event
                                     .response
@@ -556,7 +642,7 @@ pub(crate) async fn generate_session_compact(
                             _ => {}
                         }
                     }
-                    Err(e) => return Err(classify_sampling_error(e)),
+                    Err(e) => return Err(classify_sampling_error(e, image_count)),
                 }
             }
             CompactOutput {
@@ -581,7 +667,7 @@ pub(crate) async fn generate_session_compact(
                     .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
-                Err(e) => return Err(classify_sampling_error(e)),
+                Err(e) => return Err(classify_sampling_error(e, image_count)),
             };
             let mut timing = StreamTiming::new();
             let mut truncated = false;
@@ -640,6 +726,7 @@ pub(crate) async fn generate_session_compact(
                                         .cache_creation_input_tokens
                                         .into(),
                                 };
+                                usage_meter.observe(&usage);
                             }
                             sampling_types::messages::MessageStreamEvent::ContentBlockDelta {
                                 delta: sampling_types::messages::StreamDelta::TextDelta { text },
@@ -664,6 +751,7 @@ pub(crate) async fn generate_session_compact(
                                 {
                                     usage.cache_write_tokens = cache_write_tokens.into();
                                 }
+                                usage_meter.observe(&usage);
                                 if let Some(sr) = delta.stop_reason {
                                     truncated = matches!(
                                     sr,
@@ -703,7 +791,7 @@ pub(crate) async fn generate_session_compact(
                             _ => {}
                         }
                     }
-                    Err(e) => return Err(classify_sampling_error(e)),
+                    Err(e) => return Err(classify_sampling_error(e, image_count)),
                 }
             }
             CompactOutput {
@@ -736,18 +824,24 @@ pub(crate) async fn generate_session_compact(
 mod classify_tests {
     use super::*;
     fn is_det(failure: &CompactFailure) -> bool {
-        matches!(failure, CompactFailure::Deterministic(_))
+        matches!(
+            failure,
+            CompactFailure::Deterministic(_) | CompactFailure::ImageInputUnsupported(_)
+        )
     }
     #[test]
     fn sampling_api_4xx_is_deterministic_except_408_and_429() {
         let det = |s: StatusCode| {
-            is_det(&classify_sampling_error(SamplingError::Api {
-                status: s,
-                message: "test".into(),
-                model_metadata: None,
-                retry_after_secs: None,
-                should_retry: None,
-            }))
+            is_det(&classify_sampling_error(
+                SamplingError::Api {
+                    status: s,
+                    message: "test".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                },
+                0,
+            ))
         };
         assert!(det(StatusCode::BAD_REQUEST));
         assert!(det(StatusCode::UNAUTHORIZED));
@@ -763,35 +857,42 @@ mod classify_tests {
     #[test]
     fn sampling_non_api_variants_classify_correctly() {
         assert!(is_det(&classify_sampling_error(
-            SamplingError::auth_unknown("expired")
+            SamplingError::auth_unknown("expired"),
+            0,
         )));
         assert!(is_det(&classify_sampling_error(
-            SamplingError::InvalidConfiguration("missing key")
+            SamplingError::InvalidConfiguration("missing key"),
+            0,
         )));
         assert!(is_det(&classify_sampling_error(
-            SamplingError::IdleTimeout { elapsed_secs: 60 }
+            SamplingError::IdleTimeout { elapsed_secs: 60 },
+            0,
         )));
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::EventStreamError("conn reset".into())
+            SamplingError::EventStreamError("conn reset".into()),
+            0,
         )));
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::from_stream_error("overloaded_error", "try again")
+            SamplingError::from_stream_error("overloaded_error", "try again"),
+            0,
         )));
     }
     #[test]
     fn response_event_invalid_request_error_marker_is_deterministic() {
         assert!(is_det(&classify_response_event_error(
             Some("invalid_request_error"),
-            "messages.27.content.1: ..."
+            "messages.27.content.1: ...",
+            0,
         )));
         assert!(is_det(&classify_response_event_error(
             Some("400"),
-            "Provider returned invalid_request_error: messages.X..."
+            "Provider returned invalid_request_error: messages.X...",
+            0,
         )));
     }
     #[test]
     fn response_event_numeric_codes_match_http_classification() {
-        let det = |c: &str| is_det(&classify_response_event_error(Some(c), "msg"));
+        let det = |c: &str| is_det(&classify_response_event_error(Some(c), "msg", 0));
         assert!(det("400"));
         assert!(det("401"));
         assert!(det("403"));
@@ -803,41 +904,48 @@ mod classify_tests {
     }
     #[test]
     fn response_event_unknown_code_defaults_to_transient() {
-        assert!(!is_det(&classify_response_event_error(None, "msg")));
+        assert!(!is_det(&classify_response_event_error(None, "msg", 0)));
         assert!(!is_det(&classify_response_event_error(
             Some("error"),
-            "msg"
+            "msg",
+            0,
         )));
         assert!(!is_det(&classify_response_event_error(
             Some("overloaded_error"),
-            "msg"
+            "msg",
+            0,
         )));
     }
     #[test]
     fn response_event_marker_in_message_with_no_code_is_deterministic() {
         assert!(is_det(&classify_response_event_error(
             None,
-            "messages.X.content.Y: invalid_request_error: ..."
+            "messages.X.content.Y: invalid_request_error: ...",
+            0,
         )));
     }
     #[test]
     fn response_event_context_length_message_is_deterministic() {
         assert!(is_det(&classify_response_event_error(
             None,
-            "The prompt is too long for this model's context window."
+            "The prompt is too long for this model's context window.",
+            0,
         )));
     }
     #[test]
     fn sampling_api_500_with_context_length_message_is_deterministic() {
-        assert!(is_det(&classify_sampling_error(SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "API error (status 500 Internal Server Error): \
+        assert!(is_det(&classify_sampling_error(
+            SamplingError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "API error (status 500 Internal Server Error): \
                       The prompt is too long for this model's context window."
-                .into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        })));
+                    .into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+            },
+            0
+        )));
     }
     #[test]
     fn sampling_http_is_transient() {
@@ -848,42 +956,91 @@ mod classify_tests {
         let http_err = rt
             .block_on(reqwest::get("http://127.0.0.1:0"))
             .expect_err("connecting to port 0 must fail");
-        assert!(!is_det(&classify_sampling_error(SamplingError::Http(
-            http_err
-        ))));
+        assert!(!is_det(&classify_sampling_error(
+            SamplingError::Http(http_err),
+            0
+        )));
     }
     #[test]
     fn sampling_serialization_is_deterministic() {
         let serde_err = serde_json::from_str::<u32>("not a number").unwrap_err();
         assert!(is_det(&classify_sampling_error(
-            SamplingError::Serialization(serde_err)
+            SamplingError::Serialization(serde_err),
+            0,
         )));
     }
     #[test]
     fn classifier_preserves_acp_error_data() {
-        let CompactFailure::Deterministic(err) = classify_sampling_error(SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "bad payload".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        }) else {
+        let CompactFailure::Deterministic(err) = classify_sampling_error(
+            SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message: "bad payload".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+            },
+            0,
+        ) else {
             panic!("expected Deterministic for 400");
         };
         let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
         assert!(data.contains("compact failed"));
         assert!(data.contains("bad payload"));
-        let CompactFailure::Transient(err) = classify_sampling_error(SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "upstream blip".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        }) else {
+        let CompactFailure::Transient(err) = classify_sampling_error(
+            SamplingError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "upstream blip".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+            },
+            0,
+        ) else {
             panic!("expected Transient for 500");
         };
         let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
         assert!(data.contains("upstream blip"));
+    }
+    #[test]
+    fn image_capability_rejection_is_typed_only_when_the_request_has_images() {
+        let reject = |image_count| {
+            classify_sampling_error(
+                SamplingError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "input_image is not supported by this model".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                },
+                image_count,
+            )
+        };
+        assert!(matches!(
+            reject(1),
+            CompactFailure::ImageInputUnsupported(_)
+        ));
+        assert!(matches!(reject(0), CompactFailure::Deterministic(_)));
+        assert!(matches!(
+            classify_sampling_error(
+                SamplingError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "unsupported image format: animated webp".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                },
+                1,
+            ),
+            CompactFailure::Deterministic(_)
+        ));
+        assert!(matches!(
+            classify_response_event_error(
+                Some("invalid_request_error"),
+                "this model only supports text",
+                1,
+            ),
+            CompactFailure::ImageInputUnsupported(_)
+        ));
     }
     #[test]
     fn stream_timing_boundaries() {
@@ -1020,6 +1177,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_secs(30),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await
         .unwrap_or_else(|_| panic!("compaction must succeed"));
@@ -1052,6 +1210,35 @@ mod reasoning_compaction_regression_tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
         }
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_compaction_still_settles_the_admitted_attempt() {
+        let config = test_config("http://127.0.0.1:1/v1");
+        let client = SamplingClient::new(config.clone()).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer = {
+            let observed = std::sync::Arc::clone(&observed);
+            std::sync::Arc::new(move |usage| observed.lock().unwrap().push(usage))
+                as CompactUsageObserver
+        };
+
+        assert!(matches!(
+            generate_session_compact(
+                vec![ConversationItem::user("summarize")],
+                client,
+                &config,
+                std::time::Duration::from_secs(1),
+                0,
+                &cancel,
+                observer,
+            )
+            .await,
+            Err(CompactFailure::Cancelled)
+        ));
+        assert_eq!(observed.lock().unwrap().as_slice(), &[None]);
     }
     #[tokio::test]
     async fn chat_completions_compaction_does_not_panic_on_reasoning_sibling() {
@@ -1102,6 +1289,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_secs(30),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await;
         let output = result
@@ -1156,6 +1344,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_secs(30),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await
         .unwrap_or_else(|_| panic!("tool-free compaction must succeed"));
@@ -1269,6 +1458,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_secs(30),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await
         .unwrap_or_else(|_| panic!("tool-free Responses compaction must succeed"));
@@ -1322,6 +1512,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_millis(150),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await;
         match result {
@@ -1336,7 +1527,11 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+            Err(
+                CompactFailure::Deterministic(_)
+                | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Cancelled,
+            ) => {
                 panic!(
                     "a stalled stream must be retryable (Transient), not Deterministic/Cancelled"
                 )
@@ -1400,6 +1595,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_millis(150),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await;
         match result {
@@ -1414,7 +1610,11 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+            Err(
+                CompactFailure::Deterministic(_)
+                | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Cancelled,
+            ) => {
                 panic!("a stalled stream must be retryable (Transient), not Deterministic")
             }
             Ok(_) => {
@@ -1475,6 +1675,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_millis(150),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await;
         match result {
@@ -1489,7 +1690,11 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+            Err(
+                CompactFailure::Deterministic(_)
+                | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Cancelled,
+            ) => {
                 panic!("a stalled stream must be retryable (Transient), not Deterministic")
             }
             Ok(_) => {
@@ -1547,6 +1752,7 @@ mod reasoning_compaction_regression_tests {
             std::time::Duration::from_millis(150),
             0,
             &tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await;
         match result {

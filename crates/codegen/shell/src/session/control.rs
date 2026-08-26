@@ -37,6 +37,17 @@ impl SessionControlSnapshot {
         self.architecture_version == SESSION_CONTROL_ARCHITECTURE_VERSION
     }
 
+    fn retired_context_layers(&self) -> Vec<chat_state::ControlContextLayer> {
+        let goal_definition_active = self.behavior.behavior() == tool_types::BehaviorId::Goal
+            && self.goal.as_ref().is_some_and(|goal| {
+                goal.status == crate::session::goal_tracker::GoalStatus::Active
+            });
+        (!goal_definition_active)
+            .then_some(chat_state::ControlContextLayer::GoalDefinition)
+            .into_iter()
+            .collect()
+    }
+
     fn validate(&self) -> std::io::Result<()> {
         if !self.architecture_is_current() {
             return Err(std::io::Error::new(
@@ -78,7 +89,7 @@ impl SessionControlSnapshot {
     }
 
     pub fn timeline_kind(&self) -> std::io::Result<chat_state::TimelineEventKind> {
-        self.timeline_kind_inner(None)
+        self.timeline_kind_inner(Vec::new())
     }
 
     pub fn timeline_kind_with_model_context(
@@ -87,25 +98,47 @@ impl SessionControlSnapshot {
         activation: chat_state::ControlContextActivation,
         context: impl Into<String>,
     ) -> std::io::Result<chat_state::TimelineEventKind> {
-        self.timeline_kind_inner(Some(chat_state::ControlContext {
+        self.timeline_kind_with_model_context_item(
             layer,
             activation,
-            item: sampling_types::ConversationItem::system_reminder(context),
-        }))
+            sampling_types::ConversationItem::system_reminder(context),
+        )
+    }
+
+    pub fn timeline_kind_with_model_context_item(
+        &self,
+        layer: chat_state::ControlContextLayer,
+        activation: chat_state::ControlContextActivation,
+        item: sampling_types::ConversationItem,
+    ) -> std::io::Result<chat_state::TimelineEventKind> {
+        self.timeline_kind_with_model_context_items(vec![chat_state::ControlContext {
+            layer,
+            activation,
+            item,
+        }])
+    }
+
+    pub fn timeline_kind_with_model_context_items(
+        &self,
+        model_contexts: Vec<chat_state::ControlContext>,
+    ) -> std::io::Result<chat_state::TimelineEventKind> {
+        self.timeline_kind_inner(model_contexts)
     }
 
     fn timeline_kind_inner(
         &self,
-        model_context: Option<chat_state::ControlContext>,
+        model_contexts: Vec<chat_state::ControlContext>,
     ) -> std::io::Result<chat_state::TimelineEventKind> {
         self.validate()?;
         let snapshot = serde_json::to_value(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let retired_context_layers = self.retired_context_layers();
         Ok(chat_state::TimelineEventKind::Control(
             chat_state::ControlEvent {
                 revision: self.control_revision,
                 snapshot,
-                model_context,
+                retired_context_layers,
+                model_contexts,
             },
         ))
     }
@@ -130,6 +163,12 @@ impl SessionControlSnapshot {
                     ),
                 ));
             }
+            if snapshot.retired_context_layers() != control.retired_context_layers {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session control context retirement does not match its snapshot",
+                ));
+            }
             latest = Some(snapshot);
         }
         Ok(latest)
@@ -141,14 +180,26 @@ impl SessionControlSnapshot {
 /// Agent identity and its rendered role are committed in the same Control
 /// event. An Agent without an authored body still emits an explicit reset so
 /// an earlier role cannot remain active by omission.
-pub fn agent_role_transition_context(agent_name: &str, role_prompt: Option<&str>) -> String {
+pub fn agent_role_transition_context(
+    agent_name: &str,
+    role_prompt: Option<&str>,
+    capability_catalog: Option<&str>,
+) -> String {
     let role = role_prompt
         .filter(|role| !role.trim().is_empty())
         .unwrap_or("This Agent defines no additional role instructions beyond the stable Grow system guidance.");
-    let content = format!(
+    let mut content = format!(
         "The active Agent is `{agent_name}`. This Agent role replaces every earlier Agent role; earlier role instructions are historical and no longer apply.\n\n{role}"
-    )
-    .replace("</agent-role>", "<\\/agent-role>");
+    );
+    if let Some(catalog) = capability_catalog.filter(|catalog| !catalog.trim().is_empty()) {
+        content.push_str(&format!(
+            "\n\n<{}>\n{}\n</{}>",
+            crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
+            catalog,
+            crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
+        ));
+    }
+    let content = content.replace("</agent-role>", "<\\/agent-role>");
     format!("<agent-role>\n{content}\n</agent-role>")
 }
 
@@ -176,7 +227,11 @@ mod tests {
             crate::session::goal_tracker::GoalStatus::Blocked => {
                 for index in 1..=3 {
                     tracker
-                        .report_blocked("waiting for user".into(), index)
+                        .report_blocked(
+                            "waiting for user".into(),
+                            index,
+                            (index > 1).then_some(index - 1),
+                        )
                         .unwrap();
                 }
             }
@@ -246,7 +301,12 @@ mod tests {
             unreachable!();
         };
         assert_eq!(
-            control.model_context.unwrap().item.text_content(),
+            control
+                .model_contexts
+                .first()
+                .expect("control context")
+                .item
+                .text_content(),
             context,
             "the state transition and provider-visible protocol must be one durable fact"
         );
@@ -269,7 +329,8 @@ mod tests {
                 chat_state::ControlEvent {
                     revision: 1,
                     snapshot: serde_json::json!({ "broken": true }),
-                    model_context: None,
+                    retired_context_layers: vec![],
+                    model_contexts: vec![],
                 },
             ))
             .unwrap();
@@ -337,7 +398,8 @@ mod tests {
                 chat_state::ControlEvent {
                     revision: 1,
                     snapshot: serde_json::to_value(snapshot).unwrap(),
-                    model_context: None,
+                    retired_context_layers: vec![],
+                    model_contexts: vec![],
                 },
             ))
             .unwrap();
@@ -347,13 +409,45 @@ mod tests {
 
     #[test]
     fn agent_role_transition_always_retires_the_previous_role() {
-        let custom = agent_role_transition_context("reviewer", Some("Review carefully."));
+        let custom = agent_role_transition_context(
+            "reviewer",
+            Some("Review carefully."),
+            Some("- available native tools: read(Read)"),
+        );
         assert!(custom.contains("active Agent is `reviewer`"));
         assert!(custom.contains("replaces every earlier Agent role"));
         assert!(custom.contains("Review carefully."));
+        assert!(custom.contains("<subagent-capability-catalog>"));
 
-        let reset = agent_role_transition_context("grow", None);
+        let reset = agent_role_transition_context("grow", None, None);
         assert!(reset.contains("no additional role instructions"));
         assert_eq!(reset.matches("<agent-role>").count(), 1);
+    }
+
+    #[test]
+    fn normal_behavior_retires_any_goal_definition_context() {
+        let kind = snapshot(1).timeline_kind().unwrap();
+        let chat_state::TimelineEventKind::Control(control) = kind else {
+            unreachable!();
+        };
+        assert_eq!(
+            control.retired_context_layers,
+            [chat_state::ControlContextLayer::GoalDefinition]
+        );
+    }
+
+    #[test]
+    fn active_goal_keeps_its_goal_definition_context() {
+        let state = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            Some(goal(crate::session::goal_tracker::GoalStatus::Active)),
+        );
+        let kind = state.timeline_kind().unwrap();
+        let chat_state::TimelineEventKind::Control(control) = kind else {
+            unreachable!();
+        };
+        assert!(control.retired_context_layers.is_empty());
     }
 }

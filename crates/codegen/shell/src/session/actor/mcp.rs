@@ -33,7 +33,13 @@ impl SessionActor {
             (touched, clients, st.shared_client_ids())
         };
         if let Some(capabilities) = &self.subagent_capabilities {
-            capabilities.replace_bound_mcp_client_ids(shared_client_ids);
+            let inheritance = self.agent.borrow().definition().mcp_inheritance.clone();
+            capabilities.replace_bound_mcp_client_ids(
+                crate::session::subagent_capability::project_agent_mcp_bindings(
+                    &inheritance,
+                    shared_client_ids,
+                ),
+            );
         }
         if touched_servers.is_empty() {
             return;

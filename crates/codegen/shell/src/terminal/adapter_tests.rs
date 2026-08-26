@@ -126,6 +126,7 @@ fn scripted_gateway(outputs: Vec<(String, bool)>) -> GatewaySender {
 
 fn background_request(output_file: PathBuf) -> TerminalRunRequest {
     TerminalRunRequest {
+        goal_definition_revision: None,
         command: "watch-something".into(),
         working_directory: PathBuf::from("/tmp"),
         env: HashMap::new(),

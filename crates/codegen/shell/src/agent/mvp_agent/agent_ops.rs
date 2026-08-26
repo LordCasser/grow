@@ -521,6 +521,7 @@ impl MvpAgent {
         let activity = crate::agent::activity::AgentActivity::default();
         Self {
             sessions: RefCell::new(HashMap::new()),
+            active_child_sessions: Default::default(),
             activity,
             loading_sessions: RefCell::new(HashMap::new()),
             retained_resources: RefCell::new(HashMap::new()),
@@ -739,6 +740,52 @@ impl MvpAgent {
         }
         self.wait_for_in_flight_session_load(session_id).await;
         self.sessions.borrow().get(session_id).cloned()
+    }
+
+    /// Resolve a resident actor for session-scoped control. Primary sessions
+    /// retain the load-race wait above; live child actors are addressed from
+    /// their separate lifecycle registry and are never promoted into the
+    /// primary roster domain.
+    pub(crate) async fn control_session_handle_waiting_for_load(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Option<crate::session::SessionHandle> {
+        if let Some(handle) = self.control_session_handle(session_id) {
+            return Some(handle);
+        }
+        self.wait_for_in_flight_session_load(session_id).await;
+        self.control_session_handle(session_id)
+    }
+
+    /// Resolve a currently resident primary or child actor without waiting for
+    /// a reconnect load. Callers that already own a global publication lock
+    /// use this form so they never wait on a load that needs the same lock.
+    pub(crate) fn control_session_handle(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Option<crate::session::SessionHandle> {
+        self.sessions
+            .borrow()
+            .get(session_id)
+            .cloned()
+            .or_else(|| self.active_child_sessions.borrow().get(session_id).cloned())
+    }
+
+    /// Snapshot every live actor addressable by session control. Catalog
+    /// publication uses this exact domain so primary and child routes converge
+    /// under the same generation.
+    pub(crate) fn live_control_session_handles(
+        &self,
+    ) -> HashMap<acp::SessionId, crate::session::SessionHandle> {
+        let mut handles = self.sessions.borrow().clone();
+        handles.extend(
+            self.active_child_sessions
+                .borrow()
+                .iter()
+                .filter(|(_, handle)| handle.workflow_run_id.is_none())
+                .map(|(id, handle)| (id.clone(), handle.clone())),
+        );
+        handles
     }
     /// If a `session/load` for `session_id` is in flight, wait (bounded) for
     /// it to finish. Returns immediately when no load is in flight.
@@ -1147,6 +1194,7 @@ impl MvpAgent {
     /// global default. Model selection is intentionally independent.
     pub fn resolve_agent_definition(
         cwd: &std::path::Path,
+        plugins: Option<&agent::plugins::PluginRegistry>,
         agent_profile_path: Option<&std::path::Path>,
         agent_config: &config::AgentSelectionConfig,
         acp_agent_profile: Option<agent::AgentDefinition>,
@@ -1154,7 +1202,9 @@ impl MvpAgent {
     ) -> agent::AgentDefinition {
         use agent::AgentDefinition;
         if let Some(name) = persisted_agent_name {
-            if let Some(definition) = agent::discovery::by_name_in_cwd(name, cwd) {
+            if let Some(definition) =
+                agent::discovery::by_name_in_cwd_with_plugins(name, cwd, plugins)
+            {
                 return definition;
             }
             tracing::warn!(
@@ -1212,7 +1262,9 @@ impl MvpAgent {
                 agent_name = %name,
                 "Resolving agent definition from config.toml [agent] name"
             );
-            if let Some(def) = agent::discovery::by_name_in_cwd(name, cwd) {
+            if let Some(def) =
+                agent::discovery::by_name_in_cwd_with_plugins(name, cwd, plugins)
+            {
                 return def;
             }
             tracing::warn!(
@@ -1241,7 +1293,7 @@ impl MvpAgent {
                 }
             }
             Some(name) => {
-                agent::discovery::by_name_in_cwd(name, cwd)
+                agent::discovery::by_name_in_cwd_with_plugins(name, cwd, plugins)
                     .unwrap_or_else(AgentDefinition::default_grow_build)
             }
             None => AgentDefinition::default_grow_build(),
@@ -1525,16 +1577,39 @@ impl MvpAgent {
         let buffering_settings = self.buffering_settings.borrow().clone();
         let skills = self.cfg.borrow().skills.clone();
         let acp_agent_profile = parse_agent_profile_from_meta(session_meta);
+        let session_plugin_registry = {
+            let disk_cfg = crate::config::resolve_effective_plugins_config(cwd.as_path())
+                .to_discovery_config();
+            self.plugin_registry_handle.refresh_and_build_for_cwd(
+                cwd.as_path(),
+                &disk_cfg,
+                &parse_session_plugin_dirs(session_meta),
+                folder_trust::project_scope_allowed(cwd.as_path()),
+            )
+        };
         let mut agent_definition = {
             let cfg = self.cfg.borrow();
             Self::resolve_agent_definition(
                 cwd.as_path(),
+                session_plugin_registry.as_deref(),
                 cfg.agent_profile_path.as_deref(),
                 &cfg.agent,
                 acp_agent_profile,
                 persisted_agent_name,
             )
         };
+        if !agent_definition.is_primary_agent_eligible() {
+            let issues = agent_definition
+                .primary_agent_issues()
+                .into_iter()
+                .map(|issue| issue.message())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(acp::Error::invalid_params().data(format!(
+                "Agent `{}` cannot own a primary session: {issues}",
+                agent_definition.selector_identity()
+            )));
+        }
         {
             let cfg = self.cfg.borrow();
             let overrides = &cfg.cli_agent_overrides;
@@ -1555,7 +1630,7 @@ impl MvpAgent {
                 .or(agent_definition.max_turns)
                 .map(|v| v as usize)
         };
-        {
+        let workflow_file_tool_overrides = {
             let cfg = self.cfg.borrow();
             let effective = cfg
                 .toolset
@@ -1567,9 +1642,12 @@ impl MvpAgent {
                         acp::Error::invalid_params()
                             .data(format!("invalid [toolset.hashline] config: {e}"))
                     })?;
-                agent_definition.override_file_tools(file_tools);
+                agent_definition.override_file_tools(file_tools.clone());
+                Some(file_tools)
+            } else {
+                None
             }
-        }
+        };
         let lsp_tools_enabled = self.cfg.borrow().resolve_lsp_tools().value;
         if lsp_tools_enabled && tool_ctx.lsp.is_none() {
             let snapshot = self.plugin_registry_handle.snapshot();
@@ -1661,12 +1739,15 @@ impl MvpAgent {
         let ask_user_question_enabled = parse_ask_user_question_from_meta(session_meta)
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
         let client_hooks = crate::extensions::hooks::parse_client_hooks(session_meta);
-        let todo_gate = self.cfg.borrow().todo_gate;
         let remote_settings_for_spawn = self.cfg.borrow().remote_settings.clone();
         let laziness_debug_log_for_spawn = self.cfg.borrow().laziness_debug_log.clone();
         let respect_gitignore = self.cfg.borrow().respect_gitignore;
         let path_not_found_hints = self.cfg.borrow().path_not_found_hints;
         let subagent_toggle = self.cfg.borrow().subagent_toggle.clone();
+        let (workflow_cli_agents, workflow_cli_overrides) = {
+            let cfg = self.cfg.borrow();
+            (cfg.cli_agents.clone(), cfg.cli_agent_overrides.clone())
+        };
         let handle_display_cwd = prompt_display_cwd.clone();
         let bash_params_json = {
             let cfg = self.cfg.borrow();
@@ -1751,7 +1832,7 @@ impl MvpAgent {
                 .tx
                 .send(crate::session::persistence::PersistenceMsg::CurrentModel {
                     model_id: session_model_id.clone(),
-                    agent_name: Some(agent_definition.name.clone()),
+                    agent_name: Some(agent_definition.selector_identity()),
                     reasoning_effort: initial_reasoning_effort,
                 });
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
@@ -1834,23 +1915,15 @@ impl MvpAgent {
                     client_hooks,
                     prompt_display_cwd,
                     subagent_toggle,
+                    workflow_cli_agents,
+                    workflow_cli_overrides,
+                    workflow_file_tool_overrides,
+                    None,
                     agent::prompt::context::PromptAudience::Primary,
                     respect_gitignore,
                     path_not_found_hints,
                     tool_params_json,
-                    {
-                        let disk_cfg = crate::config::resolve_effective_plugins_config(
-                                session_cwd,
-                            )
-                            .to_discovery_config();
-                        self.plugin_registry_handle
-                            .refresh_and_build_for_cwd(
-                                session_cwd,
-                                &disk_cfg,
-                                &parse_session_plugin_dirs(session_meta),
-                                folder_trust::project_scope_allowed(session_cwd),
-                            )
-                    },
+                    session_plugin_registry,
                     Some(self.plugin_registry_handle.clone()),
                     self.models_manager.clone(),
                     None,
@@ -1862,7 +1935,6 @@ impl MvpAgent {
                         let cfg = self.cfg.borrow();
                         cfg.cli_agent_overrides.permission_rules.clone()
                     },
-                    todo_gate,
                     remote_settings_for_spawn,
                     laziness_debug_log_for_spawn,
                     None,

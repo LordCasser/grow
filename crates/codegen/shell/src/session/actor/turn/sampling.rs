@@ -28,98 +28,18 @@ fn permission_sideband_prompt(items: &[ConversationItem]) -> String {
     serde_json::to_string(&purpose_items).unwrap_or_else(|_| "permission judgment request".into())
 }
 
-/// Match a provider's unconditional model-capability claim without treating
-/// an open-ended format/size qualifier as a permanent text-only capability.
-/// Provider prose such as "does not support images with animated frames" is
-/// about one representation, not image input as a whole.
-fn contains_terminal_capability_claim(message: &str, claim: &str) -> bool {
-    message.match_indices(claim).any(|(start, _)| {
-        let suffix = &message[start + claim.len()..];
-        suffix
-            .chars()
-            .all(|ch| ch.is_whitespace() || ch.is_ascii_punctuation())
-    })
-}
-
 pub(super) fn is_image_input_unsupported(
     error: &sampler::SamplingErrorInfo,
     image_count: usize,
 ) -> bool {
-    if image_count == 0
-        || !matches!(error.kind, sampler::SamplingErrorKind::Api)
-        || error.status_code != Some(400)
-    {
+    if !matches!(error.kind, sampler::SamplingErrorKind::Api) {
         return false;
     }
-
-    let message = error.message.to_ascii_lowercase();
-    if [
-        "invalid image",
-        "malformed image",
-        "corrupt image",
-        "image too large",
-        "image size",
-        "image dimensions",
-        "unsupported image format",
-        "alpha channel",
-        "transparency",
-        "transparent image",
-        "content policy",
-        "safety policy",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-    {
-        return false;
-    }
-
-    let names_image_content = [
-        "image_url",
-        "input_image",
-        "image input",
-        "image content",
-        "content type image",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle));
-    let text_only_model = [
-        "this text-only model only supports text input",
-        "this text only model only supports text input",
-        "this model only supports text",
-        "this model supports only text",
-        "this model only accepts text",
-        "this model accepts only text",
-        "model only supports text",
-        "model supports only text",
-        "only text input is supported",
-        "only text inputs are supported",
-        "only text content is supported",
-        "text-only model",
-        "text only model",
-    ]
-    .iter()
-    .any(|claim| contains_terminal_capability_claim(&message, claim));
-    let model_rejects_images = [
-        "model does not support images",
-        "model doesn't support images",
-        "model does not accept images",
-        "input_image is not supported by this model",
-        "image input is unsupported by this model",
-        "image inputs are unsupported by this model",
-        "images are not supported by this model",
-    ]
-    .iter()
-    .any(|claim| contains_terminal_capability_claim(&message, claim));
-    let image_type_rejected_as_text = [
-        "unknown variant",
-        "expected `text`",
-        "expected text",
-        "must be text",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle));
-
-    text_only_model || model_rejects_images || (names_image_content && image_type_rejected_as_text)
+    sampling_types::is_unconditional_image_input_unsupported(
+        error.status_code,
+        &error.message,
+        image_count,
+    )
 }
 
 fn sampler_model_image_input_key(
@@ -421,9 +341,21 @@ impl SessionActor {
                     (String, chat_state::TimelineRangeRef),
                     crate::session::image_describe::DescribeError,
                 > = async {
-                    match tokio::time::timeout(timeout, client.conversation_collect(request)).await
+                    match tokio::time::timeout(
+                        timeout,
+                        sideband.run_provider(client.conversation_collect(request)),
+                    )
+                    .await
                     {
-                        Ok(Ok(response)) => {
+                        Ok(Ok(Ok(response))) => {
+                            let usage = self
+                                .settle_sideband_response_usage(&mut sideband, &response)
+                                .await
+                                .map_err(|error| {
+                                    crate::session::image_describe::DescribeError::Sideband(
+                                        error.to_string(),
+                                    )
+                                })?;
                             let raw = response.assistant_text();
                             let description = raw.trim().to_owned();
                             if description.is_empty() {
@@ -440,7 +372,6 @@ impl SessionActor {
                                     })?;
                                 Err(crate::session::image_describe::DescribeError::EmptyResponse)
                             } else {
-                                let usage = sideband_usage(&response);
                                 let finish = sideband_finish(&response);
                                 let result_ref = sideband
                                     .complete(raw, None, usage, finish, vec![source_ref.clone()])
@@ -458,7 +389,7 @@ impl SessionActor {
                                 Ok((description, result_ref))
                             }
                         }
-                        Ok(Err(error)) => {
+                        Ok(Ok(Err(error))) => {
                             let info = sampler::SamplingErrorInfo::from(&error);
                             sideband
                                 .fail(chat_state::SidebandOutcome::Failed, error.to_string())
@@ -470,6 +401,11 @@ impl SessionActor {
                                 })?;
                             Err(crate::session::image_describe::DescribeError::Sampling(
                                 info,
+                            ))
+                        }
+                        Ok(Err(error)) => {
+                            Err(crate::session::image_describe::DescribeError::Sideband(
+                                error.to_string(),
                             ))
                         }
                         Err(_) => {
@@ -616,7 +552,7 @@ impl SessionActor {
         Ok(report)
     }
 
-    async fn project_conversation_images_for_text_model(
+    pub(in crate::session::actor) async fn project_conversation_images_for_text_model(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
@@ -1304,15 +1240,16 @@ impl SessionActor {
                                         error.to_string(),
                                     )
                                 })?;
-                            let fut = sampling_client.conversation_collect(request);
+                            let fut = sideband
+                                .run_provider(sampling_client.conversation_collect(request));
                             let attempts_remaining =
                                 PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
                             let remaining = judgment_deadline
                                 .saturating_duration_since(tokio::time::Instant::now());
                             let attempt_budget = remaining / attempts_remaining as u32;
                             let response = match tokio::time::timeout(attempt_budget, fut).await {
-                                Ok(Ok(response)) => response,
-                                Ok(Err(error))
+                                Ok(Ok(Ok(response))) => response,
+                                Ok(Ok(Err(error)))
                                     if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
                                         && permission_judgment_error_needs_retry(&error) =>
                                 {
@@ -1324,6 +1261,13 @@ impl SessionActor {
                                     );
                                     feedback = Some(format!("transient provider error: {error}"));
                                     continue;
+                                }
+                                Ok(Ok(Err(error))) => {
+                                    return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            error.to_string(),
+                                        ),
+                                    );
                                 }
                                 Ok(Err(error)) => {
                                     return Err(
@@ -1346,9 +1290,17 @@ impl SessionActor {
                                     return Err(workspace::permission::ClassifierFailure::Timeout);
                                 }
                             };
+                            let usage = session
+                                .settle_sideband_response_usage(&mut sideband, &response)
+                                .await
+                                .map_err(|error| {
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        error.to_string(),
+                                    )
+                                })?;
                             let model_text = response.assistant_text();
                             if !permission_judgment_needs_retry(&model_text) {
-                                return Ok(response);
+                                return Ok((response, usage));
                             }
                             if attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS {
                                 return Err(
@@ -1370,7 +1322,7 @@ impl SessionActor {
                     }
                     .await;
                     match sampled {
-                        Ok(response) => {
+                        Ok((response, usage)) => {
                             let model_text = response.assistant_text();
                             let structured_output =
                                 serde_json::from_str(&model_text).map_err(|_| {
@@ -1383,7 +1335,7 @@ impl SessionActor {
                                 .complete(
                                     model_text.clone(),
                                     Some(structured_output),
-                                    sideband_usage(&response),
+                                    usage,
                                     sideband_finish(&response),
                                     Vec::new(),
                                 )
@@ -1448,6 +1400,14 @@ impl SessionActor {
         model_id: &str,
     ) -> Option<sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
+        if let Some(route) = &self.startup_hints.workflow_runtime_route {
+            return route
+                .image_description_sampler_for(model_id, &self.models_manager, creds.alpha_test_key)
+                .map_err(|error| {
+                    tracing::warn!(model_id, error, "Workflow auxiliary route unavailable")
+                })
+                .ok();
+        }
         let models = self.models_manager.models();
         crate::agent::config::resolve_aux_model_sampling_config(
             model_id,
@@ -1540,6 +1500,13 @@ impl SessionActor {
         request_image_input_key: Option<sampling_types::ModelImageInputKey>,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use sampler::SamplingErrorKind;
+        // The sampler settles every provider attempt before returning its
+        // terminal outcome. Do not mutate Goal lifecycle while this Step is
+        // still active: report the closed admission fence and let the outer
+        // loop commit the terminal only after StepEnded.
+        if self.goal_provider_admission_closed() {
+            return Ok(SamplerFailureRecovery::GoalSpendingStopped);
+        }
         if is_image_input_unsupported(&error, request_image_count)
             && let Some(key) = request_image_input_key
         {
@@ -1637,13 +1604,7 @@ impl SessionActor {
                     percentage,
                     source: "sampler_error_recovery",
                 };
-                if let Err(e) = self.run_compact_only(trigger_info).await {
-                    if Self::is_auth_compact_error(&e) {
-                        return Err(self.surface_compact_auth_failure(e).await);
-                    }
-                    return Err(e);
-                }
-                return Ok(SamplerFailureRecovery::CompactAndResubmit);
+                return Ok(SamplerFailureRecovery::CompactAndResubmit(trigger_info));
             }
         }
         let detailed_message = error.message.clone();
@@ -1825,8 +1786,8 @@ impl SessionActor {
     /// push), then submits via `SamplerHandle::submit_and_collect` and
     /// returns:
     /// * `Ok(SamplerTurnOutcome::Response(_))` - model responded.
-    /// * `Ok(SamplerTurnOutcome::CompactAndResubmit)` - compaction
-    ///    ran, the outer turn loop should `continue`.
+    /// * `Ok(SamplerTurnOutcome::CompactAndResubmit(_))` - the outer turn
+    ///    must close the current step, compact, and rebuild the request.
     /// * `Ok(SamplerTurnOutcome::RefreshByokAndResubmit { .. })` - a BYOK source recovered a 401
     ///    recovery succeeded, credentials refreshed, retry once.
     /// * `Err(acp::Error)` - terminal failure already reported via
@@ -1871,11 +1832,77 @@ impl SessionActor {
                 acp::Error::internal_error()
                     .data(format!("model request was not durably recorded: {error}"))
             })?;
-        let collect = self
-            .sampler_handle
-            .submit_and_collect(request_id.clone(), request);
+        let goal_usage_window = self.goal_usage_window.clone();
+        let goal_usage_owner = self.session_id_string();
+        let goal_usage_epoch = super::super::tasks_cancel::turn_usage_epoch_or(
+            goal_usage_window.owner_epoch(&goal_usage_owner),
+        );
+        let expected_goal_id = self.events.current_goal_id();
+        let scope_capture: sampler::AttemptScopeCapture = std::sync::Arc::new(move || {
+            goal_usage_window.begin_model_attempt(
+                &goal_usage_owner,
+                goal_usage_epoch,
+                expected_goal_id.as_deref(),
+            )
+        });
+        let goal_usage_window = self.goal_usage_window.clone();
+        let usage_state = self.chat_state_handle.clone();
+        let usage_sink: sampler::AttemptUsageSink = std::sync::Arc::new(move |attempt| {
+            let goal_usage_window = goal_usage_window.clone();
+            let usage_state = usage_state.clone();
+            Box::pin(async move {
+                match attempt {
+                    sampler::AttemptUsage::Known {
+                        scope: Some(attempt_id),
+                        usage,
+                    } => {
+                        let tokens = crate::session::goal_tracker::model_usage_goal_tokens(&usage);
+                        let _ = goal_usage_window
+                            .settle_attempt_via_root(attempt_id, Some(tokens))
+                            .await?;
+                    }
+                    sampler::AttemptUsage::Incomplete {
+                        scope: Some(attempt_id),
+                    } => {
+                        // These are two independent durable ledgers. Failure
+                        // to stain the prompt ledger must never strand the
+                        // already-admitted Goal attempt: the owner fence would
+                        // then wait forever. Always hand the attempt to the
+                        // root settlement path before surfacing either error.
+                        let prompt_usage_marked =
+                            usage_state.mark_usage_incomplete(true, true).await;
+                        let goal_settlement = goal_usage_window
+                            .settle_attempt_via_root(attempt_id, None)
+                            .await;
+                        match (prompt_usage_marked, goal_settlement) {
+                            (true, Ok(_)) => {}
+                            (false, Ok(_)) => {
+                                return Err(
+                                    "failed to persist incomplete provider-attempt usage".into()
+                                );
+                            }
+                            (true, Err(error)) => return Err(error),
+                            (false, Err(error)) => {
+                                return Err(format!(
+                                    "failed to persist incomplete provider-attempt usage; Goal settlement also failed: {error}"
+                                ));
+                            }
+                        }
+                    }
+                    sampler::AttemptUsage::Known { scope: None, .. }
+                    | sampler::AttemptUsage::Incomplete { scope: None } => {}
+                }
+                Ok(())
+            })
+        });
+        let collect = self.sampler_handle.submit_and_collect_accounted(
+            request_id.clone(),
+            request,
+            Some(scope_capture),
+            Some(usage_sink),
+        );
         tokio::pin!(collect);
-        let collected = tokio::select! {
+        let (collected, steered) = tokio::select! {
             biased;
             _ = super::super::wait_for_pending_interjection(
                 &self.pending_interjections,
@@ -1885,20 +1912,18 @@ impl SessionActor {
                 self.sampler_handle.cancel(request_id.clone());
                 // Steering restarts sampling inside the same visible turn; it
                 // never creates a second foreground owner or terminal event.
-                let _ = collect.await;
-                self.turn_stream_drained.lock().take();
+                let completion = collect.await;
                 tracing::info!(
                     sampler_request_id = request_id_str,
                     "soft-preempted sampling for user steering"
                 );
-                None
+                (completion, true)
             },
-            result = &mut collect => Some(result),
+            result = &mut collect => (result, false),
         };
-        if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
-            .await
-            .is_err()
-        {
+        let stream_drained =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx).await;
+        if !matches!(stream_drained, Ok(Ok(()))) {
             self.turn_stream_drained.lock().take();
             self.events.request_failed(
                 &request_id_str,
@@ -1910,10 +1935,25 @@ impl SessionActor {
                 sampler_request_id = request_id_str,
                 "sampler terminal-event barrier timed out"
             );
+            return Err(acp::Error::internal_error().data(
+                "sampler response was collected, but its ordered stream events did not drain",
+            ));
         }
-        let Some(collected) = collected else {
+        if steered
+            && matches!(
+                &collected,
+                Err(sampling_types::SamplingError::Auth { message, .. })
+                    if message == "request cancelled"
+            )
+        {
             return Ok(SamplerTurnOutcome::Steered);
-        };
+        }
+        if steered {
+            tracing::warn!(
+                sampler_request_id = request_id_str,
+                "steering raced a non-cancellation sampler terminal; preserving the real outcome"
+            );
+        }
         match collected {
             Ok((response, metrics)) => {
                 let span = tracing::Span::current();
@@ -1939,8 +1979,11 @@ impl SessionActor {
                     )
                     .await?
                 {
-                    SamplerFailureRecovery::CompactAndResubmit => {
-                        Ok(SamplerTurnOutcome::CompactAndResubmit)
+                    SamplerFailureRecovery::GoalSpendingStopped => {
+                        Ok(SamplerTurnOutcome::GoalSpendingStopped)
+                    }
+                    SamplerFailureRecovery::CompactAndResubmit(trigger_info) => {
+                        Ok(SamplerTurnOutcome::CompactAndResubmit(trigger_info))
                     }
                     SamplerFailureRecovery::ImageInputUnsupportedAndResubmit => {
                         Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit)
@@ -2025,13 +2068,13 @@ impl SessionActor {
     ///
     /// The provider total replaces current-context pressure. Per-prompt and
     /// lifetime billing remain independent `UsageLedger` transactions.
-    pub(crate) fn record_response_token_usage(
+    pub(crate) async fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
         response_model_id: Option<String>,
         admitted_goal_id: Option<&str>,
-    ) {
+    ) -> Result<(), String> {
         if let Some(ref u) = response.usage {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
@@ -2045,19 +2088,9 @@ impl SessionActor {
                 response.cost_usd_ticks,
             );
             let goal_charge = crate::session::goal_tracker::model_usage_goal_tokens(u);
-            if admitted_goal_id.is_some_and(|goal_id| {
-                self.goal_tracker
-                    .lock()
-                    .account_model_tokens(goal_id, goal_charge)
-            }) {
-                // Goal usage is durable Control bookkeeping. It shares the
-                // provider usage transaction but never derives from context
-                // pressure, which compaction and shadow projection may lower.
-                self.record_control_snapshot();
-                let tokens_used = self.goal_tokens_used();
-                self.goal_notify_sender()
-                    .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-            }
+            let _ = self
+                .record_goal_model_usage(admitted_goal_id, goal_charge)
+                .await?;
             self.signals_handle()
                 .record_response_output_usage(u.completion_tokens, u.reasoning_tokens);
         } else if self.tool_context.task_output_token_budget.is_some() {
@@ -2072,6 +2105,7 @@ impl SessionActor {
                 let _ = handle.mark_usage_incomplete(true, true).await;
             });
         }
+        Ok(())
     }
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
         self.signals_handle().record_assistant_message();

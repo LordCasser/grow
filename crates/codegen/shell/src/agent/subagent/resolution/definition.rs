@@ -86,6 +86,45 @@ pub fn available_agent_names(context: &DefinitionResolutionContext<'_>) -> Vec<S
     available.sort();
     available
 }
+
+/// Resolve the complete Agent catalog that a newly-admitted Workflow Run may
+/// delegate to. The caller persists the returned definitions in the Run route;
+/// Workflow child admission must never call this function again.
+pub fn capture_agent_definitions(
+    context: &DefinitionResolutionContext<'_>,
+    filter: &agent::config::SubagentFilter,
+    cli_overrides: &crate::agent::config::CliAgentOverrides,
+) -> std::collections::BTreeMap<String, AgentDefinition> {
+    let mut names = available_agent_names(context)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let bare_plugin_names = names
+        .iter()
+        .filter_map(|name| name.split_once(':').map(|(_, bare)| bare.to_owned()))
+        .collect::<Vec<_>>();
+    names.extend(bare_plugin_names);
+    names.extend(
+        agent::discovery::all_builtin_agent_definitions()
+            .into_iter()
+            .map(|definition| definition.name),
+    );
+    names.extend(
+        context
+            .cli_agents
+            .iter()
+            .map(|definition| definition.name.clone()),
+    );
+
+    names
+        .into_iter()
+        .filter(|name| filter.allows(name) && context.toggles.get(name).copied().unwrap_or(true))
+        .filter_map(|name| {
+            let mut definition = discover_agent_definition(&name, context)?;
+            cli_overrides.apply_to_subagent_definition(&mut definition);
+            Some((name, definition))
+        })
+        .collect()
+}
 /// Apply the production global toggle.
 pub fn gate_agent_definition(
     subagent_type: &str,
@@ -179,13 +218,44 @@ pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_su
     }
 }
 
-/// A delegated child may read its immutable Goal snapshot, but only the
-/// owning primary Session may mutate Goal lifecycle state.
+/// A child may read an immutable Goal snapshot when one is delegated, but only
+/// the owning primary Session may mutate Goal lifecycle state or create a new
+/// long-running Goal.
 pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
     authored_eligibility(definition).tools.retain(|tool| {
         tool.kind
             .is_some_and(|kind| kind != ToolKind::GoalLifecycleUpdate)
     });
+}
+
+/// Apply every immutable child-session policy to an Agent profile.
+///
+/// This is the single projector used by initial construction and every later
+/// Agent rebuild. Explicit profile selection may change authored tools and
+/// nested delegation filters, but it cannot change the child's birth RWX,
+/// regain Task at maximum depth, mutate an owning Goal, or control the
+/// primary session's scheduler. Workflow-owned children additionally cannot
+/// start another Workflow runtime.
+pub fn apply_child_profile_policy(
+    definition: &mut AgentDefinition,
+    initial_mode: tool_types::SubagentCapabilityMode,
+    allow_nested_subagents: bool,
+    workflow_owned: bool,
+) {
+    definition.capability_mode = Some(initial_mode);
+    apply_child_tool_policy(definition, allow_nested_subagents);
+    apply_goal_object_tool_policy(definition);
+    let forbidden = |tool: &tools::registry::types::ToolConfig| {
+        let name = tool.id.rsplit(':').next();
+        matches!(
+            name,
+            Some("scheduler_create" | "scheduler_list" | "scheduler_delete")
+        ) || (workflow_owned && name == Some("workflow"))
+    };
+    authored_eligibility(definition)
+        .tools
+        .retain(|tool| !forbidden(tool));
+    definition.tool_config.tools.retain(|tool| !forbidden(tool));
 }
 /// Resolve runtime overrides and definition defaults in the production order.
 pub fn resolve_runtime_config(
@@ -380,5 +450,33 @@ mod tests {
                 .iter()
                 .any(|tool| tool.id == "custom:opaque")
         );
+    }
+
+    #[test]
+    fn every_child_profile_removes_parent_scheduler_authority() {
+        let mut definition = AgentDefinition::default_grow_build();
+        for name in ["scheduler_create", "scheduler_list", "scheduler_delete"] {
+            definition.tool_config.tools.push(ToolConfig::from_id(name));
+        }
+        definition.authored_capability_tools = Some(definition.tool_config.clone());
+
+        apply_child_profile_policy(
+            &mut definition,
+            tool_types::SubagentCapabilityMode::ReadWrite,
+            true,
+            false,
+        );
+
+        for tools in [
+            &definition.tool_config,
+            definition.authored_capability_tools.as_ref().unwrap(),
+        ] {
+            assert!(tools.tools.iter().all(|tool| {
+                !matches!(
+                    tool.id.rsplit(':').next(),
+                    Some("scheduler_create" | "scheduler_list" | "scheduler_delete")
+                )
+            }));
+        }
     }
 }

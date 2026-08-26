@@ -18,157 +18,64 @@ fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTa
 }
 
 #[test]
-fn behavior_confirmation_unwinds_submission_and_returns_prompt_to_fifo() {
+fn behavior_transport_failure_keeps_first_prompt_local_and_retryable() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let effects = dispatch(
+    let (session_id, control_token) = match dispatch(
         Action::SetBehaviorThenPrompt {
             mode: tools::types::BehaviorId::Plan,
-            prompt: Some("add auth to the app".into()),
+            prompt: Some("keep this prompt".into()),
         },
         &mut app,
-    );
-    let (session_id, mode_id, prompt_id, skill_token_ranges) = match effects.as_slice() {
+    )
+    .as_slice()
+    {
         [
-            Effect::SetModeThenPrompt {
+            Effect::SwitchBehavior {
                 session_id,
-                mode_id,
-                prompt_id,
-                skill_token_ranges,
+                control_token,
+                mode: tools::types::BehaviorId::Plan,
                 ..
             },
-        ] => (
-            session_id.clone(),
-            mode_id.clone(),
-            prompt_id.clone(),
-            skill_token_ranges.clone(),
-        ),
-        other => panic!("expected mode+prompt effect, got {other:?}"),
+        ] => (session_id.clone(), *control_token),
+        other => panic!("expected serialized Plan control, got {other:?}"),
     };
-    let provisional_entry = app.agents[&id]
+    app.agents
+        .get_mut(&id)
+        .unwrap()
         .session
-        .in_flight_prompt
-        .as_ref()
-        .expect("local submission paints a provisional bubble")
-        .scrollback_entry;
+        .defer_authoritative_agent_change("remote-agent".into());
 
-    let result = dispatch(
-        Action::TaskComplete(TaskResult::PromptRequiresBehaviorConfirmation {
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchBehaviorComplete {
             agent_id: id,
             session_id,
-            mode_id,
-            text: "add auth to the app".into(),
-            prompt_id,
-            skill_token_ranges,
-            message: "Select Plan again to confirm".into(),
-            remaining_ms: 8_000,
-        }),
-        &mut app,
-    );
-
-    assert!(result.is_empty());
-    let agent = &app.agents[&id];
-    assert!(agent.session.state.is_idle());
-    assert!(agent.session.current_prompt_id.is_none());
-    assert!(agent.session.in_flight_prompt.is_none());
-    assert!(agent.scrollback.get_by_id(provisional_entry).is_none());
-    assert_eq!(agent.session.pending_prompts.len(), 1);
-    assert_eq!(
-        agent
-            .session
-            .pending_prompts
-            .front()
-            .map(|p| p.text.as_str()),
-        Some("add auth to the app")
-    );
-    assert!(agent.mode_switch_banner.is_some());
-}
-
-#[test]
-fn standalone_behavior_failure_is_visible_and_does_not_drain_the_queue() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let session_id = app.agents[&id]
-        .session
-        .session_id
-        .clone()
-        .expect("test agent has a session");
-    app.agents[&id]
-        .session
-        .pending_prompts
-        .push_back(crate::app::session::QueuedPrompt::plain(
-            1,
-            "queued prompt",
-            crate::app::session::QueueEntryKind::Prompt,
-        ));
-    app.agents[&id].session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionModeSet {
-            session_id,
+            control_token,
+            mode: tools::types::BehaviorId::Plan,
             result: Err("transport unavailable".into()),
         }),
         &mut app,
     );
 
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
-    let toast = agent_toast(&app).expect("Behavior failure toast");
-    assert!(toast.contains("prompt is still queued"));
-    assert!(toast.contains("transport unavailable"));
-
-    let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::BehaviorId::Normal),
-        &mut app,
-    );
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-    )));
-    assert!(app.agents[&id].session.pending_prompts.is_empty());
-    assert!(app.agents[&id].session.deferred_session_mode.is_none());
-}
-
-#[test]
-fn standalone_behavior_failure_allows_retrying_the_deferred_target() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let session_id = app.agents[&id]
-        .session
-        .session_id
-        .clone()
-        .expect("test agent has a session");
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.behavior_mode = tools::types::BehaviorId::Normal;
-    agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Plan);
-    agent.session.plan_mode_pending = Some(true);
-    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
-    agent.session.enqueue_prompt("must remain parked".into());
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SessionModeSet {
-            session_id,
-            result: Err("transport unavailable".into()),
-        }),
-        &mut app,
-    );
-    assert!(effects.is_empty());
-    assert!(app.agents[&id].session.behavior_mode_pending.is_none());
-    assert!(app.agents[&id].session.plan_mode_pending.is_none());
-
-    let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
-        &mut app,
-    );
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::SetSessionMode { mode_id, .. } if mode_id.0.as_ref() == "plan"
-    )));
     assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
     assert_eq!(
         app.agents[&id].session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan)
     );
+    assert_eq!(app.agents[&id].session.agent_name(), Some("remote-agent"));
+    assert!(matches!(
+        dispatch(
+            Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+            &mut app
+        )
+        .as_slice(),
+        [Effect::SwitchBehavior {
+            mode: tools::types::BehaviorId::Plan,
+            ..
+        }]
+    ));
+    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
 }
 
 #[test]
@@ -188,30 +95,6 @@ fn trajectory_post_ready_failure_is_visible() {
     assert_eq!(
         agent_toast(&app).as_deref(),
         Some("Trajectory debugger stopped (exit status: 1)")
-    );
-}
-
-#[test]
-fn selecting_in_flight_deferred_target_never_releases_under_current_behavior() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.behavior_mode = tools::types::BehaviorId::Normal;
-    agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Plan);
-    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
-    agent.session.enqueue_prompt("must stay parked".into());
-
-    let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
-        &mut app,
-    );
-
-    assert!(effects.is_empty());
-    let agent = &app.agents[&id];
-    assert_eq!(agent.session.pending_prompts.len(), 1);
-    assert_eq!(
-        agent.session.deferred_session_mode,
-        Some(tools::types::BehaviorId::Plan)
     );
 }
 
@@ -1102,27 +985,29 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
             model_id.clone(),
             acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
         );
-    app.agents
+    let control_token = app
+        .agents
         .get_mut(&id)
         .unwrap()
         .session
-        .model_switch_pending = true;
+        .begin_model_switch_for_test();
 
     let initial_scrollback = app.agents[&id].scrollback.len();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_id.clone(),
             effort: None,
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
 
     // Pending flag cleared.
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
     // Current model updated.
     assert_eq!(
         app.agents[&id].session.models.current,
@@ -1146,13 +1031,15 @@ fn switch_agent_complete_updates_only_agent_name() {
     agent.session.models.current = Some(model_id.clone());
     agent.session.apply_agent_name(Some("builder".into()));
     // Local dispatch marks pending; AgentChanged may already have the new name.
-    agent.session.begin_agent_switch("reviewer");
+    let control_token = agent.session.begin_agent_switch("reviewer");
     agent.session.apply_agent_name(Some("reviewer".into()));
     let before = agent.scrollback.len();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchAgentComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             agent_name: "reviewer".into(),
             result: Ok(()),
         }),
@@ -1177,21 +1064,103 @@ fn switch_agent_complete_updates_only_agent_name() {
 }
 
 #[test]
-fn switch_agent_complete_without_pending_skips_success_message() {
-    // Remote AgentChanged-only path: no local pending → no "Switched to" block.
+fn late_session_agent_name_read_cannot_overwrite_completed_switch() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let old_revision = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .begin_agent_metadata_read();
+    let control_token = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .begin_agent_switch("reviewer");
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
+            agent_name: "reviewer".into(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].session.agent_name(), Some("reviewer"));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionAgentNameResolved {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            revision: old_revision,
+            agent_name: Some("stale-agent".into()),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.agent_name(),
+        Some("reviewer"),
+        "a metadata read from before the switch must be discarded"
+    );
+}
+
+#[test]
+fn switch_agent_completion_releases_the_fenced_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let control_token = agent.session.begin_agent_switch("reviewer");
+    agent.session.enqueue_prompt("next request".into());
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
+            agent_name: "reviewer".into(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendPrompt { text, .. }] if text == "next request"
+    ));
+}
+
+#[test]
+fn stale_switch_agent_completion_is_ignored() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let control_token = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .begin_agent_switch("reviewer");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .invalidate_controls();
     let before = app.agents[&id].scrollback.len();
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchAgentComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             agent_name: "reviewer".into(),
             result: Ok(()),
         }),
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].session.agent_name(), Some("reviewer"));
+    assert_ne!(app.agents[&id].session.agent_name(), Some("reviewer"));
     assert_eq!(
         app.agents[&id].scrollback.len(),
         before,
@@ -1203,10 +1172,18 @@ fn switch_agent_complete_without_pending_skips_success_message() {
 fn switch_agent_complete_failure_writes_scrollback() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let control_token = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .begin_agent_switch("missing");
     let before = app.agents[&id].scrollback.len();
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchAgentComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             agent_name: "missing".into(),
             result: Err("unknown agent: missing".into()),
         }),
@@ -1227,6 +1204,57 @@ fn switch_agent_complete_failure_writes_scrollback() {
 }
 
 #[test]
+fn switch_completions_update_the_exact_subagent_view() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_sid = "child-session";
+    let mut child_session = make_test_agent_session(&app, AgentId(99), child_sid);
+    let model_id = acp::ModelId::new("catalog/child-model");
+    child_session.models.available.insert(
+        model_id.clone(),
+        acp::ModelInfo::new(model_id.clone(), "Child Model"),
+    );
+    let model_control_token = child_session.begin_model_switch_for_test();
+    let agent_control_token = child_session.begin_agent_switch("reviewer");
+    let child = AgentView::new(child_session, ScrollbackState::new());
+    app.agents
+        .get_mut(&root_id)
+        .unwrap()
+        .insert_subagent_view(child_sid.into(), Box::new(child));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: root_id,
+            session_id: acp::SessionId::new(child_sid),
+            control_token: model_control_token,
+            model_id: model_id.clone(),
+            effort: None,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: root_id,
+            session_id: acp::SessionId::new(child_sid),
+            control_token: agent_control_token,
+            agent_name: "reviewer".into(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+
+    let root = app.agents.get(&root_id).unwrap();
+    assert_ne!(root.session.models.current.as_ref(), Some(&model_id));
+    assert_ne!(root.session.agent_name(), Some("reviewer"));
+    let child = &root.subagent_views[child_sid];
+    assert_eq!(child.session.models.current.as_ref(), Some(&model_id));
+    assert_eq!(child.session.agent_name(), Some("reviewer"));
+    assert!(!child.session.model_switch_pending());
+    assert!(child.session.agent_switch_target().is_none());
+}
+
+#[test]
 fn switch_model_complete_reports_already_using_and_skips_persist_when_unchanged() {
     use shell::sampling::types::ReasoningEffort;
 
@@ -1243,21 +1271,22 @@ fn switch_model_complete_reports_already_using_and_skips_persist_when_unchanged(
     );
     agent.session.models.current = Some(model_id.clone());
     agent.session.models.reasoning_effort = Some(ReasoningEffort::High);
-    agent.session.model_switch_pending = true;
+    let control_token = agent.session.begin_model_switch_for_test();
 
     let before = app.agents[&id].scrollback.len();
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_id.clone(),
             effort: Some(ReasoningEffort::High),
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
 
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
     assert_eq!(app.agents[&id].scrollback.len(), before + 1);
     let last = app.agents[&id]
         .scrollback
@@ -1300,19 +1329,21 @@ fn switch_model_complete_resolves_effort_from_catalog_meta_session_only() {
             acp::ModelInfo::new(model_id.clone(), "BYOK Model 4.7".to_string())
                 .meta(serde_json::Value::Object(meta).as_object().cloned()),
         );
-    app.agents
+    let control_token = app
+        .agents
         .get_mut(&id)
         .unwrap()
         .session
-        .model_switch_pending = true;
+        .begin_model_switch_for_test();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_id.clone(),
             effort: None, // user typed `/model Blackbox 4.7` with no effort
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
@@ -1354,19 +1385,21 @@ fn switch_to_non_reasoning_model_clears_session_effort() {
             model_id.clone(),
             acp::ModelInfo::new(model_id.clone(), "Grow".to_string()),
         );
-    app.agents
+    let control_token = app
+        .agents
         .get_mut(&id)
         .unwrap()
         .session
-        .model_switch_pending = true;
+        .begin_model_switch_for_test();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_id.clone(),
             effort: None,
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
@@ -1387,28 +1420,30 @@ fn switch_model_complete_failure_pushes_error_and_clears_pending() {
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("bad-model"));
 
-    app.agents
+    let control_token = app
+        .agents
         .get_mut(&id)
         .unwrap()
         .session
-        .model_switch_pending = true;
+        .begin_model_switch_for_test();
     let old_current = app.agents[&id].session.models.current.clone();
     let initial_scrollback = app.agents[&id].scrollback.len();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id,
             effort: None,
             result: Err("model not found".into()),
-            prev_model_id: None,
         }),
         &mut app,
     );
 
     assert!(effects.is_empty());
     // Pending flag cleared.
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
     // Current model unchanged.
     assert_eq!(app.agents[&id].session.models.current, old_current);
     // Error message pushed to scrollback.
@@ -1416,7 +1451,7 @@ fn switch_model_complete_failure_pushes_error_and_clears_pending() {
 }
 
 #[test]
-fn failed_model_switch_rolls_back_optimistic_selection() {
+fn failed_model_switch_preserves_local_selection() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
@@ -1433,28 +1468,30 @@ fn failed_model_switch_rolls_back_optimistic_selection() {
         new_model.clone(),
         acp::ModelInfo::new(new_model.clone(), "Cursor".to_string()),
     );
-    // Simulate the optimistic update that set_default_model_inner does.
+    // The serialized control does not own a speculative selection. A failure
+    // must therefore not overwrite the current local projection.
     agent.session.models.set_current(new_model.clone(), None);
-    agent.session.model_switch_pending = true;
+    let control_token = agent.session.begin_model_switch_for_test();
 
     assert_eq!(agent.session.models.current, Some(new_model.clone()));
 
     dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
-            model_id: new_model,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
+            model_id: new_model.clone(),
             effort: None,
             result: Err("request failed".into()),
-            prev_model_id: Some(prev_model.clone()),
         }),
         &mut app,
     );
 
-    // models.current must be rolled back to the previous model.
+    // models.current remains the value that was already projected locally.
     assert_eq!(
         app.agents[&id].session.models.current,
-        Some(prev_model),
-        "models.current must be rolled back when a switch fails",
+        Some(new_model),
+        "models.current must not be rolled back when a switch fails",
     );
 }
 
@@ -1476,16 +1513,17 @@ fn model_switch_succeeds_without_changing_agent() {
         model_b.clone(),
         acp::ModelInfo::new(model_b.clone(), "Grow B".to_string()),
     );
-    agent.session.model_switch_pending = true;
+    let control_token = agent.session.begin_model_switch_for_test();
 
     // Shell returns Ok (same agent type, no mismatch).
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_b.clone(),
             effort: None,
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
@@ -1510,7 +1548,7 @@ fn switch_model_pending_lifecycle() {
     let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     // Initially false.
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 
     // Action sets pending.
     dispatch(
@@ -1520,20 +1558,162 @@ fn switch_model_pending_lifecycle() {
         },
         &mut app,
     );
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
+    let control_token = app.agents[&id].session.current_control_token_for_test();
 
     // TaskResult clears pending.
     dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id,
             effort: None,
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
+}
+
+#[test]
+fn rapid_model_and_agent_controls_are_serialized_before_prompt_drain() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = acp::SessionId::new("test-session");
+    let model_id = acp::ModelId::new("serialized-model");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Serialized Model"),
+        );
+
+    let first = dispatch(
+        Action::SwitchModel {
+            model_id: model_id.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    let model_token = match first.as_slice() {
+        [Effect::SwitchModel { control_token, .. }] => *control_token,
+        other => panic!("expected first model control effect, got {other:?}"),
+    };
+    assert!(
+        dispatch(
+            Action::SwitchAgent {
+                agent_name: "reviewer".into(),
+            },
+            &mut app,
+        )
+        .is_empty()
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .enqueue_prompt("after controls".into());
+
+    let second = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            session_id: session_id.clone(),
+            control_token: model_token,
+            model_id,
+            effort: None,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    let agent_token = match second.as_slice() {
+        [
+            Effect::SwitchAgent {
+                control_token,
+                agent_name,
+                ..
+            },
+        ] if agent_name == "reviewer" => *control_token,
+        other => panic!("expected serialized Agent control, got {other:?}"),
+    };
+    assert!(app.agents[&id].session.controls_pending());
+
+    let released = dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: id,
+            session_id,
+            control_token: agent_token,
+            agent_name: "reviewer".into(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        released.as_slice(),
+        [Effect::SendPrompt { text, .. }] if text == "after controls"
+    ));
+}
+
+#[test]
+fn reconnect_generation_discards_old_control_completion() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let old_model = acp::ModelId::new("old-completion-model");
+    let new_model = acp::ModelId::new("post-reconnect-model");
+    for model in [&old_model, &new_model] {
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .models
+            .available
+            .insert(
+                model.clone(),
+                acp::ModelInfo::new(model.clone(), model.0.to_string()),
+            );
+    }
+    let old_effects = dispatch(
+        Action::SwitchModel {
+            model_id: old_model.clone(),
+            effort: None,
+        },
+        &mut app,
+    );
+    let old_token = match old_effects.as_slice() {
+        [Effect::SwitchModel { control_token, .. }] => *control_token,
+        other => panic!("expected old model control, got {other:?}"),
+    };
+    app.agents.get_mut(&id).unwrap().begin_session_reload(7);
+    let new_effects = dispatch(
+        Action::SwitchModel {
+            model_id: new_model,
+            effort: None,
+        },
+        &mut app,
+    );
+    assert!(
+        new_effects.is_empty(),
+        "the new selection queues behind the rearmed pre-outage control"
+    );
+
+    let stale_effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token: old_token,
+            model_id: old_model.clone(),
+            effort: None,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(stale_effects.is_empty());
+    assert_ne!(app.agents[&id].session.models.current, Some(old_model));
+    assert!(app.agents[&id].session.controls_pending());
 }
 
 #[test]
@@ -1562,7 +1742,7 @@ fn no_deferred_switch_means_no_extra_effect() {
             .iter()
             .any(|e| matches!(e, Effect::SwitchModel { .. }))
     );
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 }
 
 #[test]

@@ -312,20 +312,17 @@
         let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
         assert!(refresh_needed);
         assert!(agent.session.plan_mode_active);
-        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     #[test]
     fn current_mode_update_normal_deactivates_plan_mode() {
         let mut agent = make_agent(Some("s1"));
         agent.session.plan_mode_active = true;
-        agent.session.plan_mode_pending = Some(true);
 
         let refresh_needed =
             detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
         assert!(refresh_needed);
         assert!(!agent.session.plan_mode_active);
-        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     /// Unknown mode ids are invalid control-plane data. They must not silently
@@ -341,21 +338,18 @@
         assert!(agent.session.plan_mode_active);
     }
 
-    /// Idempotent CurrentModeUpdate still signals refresh because
-    /// `plan_mode_pending` was cleared (affects effective state).
+    /// Idempotent CurrentModeUpdate still signals refresh for UI consumers.
     #[test]
     fn current_mode_update_signals_refresh_even_on_no_op_active_change() {
         let mut agent = make_agent(Some("s1"));
         agent.session.plan_mode_active = true;
-        agent.session.plan_mode_pending = Some(true);
 
         let refresh_needed = detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
         assert!(
             refresh_needed,
-            "CurrentModeUpdate must always signal refresh — pending was cleared"
+            "CurrentModeUpdate must always signal refresh"
         );
         assert!(agent.session.plan_mode_active);
-        assert!(agent.session.plan_mode_pending.is_none());
     }
 
     /// The `grow/behaviorChange` meta of a `CurrentModeUpdate` mirrors the
@@ -405,16 +399,18 @@
         assert!(refresh);
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
         assert!(agent.session.plan_mode_active);
-        assert!(agent.session.behavior_mode_pending.is_none());
         assert!(
             agent.mode_switch_banner.is_some(),
             "the warning banner must be visible"
         );
-        assert!(!behavior_mode_update_applied(&behavior_change_update(
-            "confirmation_required",
-            "plan",
-            "normal"
-        )));
+        assert!(!matches!(
+            behavior_mode_update_resolution(&behavior_change_update(
+                "confirmation_required",
+                "plan",
+                "normal"
+            )),
+            Some(crate::app::session::BehaviorControlResolution::Applied)
+        ));
     }
 
     #[test]
@@ -423,9 +419,12 @@
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
         agent.session.plan_mode_active = true;
-        agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Normal);
         agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("held until selection repeats".into());
+        agent
+            .session
+            .defer_authoritative_agent_change("remote-agent".into());
 
         let changed = handle(
             mode_update_message(
@@ -443,6 +442,7 @@
             agent.session.deferred_session_mode,
             Some(tools::types::BehaviorId::Normal)
         );
+        assert_eq!(agent.session.agent_name(), Some("remote-agent"));
         assert!(app.pending_effects.is_empty());
     }
 
@@ -452,7 +452,7 @@
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
         agent.session.plan_mode_active = true;
-        agent.session.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.begin_behavior_switch(tools::types::BehaviorId::Normal);
         agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Normal);
         agent.session.enqueue_prompt("run after selection applies".into());
 
@@ -526,7 +526,10 @@
 
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Normal);
         assert!(!agent.session.plan_mode_active);
-        assert!(behavior_mode_update_applied(&update));
+        assert_eq!(
+            behavior_mode_update_resolution(&update),
+            Some(crate::app::session::BehaviorControlResolution::Applied)
+        );
     }
 
     #[test]
@@ -553,6 +556,9 @@
 
         assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Plan);
         assert!(agent.session.plan_mode_active);
-        assert!(!behavior_mode_update_applied(&update));
+        assert_eq!(
+            behavior_mode_update_resolution(&update),
+            Some(crate::app::session::BehaviorControlResolution::Rejected)
+        );
         assert!(agent.toast.is_some());
     }

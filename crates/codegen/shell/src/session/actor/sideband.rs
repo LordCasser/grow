@@ -19,13 +19,23 @@ pub(crate) enum SidebandRunError {
     Parent(#[from] chat_state::TimelineWriteError),
     #[error("sideband persistence failed: {0}")]
     Persistence(String),
+    #[error("sideband persistence was cancelled")]
+    Cancelled,
     #[error("an interrupted sideband append was recovered; the new operation was not applied")]
     InterruptedAppendRecovered,
+    #[error("sideband provider admission was rejected: {0}")]
+    Admission(String),
 }
 
 pub(crate) struct SidebandRun {
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
+    cancellation: tokio_util::sync::CancellationToken,
+    goal_usage_window: super::goal_support::GoalUsageWindow,
+    usage_owner_id: String,
+    usage_epoch: u64,
+    expected_goal_id: Option<String>,
+    admitted_attempt_id: Option<String>,
     pending: Option<chat_state::SidebandEvent>,
     persistence_poison: Option<String>,
 }
@@ -84,6 +94,18 @@ impl SessionActor {
         let mut run = SidebandRun {
             timeline,
             persistence: self.notifications.clone(),
+            cancellation: self.sideband_cancel.child_token(),
+            goal_usage_window: self.goal_usage_window.clone(),
+            usage_owner_id: self.session_id_string(),
+            usage_epoch: super::tasks_cancel::turn_usage_epoch_or(
+                self.goal_usage_window
+                    .owner_epoch(&self.session_id_string()),
+            ),
+            expected_goal_id: self
+                .events
+                .current_goal_id()
+                .or_else(|| self.goal_usage_window.active_goal_id()),
+            admitted_attempt_id: None,
             pending: Some(request),
             persistence_poison: None,
         };
@@ -106,6 +128,38 @@ impl SessionActor {
 }
 
 impl SidebandRun {
+    /// Normalize one successful provider response. Goal accounting is applied
+    /// by the root lifecycle mailbox so Goal mutation remains serialized with
+    /// pause, edit, completion, and every other usage settlement.
+    pub(crate) fn response_usage(
+        &self,
+        response: &ConversationResponse,
+    ) -> chat_state::SidebandUsage {
+        let usage = sideband_usage(response);
+        usage
+    }
+
+    /// Settle the current provider attempt without transferring its ownership
+    /// before the lifecycle root acknowledges it. If this future is aborted,
+    /// `Drop` still sees the attempt id and performs fail-closed detached
+    /// settlement; a successful acknowledgement disarms that fallback.
+    pub(crate) async fn settle_goal_attempt(
+        &mut self,
+        tokens: Option<i64>,
+    ) -> Result<(), SidebandRunError> {
+        let Some(attempt_id) = self.admitted_attempt_id.clone() else {
+            return Ok(());
+        };
+        self.goal_usage_window
+            .settle_attempt_via_root(attempt_id.clone(), tokens)
+            .await
+            .map_err(SidebandRunError::Persistence)?;
+        if self.admitted_attempt_id.as_deref() == Some(attempt_id.as_str()) {
+            self.admitted_attempt_id = None;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn attempt_all_sources(
         &mut self,
         request: &ConversationRequest,
@@ -200,23 +254,70 @@ impl SidebandRun {
                 .saturating_add(1),
         )
         .map_err(|_| chat_state::SidebandError::AttemptOverflow)?;
-        self.append(chat_state::SidebandEventKind::Attempt(
-            chat_state::SidebandAttempt {
-                attempt_no,
-                input_refs,
-                assembly_manifest: chat_state::SidebandAssemblyManifest {
-                    strategy: strategy.into(),
-                    strategy_version: 1,
-                    source_revision,
-                    context_surface_ids,
-                    selected_surface_ids,
-                    materialized_input_tokens: chat_state::estimate_request_input_tokens(request),
-                    max_output_tokens: request.max_output_tokens.map(u64::from),
+        self.settle_goal_attempt(None).await?;
+        self.goal_usage_window
+            .wait_for_owner_settlements_through(&self.usage_owner_id, self.usage_epoch)
+            .await;
+        let result = self
+            .append(chat_state::SidebandEventKind::Attempt(
+                chat_state::SidebandAttempt {
+                    attempt_no,
+                    input_refs,
+                    assembly_manifest: chat_state::SidebandAssemblyManifest {
+                        strategy: strategy.into(),
+                        strategy_version: 1,
+                        source_revision,
+                        context_surface_ids,
+                        selected_surface_ids,
+                        materialized_input_tokens: chat_state::estimate_request_input_tokens(
+                            request,
+                        ),
+                        max_output_tokens: request.max_output_tokens.map(u64::from),
+                    },
+                    feedback,
                 },
-                feedback,
-            },
-        ))
-        .await
+            ))
+            .await;
+        result
+    }
+
+    /// Poll-bind the Goal admission lease to the provider future. If an outer
+    /// cancellation/timeout branch wins before this future is polled, no Goal
+    /// attempt exists. Once polled, admission and the provider's first poll
+    /// happen in the same task poll, so an unknown result is legitimately
+    /// fail-closed rather than a pre-wire false positive.
+    pub(crate) async fn run_provider<F: std::future::Future>(
+        &mut self,
+        provider: F,
+    ) -> Result<F::Output, SidebandRunError> {
+        self.provider_attempt_started()?;
+        Ok(provider.await)
+    }
+
+    fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
+        if self.admitted_attempt_id.is_some() {
+            return Err(SidebandRunError::Admission(
+                "sideband provider attempt already started".into(),
+            ));
+        }
+        let has_open_attempt =
+            self.timeline.events().last().is_some_and(|event| {
+                matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
+            });
+        if !has_open_attempt {
+            return Err(SidebandRunError::Admission(
+                "sideband provider start has no durable attempt".into(),
+            ));
+        }
+        self.admitted_attempt_id = self
+            .goal_usage_window
+            .begin_model_attempt(
+                &self.usage_owner_id,
+                self.usage_epoch,
+                self.expected_goal_id.as_deref(),
+            )
+            .map_err(SidebandRunError::Admission)?;
+        Ok(())
     }
 
     pub(crate) async fn complete(
@@ -324,7 +425,9 @@ impl SidebandRun {
         let Some(event) = self.pending.clone() else {
             return Ok(());
         };
-        if let Err(error) = append_sideband_exact(&self.persistence, event.clone()).await {
+        if let Err(error) =
+            append_sideband_exact(&self.persistence, &self.cancellation, event.clone()).await
+        {
             self.persistence_poison = Some(error.to_string());
             return Err(error);
         }
@@ -332,6 +435,111 @@ impl SidebandRun {
         self.pending = None;
         Ok(())
     }
+}
+
+impl SessionActor {
+    /// Settle a successful Sideband provider response through the same root /
+    /// descendant authority split as regular model calls.
+    pub(crate) async fn settle_sideband_response_usage(
+        &self,
+        run: &mut SidebandRun,
+        response: &ConversationResponse,
+    ) -> Result<chat_state::SidebandUsage, SidebandRunError> {
+        let usage = run.response_usage(response);
+        let tokens = response
+            .usage
+            .as_ref()
+            .map(crate::session::goal_tracker::model_usage_goal_tokens);
+        self.settle_sideband_attempt(run, tokens).await?;
+        Ok(usage)
+    }
+
+    pub(crate) async fn settle_sideband_usage(
+        &self,
+        run: &mut SidebandRun,
+        usage: &chat_state::SidebandUsage,
+    ) -> Result<(), SidebandRunError> {
+        self.settle_sideband_attempt(run, Some(sideband_goal_tokens(usage)))
+            .await
+    }
+
+    pub(crate) async fn settle_sideband_attempt_incomplete(
+        &self,
+        run: &mut SidebandRun,
+    ) -> Result<(), SidebandRunError> {
+        self.settle_sideband_attempt(run, None).await
+    }
+
+    async fn settle_sideband_attempt(
+        &self,
+        run: &mut SidebandRun,
+        tokens: Option<i64>,
+    ) -> Result<(), SidebandRunError> {
+        run.settle_goal_attempt(tokens).await
+    }
+}
+
+impl Drop for SidebandRun {
+    fn drop(&mut self) {
+        if let Some(attempt_id) = self.admitted_attempt_id.take() {
+            self.goal_usage_window
+                .settle_attempt_detached(attempt_id, None);
+        }
+        if self.timeline.is_ended() {
+            return;
+        }
+        let mut timeline = self.timeline.clone();
+        let pending = self.pending.take();
+        let persistence = self.persistence.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(
+                sideband_id = %timeline.sideband_id(),
+                "open Sideband owner dropped outside its runtime; terminal lease unavailable"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            // The foreground future may have been aborted after enqueueing an
+            // immutable event but before receiving its acknowledgement. Replay
+            // that exact event first; persistence deduplicates it by identity.
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            if let Some(event) = pending {
+                if let Err(error) =
+                    append_sideband_exact(&persistence, &cancellation, event.clone()).await
+                {
+                    tracing::error!(%error, "failed to settle interrupted Sideband append");
+                    return;
+                }
+                if let Err(error) = timeline.accept(event) {
+                    tracing::error!(%error, "interrupted Sideband append violated its local fold");
+                    return;
+                }
+            }
+            if timeline.is_ended() {
+                return;
+            }
+            let terminal = match timeline.prepare(chat_state::SidebandEventKind::End(
+                chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Cancelled,
+                    error: Some("sideband owner dropped before terminal settlement".into()),
+                },
+            )) {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    tracing::error!(%error, "failed to prepare interrupted Sideband terminal");
+                    return;
+                }
+            };
+            if let Err(error) = append_sideband_exact(&persistence, &cancellation, terminal).await {
+                tracing::error!(%error, "failed to persist interrupted Sideband terminal");
+            }
+        });
+    }
+}
+
+fn sideband_goal_tokens(usage: &chat_state::SidebandUsage) -> i64 {
+    let uncached_input = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
+    i64::try_from(uncached_input.saturating_add(usage.output_tokens)).unwrap_or(i64::MAX)
 }
 
 fn output_constraint_matches(
@@ -353,14 +561,18 @@ fn output_constraint_matches(
 
 async fn append_sideband_exact(
     persistence: &NotificationSender,
+    cancellation: &tokio_util::sync::CancellationToken,
     event: chat_state::SidebandEvent,
 ) -> Result<(), SidebandRunError> {
     let mut attempts = 0_u32;
     loop {
-        match persistence
-            .append_sideband_event_durably(event.clone())
-            .await
-        {
+        let append = persistence.append_sideband_event_durably(event.clone());
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(SidebandRunError::Cancelled),
+            result = append => result,
+        };
+        match result {
             Ok(()) => return Ok(()),
             Err(error) if error.retry_exact() => {
                 attempts = attempts.saturating_add(1);
@@ -373,7 +585,13 @@ async fn append_sideband_exact(
                         "sideband durability is uncertain; retrying the exact immutable event"
                     );
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        return Err(SidebandRunError::Cancelled);
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
             }
             Err(error) => return Err(SidebandRunError::Persistence(error.to_string())),
         }
@@ -447,10 +665,19 @@ mod tests {
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_tx,
         };
+        let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             SidebandRun {
                 timeline,
                 persistence,
+                cancellation: tokio_util::sync::CancellationToken::new(),
+                goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(
+                    goal_tx, None,
+                ),
+                usage_owner_id: "test-session".into(),
+                usage_epoch: 0,
+                expected_goal_id: None,
+                admitted_attempt_id: None,
                 pending: None,
                 persistence_poison: None,
             },
@@ -470,6 +697,502 @@ mod tests {
             model: Some("test-model".into()),
             ..ConversationRequest::default()
         }
+    }
+
+    fn provider_response_with_usage() -> ConversationResponse {
+        ConversationResponse {
+            items: vec![sampling_types::ConversationItem::assistant("ok")],
+            stop_reason: None,
+            usage: Some(sampling_types::TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+                reasoning_tokens: 5,
+                cached_prompt_tokens: 40,
+                cache_creation_prompt_tokens: 0,
+            }),
+            cost_usd_ticks: None,
+            message_chunks_emitted: 1,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
+        }
+    }
+
+    fn terminal_event(run: &mut SidebandRun) -> chat_state::SidebandEvent {
+        run.timeline
+            .prepare(chat_state::SidebandEventKind::End(
+                chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    error: Some("test".into()),
+                },
+            ))
+            .unwrap()
+    }
+
+    fn goal_usage_mailbox(
+        actor: &std::sync::Arc<SessionActor>,
+        active_goal_id: Option<String>,
+    ) -> crate::session::actor::goal_support::GoalUsageWindow {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let window =
+            crate::session::actor::goal_support::GoalUsageWindow::new(tx.clone(), active_goal_id);
+        let actor = actor.clone();
+        let mailbox_window = window.clone();
+        tokio::task::spawn_local(async move {
+            let _keepalive = tx;
+            while let Some(command) = rx.recv().await {
+                match command {
+                    crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                        attempt_id,
+                        respond_to,
+                    } => {
+                        let result = match mailbox_window.attempt_settlement(&attempt_id) {
+                            Some((goal_id, Some(tokens))) => {
+                                actor.apply_captured_goal_usage(&goal_id, tokens).await
+                            }
+                            Some((goal_id, None)) => {
+                                actor.apply_captured_goal_usage_incomplete(&goal_id).await
+                            }
+                            None => Ok(false),
+                        };
+                        if result.is_ok() {
+                            mailbox_window.finish_attempt(&attempt_id);
+                        }
+                        let _ = respond_to.send(result);
+                    }
+                    crate::session::commands::SessionCommand::RecordGoalUsage {
+                        goal_id,
+                        tokens,
+                        respond_to,
+                    } => {
+                        let _ = respond_to
+                            .send(actor.apply_captured_goal_usage(&goal_id, tokens).await);
+                    }
+                    crate::session::commands::SessionCommand::RecordGoalUsageIncomplete {
+                        goal_id,
+                        respond_to,
+                    } => {
+                        let _ = respond_to
+                            .send(actor.apply_captured_goal_usage_incomplete(&goal_id).await);
+                    }
+                    _ => panic!("unexpected command on Goal usage test mailbox"),
+                }
+            }
+        });
+        window
+    }
+
+    #[tokio::test]
+    async fn permanent_persistence_error_does_not_retry_forever() {
+        let (mut run, mut persistence_rx) = test_run();
+        let event = terminal_event(&mut run);
+        let mut append = Box::pin(append_sideband_exact(
+            &run.persistence,
+            &run.cancellation,
+            event,
+        ));
+
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut append => panic!("append returned before persistence replied: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to
+            .send(Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "disk full",
+            )))
+            .unwrap();
+
+        assert!(matches!(
+            append.await,
+            Err(SidebandRunError::Persistence(error)) if error.contains("disk full")
+        ));
+        assert!(persistence_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn transient_persistence_retry_stops_at_session_cancellation() {
+        let (mut run, mut persistence_rx) = test_run();
+        let event = terminal_event(&mut run);
+        let cancellation = run.cancellation.clone();
+        let mut append = Box::pin(append_sideband_exact(
+            &run.persistence,
+            &run.cancellation,
+            event,
+        ));
+
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.unwrap(),
+            result = &mut append => panic!("append returned before persistence replied: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to
+            .send(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "retry",
+            )))
+            .unwrap();
+        cancellation.cancel();
+
+        assert!(matches!(append.await, Err(SidebandRunError::Cancelled)));
+    }
+
+    #[test]
+    fn sideband_usage_uses_the_goal_window_at_attempt_admission() {
+        let (mut run, _persistence_rx) = test_run();
+        let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let window = crate::session::actor::goal_support::GoalUsageWindow::new(
+            goal_tx,
+            Some("goal-1".into()),
+        );
+        run.goal_usage_window = window.clone();
+        let admitted = window
+            .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .unwrap()
+            .unwrap();
+        run.admitted_attempt_id = Some(admitted.clone());
+        window.sync(None);
+        assert_eq!(
+            window.attempt_goal_id(&admitted).as_deref(),
+            Some("goal-1"),
+            "pausing after admission must not erase the immutable Goal owner"
+        );
+        window.finish_attempt(&admitted);
+        run.admitted_attempt_id = None;
+
+        assert_eq!(
+            window.begin_model_attempt("test-session", 0, None).unwrap(),
+            None
+        );
+        assert!(
+            window
+                .begin_model_attempt("test-session", 0, Some("goal-1"))
+                .is_err(),
+            "a turn admitted under a closed Goal cannot start another provider attempt"
+        );
+        window.sync(Some("goal-1".into()));
+        let restarted = window
+            .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            window.attempt_goal_id(&restarted).as_deref(),
+            Some("goal-1")
+        );
+        window.finish_attempt(&restarted);
+    }
+
+    #[tokio::test]
+    async fn durable_attempt_does_not_enter_goal_usage_until_provider_start() {
+        let (mut run, mut persistence_rx) = test_run();
+        let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let window = crate::session::actor::goal_support::GoalUsageWindow::new(
+            goal_tx,
+            Some("goal-1".into()),
+        );
+        run.goal_usage_window = window.clone();
+        run.expected_goal_id = Some("goal-1".into());
+
+        let request = provider_request();
+        let mut attempt = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            None,
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.expect("durable attempt append"),
+            result = &mut attempt => panic!("attempt returned before persistence ack: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to.send(Ok(())).unwrap();
+        attempt.await.unwrap();
+
+        assert!(
+            run.admitted_attempt_id.is_none(),
+            "a durable plan is not yet a provider call"
+        );
+        run.provider_attempt_started().unwrap();
+        let attempt_id = run
+            .admitted_attempt_id
+            .clone()
+            .expect("provider start enters Goal accounting");
+        assert_eq!(
+            window.attempt_goal_id(&attempt_id).as_deref(),
+            Some("goal-1")
+        );
+        window.finish_attempt(&attempt_id);
+        run.admitted_attempt_id = None;
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_provider_future_never_enters_goal_usage() {
+        let (mut run, mut persistence_rx) = test_run();
+        let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let window = crate::session::actor::goal_support::GoalUsageWindow::new(
+            goal_tx,
+            Some("goal-1".into()),
+        );
+        run.goal_usage_window = window.clone();
+        run.expected_goal_id = Some("goal-1".into());
+        let request = provider_request();
+        let mut attempt = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            None,
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.expect("durable attempt append"),
+            result = &mut attempt => panic!("attempt returned before persistence ack: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to.send(Ok(())).unwrap();
+        attempt.await.unwrap();
+
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {}
+            result = run.run_provider(std::future::pending::<()>()) => {
+                panic!("pre-cancelled provider future was polled: {result:?}")
+            }
+        }
+
+        assert!(run.admitted_attempt_id.is_none());
+        let probe = window
+            .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .expect("pre-cancellation must not leave a hidden attempt fence")
+            .expect("active Goal must still admit a provider attempt");
+        window.finish_attempt(&probe);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_open_sideband_persists_one_cancelled_terminal() {
+        let (run, mut persistence_rx) = test_run();
+        drop(run);
+
+        let message =
+            tokio::time::timeout(std::time::Duration::from_secs(1), persistence_rx.recv())
+                .await
+                .expect("Sideband terminal lease must run independently of its owner")
+                .expect("persistence channel must remain open until the terminal is sent");
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            event,
+            respond_to,
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        assert!(matches!(
+            event.kind,
+            chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Cancelled,
+                ..
+            })
+        ));
+        respond_to.send(Ok(())).unwrap();
+
+        assert!(
+            !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), persistence_rx.recv())
+                    .await,
+                Ok(Some(_))
+            ),
+            "Drop must enqueue exactly one terminal"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_usage_settlement_keeps_the_attempt_owned_until_drop_fails_closed() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut run, _persistence_rx) = test_run();
+                let (goal_tx, mut goal_rx) = tokio::sync::mpsc::unbounded_channel();
+                let _goal_mailbox_owner = goal_tx.clone();
+                let window = crate::session::actor::goal_support::GoalUsageWindow::new(
+                    goal_tx,
+                    Some("goal-1".into()),
+                );
+                let attempt_id = window
+                    .begin_model_attempt("test-session", 0, Some("goal-1"))
+                    .unwrap()
+                    .unwrap();
+                run.goal_usage_window = window.clone();
+                run.admitted_attempt_id = Some(attempt_id.clone());
+
+                let settlement =
+                    tokio::task::spawn_local(
+                        async move { run.settle_goal_attempt(Some(80)).await },
+                    );
+                let first = goal_rx.recv().await.expect("known-usage settlement");
+                let crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                    attempt_id: first_attempt_id,
+                    respond_to: first_respond_to,
+                } = first
+                else {
+                    panic!("expected known-usage settlement");
+                };
+                assert_eq!(first_attempt_id, attempt_id);
+                assert_eq!(
+                    window.attempt_settlement(&attempt_id),
+                    Some(("goal-1".into(), Some(80)))
+                );
+                settlement.abort();
+                assert!(settlement.await.unwrap_err().is_cancelled());
+                drop(first_respond_to);
+
+                // Dropping the aborted future also drops SidebandRun. Because
+                // the root acknowledgement never disarmed its local attempt
+                // ownership, Drop must retry the exact already-claimed Known
+                // result rather than degrading it to usage-incomplete.
+                let second = goal_rx.recv().await.expect("detached exact settlement");
+                let crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                    attempt_id: second_attempt_id,
+                    respond_to,
+                } = second
+                else {
+                    panic!("aborted settlement must retry the claimed attempt");
+                };
+                assert_eq!(second_attempt_id, attempt_id);
+                assert_eq!(
+                    window.attempt_settlement(&attempt_id),
+                    Some(("goal-1".into(), Some(80)))
+                );
+                window.finish_attempt(&attempt_id);
+                respond_to.send(Ok(true)).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while window.attempt_goal_id(&attempt_id).is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("detached settlement must release the exact attempt");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn root_sideband_usage_is_serialized_through_the_lifecycle_mailbox() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = std::sync::Arc::new(
+                    crate::session::actor::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal("goal-1".into(), "finish".into(), Some(10_000), "now".into())
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                let (mut run, _rx) = test_run();
+                run.goal_usage_window = goal_usage_mailbox(&actor, Some("goal-1".into()));
+                run.admitted_attempt_id = run
+                    .goal_usage_window
+                    .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
+                    .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    actor.settle_sideband_response_usage(&mut run, &provider_response_with_usage()),
+                )
+                .await
+                .expect("root Sideband settlement must reach the lifecycle mailbox")
+                .unwrap();
+
+                assert_eq!(actor.goal_tokens_used(), 80);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_sideband_without_provider_usage_pauses_goal_fail_closed() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = std::sync::Arc::new(
+                    crate::session::actor::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal("goal-1".into(), "finish".into(), Some(10_000), "now".into())
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+
+                let (mut run, _rx) = test_run();
+                run.goal_usage_window = goal_usage_mailbox(&actor, Some("goal-1".into()));
+                run.admitted_attempt_id = run
+                    .goal_usage_window
+                    .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
+                    .unwrap();
+                let mut response = provider_response_with_usage();
+                response.usage = None;
+                actor
+                    .settle_sideband_response_usage(&mut run, &response)
+                    .await
+                    .unwrap();
+
+                let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert!(snapshot.usage_incomplete);
+                assert_eq!(
+                    snapshot.status,
+                    crate::session::goal_tracker::GoalStatus::Paused
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal,
+                    "fail-closed usage must release Goal Behavior atomically"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

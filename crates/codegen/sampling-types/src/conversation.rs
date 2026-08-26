@@ -434,6 +434,97 @@ impl ConversationImageGroup {
     }
 }
 
+/// Match a provider's unconditional text-only capability rejection. Format,
+/// size, corruption and policy failures are deliberately excluded: projecting
+/// those images would permanently discard a modality the model otherwise
+/// supports.
+pub fn is_unconditional_image_input_unsupported(
+    status_code: Option<u16>,
+    message: &str,
+    image_count: usize,
+) -> bool {
+    if image_count == 0 || status_code != Some(400) {
+        return false;
+    }
+
+    fn contains_terminal_claim(message: &str, claim: &str) -> bool {
+        message.match_indices(claim).any(|(start, _)| {
+            message[start + claim.len()..]
+                .chars()
+                .all(|ch| ch.is_whitespace() || ch.is_ascii_punctuation())
+        })
+    }
+
+    let message = message.to_ascii_lowercase();
+    if [
+        "invalid image",
+        "malformed image",
+        "corrupt image",
+        "image too large",
+        "image size",
+        "image dimensions",
+        "unsupported image format",
+        "alpha channel",
+        "transparency",
+        "transparent image",
+        "content policy",
+        "safety policy",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        return false;
+    }
+
+    let names_image_content = [
+        "image_url",
+        "input_image",
+        "image input",
+        "image content",
+        "content type image",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    let text_only_model = [
+        "this text-only model only supports text input",
+        "this text only model only supports text input",
+        "this model only supports text",
+        "this model supports only text",
+        "this model only accepts text",
+        "this model accepts only text",
+        "model only supports text",
+        "model supports only text",
+        "only text input is supported",
+        "only text inputs are supported",
+        "only text content is supported",
+        "text-only model",
+        "text only model",
+    ]
+    .iter()
+    .any(|claim| contains_terminal_claim(&message, claim));
+    let model_rejects_images = [
+        "model does not support images",
+        "model doesn't support images",
+        "model does not accept images",
+        "input_image is not supported by this model",
+        "image input is unsupported by this model",
+        "image inputs are unsupported by this model",
+        "images are not supported by this model",
+    ]
+    .iter()
+    .any(|claim| contains_terminal_claim(&message, claim));
+    let image_type_rejected_as_text = [
+        "unknown variant",
+        "expected `text`",
+        "expected text",
+        "must be text",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+
+    text_only_model || model_rejects_images || (names_image_content && image_type_rejected_as_text)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationImageSource {
     User,
@@ -581,8 +672,25 @@ pub fn replace_item_images_with_text(item: &mut ConversationItem, replacement: &
                 .filter(|part| matches!(part, ContentPart::Image { .. }))
                 .count();
             if removed > 0 {
-                result.images.clear();
-                result.content = Arc::<str>::from(replacement);
+                result.images = std::mem::take(&mut result.images)
+                    .into_iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Image { .. } => None,
+                        ContentPart::Text { text } => Some(ContentPart::Text {
+                            text: Arc::<str>::from(strip_image_files_envelope(&text)),
+                        }),
+                    })
+                    .collect();
+                let original = strip_image_files_envelope(&result.content);
+                result.content = if original.trim().is_empty() {
+                    Arc::<str>::from(replacement)
+                } else {
+                    Arc::<str>::from(format!(
+                        "{}\n\n[Projected image description]\n{}",
+                        original.trim_end(),
+                        replacement
+                    ))
+                };
             }
             removed
         }
@@ -611,6 +719,55 @@ pub fn redact_projected_image_tool_call(item: &mut ConversationItem, tool_call_i
     true
 }
 
+/// Redact source paths copied by an image-producing tool into its own textual
+/// result while preserving unrelated extracted text and metadata. The exact
+/// source values come only from path/file/image/url/source-shaped arguments on
+/// the associated Assistant call.
+pub fn redact_projected_image_tool_result_references(
+    item: &mut ConversationItem,
+    source: &ConversationItem,
+    tool_call_ids: &[String],
+) -> bool {
+    let ConversationItem::ToolResult(result) = item else {
+        return false;
+    };
+    let ids = tool_call_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if !ids.contains(result.tool_call_id.as_str()) {
+        return false;
+    }
+    let ConversationItem::Assistant(assistant) = source else {
+        return false;
+    };
+    let mut references = Vec::new();
+    for call in &assistant.tool_calls {
+        if !ids.contains(call.id.as_ref()) {
+            continue;
+        }
+        let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+            continue;
+        };
+        collect_image_source_argument_strings(&arguments, false, &mut references);
+    }
+    references.retain(|reference| !reference.trim().is_empty());
+    references.sort();
+    references.dedup();
+    if references.is_empty() {
+        return false;
+    }
+
+    const REPLACEMENT: &str = "[Image tool source projected to durable text]";
+    let mut changed = replace_text_references(&mut result.content, &references, REPLACEMENT);
+    for part in &mut result.images {
+        if let ContentPart::Text { text } = part {
+            changed |= replace_text_references(text, &references, REPLACEMENT);
+        }
+    }
+    changed
+}
+
 /// Replace every provider-native carrier emitted in the same response as an
 /// image-producing tool call with one protocol-neutral text item. Keeping a
 /// Reasoning or BackendToolCall payload would leave a second carrier for the
@@ -626,6 +783,66 @@ pub fn redact_projected_image_response_carrier(item: &mut ConversationItem) -> b
         "[Image-associated response carrier projected to durable text.]",
     );
     true
+}
+
+/// Remove references copied from a provider-native response carrier into a
+/// completed compaction summary.
+///
+/// Projection replaces the whole live Reasoning/BackendToolCall carrier with
+/// protocol-neutral text. A summary derived before that projection is already
+/// a synthetic User item, so the ordinary carrier replacement cannot reach
+/// it. Preserve the same irreversible boundary by redacting exact carrier
+/// strings and path/URL-like tokens derived from them.
+pub fn redact_projected_image_response_carrier_compaction_references(
+    item: &mut ConversationItem,
+    source: &ConversationItem,
+) -> bool {
+    if !matches!(
+        source,
+        ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+    ) {
+        return false;
+    }
+    let Ok(value) = serde_json::to_value(source) else {
+        return false;
+    };
+    let mut strings = Vec::new();
+    collect_all_string_values(&value, &mut strings);
+    let mut references = Vec::new();
+    for value in strings {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        references.push(value.to_owned());
+        references.extend(
+            value
+                .split_whitespace()
+                .map(|token| {
+                    token.trim_matches(|character: char| {
+                        matches!(
+                            character,
+                            '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                        )
+                    })
+                })
+                .filter(|token| {
+                    token.starts_with("data:image/")
+                        || token.contains("://")
+                        || token.contains('/')
+                        || token.contains('\\')
+                })
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    references.sort();
+    references.dedup();
+    replace_compaction_reference_tokens(
+        item,
+        &references,
+        "[Image-associated response carrier projected to durable text]",
+    )
 }
 
 /// Remove exact image references copied into a completed compaction summary.
@@ -712,6 +929,18 @@ fn replace_compaction_reference_tokens(
     changed
 }
 
+fn replace_text_references(text: &mut Arc<str>, references: &[String], replacement: &str) -> bool {
+    let mut next = text.to_string();
+    for reference in references {
+        next = next.replace(reference, replacement);
+    }
+    if next.as_str() == text.as_ref() {
+        return false;
+    }
+    *text = Arc::<str>::from(next);
+    true
+}
+
 fn collect_image_source_argument_strings(
     value: &serde_json::Value,
     source_key: bool,
@@ -733,6 +962,23 @@ fn collect_image_source_argument_strings(
             }
         }
         serde_json::Value::String(value) if source_key => references.push(value.clone()),
+        _ => {}
+    }
+}
+
+fn collect_all_string_values(value: &serde_json::Value, strings: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for value in object.values() {
+                collect_all_string_values(value, strings);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_all_string_values(value, strings);
+            }
+        }
+        serde_json::Value::String(value) => strings.push(value.clone()),
         _ => {}
     }
 }
@@ -7948,7 +8194,7 @@ mod tests {
             }]));
         req.items.push(ConversationItem::tool_result_with_images(
             "call_1",
-            "Read PDF text",
+            "Read /secret/photo.png; extracted PDF text",
             vec![
                 ContentPart::Text {
                     text: "metadata retained".into(),
@@ -7978,6 +8224,12 @@ mod tests {
 
         let removed = replace_item_images_with_text(&mut req.items[1], "described in order");
         assert_eq!(removed, 2);
+        let source = req.items[0].clone();
+        assert!(redact_projected_image_tool_result_references(
+            &mut req.items[1],
+            &source,
+            &["call_1".into()],
+        ));
         assert!(redact_projected_image_tool_call(
             &mut req.items[0],
             "call_1"
@@ -7999,8 +8251,13 @@ mod tests {
             panic!("expected tool result");
         };
         assert_eq!(result.tool_call_id, "call_1");
-        assert!(result.images.is_empty());
-        assert_eq!(result.content.as_ref(), "described in order");
+        assert!(matches!(
+            result.images.as_slice(),
+            [ContentPart::Text { text }] if text.as_ref() == "metadata retained"
+        ));
+        assert!(result.content.contains("extracted PDF text"));
+        assert!(!result.content.contains("/secret/photo.png"));
+        assert!(result.content.contains("described in order"));
     }
 
     #[test]

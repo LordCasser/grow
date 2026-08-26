@@ -12,33 +12,6 @@ fn trajectory_ready_line_yields_the_exact_url() {
     assert_eq!(trajectory_ready_url("startup failed: session missing"), None);
 }
 
-#[test]
-fn set_mode_then_prompt_only_accepts_an_applied_behavior_change() {
-    let applied = serde_json::json!({
-        "grow/behaviorChange": { "status": "applied" }
-    })
-    .as_object()
-    .cloned()
-    .unwrap();
-    assert!(behavior_change_applied(Some(&applied)).is_ok());
-
-    for status in ["confirmation_required", "rejected"] {
-        let meta = serde_json::json!({
-            "grow/behaviorChange": {
-                "status": status,
-                "message": "do not send"
-            }
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
-        assert_eq!(
-            behavior_change_applied(Some(&meta)).unwrap_err(),
-            "do not send"
-        );
-    }
-    assert!(behavior_change_applied(None).is_err());
-}
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -1447,75 +1420,4 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
-}
-/// A `confirmation_required` answer to the mode half of `SetModeThenPrompt`
-/// must return the prompt text to the dispatcher instead of failing and
-/// dropping it. The fake agent answers the `SetSessionMode` RPC with the
-/// shell's `BehaviorChangeOutcome::ConfirmationRequired` response meta.
-#[tokio::test]
-async fn set_mode_then_prompt_confirmation_required_returns_prompt_to_fifo_result() {
-    use std::sync::Arc;
-    use acp_transport::AcpAgentMessage;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let AcpAgentMessage::SetSessionMode(args) = msg {
-                assert_eq!(args.request.mode_id.0.as_ref(), "plan");
-                let _ = args.response_tx.send(Ok(
-                    acp::SetSessionModeResponse::new().meta(
-                        serde_json::json!({
-                            "grow/behaviorChange": {
-                                "status": "confirmation_required",
-                                "message": "Switching to Plan will interrupt active work. Select it again to confirm.",
-                                "remainingMs": 8000,
-                            }
-                        })
-                        .as_object()
-                        .cloned()
-                        .unwrap(),
-                    ),
-                ));
-            }
-        }
-    });
-    let mut tasks = JoinSet::new();
-    execute(
-        Effect::SetModeThenPrompt {
-            session_id: acp::SessionId::new(Arc::from("s1")),
-            mode_id: acp::SessionModeId::new("plan"),
-            agent_id: AgentId(0),
-            text: "keep this prompt".into(),
-            prompt_id: "p-1".into(),
-            skill_token_ranges: vec![6..18],
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-    );
-    match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::PromptRequiresBehaviorConfirmation {
-            agent_id,
-            session_id,
-            mode_id,
-            text,
-            prompt_id,
-            skill_token_ranges,
-            message,
-            remaining_ms,
-        } => {
-            assert_eq!(agent_id, AgentId(0));
-            assert_eq!(session_id.0.as_ref(), "s1");
-            assert_eq!(mode_id.0.as_ref(), "plan");
-            assert_eq!(text, "keep this prompt", "the prompt text must survive");
-            assert_eq!(prompt_id, "p-1");
-            assert_eq!(skill_token_ranges, vec![6..18]);
-            assert_eq!(remaining_ms, 8_000);
-            assert!(
-                message.contains("Select it again to confirm"),
-                "the shell's confirm hint must ride the message: {message}"
-            );
-        }
-        other => panic!("expected PromptRequiresBehaviorConfirmation, got {other:?}"),
-    }
 }

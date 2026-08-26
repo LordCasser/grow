@@ -1204,110 +1204,29 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::SetSessionMode { session_id, mode_id } => {
+        Effect::SwitchBehavior {
+            agent_id,
+            session_id,
+            control_token,
+            mode,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let req = acp::SetSessionModeRequest::new(session_id.clone(), mode_id);
+                    let req = acp::SetSessionModeRequest::new(
+                        session_id.clone(),
+                        acp::SessionModeId::new(mode.as_id()),
+                    );
                     let result = acp_send(req, &tx)
                         .await
                         .map(|_| ())
                         .map_err(|error| error.to_string());
-                    TaskResult::SessionModeSet { session_id, result }
-                });
-        }
-        Effect::SetModeThenPrompt {
-            session_id,
-            mode_id,
-            agent_id,
-            text,
-            prompt_id,
-            skill_token_ranges,
-        } => {
-            let tx = acp_tx.clone();
-            let screen_mode = session_flags.screen_mode_label;
-            tasks
-                .spawn(async move {
-                    let mode_req = acp::SetSessionModeRequest::new(
-                        session_id.clone(),
-                        mode_id.clone(),
-                    );
-                    let mode_response = match acp_send(mode_req, &tx).await {
-                        Ok(response) => response,
-                        Err(error) => {
-                            tracing::warn!("Failed to set session mode: {error}");
-                            return TaskResult::PromptResponse {
-                                agent_id,
-                                result: Err(format!("Behavior change failed: {error}")),
-                                http_status: None,
-                                prompt_id: Some(prompt_id),
-                            };
-                        }
-                    };
-                    // An interrupting switch parks on the Shell. Return the
-                    // prompt to the ordinary FIFO; only a repeated user
-                    // selection may confirm the Shell-owned latch.
-                    let behavior_change = mode_response
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.get("grow/behaviorChange"));
-                    let confirmation_message = behavior_change
-                        .and_then(|change| change.get("status"))
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|status| *status == "confirmation_required")
-                        .and_then(|_| {
-                            behavior_change
-                                .and_then(|change| change.get("message"))
-                                .and_then(serde_json::Value::as_str)
-                        });
-                    if let Some(message) = confirmation_message {
-                        let remaining_ms = behavior_change
-                            .and_then(|change| change.get("remainingMs"))
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(1);
-                        return TaskResult::PromptRequiresBehaviorConfirmation {
-                            agent_id,
-                            session_id,
-                            mode_id,
-                            text,
-                            prompt_id,
-                            skill_token_ranges,
-                            message: message.to_string(),
-                            remaining_ms,
-                        };
-                    }
-                    if let Err(message) = behavior_change_applied(mode_response.meta.as_ref()) {
-                        return TaskResult::PromptResponse {
-                            agent_id,
-                            result: Err(message),
-                            http_status: None,
-                            prompt_id: Some(prompt_id),
-                        };
-                    }
-                    ulog::info(
-                        "prompt submitted",
-                        Some(&session_id.0),
-                        Some(serde_json::json!({"len": text.len()})),
-                    );
-                    let prompt = vec![plain_prompt_content_block(text, &skill_token_ranges)];
-                    let req = acp::PromptRequest::new(session_id.clone(), prompt)
-                        .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
-                                .as_object()
-                                .cloned(),
-                        );
-                    let result = acp_send(req, &tx).await;
-                    log_prompt_result(&session_id, &result);
-                    let http_status = result
-                        .as_ref()
-                        .err()
-                        .and_then(http_status_from_error);
-                    TaskResult::PromptResponse {
+                    TaskResult::SwitchBehaviorComplete {
                         agent_id,
-                        result: result
-                            .map_err(|e| format_acp_error(&e)),
-                        http_status,
-                        prompt_id: Some(prompt_id),
+                        session_id,
+                        control_token,
+                        mode,
+                        result,
                     }
                 });
         }
@@ -1504,9 +1423,9 @@ pub(crate) fn execute(
         Effect::SwitchModel {
             agent_id,
             session_id,
+            control_token,
             model_id,
             effort,
-            prev_model_id,
         } => {
             let tx = acp_tx.clone();
             tasks
@@ -1524,7 +1443,7 @@ pub(crate) fn execute(
                             m
                         });
                     let req = acp::SetSessionModelRequest::new(
-                            session_id,
+                            session_id.clone(),
                             model_id.clone(),
                         )
                         .meta(meta);
@@ -1534,16 +1453,18 @@ pub(crate) fn execute(
                         .map_err(|e| sanitize_user_error(&e.to_string()));
                     TaskResult::SwitchModelComplete {
                         agent_id,
+                        session_id,
+                        control_token,
                         model_id,
                         effort,
                         result,
-                        prev_model_id,
                     }
                 });
         }
         Effect::SwitchAgent {
             agent_id,
             session_id,
+            control_token,
             agent_name,
         } => {
             let tx = acp_tx.clone();
@@ -1569,6 +1490,8 @@ pub(crate) fn execute(
                     .map_err(|error| sanitize_user_error(&error.to_string()));
                 TaskResult::SwitchAgentComplete {
                     agent_id,
+                    session_id,
+                    control_token,
                     agent_name,
                     result,
                 }
@@ -2783,7 +2706,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionAgentName { agent_id, session_id } => {
+        Effect::FetchSessionAgentName { agent_id, session_id, revision } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2791,6 +2714,8 @@ pub(crate) fn execute(
                         Ok(info) => {
                             TaskResult::SessionAgentNameResolved {
                                 agent_id,
+                                session_id: session_id.clone(),
+                                revision,
                                 agent_name: info.data.agent_name,
                             }
                         }
@@ -2798,13 +2723,15 @@ pub(crate) fn execute(
                             tracing::debug!("session agent name fetch failed: {e}");
                             TaskResult::SessionAgentNameResolved {
                                 agent_id,
+                                session_id,
+                                revision,
                                 agent_name: None,
                             }
                         }
                     }
                 });
         }
-        Effect::ShowSessionInfo { agent_id, session_id, show_resolved_model, nonce } => {
+        Effect::ShowSessionInfo { agent_id, session_id, revision, show_resolved_model, nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2818,6 +2745,8 @@ pub(crate) fn execute(
                             );
                             TaskResult::SessionInfoComplete {
                                 agent_id,
+                                session_id: session_id.clone(),
+                                revision,
                                 info: Box::new(info),
                                 text,
                                 title,
@@ -3840,21 +3769,6 @@ pub(crate) fn execute(
     (false, meta)
 }
 
-fn behavior_change_applied(meta: Option<&acp::Meta>) -> Result<(), String> {
-    let change = meta.and_then(|meta| meta.get("grow/behaviorChange"));
-    if change
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-        == Some("applied")
-    {
-        return Ok(());
-    }
-    Err(change
-        .and_then(|value| value.get("message"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("Behavior change was not applied; the prompt was not sent.")
-        .to_string())
-}
 /// Fetch session info from ACP via `grow/session/info`.
 async fn fetch_session_info(
     session_id: &acp::SessionId,

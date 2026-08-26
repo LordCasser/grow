@@ -170,13 +170,17 @@ pub(crate) fn render_goal_detail(
         Style::default().fg(theme.text_primary),
     ));
     lines.push(Line::default());
+    let lower_bound = if goal.usage_incomplete { "≥" } else { "" };
     let usage = match goal.token_budget {
         Some(budget) => format!(
-            "Usage  {}/{} tokens",
+            "Usage  {lower_bound}{}/{} tokens",
             format_tokens_compact(goal.tokens_used),
             format_tokens_compact(budget)
         ),
-        None => format!("Usage  {} tokens", format_tokens_compact(goal.tokens_used)),
+        None => format!(
+            "Usage  {lower_bound}{} tokens",
+            format_tokens_compact(goal.tokens_used)
+        ),
     };
     lines.push(Line::from(Span::styled(
         usage,

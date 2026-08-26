@@ -56,6 +56,11 @@ pub(super) async fn stop_permission_manager_and_drain_audit(session: &SessionAct
 /// Cross the final persistence barrier after every teardown producer,
 /// including the drained permission bridge and session-end hooks, has stopped.
 pub(super) async fn final_session_persistence_flush(session: &SessionActor) {
+    // Every session-end producer (hooks, memory dream, Workflow/Goal
+    // checkpoints and permission audit) has stopped at this boundary. Exact
+    // Sideband retries remain live until now so teardown work can still use
+    // the same durable auxiliary-model protocol.
+    session.sideband_cancel.cancel();
     let (respond_to, ack) = tokio::sync::oneshot::channel();
     if session
         .notifications

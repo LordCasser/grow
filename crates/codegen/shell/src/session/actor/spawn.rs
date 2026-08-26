@@ -287,98 +287,6 @@ fn restored_runtime_conflict_actions(
     }
 }
 
-fn is_subagent_capability_catalog_item(item: &ConversationItem) -> bool {
-    let ConversationItem::User(user) = item else {
-        return false;
-    };
-    user.synthetic_reason == Some(sampling_types::SyntheticReason::SystemReminder)
-        && user.content.iter().any(|part| {
-            matches!(
-                part,
-                sampling_types::conversation::ContentPart::Text { text }
-                    if text.contains("<subagent-capability-catalog>")
-            )
-        })
-}
-
-fn remove_stale_subagent_capability_catalog(
-    conversation: &mut Vec<ConversationItem>,
-    inherited_prefix_len: &mut Option<usize>,
-) {
-    let prefix_len = inherited_prefix_len.unwrap_or_default();
-    let mut index = 0usize;
-    let mut removed_from_prefix = 0usize;
-    conversation.retain(|item| {
-        let remove = is_subagent_capability_catalog_item(item);
-        if remove && index < prefix_len {
-            removed_from_prefix += 1;
-        }
-        index += 1;
-        !remove
-    });
-    if let Some(len) = inherited_prefix_len {
-        *len = len.saturating_sub(removed_from_prefix);
-    }
-}
-
-fn install_subagent_capability_catalog(
-    conversation: &mut Vec<ConversationItem>,
-    inherited_prefix_len: &mut Option<usize>,
-    prompt: String,
-) {
-    remove_stale_subagent_capability_catalog(conversation, inherited_prefix_len);
-    // Capability state is live-session metadata, never inherited conversation.
-    // Insert immediately after the preserved prefix so verbatim forks retain an
-    // exact provider-cache prefix and resumes cannot persist this catalog.
-    let insert_at = inherited_prefix_len
-        .unwrap_or(conversation.len())
-        .min(conversation.len());
-    conversation.insert(insert_at, ConversationItem::system_reminder(prompt));
-}
-
-#[cfg(test)]
-mod capability_catalog_restore_tests {
-    use super::*;
-
-    #[test]
-    fn stale_catalog_is_removed_and_prefix_len_is_repaired() {
-        let mut conversation = vec![
-            ConversationItem::system("system"),
-            ConversationItem::system_reminder(
-                "<subagent-capability-catalog>old</subagent-capability-catalog>",
-            ),
-            ConversationItem::user("continue"),
-        ];
-        let mut prefix_len = Some(2);
-
-        remove_stale_subagent_capability_catalog(&mut conversation, &mut prefix_len);
-
-        assert_eq!(conversation.len(), 2);
-        assert_eq!(prefix_len, Some(1));
-        assert!(!conversation.iter().any(is_subagent_capability_catalog_item));
-    }
-
-    #[test]
-    fn fresh_catalog_is_outside_verbatim_inherited_prefix() {
-        let mut conversation = vec![
-            ConversationItem::system("parent system"),
-            ConversationItem::user("parent turn"),
-        ];
-        let mut prefix_len = Some(conversation.len());
-
-        install_subagent_capability_catalog(
-            &mut conversation,
-            &mut prefix_len,
-            "<subagent-capability-catalog>fresh</subagent-capability-catalog>".to_owned(),
-        );
-
-        assert_eq!(prefix_len, Some(2));
-        assert!(matches!(&conversation[0], ConversationItem::System(_)));
-        assert!(matches!(&conversation[1], ConversationItem::User(_)));
-        assert!(is_subagent_capability_catalog_item(&conversation[2]));
-    }
-}
-
 fn restored_plan_artifact_is_valid(
     session: &crate::session::storage::ContainedDirectory,
     snapshot: &crate::session::behavior::BehaviorSnapshot,
@@ -751,6 +659,10 @@ pub(crate) async fn spawn_session_actor(
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
     subagent_toggle: std::collections::HashMap<String, bool>,
+    workflow_cli_agents: Vec<agent::config::AgentDefinition>,
+    workflow_cli_overrides: crate::agent::config::CliAgentOverrides,
+    workflow_file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
+    frozen_subagent_names: Option<Vec<String>>,
     prompt_audience: agent::prompt::context::PromptAudience,
     respect_gitignore: bool,
     path_not_found_hints: bool,
@@ -764,7 +676,6 @@ pub(crate) async fn spawn_session_actor(
     hook_registry_override: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     workspace_ops: workspace::WorkspaceOps,
     cli_permission_rules: Vec<workspace::permission::types::PermissionRule>,
-    todo_gate: bool,
     remote_settings: Option<crate::util::config::RemoteSettings>,
     laziness_debug_log: Option<std::path::PathBuf>,
     parent_terminal_backend: Option<std::sync::Arc<dyn tools::computer::types::TerminalBackend>>,
@@ -1012,7 +923,8 @@ pub(crate) async fn spawn_session_actor(
         nudges_used_this_session: 0,
         recent_terminals: VecDeque::new(),
         pending_manual_compact: None,
-        pending_model_reload: None,
+        pending_step_controls: VecDeque::new(),
+        terminal_preemption_pending: false,
     });
     let mcp_strategy = match std::env::var("MCP_INIT_STRATEGY") {
         Ok(v) if !v.trim().is_empty() => McpInitStrategy::from(v),
@@ -1051,6 +963,13 @@ pub(crate) async fn spawn_session_actor(
     let goal_tracker = Arc::new(parking_lot::Mutex::new(
         restored_goal_tracker.unwrap_or_default(),
     ));
+    let goal_usage_window = startup_hints.goal_usage_window.clone().unwrap_or_else(|| {
+        let active_goal_id = goal_tracker.lock().snapshot().and_then(|goal| {
+            (goal.status == crate::session::goal_tracker::GoalStatus::Active)
+                .then(|| goal.goal_id.clone())
+        });
+        super::goal_support::GoalUsageWindow::new(cmd_tx.clone(), active_goal_id)
+    });
     let persisted_behavior = persisted_behavior
         .map(|snapshot| {
             let valid = snapshot.runtime_fields_match_selection()
@@ -1164,8 +1083,11 @@ pub(crate) async fn spawn_session_actor(
         };
     let resources_persistence =
         crate::session::storage::resources_persistence(session_directory.clone());
-    let agent_name_for_handle = agent_definition.name.clone();
-    let subagent_filter_for_handle = agent_definition.subagent_filter();
+    let agent_selector = agent_definition.selector_identity();
+    let agent_profile = crate::session::handle::SessionAgentProfile::new(
+        agent_selector.clone(),
+        agent_definition.subagent_filter(),
+    );
     let harness_metrics = {
         let plugin_names = plugin_registry
             .as_ref()
@@ -1180,7 +1102,7 @@ pub(crate) async fn spawn_session_actor(
             session_id: session_info.id.0.to_string(),
             client_identifier: session_client_identifier.clone(),
             model_id: session_model_id.0.to_string(),
-            agent_name: agent_definition.name.clone(),
+            agent_name: agent_selector,
             permission_mode: if session_permission_mode.is_auto()
                 && !crate::util::config::auto_permission_mode_enabled_from_disk()
             {
@@ -1208,7 +1130,6 @@ pub(crate) async fn spawn_session_actor(
                 .as_ref()
                 .and_then(|r| r.compaction_wall_clock_budget_secs),
         );
-    let todo_gate_config = resolve_todo_gate_config(remote_settings.as_ref(), todo_gate);
     let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::ask_user_question::types::UserQuestionRequest,
     >();
@@ -1359,16 +1280,22 @@ pub(crate) async fn spawn_session_actor(
     let tool_metadata_snapshot = Arc::new(std::sync::Mutex::new(Default::default()));
     let (context_recall_backend, context_recall_receiver) =
         crate::session::actor::context_recall::context_recall_channel();
+    let shared_plugin_registry =
+        std::sync::Arc::new(parking_lot::RwLock::new(plugin_registry.clone()));
+    let frozen_workflow_skills = startup_hints
+        .workflow_run_id
+        .as_ref()
+        .and(preloaded_skills.clone());
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
         fs_backend: fs_backend.clone(),
         tools_notification_handle: tools_notification_handle.clone(),
         resources_persistence: resources_persistence.clone(),
+        resource_domain: std::sync::Arc::new(tools::registry::types::SessionResourceDomain::new()),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
-        memory_enabled: memory_config.as_ref().is_some_and(|mc| mc.enabled),
-        memory_backend: memory_backend_for_spec,
+        memory_runtime: std::sync::Arc::new(parking_lot::RwLock::new(memory_backend_for_spec)),
         context_recall_backend,
         web_fetch_config: web_fetch_config.clone(),
         app_builder_deployer_config: app_builder_deployer_config.clone(),
@@ -1379,15 +1306,22 @@ pub(crate) async fn spawn_session_actor(
         ask_user_question_enabled,
         prompt_audience,
         skills_config: skills_config.clone(),
-        context_window_tokens,
+        context_window_tokens: Arc::new(std::sync::atomic::AtomicU64::new(context_window_tokens)),
         prompt_working_directory: prompt_display_cwd.clone(),
         lsp: tool_context.lsp.clone(),
-        plugin_registry: plugin_registry.clone(),
+        plugin_registry: shared_plugin_registry.clone(),
+        preloaded_subagent_names: frozen_subagent_names,
+        frozen_skills: frozen_workflow_skills,
+        file_tool_overrides: workflow_file_tool_overrides.clone(),
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
         subagents_max_depth,
+        initial_subagent_capability_mode: startup_hints
+            .is_subagent
+            .then_some(agent_definition.capability_mode.unwrap_or_default()),
+        workflow_owned: startup_hints.workflow_run_id.is_some(),
         session_id_str: session_info.id.0.to_string(),
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
@@ -1496,21 +1430,6 @@ pub(crate) async fn spawn_session_actor(
     }
     let system_prompt = agent.system_prompt().to_string();
     let mut initial_context_changed = false;
-    if resumed_timeline.is_some()
-        && let Some(capabilities) = &subagent_capabilities
-    {
-        install_subagent_capability_catalog(
-            &mut conversation,
-            &mut startup_hints.inherited_prefix_len,
-            format!(
-                "<{}>\n{}\n</{}>",
-                crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
-                capabilities.native_catalog_prompt(),
-                crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
-            ),
-        );
-        initial_context_changed = true;
-    }
     if resumed_timeline.is_some()
         && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
@@ -1656,6 +1575,7 @@ pub(crate) async fn spawn_session_actor(
             "Recovered a non-terminal public Workflow alongside this Goal. Stop or finish the Workflow, then restart the Goal."
                 .to_string(),
         );
+        goal_usage_window.sync(None);
     }
     if reset_behavior {
         behavior
@@ -1679,11 +1599,23 @@ pub(crate) async fn spawn_session_actor(
     let mut workflow_default_sampler = sampling_config.clone();
     workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout_secs);
     workflow_default_sampler.max_retries = max_retries;
+    let workflow_agent_catalog_source =
+        crate::session::workflow::tracker::WorkflowAgentCatalogSource::new(
+            std::path::PathBuf::from(session_info.cwd.as_str()),
+            shared_plugin_registry.clone(),
+            workflow_cli_agents,
+            workflow_cli_overrides,
+            subagent_toggle.clone(),
+            workflow_file_tool_overrides,
+            agent.definition().selector_identity(),
+            skills_config.clone(),
+        );
     let workflow_next_run_route = crate::session::workflow::tracker::WorkflowRuntimeRoute::capture(
         session_model_id.0.to_string(),
         workflow_default_sampler,
         &models_manager,
         workflow_alpha_test_key,
+        agent.definition().subagent_filter(),
     )
     .map_err(|error| agent::AgentBuildError::InvalidConfig(error.into()))?;
     let workflow_manager = Arc::new(tokio::sync::Mutex::new(
@@ -1709,6 +1641,7 @@ pub(crate) async fn spawn_session_actor(
             chat_state_handle.clone(),
             std::collections::HashMap::new(),
             workflow_next_run_route,
+            workflow_agent_catalog_source,
         ),
     ));
     let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2110,6 +2043,7 @@ pub(crate) async fn spawn_session_actor(
         session_model_id.clone(),
         sampling_config.clone(),
     );
+    let workflow_run_id = startup_hints.workflow_run_id.clone();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         #[cfg(test)]
@@ -2120,6 +2054,7 @@ pub(crate) async fn spawn_session_actor(
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         state,
+        step_control_gate: TokioMutex::new(()),
         notifications: NotificationSender {
             gateway: gateway.clone(),
             gateway_enabled: gateway_enabled.clone(),
@@ -2175,7 +2110,7 @@ pub(crate) async fn spawn_session_actor(
             pre_prune_token_budget: std::cell::Cell::new(compaction_pre_prune_token_budget),
             cancel: Default::default(),
         },
-        todo_gate: todo_gate_config,
+        sideband_cancel: tokio_util::sync::CancellationToken::new(),
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(
                 || crate::config::MemoryFlushConfig {
@@ -2238,6 +2173,7 @@ pub(crate) async fn spawn_session_actor(
         origin_client: origin_client.clone(),
         signals_handle: signals_handle.clone(),
         agent: std::cell::RefCell::new(agent),
+        agent_profile: agent_profile.clone(),
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
@@ -2263,6 +2199,7 @@ pub(crate) async fn spawn_session_actor(
         goal_runtime_available: std::sync::atomic::AtomicBool::new(false),
         goal_drive: TaskSlot::new(),
         goal_tracker,
+        goal_usage_window: goal_usage_window.clone(),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
@@ -2290,7 +2227,7 @@ pub(crate) async fn spawn_session_actor(
             },
             load_errors: std::cell::RefCell::new(_hook_load_errors),
         },
-        plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
+        plugin_registry: shared_plugin_registry.clone(),
         plugin_registry_handle,
         events: crate::session::events::EventTracker::new(chat_state_handle.clone()),
         current_turn_number: std::cell::Cell::new(0),
@@ -2304,7 +2241,6 @@ pub(crate) async fn spawn_session_actor(
         image_description_model: parking_lot::RwLock::new(image_description_model),
         session_title_route: std::cell::RefCell::new(session_title_route),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
-        subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
     session.recover_pending_rewind().await.map_err(|error| {
@@ -2325,16 +2261,24 @@ pub(crate) async fn spawn_session_actor(
     } else {
         false
     };
-    if persisted_control_revision == 0 {
-        let (agent_name, role_prompt) = {
+    if persisted_control_revision == 0 || resumed_timeline.is_some() {
+        let (agent_name, role_prompt, capability_catalog) = {
             let agent = session.agent.borrow();
             (
-                agent.name().to_owned(),
+                agent.definition().selector_identity(),
                 agent.role_prompt().map(str::to_owned),
+                session
+                    .subagent_capabilities
+                    .as_ref()
+                    .map(|capabilities| capabilities.native_catalog_prompt()),
             )
         };
         session
-            .persist_agent_transition_durably(&agent_name, role_prompt.as_deref())
+            .persist_agent_transition_durably(
+                &agent_name,
+                role_prompt.as_deref(),
+                capability_catalog.as_deref(),
+            )
             .await
             .map_err(|error| {
                 agent::AgentBuildError::IoError(std::io::Error::other(format!(
@@ -2707,7 +2651,11 @@ pub(crate) async fn spawn_session_actor(
     });
     Ok((
         SessionHandle {
+            lifecycle_owner: std::sync::Arc::new(
+                crate::session::handle::SessionLifecycleOwner::new(&cmd_tx),
+            ),
             cmd_tx,
+            goal_usage_window,
             persistence_tx: persistence.tx.clone(),
             current_prompt_id,
             pending_interactions,
@@ -2732,8 +2680,9 @@ pub(crate) async fn spawn_session_actor(
             force_compact,
             permission_handle: permissions_for_handle,
             delegable_capability_ceiling,
-            agent_name: agent_name_for_handle,
-            subagent_filter: subagent_filter_for_handle,
+            agent_profile,
+            workflow_run_id,
+            plugin_registry: shared_plugin_registry.clone(),
             hook_registry: hook_registry_for_handle,
             workspace_ops: workspace_ops_for_handle,
             terminal_backend: Some(terminal_backend.clone()),
@@ -2838,6 +2787,10 @@ pub(crate) async fn spawn_session_on_thread(
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
     subagent_toggle: std::collections::HashMap<String, bool>,
+    workflow_cli_agents: Vec<agent::config::AgentDefinition>,
+    workflow_cli_overrides: crate::agent::config::CliAgentOverrides,
+    workflow_file_tool_overrides: Option<Vec<tools::registry::types::ToolConfig>>,
+    frozen_subagent_names: Option<Vec<String>>,
     prompt_audience: agent::prompt::context::PromptAudience,
     respect_gitignore: bool,
     path_not_found_hints: bool,
@@ -2851,7 +2804,6 @@ pub(crate) async fn spawn_session_on_thread(
     hook_registry_override: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     workspace_ops: workspace::WorkspaceOps,
     cli_permission_rules: Vec<workspace::permission::types::PermissionRule>,
-    todo_gate: bool,
     remote_settings: Option<crate::util::config::RemoteSettings>,
     laziness_debug_log: Option<std::path::PathBuf>,
     parent_terminal_backend: Option<std::sync::Arc<dyn tools::computer::types::TerminalBackend>>,
@@ -2946,6 +2898,10 @@ pub(crate) async fn spawn_session_on_thread(
                     client_hooks,
                     prompt_display_cwd,
                     subagent_toggle,
+                    workflow_cli_agents,
+                    workflow_cli_overrides,
+                    workflow_file_tool_overrides,
+                    frozen_subagent_names,
                     prompt_audience,
                     respect_gitignore,
                     path_not_found_hints,
@@ -2959,7 +2915,6 @@ pub(crate) async fn spawn_session_on_thread(
                     hook_registry_override,
                     workspace_ops,
                     cli_permission_rules,
-                    todo_gate,
                     remote_settings,
                     laziness_debug_log,
                     parent_terminal_backend,

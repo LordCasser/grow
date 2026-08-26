@@ -21,7 +21,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "please also add tests".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
 
             assert!(
@@ -90,17 +90,17 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "first steer".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second steer".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "third steer".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -180,7 +180,7 @@ async fn terminal_boundary_discards_residual_same_turn_interjections() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "too late for this turn".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
 
             actor.discard_residual_interjections_at_turn_end().await;
@@ -190,6 +190,37 @@ async fn terminal_boundary_discards_residual_same_turn_interjections() {
                 actor.chat_state_handle.get_conversation().await.as_slice(),
                 [sampling_types::ConversationItem::System(_)]
             ));
+        })
+        .await;
+}
+
+/// A direct steer is acknowledged only after it has entered the shared
+/// interjection buffer. If an independent terminal condition (Goal budget,
+/// control transition, Stop) wins before the next safe-point drain, the
+/// terminal fence must preserve that accepted input as a fresh FIFO turn.
+#[tokio::test]
+async fn terminal_boundary_requeues_an_accepted_direct_steer() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor.queue_mid_turn_interjection("preserve me".to_string(), vec![]);
+
+            actor.discard_residual_interjections_at_turn_end().await;
+
+            assert!(actor.pending_interjections.is_empty());
+            let state = actor.state.lock().await;
+            let item = state
+                .pending_inputs
+                .front()
+                .expect("accepted direct steer becomes the next FIFO turn");
+            assert!(item.prompt_id.starts_with("steer-"));
+            assert_eq!(item.origin, crate::session::PromptOrigin::User);
+            assert_eq!(item.turn_kind, crate::session::TurnKind::User);
+            assert_eq!(
+                item.queue_meta.as_ref().map(|meta| meta.text.as_str()),
+                Some("preserve me")
+            );
         })
         .await;
 }
@@ -206,7 +237,7 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
 
-            let requeue = |prompt_id: &str| super::AutoPromotedRequeue {
+            let requeue = |prompt_id: &str| super::ResidualInterjectionRequeue {
                 prompt_id: prompt_id.to_string(),
                 origin: crate::session::PromptOrigin::User,
                 turn_kind: crate::session::TurnKind::User,
@@ -218,17 +249,17 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
             actor.pending_interjections.push(PendingInterjection {
                 text: "first follow-up".to_string(),
                 attachments: vec![],
-                auto_promoted: Some(requeue("follow-up-1")),
+                requeue: Some(requeue("follow-up-1")),
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "explicit steer".to_string(),
                 attachments: vec![],
-                auto_promoted: None,
+                requeue: None,
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second follow-up".to_string(),
                 attachments: vec![],
-                auto_promoted: Some(requeue("follow-up-2")),
+                requeue: Some(requeue("follow-up-2")),
             });
 
             actor.discard_residual_interjections_at_turn_end().await;
@@ -285,7 +316,7 @@ async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "steer me".to_string(),
                 attachments: vec![],
-                auto_promoted: Some(super::AutoPromotedRequeue {
+                requeue: Some(super::ResidualInterjectionRequeue {
                     prompt_id: "follow-up-1".to_string(),
                     origin: crate::session::PromptOrigin::User,
                     turn_kind: crate::session::TurnKind::User,
@@ -367,7 +398,7 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
             assert_eq!(entries.len(), 1, "exactly one interjection");
             assert_eq!(entries[0].text, "please pivot");
             let auto = entries[0]
-                .auto_promoted
+                .requeue
                 .as_ref()
                 .expect("auto-promoted entry carries its requeue payload");
             assert_eq!(auto.prompt_id, "follow-up-1");

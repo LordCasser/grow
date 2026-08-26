@@ -14,13 +14,13 @@ fn behavior_picker_selection_changes_behavior_without_touching_permission() {
 
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
-        agent.session.behavior_mode_pending,
-        Some(tools::types::BehaviorId::Plan)
+        agent.session.effective_behavior(),
+        tools::types::BehaviorId::Plan
     );
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "plan"
+        [Effect::SwitchBehavior { mode, .. }] if *mode == tools::types::BehaviorId::Plan
     ));
 }
 
@@ -176,22 +176,22 @@ fn slash_plan_no_args_not_in_plan_enters_plan_mode() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     assert!(!app.agents[&id].session.plan_mode_active);
-    assert!(app.agents[&id].session.plan_mode_pending.is_none());
+    assert!(!app.agents[&id].session.effective_plan_mode());
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
 
-    // Should emit SetSessionMode to enter plan mode.
+    // The first serialized control is the Behavior transition.
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "plan"),
-        "expected SetSessionMode(plan), got: {effects:?}"
+        matches!(&effects[0], Effect::SwitchBehavior { mode, .. } if *mode == tools::types::BehaviorId::Plan),
+        "expected SwitchBehavior(plan), got: {effects:?}"
     );
     // Optimistic pending state should be set.
-    assert_eq!(app.agents[&id].session.plan_mode_pending, Some(true));
+    assert!(app.agents[&id].session.effective_plan_mode());
 }
 
 #[test]
-fn slash_plan_no_args_already_in_plan_shows_plan() {
+fn slash_plan_no_args_already_in_plan_reissues_idempotent_selection() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -200,8 +200,13 @@ fn slash_plan_no_args_already_in_plan_shows_plan() {
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
 
-    // Should NOT emit SetSessionMode — just show the plan (no async effect).
-    assert!(effects.is_empty(), "expected no effects, got: {effects:?}");
+    // Reselection must reach the Shell because it is also the explicit
+    // confirmation-latch cancellation protocol.
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchBehavior { mode, .. }]
+            if *mode == tools::types::BehaviorId::Plan
+    ));
 }
 
 #[test]
@@ -214,18 +219,17 @@ fn slash_plan_with_args_not_in_plan_enters_and_sends_prompt() {
         &mut app,
     );
 
-    // Should emit a single SetModeThenPrompt (mode switch + prompt
-    // bundled into one sequential task to avoid a race).
+    // The prompt remains local while the serialized mode control is in flight.
     assert_eq!(effects.len(), 1, "expected 1 effect, got: {effects:?}");
     assert!(
         matches!(
             &effects[0],
-            Effect::SetModeThenPrompt { mode_id, text, .. }
-                if &*mode_id.0 == "plan" && text == "add auth to the app"
+            Effect::SwitchBehavior { mode, .. }
+                if *mode == tools::types::BehaviorId::Plan
         ),
-        "expected SetModeThenPrompt(plan, \"add auth to the app\"), got: {effects:?}"
+        "expected SwitchBehavior(plan), got: {effects:?}"
     );
-    assert_eq!(app.agents[&id].session.plan_mode_pending, Some(true));
+    assert!(app.agents[&id].session.effective_plan_mode());
 }
 
 #[test]
@@ -241,9 +245,44 @@ fn slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SetModeThenPrompt { mode_id, text, .. }]
-            if mode_id.0.as_ref() == "plan" && text == "add auth to the app"
+        [Effect::SwitchBehavior { mode, .. }]
+            if *mode == tools::types::BehaviorId::Plan
     ));
+    assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
+    assert_eq!(
+        app.agents[&id].session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
+}
+
+#[test]
+fn reselecting_authoritative_behavior_reaches_shell_to_clear_confirmation() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+    agent.session.plan_mode_active = true;
+    agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Normal);
+    agent
+        .session
+        .enqueue_prompt("run only after fallback applies".into());
+
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchBehavior { mode, .. }]
+            if *mode == tools::types::BehaviorId::Plan
+    ));
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent.session.deferred_session_mode,
+        Some(tools::types::BehaviorId::Plan)
+    );
 }
 
 /// A second explicit user selection is the only Pager action that can confirm
@@ -256,7 +295,6 @@ fn repeated_behavior_selection_reissues_the_same_target() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
-        agent.session.behavior_mode_pending = None;
     }
 
     let effects = dispatch(
@@ -268,42 +306,37 @@ fn repeated_behavior_selection_reissues_the_same_target() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "normal"
+            [Effect::SwitchBehavior { mode, .. }] if *mode == tools::types::BehaviorId::Normal
         ),
         "the repeated user selection must reach the Shell unchanged: {effects:?}"
     );
     assert_eq!(
-        agent.session.behavior_mode_pending,
-        Some(tools::types::BehaviorId::Normal)
+        agent.session.effective_behavior(),
+        tools::types::BehaviorId::Normal
     );
 }
 
-/// Multi-agent fan-out (sibling for `plan_mode`).
-/// `Action::SetBehaviorMode(Plan)` populates the active agent's
-/// `plan_mode_pending` and never touches other agents in the
-/// registry. The contract differs from `multiline_mode` in that
-/// `plan_mode_pending` is an `Option<bool>` (optimistic stash) —
-/// the non-active agent must stay `None`.
+/// Multi-agent fan-out: a Behavior control belongs to its exact active
+/// session and never changes sibling projections.
 #[test]
 fn set_plan_mode_mutates_only_active_agent_not_others() {
     let mut app = test_app_with_agent();
     insert_placeholder_agent(&mut app, AgentId(1));
-    assert!(app.agents[&AgentId(0)].session.plan_mode_pending.is_none());
-    assert!(app.agents[&AgentId(1)].session.plan_mode_pending.is_none());
+    assert!(!app.agents[&AgentId(0)].session.effective_plan_mode());
+    assert!(!app.agents[&AgentId(1)].session.effective_plan_mode());
 
     let _ = dispatch(
         Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
         &mut app,
     );
 
-    assert_eq!(
-        app.agents[&AgentId(0)].session.plan_mode_pending,
-        Some(true),
-        "active agent must have optimistic plan_mode_pending = Some(true)",
+    assert!(
+        app.agents[&AgentId(0)].session.effective_plan_mode(),
+        "active agent must expose the queued Plan Behavior",
     );
     assert!(
-        app.agents[&AgentId(1)].session.plan_mode_pending.is_none(),
-        "non-active agent must NOT receive the plan_mode pending state",
+        !app.agents[&AgentId(1)].session.effective_plan_mode(),
+        "non-active agent must NOT receive the queued Plan Behavior",
     );
     assert!(
         !app.agents[&AgentId(1)].session.plan_mode_active,
@@ -477,6 +510,11 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
         .unwrap()
         .session
         .plan_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .behavior_mode = tools::types::BehaviorId::Plan;
 
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
@@ -496,7 +534,7 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
         .get_mut(&AgentId(0))
         .unwrap()
         .session
-        .plan_mode_pending = Some(true);
+        .begin_behavior_switch(tools::types::BehaviorId::Plan);
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
@@ -536,6 +574,11 @@ fn set_permission_mode_always_approve_under_plan_uses_plan_aware_toast() {
         .unwrap()
         .session
         .plan_mode_active = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .behavior_mode = tools::types::BehaviorId::Plan;
 
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),

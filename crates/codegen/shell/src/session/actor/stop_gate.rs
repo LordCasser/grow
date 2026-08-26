@@ -369,6 +369,7 @@ mod stop_gate_snapshot_tests {
 
     fn task_snapshot(kind: tools::computer::types::TaskKind) -> tools::types::TaskSnapshot {
         tools::types::TaskSnapshot {
+            goal_definition_revision: None,
             task_id: "task-1".into(),
             command: "sandbox-exec tail -f /var/log/syslog".into(),
             display_command: Some("tail -f /var/log/syslog".into()),

@@ -793,12 +793,12 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
 }
 
 #[tokio::test]
-async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_session() {
+async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_revision() {
     let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
 
     let mut owned = request("goal-owned", false);
     owned.await_to_completion = true;
-    owned.owner = SubagentOwner::goal("goal-epoch");
+    owned.owner = SubagentOwner::goal("goal-epoch", 1);
     let owned_cancel = owned.cancel_token.clone();
     let owned_spawn = tokio::spawn({
         let backend = harness.backend.clone();
@@ -809,9 +809,11 @@ async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_sessi
     assert_eq!(harness.started.recv().await.as_deref(), Some("goal-owned"));
 
     let mut other = request("other-session-goal", false);
-    other.parent_session_id = "other-session".into();
+    // Same session and Goal id, but a newer definition revision: an old
+    // cancellation must not kill this child after an edit race.
+    other.parent_session_id = "parent".into();
     other.await_to_completion = true;
-    other.owner = SubagentOwner::goal("goal-epoch");
+    other.owner = SubagentOwner::goal("goal-epoch", 2);
     let other_spawn = tokio::spawn({
         let backend = harness.backend.clone();
         async move { backend.spawn(other).await }
@@ -832,7 +834,10 @@ async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_sessi
         .sender()
         .send(SubagentEvent::Cancel(SubagentCancelRequest {
             parent_session_id: Some("parent".into()),
-            target: SubagentCancelTarget::GoalId("goal-epoch".into()),
+            target: SubagentCancelTarget::Goal {
+                goal_id: "goal-epoch".into(),
+                definition_revision: 1,
+            },
             respond_to,
         }))
         .unwrap();
@@ -851,7 +856,7 @@ async fn goal_cancel_waits_for_scoped_owner_drain_without_touching_another_sessi
     // captured only `goal-owned`.
     let mut successor = request("goal-successor", false);
     successor.await_to_completion = true;
-    successor.owner = SubagentOwner::goal("goal-epoch");
+    successor.owner = SubagentOwner::goal("goal-epoch", 1);
     let successor_spawn = tokio::spawn({
         let backend = harness.backend.clone();
         async move { backend.spawn(successor).await }

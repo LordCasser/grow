@@ -150,6 +150,7 @@ async fn test_turn_completed_round_trips_through_storage() {
                 origin: "user".into(),
                 turn_kind: "user".into(),
                 goal_id: None,
+                goal_definition_revision: None,
                 stage_id: None,
             }),
             stop_reason: "end_turn".to_string(),

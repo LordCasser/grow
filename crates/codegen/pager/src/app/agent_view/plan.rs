@@ -190,7 +190,6 @@ impl AgentView {
             return InputOutcome::Changed;
         };
         pav.send_abandoned();
-        self.session.plan_mode_pending = Some(false);
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;

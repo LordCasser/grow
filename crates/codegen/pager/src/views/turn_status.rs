@@ -902,6 +902,7 @@ mod tests {
         let theme = Theme::current();
         let cases = [
             (WaitingReason::Model, "Waiting for response…"),
+            (WaitingReason::AgentSwitch, "Switching Agent…"),
             (WaitingReason::Subagent, "Waiting on subagent…"),
             (WaitingReason::task_output(), "Waiting on task output…"),
             (

@@ -467,15 +467,31 @@ impl acp::Agent for MvpAgent {
                 ::diagnostics::session_ctx::log_event(ev);
             });
         }
-        if let Some(model_id) = resolved_custom_model {
-            let _ = crate::timed!(log: "new_session: set_session_model", {
-                crate::agent::handlers::model_switch::apply(
-                    self,
-                    &catalog_transaction,
-                    acp::SetSessionModelRequest::new(session_id.clone(), acp::ModelId::new(model_id)),
-                )
-                .await
-            });
+        let enqueued_custom_model = if let Some(model_id) = resolved_custom_model {
+            Some(crate::timed!(log: "new_session: enqueue_session_model", {
+                self.control_session_handle(&session_id)
+                    .ok_or_else(|| acp::Error::internal_error().data("new session actor missing"))
+                    .and_then(|handle| {
+                        crate::agent::handlers::model_switch::enqueue(
+                            self,
+                            &catalog_transaction,
+                            handle,
+                            acp::SetSessionModelRequest::new(
+                                session_id.clone(),
+                                acp::ModelId::new(model_id),
+                            ),
+                        )
+                    })
+            }))
+        } else {
+            None
+        };
+        drop(catalog_transaction);
+        if let Some(enqueued) = enqueued_custom_model {
+            let _ = match enqueued {
+                Ok(enqueued) => crate::agent::handlers::model_switch::finish(self, enqueued).await,
+                Err(error) => Err(error),
+            };
             tracing::debug!(session_id = %session_id.0, "new_session: set_session_model");
         }
         if let Some(requested) = disallowed_custom {
@@ -1074,10 +1090,13 @@ impl acp::Agent for MvpAgent {
                         handle.cmd_tx.clone(),
                         handle.info.cwd.clone(),
                         handle.chat_state_handle.clone(),
+                        handle.workflow_tracker.clone(),
                     )
                 })
         };
-        if let Some((parent_cmd_tx, _session_cwd, parent_chat_state)) = orphan_parent {
+        if let Some((parent_cmd_tx, _session_cwd, parent_chat_state, workflow_tracker)) =
+            orphan_parent
+        {
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
                     &subagent_projections,
                     !no_replay,
@@ -1087,6 +1106,7 @@ impl acp::Agent for MvpAgent {
                     ),
                     session_id.0.as_ref(),
                     &parent_chat_state,
+                    Some(&workflow_tracker),
                     &self.gateway,
                     Some(&parent_cmd_tx),
                 )
@@ -1099,7 +1119,7 @@ impl acp::Agent for MvpAgent {
             final_model_id = %model_id.0,
             "load_session: resolved final model_id for set_session_model"
         );
-        {
+        let enqueued_restore = {
             let _timer = crate::instrumentation_timer!("session.restore_model");
             let restore_meta = summary
                 .reasoning_effort
@@ -1111,13 +1131,21 @@ impl acp::Agent for MvpAgent {
                     );
                     map
                 });
-            let _ = crate::agent::handlers::model_switch::apply(
-                self,
-                &catalog_transaction,
-                acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
-                        .meta(restore_meta),
-                )
-                .await;
+            self.control_session_handle(&session_id)
+                .ok_or_else(|| acp::Error::internal_error().data("loaded session actor missing"))
+                .and_then(|handle| {
+                    crate::agent::handlers::model_switch::enqueue(
+                        self,
+                        &catalog_transaction,
+                        handle,
+                        acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
+                            .meta(restore_meta),
+                    )
+                })
+        };
+        drop(catalog_transaction);
+        if let Ok(enqueued) = enqueued_restore {
+            let _ = crate::agent::handlers::model_switch::finish(self, enqueued).await;
         }
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
@@ -1195,6 +1223,12 @@ impl acp::Agent for MvpAgent {
             summary.display_title_opt(),
             &model_state,
         );
+        if let Some(agent_name) = summary.agent_name.as_deref() {
+            response_meta_map.insert(
+                "grow/agentName".to_owned(),
+                serde_json::Value::String(agent_name.to_owned()),
+            );
+        }
         // The resident actor may terminate during any of the asynchronous
         // restore work above. Never acknowledge a reconnect that has no live
         // command endpoint at the response boundary.
@@ -1300,6 +1334,7 @@ impl acp::Agent for MvpAgent {
             .borrow()
             .get(arguments.session_id.0.as_ref())
             .cloned();
+        let mut enqueued_recovery = None;
         if let Some(unavailable_model) = latched_model {
             let models = self.models_manager.models();
             let available = self.models_manager.available();
@@ -1324,26 +1359,18 @@ impl acp::Agent for MvpAgent {
                     }),
                     ),
                 );
-                self.model_unavailable_sessions
-                    .borrow_mut()
-                    .remove(arguments.session_id.0.as_ref());
-                if let Err(e) = crate::agent::handlers::model_switch::apply(
+                enqueued_recovery = Some((
+                    restore_model_id.clone(),
+                    crate::agent::handlers::model_switch::enqueue(
                         self,
                         &catalog_transaction,
+                        handle.clone(),
                         acp::SetSessionModelRequest::new(
                             arguments.session_id.clone(),
                             restore_model_id.clone(),
                         ),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        session_id = %arguments.session_id.0,
-                        model_id = %restore_model_id.0,
-                        error = ?e,
-                        "prompt: failed to restore previously-unavailable model; continuing with the session's current model"
-                    );
-                }
+                    ),
+                ));
             } else {
                 tracing::warn!(
                     session_id = %arguments.session_id.0,
@@ -1374,6 +1401,27 @@ impl acp::Agent for MvpAgent {
             }
         }
         drop(catalog_transaction);
+        if let Some((restore_model_id, enqueued)) = enqueued_recovery {
+            let result = match enqueued {
+                Ok(enqueued) => crate::agent::handlers::model_switch::finish(self, enqueued).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(_) => {
+                    self.model_unavailable_sessions
+                        .borrow_mut()
+                        .remove(arguments.session_id.0.as_ref());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %arguments.session_id.0,
+                        model_id = %restore_model_id.0,
+                        error = ?error,
+                        "prompt: failed to restore previously-unavailable model; continuing with the session's current model"
+                    );
+                }
+            }
+        }
         let dispatch_lock = self.dispatch_lock(&arguments.session_id);
         let dispatch_guard = dispatch_lock.lock().await;
         let turn_number = self.allocate_turn_number(&arguments.session_id);
@@ -1646,34 +1694,46 @@ impl acp::Agent for MvpAgent {
         args: acp::SetSessionModeRequest,
     ) -> Result<acp::SetSessionModeResponse, acp::Error> {
         tracing::info!("Received set session mode request {args:?}");
-        let handle = self.session_handle_waiting_for_load(&args.session_id).await;
+        let handle = self
+            .session_handle_waiting_for_load(&args.session_id)
+            .await
+            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         let (tx, rx) = oneshot::channel();
-        if let Some(handle) = handle {
-            let _ = handle
-                .cmd_tx
-                .send(SessionCommand::BehaviorChange {
-                    session_mode: args.mode_id,
-                    responds_to: tx,
-                });
-        }
+        handle
+            .cmd_tx
+            .send(SessionCommand::BehaviorChange {
+                session_mode: args.mode_id,
+                responds_to: tx,
+            })
+            .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
         let outcome = rx
             .await
             .map_err(|_| {
                 acp::Error::internal_error().data("response to set session failed")
-            })?;
+            })??;
         Ok(acp::SetSessionModeResponse::new().meta(outcome.response_meta()))
     }
     async fn set_session_model(
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        // A reconnect load registers itself before taking the catalog lock.
+        // Resolve that race first so this request never holds the lock while
+        // waiting for the load that must acquire it.
+        let handle = self
+            .control_session_handle_waiting_for_load(&args.session_id)
+            .await
+            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         let catalog_transaction = self.model_reload_lock.lock().await;
-        let model = self.resolve_model_id(&args.model_id)?;
-        if !model.info.user_selectable {
-            return Err(
-                acp::Error::invalid_params()
-                    .data("This model isn't allowed by your allowed_models setting."),
-            );
+        let workflow_pinned = handle.workflow_run_id.is_some();
+        if !workflow_pinned {
+            let model = self.resolve_model_id(&args.model_id)?;
+            if !model.info.user_selectable {
+                return Err(
+                    acp::Error::invalid_params()
+                        .data("This model isn't allowed by your allowed_models setting."),
+                );
+            }
         }
         if args
             .meta
@@ -1684,7 +1744,8 @@ impl acp::Agent for MvpAgent {
                 return Err(acp::Error::invalid_params()
                     .data("reasoningEffort must be a canonical string offered by the selected model"));
             };
-            if !self
+            if !workflow_pinned
+                && !self
                 .models_manager
                 .model_offers_reasoning_effort(args.model_id.0.as_ref(), effort)
             {
@@ -1695,8 +1756,14 @@ impl acp::Agent for MvpAgent {
             }
         }
         let session_id = args.session_id.clone();
-        let res =
-            crate::agent::handlers::model_switch::apply(self, &catalog_transaction, args).await;
+        let enqueued = crate::agent::handlers::model_switch::enqueue(
+            self,
+            &catalog_transaction,
+            handle,
+            args,
+        )?;
+        drop(catalog_transaction);
+        let res = crate::agent::handlers::model_switch::finish(self, enqueued).await;
         if res.is_ok()
             && let Some(unavailable) = self
                 .model_unavailable_sessions

@@ -390,6 +390,8 @@ fn stale_epoch_results_are_dropped_after_close_reopen() {
     let effects = dispatch_task_result(
         TaskResult::SessionInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            revision: 1,
             info: Box::new(session_info_response()),
             text: "stale result".to_string(),
             title: Some("stale".to_string()),
@@ -412,6 +414,8 @@ fn stale_epoch_results_are_dropped_after_close_reopen() {
     let _ = dispatch_task_result(
         TaskResult::SessionInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            revision: 2,
             info: Box::new(session_info_response()),
             text: "fresh result".to_string(),
             title: None,
@@ -467,6 +471,8 @@ fn modal_fill_writes_nothing_to_scrollback() {
     dispatch_task_result(
         TaskResult::SessionInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            revision: 1,
             info: Box::new(session_info_response()),
             text: "must not reach scrollback".to_string(),
             title: None,
@@ -502,6 +508,8 @@ fn minimal_mode_commits_scrollback_blocks() {
     dispatch_task_result(
         TaskResult::SessionInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            revision: 0,
             info: Box::new(session_info_response()),
             text: "Session info block".to_string(),
             title: None,

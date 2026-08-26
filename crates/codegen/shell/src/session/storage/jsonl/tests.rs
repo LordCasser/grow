@@ -210,6 +210,7 @@ async fn append_completed_prompt_turn(
         .record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
             id: turn,
             identity: chat_state::TurnIdentity {
+                goal_definition_revision: None,
                 origin: "user".into(),
                 turn_kind: "interactive".into(),
                 goal_id: None,
@@ -1374,6 +1375,42 @@ async fn delete_session_removes_dir_and_is_idempotent() {
         );
     adapter.delete_session(&info).await.expect("second delete must succeed");
 }
+
+#[tokio::test]
+async fn delete_then_recreate_drops_the_old_timeline_prefix_epoch() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut first = chat_state::Timeline::from_events(
+        adapter.read_timeline_events_sync(&info).unwrap(),
+    )
+    .unwrap();
+    let event = first
+        .append(
+            ConversationItem::user("old writer epoch"),
+            chat_state::MessageCause::User,
+        )
+        .unwrap();
+    adapter.append_timeline_event(&info, &event).await.unwrap();
+
+    adapter.delete_session(&info).await.unwrap();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut recreated = chat_state::Timeline::from_events(
+        adapter.read_timeline_events_sync(&info).unwrap(),
+    )
+    .unwrap();
+    let event = recreated
+        .append(
+            ConversationItem::user("new writer epoch"),
+            chat_state::MessageCause::User,
+        )
+        .unwrap();
+    adapter
+        .append_timeline_event(&info, &event)
+        .await
+        .expect("a recreated session must not inherit the deleted ledger prefix");
+}
 #[tokio::test]
 async fn test_grow_session_update_round_trip() {
     use crate::extensions::notification::{
@@ -1462,6 +1499,8 @@ async fn test_subagent_notifications_round_trip() {
             permission_mode: None,
             effective_permission_mode: None,
             model: None,
+            model_state: None,
+            workflow_agent_names: None,
             resumed_from: None,
             workflow_run_id: None,
             goal_id: None,
@@ -1580,6 +1619,8 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             permission_mode: None,
             effective_permission_mode: None,
             model: None,
+            model_state: None,
+            workflow_agent_names: None,
             resumed_from: Some("source-agent-id".to_string()),
             workflow_run_id: None,
             goal_id: None,
@@ -3350,7 +3391,8 @@ async fn malformed_timeline_control_bricks_session_load() {
         .record(chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
             revision: 1,
             snapshot: serde_json::json!({ "broken": true }),
-            model_context: None,
+            retired_context_layers: vec![],
+model_contexts: vec![],
         }))
         .unwrap();
     adapter.append_timeline_event(&info, &event).await.unwrap();

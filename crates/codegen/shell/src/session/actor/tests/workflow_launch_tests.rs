@@ -118,6 +118,9 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
                     ),
                 )
                 .unwrap(),
+                crate::session::workflow::tracker::WorkflowAgentCatalogSource::for_test(
+                    project.path().to_path_buf(),
+                ),
             );
             actor.workflow_manager = Arc::new(tokio::sync::Mutex::new(manager));
             actor

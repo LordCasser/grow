@@ -70,10 +70,7 @@ impl AgentView {
         if self.prompt.take_undo_tip_fire() {
             return Some(Action::ShowUndoTip);
         }
-        let in_plan = self
-            .session
-            .plan_mode_pending
-            .unwrap_or(self.session.plan_mode_active);
+        let in_plan = self.session.effective_plan_mode();
         if self.prompt.take_plan_nudge_fire()
             && !in_plan
             && self.session.state.is_idle()

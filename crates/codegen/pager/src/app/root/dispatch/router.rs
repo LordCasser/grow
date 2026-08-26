@@ -739,27 +739,24 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
-            let Some(agent) = app.agents.get_mut(&id) else {
+            let reconnecting = app.reconnect_pending;
+            let Some(agent) = get_active_agent_mut(app) else {
                 return vec![];
             };
             let Some(session_id) = agent.session.session_id.clone() else {
                 agent.session.deferred_model_switch = Some((model_id, effort));
                 return vec![];
             };
-            agent.session.model_switch_pending = true;
-            vec![Effect::SwitchModel {
-                agent_id: id,
-                session_id,
-                model_id,
-                effort,
-                prev_model_id: None,
-            }]
+            let effects =
+                queue::enqueue_model_control(id, session_id, &mut agent.session, model_id, effort);
+            if reconnecting { vec![] } else { effects }
         }
         Action::SwitchAgent { agent_name } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
-            let Some(agent) = app.agents.get(&id) else {
+            let reconnecting = app.reconnect_pending;
+            let Some(agent) = get_active_agent_mut(app) else {
                 return vec![];
             };
             // Main-session switch: do not gate on `[subagents.toggle]` (that
@@ -768,36 +765,25 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             // discovery (incl. plugin agents) remains SSOT; failures surface
             // via SwitchAgentComplete scrollback.
             let Some(session_id) = agent.session.session_id.clone() else {
-                if let Some(agent) = app.agents.get_mut(&id) {
-                    agent
-                        .scrollback
-                        .push_block(crate::scrollback::block::RenderBlock::system(
-                            "Agent can be changed after the session connects.",
-                        ));
-                } else {
-                    app.show_toast("Agent can be changed after the session connects.");
-                }
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Agent can be changed after the session connects.",
+                    ));
                 return vec![];
             };
-            // Mark local intent before the ACP round-trip so complete can
-            // always emit feedback even if AgentChanged updates the name first.
-            if let Some(agent) = app.agents.get_mut(&id) {
-                agent.session.begin_agent_switch(agent_name.clone());
-            }
-            vec![Effect::SwitchAgent {
-                agent_id: id,
-                session_id,
-                agent_name,
-            }]
+            let effects =
+                queue::enqueue_agent_control(id, session_id, &mut agent.session, agent_name);
+            if reconnecting { vec![] } else { effects }
         }
         Action::OpenCommandPicker {
             command,
             args_query,
         } => {
-            let ActiveView::Agent(id) = app.active_view else {
+            let ActiveView::Agent(_) = app.active_view else {
                 return vec![];
             };
-            if let Some(agent) = app.agents.get_mut(&id) {
+            if let Some(agent) = get_active_agent_mut(app) {
                 agent.open_command_picker(&command, &args_query);
             }
             vec![]

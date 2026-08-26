@@ -23,6 +23,7 @@ pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
                 origin: "test".into(),
                 turn_kind: "internal".into(),
                 goal_id: None,
+                goal_definition_revision: None,
                 stage_id: None,
             },
             model_id: "test".into(),
@@ -112,6 +113,7 @@ pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) 
                     origin: "user".into(),
                     turn_kind: "internal".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "test".into(),
@@ -310,7 +312,8 @@ pub(crate) async fn create_test_actor_ex(
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
         pending_manual_compact: None,
-        pending_model_reload: None,
+        pending_step_controls: VecDeque::new(),
+        terminal_preemption_pending: false,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
         notifications_suppressed: false,
@@ -346,6 +349,7 @@ pub(crate) async fn create_test_actor_ex(
     chat_state_handle.record_provider_context_anchor(total_tokens);
     let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (goal_usage_tx, _goal_usage_rx) = tokio::sync::mpsc::unbounded_channel();
     let test_session_dir_guard = tempfile::Builder::new()
         .prefix(".grow-test-session-")
         .tempdir_in(cwd.as_path())
@@ -380,6 +384,7 @@ pub(crate) async fn create_test_actor_ex(
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,
+        step_control_gate: TokioMutex::new(()),
         notifications: NotificationSender {
             gateway: GatewaySender::new(gateway_tx),
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -428,7 +433,7 @@ pub(crate) async fn create_test_actor_ex(
             pre_prune_token_budget: std::cell::Cell::new(None),
             cancel: Default::default(),
         },
-        todo_gate: Default::default(),
+        sideband_cancel: tokio_util::sync::CancellationToken::new(),
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
             is_flushing: std::sync::atomic::AtomicBool::new(false),
@@ -469,6 +474,10 @@ pub(crate) async fn create_test_actor_ex(
         origin_client: None,
         signals_handle: Default::default(),
         agent: std::cell::RefCell::new(test_agent_default().await),
+        agent_profile: crate::session::handle::SessionAgentProfile::new(
+            "grow-build".into(),
+            Default::default(),
+        ),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
@@ -497,6 +506,10 @@ pub(crate) async fn create_test_actor_ex(
         goal_tracker: Arc::new(parking_lot::Mutex::new(
             crate::session::goal_tracker::GoalTracker::new(),
         )),
+        goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(
+            goal_usage_tx,
+            None,
+        ),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
@@ -516,7 +529,7 @@ pub(crate) async fn create_test_actor_ex(
             vcs_kind: workspace::session::git::VcsKind::Git,
             load_errors: std::cell::RefCell::new(Vec::new()),
         },
-        plugin_registry: std::cell::RefCell::new(None),
+        plugin_registry: std::sync::Arc::new(parking_lot::RwLock::new(None)),
         plugin_registry_handle: None,
         events,
         current_turn_number: std::cell::Cell::new(0),
@@ -530,9 +543,14 @@ pub(crate) async fn create_test_actor_ex(
         image_description_model: parking_lot::RwLock::new(None),
         session_title_route: std::cell::RefCell::new(None),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
-        subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
     };
+    actor
+        .agent
+        .borrow_mut()
+        .activate_resource_domain(&actor.rebuild_spec.resource_domain)
+        .await
+        .expect("test actor resource domain must be active before Agent rebuilds");
     (actor, event_rx)
 }
 #[cfg(test)]
@@ -629,11 +647,27 @@ pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
         origin: crate::session::PromptOrigin::User,
         turn_kind: crate::session::TurnKind::User,
         turn_start_ms: 0,
+        usage_epoch: 0,
         handle: tokio::task::spawn_local(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         })
         .abort_handle(),
+        steering_open: true,
     }
+}
+
+/// Install the foreground ownership half that production establishes before
+/// `run_task` invokes `handle_prompt`. Direct turn tests bypass the admission
+/// queue, but terminal settlement must still exercise the real ownership
+/// transfer instead of a test-only fallback in production code.
+#[cfg(test)]
+pub(crate) async fn install_test_foreground(actor: &SessionActor, prompt_id: &str) {
+    let mut state = actor.state.lock().await;
+    assert!(
+        state.foreground.is_idle(),
+        "test foreground is already owned"
+    );
+    state.foreground = ForegroundState::RegularTurn(running_task_stub(prompt_id));
 }
 #[cfg(test)]
 pub(crate) async fn build_actor() -> (

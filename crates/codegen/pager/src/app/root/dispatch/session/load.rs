@@ -10,7 +10,10 @@ use crate::app::root::dispatch::ctx::{
 };
 use crate::app::root::dispatch::modes::inherit_permission_mode;
 use crate::app::root::dispatch::prompt::defer_to_open_reload_window;
-use crate::app::root::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
+use crate::app::root::dispatch::queue::{
+    enqueue_behavior_control, enqueue_model_control, maybe_drain_queue, next_control_effect,
+    note_peek_page_flip,
+};
 use crate::app::root::dispatch::status::notify_session_ready;
 use crate::app::root::dispatch::transcript::extensions_modal_tab_fetches;
 use crate::app::session::{AgentCommand, AgentId, AgentSession};
@@ -18,6 +21,63 @@ use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
+
+/// Reconcile and reissue the exact-session control FIFO after a replacement
+/// ACP transport has restored authoritative state. Descendants retain their
+/// own tokens and session ids; `agent_id` is the owning root used for result
+/// routing and page-flip effects.
+pub(crate) fn reconcile_controls_after_reconnect(
+    agent_id: AgentId,
+    agent: &mut AgentView,
+    cli_effort_token: Option<&str>,
+) -> Vec<Effect> {
+    fn visit(
+        agent_id: AgentId,
+        view: &mut AgentView,
+        cli_effort_token: Option<&str>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(session_id) = view.session.session_id.clone() else {
+            return;
+        };
+        let agent_name = view.session.agent_name().map(str::to_owned);
+        view.session
+            .reconcile_rearmed_control_prefix(agent_name.as_deref());
+
+        if let Some((model_id, effort)) =
+            super::lifecycle::apply_deferred_model_switch(view, cli_effort_token)
+            && !view.session.has_pending_model_control(&model_id, effort)
+        {
+            let _ = enqueue_model_control(
+                agent_id,
+                session_id.clone(),
+                &mut view.session,
+                model_id,
+                effort,
+            );
+        }
+        if let Some(mode) = view.session.deferred_session_mode {
+            if !view.session.has_pending_behavior_control(mode) {
+                // A matching loaded mode does not prove that the Shell's
+                // interrupt-confirmation latch is clear. Keep the prompt
+                // parked and reissue the exact Behavior selection; only its
+                // authoritative applied update may release admission.
+                let _ =
+                    enqueue_behavior_control(agent_id, session_id.clone(), &mut view.session, mode);
+            }
+        }
+        if let Some(effect) = next_control_effect(agent_id, session_id, &view.session) {
+            effects.push(effect);
+        }
+        for child in view.subagent_views.values_mut() {
+            visit(agent_id, child, cli_effort_token, effects);
+        }
+    }
+
+    let mut effects = Vec::new();
+    visit(agent_id, agent, cli_effort_token, &mut effects);
+    effects
+}
 /// Create a placeholder agent and load an existing session by ID.
 ///
 /// `session_cwd` overrides the CWD in the `LoadSessionRequest`. This is needed
@@ -516,13 +576,8 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             agent.scrollback.remove_entry(placeholder_id);
         }
         if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
+            agent.session.models = Some(m).into();
         }
-        let deferred = crate::app::root::dispatch::session::lifecycle::apply_deferred_model_switch(
-            agent,
-            app.cli_effort_token.as_deref(),
-        );
         match (code_restored, restore_summary.as_deref()) {
             (true, Some(s)) => {
                 agent
@@ -565,6 +620,8 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
                 child.scrollback.finish_all_running();
             }
         }
+        let control_effects =
+            reconcile_controls_after_reconnect(agent_id, agent, app.cli_effort_token.as_deref());
         let mut effects = Vec::new();
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
@@ -584,9 +641,11 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             cwd,
             session_id: hydrate_sid.to_string(),
         });
+        let revision = agent.session.begin_agent_metadata_read();
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: hydrate_sid.clone(),
+            revision,
         });
         if app.plugin_cta_enabled {
             effects.push(Effect::FetchPluginCtaCatalog {
@@ -594,16 +653,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
                 session_id: hydrate_sid.clone(),
             });
         }
-        if let Some((model_id, effort)) = deferred {
-            agent.session.model_switch_pending = true;
-            effects.push(Effect::SwitchModel {
-                agent_id,
-                session_id: hydrate_sid.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
-            });
-        }
+        effects.extend(control_effects);
         if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
@@ -620,7 +670,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         notify_session_ready(&app.notification_service, agent);
         crate::memory_release::release_retained_memory_with("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
-        crate::app::subagent::restore_descendant_lifecycle(app, agent_id);
+        crate::app::subagent::restore_descendant_state(app, agent_id);
         return effects;
     }
     vec![]

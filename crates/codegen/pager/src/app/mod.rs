@@ -607,7 +607,6 @@ pub async fn run(
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
         no_memory: args.no_memory,
-        todo_gate: args.todo_gate,
         laziness_debug_log: None,
         client_identifier: args.client_identifier.clone(),
         hunk_tracker_mode,

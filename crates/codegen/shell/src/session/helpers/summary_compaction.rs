@@ -66,6 +66,7 @@ pub(crate) struct ShellCompactionSampler {
     sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
+    image_input_unsupported: std::sync::atomic::AtomicBool,
 }
 
 impl ShellCompactionSampler {
@@ -90,12 +91,18 @@ impl ShellCompactionSampler {
             sideband,
             sideband_feedback,
             last_success: Mutex::new(None),
+            image_input_unsupported: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Take the [`CompactOutput`] of the most recent successful sample, if any.
     pub(crate) fn take_last_success(&self) -> Option<CompactOutput> {
         self.last_success.lock().unwrap().take()
+    }
+
+    pub(crate) fn take_image_input_unsupported(&self) -> bool {
+        self.image_input_unsupported
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 }
 
@@ -124,23 +131,59 @@ impl CompactionSampler for ShellCompactionSampler {
             .attempt_all_sources(&audit_request, self.client.api_backend(), feedback)
             .await
             .map_err(sideband_error_to_sample_error)?;
+        let observed_usage = std::sync::Arc::new(Mutex::new(None));
+        let usage_slot = std::sync::Arc::clone(&observed_usage);
+        let usage_observer: crate::session::helpers::session_compact::CompactUsageObserver =
+            std::sync::Arc::new(move |usage| {
+                let mut slot = usage_slot.lock().unwrap();
+                debug_assert!(slot.is_none(), "compaction usage settled more than once");
+                *slot = Some(usage);
+            });
 
-        match generate_session_compact(
+        let provider = generate_session_compact(
             request_surface,
             self.client.clone(),
             &self.sampling_config,
             self.idle_timeout,
             self.wall_clock_budget_secs,
             &self.cancel,
-        )
-        .await
-        {
+            usage_observer,
+        );
+        let sample = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(CompactFailure::Cancelled),
+            result = async {
+                self.sideband.lock().await.run_provider(provider).await
+            } => result.map_err(sideband_error_to_sample_error)?,
+        };
+        // `generate_session_compact` drops its exactly-once meter before it
+        // returns. Settle that exact provider attempt through the lifecycle
+        // root before the shared summary engine can issue a retry. Otherwise
+        // a transient/degenerate retry can overtake the durable Goal budget
+        // transition produced by the preceding response.
+        let usage = observed_usage.lock().unwrap().take().unwrap_or(None);
+        let tokens = usage.map(|usage| {
+            let uncached = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
+            i64::try_from(uncached.saturating_add(usage.output_tokens)).unwrap_or(i64::MAX)
+        });
+        self.sideband
+            .lock()
+            .await
+            .settle_goal_attempt(tokens)
+            .await
+            .map_err(sideband_error_to_sample_error)?;
+
+        match sample {
             Ok(output) => {
                 let response = output.content.clone();
                 *self.last_success.lock().unwrap() = Some(output);
                 Ok(LlmCompactionOutput { response })
             }
             Err(failure) => {
+                if matches!(&failure, CompactFailure::ImageInputUnsupported(_)) {
+                    self.image_input_unsupported
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
                 let error = compact_failure_to_sample_error(failure);
                 *self.sideband_feedback.lock().unwrap() = Some(error.to_string());
                 Err(error)
@@ -162,6 +205,7 @@ impl CompactionSampler for ShellCompactionSampler {
 fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleError {
     let (deterministic, err) = match failure {
         CompactFailure::Deterministic(err) => (true, err),
+        CompactFailure::ImageInputUnsupported(err) => (true, err),
         CompactFailure::Transient(err) => (false, err),
         CompactFailure::Cancelled => (true, CompactFailure::cancelled_error()),
     };
@@ -181,6 +225,10 @@ fn sideband_error_to_sample_error(error: SidebandRunError) -> CompactionSampleEr
             )
         }
         SidebandRunError::Invalid(error) => CompactionSampleError::Deterministic(error.to_string()),
+        SidebandRunError::Cancelled => {
+            CompactionSampleError::Deterministic("sideband persistence was cancelled".into())
+        }
+        SidebandRunError::Admission(error) => CompactionSampleError::Deterministic(error),
         error @ (SidebandRunError::Parent(_)
         | SidebandRunError::Persistence(_)
         | SidebandRunError::InterruptedAppendRecovered) => {

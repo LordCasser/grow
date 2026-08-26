@@ -135,6 +135,14 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
     },
 
+    /// Atomically close the one open compaction before an in-process Stop may
+    /// close its Step/Turn. A fully committed Summary+Replacement becomes
+    /// Completed; every earlier phase becomes Failed.
+    SettleOpenCompactionDurably {
+        reason: String,
+        reply: oneshot::Sender<Result<Option<crate::TimelineEvent>, TimelineWriteError>>,
+    },
+
     /// Persist the exact user-message event, then accept it into Timeline.
     PushUserMessageDurably {
         item: ConversationItem,

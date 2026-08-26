@@ -231,7 +231,7 @@ impl SessionActor {
         self.queue_auto_promoted_follow_up(
             text.clone(),
             attachments,
-            AutoPromotedRequeue {
+            ResidualInterjectionRequeue {
                 prompt_id: prompt_id.to_string(),
                 origin,
                 turn_kind,
@@ -544,8 +544,17 @@ impl SessionActor {
                     })
                     .collect::<Vec<_>>();
                 let image_count = attachments.len() as u32;
+                let requeue = ResidualInterjectionRequeue {
+                    prompt_id: item.prompt_id.clone(),
+                    origin: item.origin.clone(),
+                    turn_kind: item.turn_kind,
+                    client_identifier: item.client_identifier.clone(),
+                    screen_mode: item.screen_mode.clone(),
+                    verbatim: item.verbatim,
+                    json_schema: item.json_schema.clone(),
+                };
                 Self::respond_removed_prompt(item.respond_to);
-                self.queue_mid_turn_interjection(text.clone(), attachments);
+                self.queue_auto_promoted_follow_up(text.clone(), attachments, requeue);
                 self.broadcast_interjection(&text, Some(id));
                 self.events
                     .emit(crate::session::events::Event::Interjected {

@@ -4,44 +4,101 @@ use serde::Deserialize;
 /// Handle `grow/models/update` — model list changed (etag-triggered refresh).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
-        use crate::acp::model_state::ModelState;
-        let new_models = ModelState::from(Some(model_state));
-        tracing::info!(
-            count = new_models.available.len(),
-            "models updated via grow/models/update"
-        );
-
-        let shell_fallback_current = new_models.current.clone();
-
-        // Refresh the new-session template catalog without importing the active
-        // session's transient model selection into the persistent default.
-        let mut app_models = app.models.clone();
-        app_models.update_catalog(new_models.available.clone(), new_models.current.clone());
-        app.models = app_models;
-
-        for agent in app.agents.values_mut() {
-            // Log when an update drops the agent's active model — this is the
-            // moment the status bar visibly "switches model mid-conversation"
-            // (the agent falls back to the shell's current model below).
-            if let Some(ref current) = agent.session.models.current
-                && !new_models.available.contains_key(current)
-            {
-                tracing::warn!(
-                    current_model = %current.0,
-                    fallback = ?shell_fallback_current.as_ref().map(|m| m.0.as_ref()),
-                    available_count = new_models.available.len(),
-                    "models update removed this agent's current model; falling back"
-                );
-            }
-            agent
-                .session
-                .models
-                .update_catalog(new_models.available.clone(), shell_fallback_current.clone());
-        }
-        true
+        apply_models_state_update(model_state, app)
     } else {
         tracing::warn!("Failed to parse grow/models/update");
         false
+    }
+}
+
+pub(crate) fn apply_models_state_update(
+    model_state: acp::SessionModelState,
+    app: &mut AppView,
+) -> bool {
+    use crate::acp::model_state::ModelState;
+    let new_models = ModelState::from(Some(model_state));
+    tracing::info!(
+        count = new_models.available.len(),
+        "models updated from authoritative process catalog"
+    );
+
+    let shell_fallback_current = new_models.current.clone();
+    // This is the process-owned template for future sessions, not a live
+    // session selection. Always adopt the Shell's published default even when
+    // the previous default remains in the catalog; concrete sessions below
+    // independently preserve their own current model.
+    app.models = new_models.clone();
+
+    for agent in app.agents.values_mut() {
+        update_model_catalog_recursively(
+            agent,
+            &new_models.available,
+            shell_fallback_current.as_ref(),
+        );
+        retry_authoritative_controls_recursively(agent);
+        super::sync_all_subagent_control_projections(agent);
+    }
+    true
+}
+
+/// A ModelChanged event can legitimately precede the catalog generation that
+/// defines its model. Keep the authoritative value on the concrete session
+/// and retry it after every catalog publication; dropping it here would leave
+/// the selector permanently behind the Shell until another control event.
+fn retry_authoritative_controls_recursively(agent: &mut crate::app::agent_view::AgentView) -> bool {
+    let session_changed = if agent.session.controls_pending() {
+        false
+    } else if let Some(session_id) = agent.session.session_id.clone() {
+        super::apply_deferred_authoritative_controls(agent, session_id.0.as_ref())
+    } else {
+        false
+    };
+    let child_changed = agent
+        .subagent_views
+        .values_mut()
+        .fold(false, |changed, child| {
+            retry_authoritative_controls_recursively(child) || changed
+        });
+    session_changed || child_changed
+}
+
+/// Keep every concrete session view on the current catalog. A subagent has its
+/// own model/effort selection and may be the active view, so updating only the
+/// root's catalog makes a later `ModelChanged` impossible to resolve there.
+fn update_model_catalog_recursively(
+    agent: &mut crate::app::agent_view::AgentView,
+    available: &indexmap::IndexMap<acp::ModelId, acp::ModelInfo>,
+    fallback_current: Option<&acp::ModelId>,
+) {
+    if let Some(current) = agent.session.models.current.as_ref()
+        && !available.contains_key(current)
+    {
+        tracing::warn!(
+            current_model = %current.0,
+            fallback = ?fallback_current.map(|m| m.0.as_ref()),
+            available_count = available.len(),
+            "models update removed this session's current model; falling back"
+        );
+    }
+    agent
+        .session
+        .models
+        .update_catalog(available.clone(), fallback_current.cloned());
+    for (child_session_id, child) in &mut agent.subagent_views {
+        // Workflow Runs own an immutable runtime route. Shell deliberately
+        // leaves those child catalogs pinned, so mirroring a process-wide
+        // catalog publication into the Pager would invent a fallback model
+        // that the child never adopted. Descendants share the same frozen
+        // route and are skipped with their owner.
+        if agent
+            .session
+            .subagent_sessions
+            .get(child_session_id)
+            .is_some_and(|info| info.workflow_run_id.is_some())
+        {
+            continue;
+        }
+        update_model_catalog_recursively(child, available, fallback_current);
     }
 }
 

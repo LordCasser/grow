@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 9;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 10;
 
 const REQUIRED_CONSECUTIVE_BLOCKED_TURNS: u8 = 3;
 
@@ -77,10 +77,14 @@ pub struct GoalState {
     pub status: GoalStatus,
     pub token_budget: Option<i64>,
     /// Durable cumulative Goal charge. This is model consumption, not the
-    /// current provider context length: uncached input plus output for each
-    /// main-Agent call, plus acknowledged usage folds from Goal-owned
-    /// subagents.
+    /// current provider context length: uncached input plus output for every
+    /// main-loop or sideband model call in the session task tree while the
+    /// Goal usage window is Active.
     pub tokens_used: i64,
+    /// At least one provider attempt admitted while this Goal was active did
+    /// not return usage. `tokens_used` is then only a durable lower bound and
+    /// automatic continuation remains fail-closed.
+    pub usage_incomplete: bool,
     #[serde(default)]
     pub elapsed_ms: u64,
     pub created_at: String,
@@ -91,7 +95,7 @@ pub struct GoalState {
     pub blocked_audit: Option<GoalBlockedAudit>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GoalTracker {
     goal: Option<GoalState>,
     active_since: Option<Instant>,
@@ -196,6 +200,7 @@ impl GoalTracker {
             status: GoalStatus::Active,
             token_budget,
             tokens_used: 0,
+            usage_incomplete: false,
             elapsed_ms: 0,
             created_at: created_at.clone(),
             updated_at: created_at,
@@ -219,6 +224,7 @@ impl GoalTracker {
             return false;
         };
         let next_status = match goal.status {
+            _ if goal.usage_incomplete => GoalStatus::Paused,
             GoalStatus::Paused | GoalStatus::Blocked => goal.status,
             GoalStatus::Active | GoalStatus::BudgetLimited | GoalStatus::Complete => {
                 GoalStatus::Active
@@ -273,7 +279,12 @@ impl GoalTracker {
     /// Returns the current consecutive count; only the third consecutive turn
     /// transitions the Goal to Blocked. Repeated calls in one turn are not a
     /// substitute for three independent continuation audits.
-    pub fn report_blocked(&mut self, blocker: String, prompt_index: u64) -> Result<u8, String> {
+    pub fn report_blocked(
+        &mut self,
+        blocker: String,
+        prompt_index: u64,
+        previous_goal_turn_prompt_index: Option<u64>,
+    ) -> Result<u8, String> {
         let blocker = blocker.split_whitespace().collect::<Vec<_>>().join(" ");
         if blocker.is_empty() {
             return Err("A concrete blocker is required when reporting a blocked Goal.".into());
@@ -296,7 +307,7 @@ impl GoalTracker {
             .as_ref()
             .filter(|audit| {
                 audit.blocker == blocker
-                    && audit.last_prompt_index.checked_add(1) == Some(prompt_index)
+                    && previous_goal_turn_prompt_index == Some(audit.last_prompt_index)
             })
             .map_or(1, |audit| audit.consecutive_turns.saturating_add(1));
         if consecutive_turns < REQUIRED_CONSECUTIVE_BLOCKED_TURNS {
@@ -338,7 +349,7 @@ impl GoalTracker {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if !goal.status.can_restart() {
+        if !goal.status.can_restart() || goal.usage_incomplete {
             return false;
         }
         goal.status = GoalStatus::Active;
@@ -437,12 +448,11 @@ impl GoalTracker {
         )
     }
 
-    /// Charge one main-Agent model call to the immutable owner captured when
-    /// its turn was admitted. A lifecycle tool may stop the Goal before the
-    /// provider response is settled; owner identity, not live status, decides
-    /// attribution. Definition revisions invalidate stale continuation text,
-    /// while the stable Goal identity keeps already-admitted usage chargeable.
-    pub fn account_model_tokens(&mut self, goal_id: &str, tokens: i64) -> bool {
+    /// Charge one model call captured by the process-local Active window. The
+    /// stable Goal id lets an already-captured charge land after the lifecycle
+    /// transition that closed that window, without charging calls settled
+    /// during the stopped interval.
+    pub fn account_tokens(&mut self, goal_id: &str, tokens: i64) -> bool {
         if tokens <= 0 {
             return false;
         }
@@ -456,17 +466,42 @@ impl GoalTracker {
         true
     }
 
-    pub fn settle_subagent_tokens(&mut self, goal_id: &str, tokens: i64) -> bool {
-        if tokens <= 0 {
-            return false;
-        }
-        let Some(goal) = self.goal.as_mut() else {
+    /// Record that a captured provider attempt was unmetered. The active Step
+    /// owns the later Paused lifecycle transition; separating the evidence
+    /// from that terminal keeps its Control fact after StepEnded.
+    pub fn mark_usage_incomplete(&mut self, goal_id: &str) -> bool {
+        let Some(goal) = self.goal.as_ref() else {
             return false;
         };
-        if goal.goal_id != goal_id {
+        if goal.goal_id != goal_id || goal.usage_incomplete {
             return false;
         }
-        goal.tokens_used = goal.tokens_used.saturating_add(tokens);
+        let goal = self.goal.as_mut().expect("Goal existed above");
+        goal.usage_incomplete = true;
+        goal.updated_at = now();
+        true
+    }
+
+    /// Finalize previously-recorded incomplete usage at a safe turn/step
+    /// boundary. An exact budget can no longer be proven, so automatic
+    /// continuation remains stopped until the Goal is cleared and recreated.
+    pub fn pause_for_incomplete_usage(&mut self, goal_id: &str) -> bool {
+        let Some(goal) = self.goal.as_ref() else {
+            return false;
+        };
+        if goal.goal_id != goal_id || !goal.usage_incomplete || goal.status == GoalStatus::Paused {
+            return false;
+        }
+        self.account_elapsed();
+        let goal = self.goal.as_mut().expect("Goal existed above");
+        goal.status = GoalStatus::Paused;
+        goal.status_message = Some(
+            "Goal paused because a provider attempt did not report token usage; usage is a lower bound. Clear and recreate the Goal to resume with an exact budget."
+                .into(),
+        );
+        goal.blocked_audit = None;
+        goal.updated_at = now();
+        self.active_since = None;
         true
     }
 
@@ -588,8 +623,8 @@ mod tests {
         };
         let charge = model_usage_goal_tokens(&usage);
         assert_eq!(charge, 380);
-        assert!(tracker.account_model_tokens("g1", charge));
-        assert!(tracker.account_model_tokens("g1", 20));
+        assert!(tracker.account_tokens("g1", charge));
+        assert!(tracker.account_tokens("g1", 20));
         assert_eq!(tracker.tokens_used(), 400);
     }
 
@@ -597,7 +632,7 @@ mod tests {
     fn admitted_owner_is_charged_even_if_goal_stops_before_settlement() {
         let mut tracker = tracker();
         assert!(tracker.pause(GoalPauseReason::User));
-        assert!(tracker.account_model_tokens("g1", 50));
+        assert!(tracker.account_tokens("g1", 50));
         assert_eq!(tracker.tokens_used(), 50);
     }
 
@@ -606,7 +641,7 @@ mod tests {
         let mut tracker = tracker();
         assert!(tracker.pause(GoalPauseReason::User));
         assert!(tracker.restart());
-        assert!(tracker.account_model_tokens("g1", 50));
+        assert!(tracker.account_tokens("g1", 50));
         assert_eq!(tracker.tokens_used(), 50);
     }
 
@@ -616,14 +651,14 @@ mod tests {
         assert!(tracker.revise_goal("ship safely".into(), Some(200)));
         assert_eq!(tracker.snapshot().unwrap().goal_id, "g1");
         assert_eq!(tracker.snapshot().unwrap().definition_revision, 2);
-        assert!(tracker.account_model_tokens("g1", 50));
+        assert!(tracker.account_tokens("g1", 50));
         assert_eq!(tracker.tokens_used(), 50);
     }
 
     #[test]
     fn turn_error_pauses_instead_of_claiming_a_genuine_impasse() {
         let mut tracker = tracker();
-        assert_eq!(tracker.report_blocked("waiting".into(), 1), Ok(1));
+        assert_eq!(tracker.report_blocked("waiting".into(), 1, None), Ok(1));
         assert!(tracker.pause(GoalPauseReason::TurnError));
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
         assert!(tracker.snapshot().unwrap().blocked_audit.is_none());
@@ -636,20 +671,26 @@ mod tests {
     #[test]
     fn blocked_requires_same_impasse_on_three_consecutive_turns() {
         let mut tracker = tracker();
-        assert_eq!(tracker.report_blocked("waiting on user".into(), 10), Ok(1));
-        assert_eq!(tracker.status(), Some(GoalStatus::Active));
-        assert_eq!(tracker.report_blocked("waiting on user".into(), 11), Ok(2));
+        assert_eq!(
+            tracker.report_blocked("waiting on user".into(), 10, None),
+            Ok(1)
+        );
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
         assert_eq!(
-            tracker.report_blocked("different blocker".into(), 12),
+            tracker.report_blocked("waiting on user".into(), 11, Some(10)),
+            Ok(2)
+        );
+        assert_eq!(tracker.status(), Some(GoalStatus::Active));
+        assert_eq!(
+            tracker.report_blocked("different blocker".into(), 12, Some(11)),
             Ok(1)
         );
         assert_eq!(
-            tracker.report_blocked("different blocker".into(), 13),
+            tracker.report_blocked("different blocker".into(), 13, Some(12)),
             Ok(2)
         );
         assert_eq!(
-            tracker.report_blocked("different blocker".into(), 14),
+            tracker.report_blocked("different blocker".into(), 14, Some(13)),
             Ok(3)
         );
         assert_eq!(tracker.status(), Some(GoalStatus::Blocked));
@@ -662,8 +703,15 @@ mod tests {
     #[test]
     fn one_turn_cannot_increment_the_blocked_audit_twice() {
         let mut tracker = tracker();
-        assert_eq!(tracker.report_blocked("external outage".into(), 7), Ok(1));
-        assert!(tracker.report_blocked("external outage".into(), 7).is_err());
+        assert_eq!(
+            tracker.report_blocked("external outage".into(), 7, None),
+            Ok(1)
+        );
+        assert!(
+            tracker
+                .report_blocked("external outage".into(), 7, None)
+                .is_err()
+        );
         assert_eq!(
             tracker
                 .snapshot()
@@ -674,5 +722,12 @@ mod tests {
                 .consecutive_turns,
             1
         );
+    }
+
+    #[test]
+    fn non_goal_prompt_index_gaps_do_not_break_a_blocked_audit() {
+        let mut tracker = tracker();
+        assert_eq!(tracker.report_blocked("outage".into(), 10, None), Ok(1));
+        assert_eq!(tracker.report_blocked("outage".into(), 14, Some(10)), Ok(2));
     }
 }

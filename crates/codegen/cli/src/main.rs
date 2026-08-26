@@ -782,7 +782,6 @@ async fn run_agent_command(
         cli_session_title_model: None,
         cli_experimental_memory: false,
         cli_no_memory: false,
-        todo_gate: false,
         laziness_debug_log: None,
     });
     let agent_memory_config = agent_config.memory_config.clone();

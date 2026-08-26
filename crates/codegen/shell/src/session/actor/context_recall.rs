@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tools::implementations::context_recall::{ContextRecallBackend, ContextRecallOutput};
 
 use crate::session::SessionActor;
-use crate::session::actor::sideband::{SidebandSource, sideband_finish, sideband_usage};
+use crate::session::actor::sideband::{SidebandSource, sideband_finish};
 
 const CONTEXT_RECALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ARCHIVE_ITEM_CHARS: usize = 12_000;
@@ -352,10 +352,10 @@ impl SessionActor {
                 }
                 response = tokio::time::timeout(
                     CONTEXT_RECALL_TIMEOUT,
-                    sampling_client.conversation_collect(request),
+                    sideband.run_provider(sampling_client.conversation_collect(request)),
                 ) => match response {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(error)) => {
+                    Ok(Ok(Ok(response))) => response,
+                    Ok(Ok(Err(error))) => {
                         let message = error.to_string();
                         sideband
                             .fail(chat_state::SidebandOutcome::Failed, message.clone())
@@ -363,6 +363,7 @@ impl SessionActor {
                             .map_err(|record_error| record_error.to_string())?;
                         return Err(message);
                     }
+                    Ok(Err(error)) => return Err(error.to_string()),
                     Err(_) => {
                         let message = "context recall sideband timed out".to_string();
                         sideband
@@ -373,6 +374,10 @@ impl SessionActor {
                     }
                 }
             };
+            let usage = self
+                .settle_sideband_response_usage(&mut sideband, &response)
+                .await
+                .map_err(|error| error.to_string())?;
             if cancellation.is_cancelled() {
                 let message = "context recall sideband was cancelled".to_string();
                 sideband
@@ -444,7 +449,7 @@ impl SessionActor {
                 .complete(
                     raw_output,
                     Some(structured_output),
-                    sideband_usage(&response),
+                    usage,
                     sideband_finish(&response),
                     evidence_refs,
                 )

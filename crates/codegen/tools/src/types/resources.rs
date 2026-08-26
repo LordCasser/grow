@@ -196,6 +196,27 @@ impl Resources {
     pub fn into_shared(self) -> SharedResources {
         Arc::new(Mutex::new(self))
     }
+
+    /// Reconfigure one session's live resource domain for a replacement
+    /// toolset while preserving every registered runtime `State<T>` value.
+    ///
+    /// Agent selection may change tool parameters and ephemeral dependencies,
+    /// so those come from `replacement`. Runtime state (Todo, Scheduler,
+    /// image capability facts, tool histories, and similar registered state)
+    /// belongs to the session and must retain its in-memory value instead of
+    /// round-tripping through an eventually-consistent file snapshot.
+    pub(crate) fn reconfigure_from(&mut self, mut replacement: Resources) {
+        for entry in replacement
+            .entries
+            .iter()
+            .filter(|entry| entry.category == ResourceCategory::State)
+        {
+            if let Some(value) = self.data.remove(&entry.type_id) {
+                replacement.data.insert(entry.type_id, value);
+            }
+        }
+        *self = replacement;
+    }
     /// Get a shared reference to a stored value.
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.data
@@ -995,6 +1016,42 @@ mod tests {
             TypeId::of::<Params<EditConfig>>(),
             TypeId::of::<State<EditConfig>>()
         );
+    }
+    #[test]
+    fn reconfigure_preserves_live_state_and_replaces_params_and_ephemeral_dependencies() {
+        let mut live = Resources::new();
+        live.register_state::<TodoData>();
+        live.register_params::<EditConfig>();
+        live.insert(State(TodoData {
+            items: vec!["live item".into()],
+        }));
+        live.insert(Params(EditConfig::default()));
+        live.insert("old dependency".to_string());
+
+        let mut replacement = Resources::new();
+        replacement.register_state::<TodoData>();
+        replacement.register_params::<EditConfig>();
+        replacement.insert(State(TodoData {
+            items: vec!["stale disk item".into()],
+        }));
+        replacement.insert(Params(EditConfig {
+            skip_read_before_edit: true,
+            max_file_size: Some(42),
+        }));
+        replacement.insert("new dependency".to_string());
+
+        live.reconfigure_from(replacement);
+
+        assert_eq!(
+            live.get::<State<TodoData>>().unwrap().items,
+            vec!["live item"]
+        );
+        assert!(
+            live.get::<Params<EditConfig>>()
+                .unwrap()
+                .skip_read_before_edit
+        );
+        assert_eq!(live.get::<String>().unwrap(), "new dependency");
     }
     #[test]
     fn serde_roundtrip_registered_types() {

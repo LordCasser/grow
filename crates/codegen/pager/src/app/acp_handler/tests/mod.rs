@@ -879,6 +879,8 @@ pub(super) fn test_subagent_spawned(
         effective_permission_mode: None,
         workflow_run_id: None,
         model: None,
+        model_state: None,
+        workflow_agent_names: None,
         resumed_from: None,
         goal_id: None,
     }
@@ -1080,6 +1082,7 @@ pub(super) fn write_subagent_spawn_timeline(
                 effective_permission_mode: None,
                 workflow_run_id: None,
                 goal_id: None,
+                goal_definition_revision: None,
                 surface_completion: true,
                 child_cwd: "/tmp".into(),
                 worktree_path: None,
@@ -1391,6 +1394,7 @@ pub(super) fn make_task_completed_notif_with_signal(
                 explicitly_killed: false,
                 owner_session_id: None,
                 goal_id: None,
+                goal_definition_revision: None,
                 description: None,
                 is_backgrounded: false,
             },
@@ -1479,6 +1483,17 @@ pub(super) fn model_changed_ext(
         update: GrowSessionUpdate::ModelChanged {
             model_id: model_id.to_string(),
             reasoning_effort: reasoning_effort.map(String::from),
+        },
+        meta: None,
+    };
+    let raw = serde_json::value::to_raw_value(&payload).unwrap();
+    acp::ExtNotification::new("grow/session_notification", std::sync::Arc::from(raw))
+}
+pub(super) fn agent_changed_ext(session_id: &str, agent_name: &str) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: GrowSessionUpdate::AgentChanged {
+            agent_name: agent_name.to_string(),
         },
         meta: None,
     };

@@ -278,6 +278,15 @@ impl SkillManager {
         }
     }
 
+    /// Update the rendering budget after a session model switch.
+    ///
+    /// Skill membership and announcement state are unchanged; only future
+    /// listings and `/context` accounting use the new model-relative cap.
+    pub fn set_context_window_tokens(&mut self, context_window_tokens: u64) {
+        self.listing_budget_chars =
+            Some((context_window_tokens as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize);
+    }
+
     /// Replace the startup baseline (plugin reload / bundle sync).
     ///
     /// Marks a pending baseline-change reconciliation only if the skill set
@@ -1231,6 +1240,29 @@ mod tests {
             text.len()
         );
         assert!(text.contains("... and"), "should indicate truncated skills");
+    }
+
+    #[test]
+    fn context_window_update_rebinds_listing_budget_without_resetting_state() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("alpha", "/s/alpha/SKILL.md")],
+            None,
+            Some(128_000),
+        );
+        let _ = mgr.take_pending_reconciliation().unwrap();
+        let announced = mgr.announced_names().clone();
+
+        mgr.set_context_window_tokens(32_000);
+
+        assert_eq!(
+            mgr.listing_budget_chars,
+            Some((32_000.0 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize)
+        );
+        assert_eq!(mgr.announced_names(), &announced);
+        assert!(mgr.take_pending_reconciliation().is_none());
     }
 
     #[test]

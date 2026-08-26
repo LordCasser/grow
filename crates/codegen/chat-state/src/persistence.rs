@@ -11,6 +11,30 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::TimelineEvent;
 
+/// Whether retrying the same immutable persistence fact cannot succeed without
+/// an external storage/configuration change.
+///
+/// Timeline and Sideband writers share this classifier so disk exhaustion,
+/// quotas and read-only filesystems cannot become independent infinite retry
+/// loops with subtly different policy.
+pub fn persistence_error_is_permanent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::StorageFull
+            | io::ErrorKind::QuotaExceeded
+            | io::ErrorKind::FileTooLarge
+            | io::ErrorKind::ReadOnlyFilesystem
+            | io::ErrorKind::OutOfMemory
+            | io::ErrorKind::WriteZero
+    )
+}
+
 /// Append-only persistence boundary owned by the Timeline actor.
 ///
 /// The actor owns this exclusively via `Box<dyn TimelinePersistence>`, so all

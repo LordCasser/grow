@@ -76,6 +76,46 @@ fn session_created_sets_session_id() {
         Some("new-session-123")
     );
 }
+
+#[test]
+fn session_created_models_do_not_overwrite_new_session_default() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    app.models = Some(acp::SessionModelState::new(
+        acp::ModelId::new("future-default"),
+        vec![acp::ModelInfo::new(
+            acp::ModelId::new("future-default"),
+            "Future Default",
+        )],
+    ))
+    .into();
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "exact-session".into(),
+            models: Some(acp::SessionModelState::new(
+                acp::ModelId::new("exact-current"),
+                vec![acp::ModelInfo::new(
+                    acp::ModelId::new("exact-current"),
+                    "Exact Current",
+                )],
+            )),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.models.current_model_id_str(),
+        Some("future-default"),
+        "a session response cannot rewrite the process new-session template"
+    );
+    assert_eq!(
+        app.agents[&id].session.models.current_model_id_str(),
+        Some("exact-current")
+    );
+}
 #[test]
 fn session_created_omits_cta_catalog_when_disabled() {
     let mut app = test_app_with_agent();
@@ -242,6 +282,52 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert_eq!(app.agents[&id].session.cwd, session_cwd);
     assert_eq!(app.agents[&id].scrollback.len(), 1);
     assert!(app.agents[&id].session.state.is_idle());
+}
+
+#[test]
+fn worktree_session_models_do_not_overwrite_new_session_default() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    app.models = Some(acp::SessionModelState::new(
+        acp::ModelId::new("future-default"),
+        vec![acp::ModelInfo::new(
+            acp::ModelId::new("future-default"),
+            "Future Default",
+        )],
+    ))
+    .into();
+    let path = PathBuf::from("/tmp/grow-worktrees/model-state");
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: acp::SessionId::new("worktree-exact"),
+            worktree_path: path.clone(),
+            session_cwd: path,
+            models: Some(acp::SessionModelState::new(
+                acp::ModelId::new("exact-current"),
+                vec![acp::ModelInfo::new(
+                    acp::ModelId::new("exact-current"),
+                    "Exact Current",
+                )],
+            )),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.models.current_model_id_str(), Some("future-default"));
+    assert_eq!(
+        app.agents[&id].session.models.current_model_id_str(),
+        Some("exact-current")
+    );
 }
 
 #[test]
@@ -643,7 +729,7 @@ fn switch_model_without_session_does_nothing() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 }
 #[test]
 fn new_session_seeds_mcp_init_progress() {
@@ -786,7 +872,7 @@ fn switch_model_deferred_when_no_session_id() {
         app.agents[&id].session.deferred_model_switch,
         Some((model_id, None))
     );
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 }
 #[test]
 fn deferred_model_switch_applied_on_session_created() {
@@ -809,7 +895,7 @@ fn deferred_model_switch_applied_on_session_created() {
         &mut app,
     );
     assert!(app.agents[&id].session.deferred_model_switch.is_none());
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
     assert!(effects.iter().any(|e| matches!(
         e,
         Effect::SwitchModel {
@@ -849,7 +935,7 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
         &mut app,
     );
     assert!(app.agents[&id].session.deferred_model_switch.is_none());
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
     assert!(effects.iter().any(|e| matches!(
         e,
         Effect::SwitchModel {
@@ -1503,18 +1589,16 @@ fn set_plan_mode_no_session_starts_with_deferred_behavior() {
             .any(|effect| matches!(effect, Effect::CreateSession { .. }))
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert_eq!(agent.session.plan_mode_pending, Some(true));
+    assert!(agent.session.effective_plan_mode());
     assert_eq!(
         agent.session.deferred_session_mode,
         Some(tools::types::BehaviorId::Plan)
     );
     assert!(!agent.session.plan_mode_active);
 }
-/// Non-idempotent ON transition: emits
-/// `Effect::SetSessionMode(plan)` and sets `plan_mode_pending`.
-/// Complement to the idempotent-ON test above.
+/// Non-idempotent ON transition emits a serialized Behavior control.
 #[test]
-fn set_plan_mode_on_from_off_emits_set_session_mode() {
+fn set_plan_mode_on_from_off_emits_switch_behavior() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
         Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
@@ -1522,14 +1606,13 @@ fn set_plan_mode_on_from_off_emits_set_session_mode() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "plan"),
-        "expected SetSessionMode(plan), got: {effects:?}"
+        matches!(&effects[0], Effect::SwitchBehavior { mode, .. } if *mode == tools::types::BehaviorId::Plan),
+        "expected SwitchBehavior(plan), got: {effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert_eq!(
-        agent.session.plan_mode_pending,
-        Some(true),
-        "optimistic pending must be set to Some(true)"
+    assert!(
+        agent.session.effective_plan_mode(),
+        "the queued Behavior must project Plan"
     );
 }
 /// Real-world repro: the peek panel is OPEN for the selected row

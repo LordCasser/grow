@@ -394,6 +394,150 @@ pub struct FinalizedToolset {
     /// `prepare_dispatch`. `None` outside a workspace bind.
     workspace_viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
 }
+
+/// The single live tool-resource and Scheduler ownership domain for a session.
+///
+/// Agent harnesses are replaceable views over this domain. The first harness
+/// installs the shared Resources and owns the root Scheduler actor; later
+/// harnesses atomically reconfigure the same Resources and reuse its stable
+/// SchedulerHandle. This prevents Agent selection from recovering stale state,
+/// starting a second timer actor, or invalidating handles already handed to
+/// child sessions.
+pub struct SessionResourceDomain {
+    activation_gate: Arc<tokio::sync::Mutex<()>>,
+    resources: OnceLock<SharedResources>,
+    scheduler_handle:
+        OnceLock<crate::implementations::grow_build::scheduler::types::SchedulerHandle>,
+    scheduler_cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
+}
+
+impl SessionResourceDomain {
+    pub fn new() -> Self {
+        Self {
+            activation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            resources: OnceLock::new(),
+            scheduler_handle: OnceLock::new(),
+            scheduler_cancel: Mutex::new(None),
+        }
+    }
+
+    pub fn scheduler_handle(
+        &self,
+    ) -> Option<crate::implementations::grow_build::scheduler::types::SchedulerHandle> {
+        self.scheduler_handle.get().cloned()
+    }
+
+    pub(crate) async fn activate_toolset(
+        &self,
+        toolset: &mut FinalizedToolset,
+    ) -> Result<(), String> {
+        let _activation = self.activation_gate.lock().await;
+        let candidate_handle = {
+            let resources = toolset.resources.lock().await;
+            resources
+                .get::<crate::implementations::grow_build::scheduler::types::SchedulerHandle>()
+                .cloned()
+                .ok_or_else(|| "rebuilt toolset has no SchedulerHandle".to_string())?
+        };
+
+        let Some(shared) = self.resources.get() else {
+            self.resources
+                .set(toolset.resources.clone())
+                .map_err(|_| "session resource domain was initialized concurrently".to_string())?;
+            self.scheduler_handle
+                .set(candidate_handle)
+                .map_err(|_| "session Scheduler handle was initialized concurrently".to_string())?;
+            *self.scheduler_cancel.lock() = toolset.scheduler_cancel.take();
+            return Ok(());
+        };
+
+        if Arc::ptr_eq(shared, &toolset.resources) {
+            return Ok(());
+        }
+        if let Some(cancel) = toolset.scheduler_cancel.take() {
+            cancel.cancel();
+            return Err("replacement toolset started a second session Scheduler".to_string());
+        }
+        let replacement = {
+            let mut resources = toolset.resources.lock().await;
+            std::mem::take(&mut *resources)
+        };
+        shared.lock().await.reconfigure_from(replacement);
+        toolset.resources = shared.clone();
+        Ok(())
+    }
+
+    /// Stage a replacement harness without mutating the live resource graph.
+    /// Every fallible invariant is checked here; after the caller durably
+    /// commits the AgentRole transition, [`PreparedResourceActivation::commit`]
+    /// is an infallible live-state swap.
+    pub(crate) async fn prepare_replacement(
+        &self,
+        toolset: &mut FinalizedToolset,
+    ) -> Result<PreparedResourceActivation, String> {
+        let activation = self.activation_gate.clone().lock_owned().await;
+        {
+            let resources = toolset.resources.lock().await;
+            resources
+                .get::<crate::implementations::grow_build::scheduler::types::SchedulerHandle>()
+                .ok_or_else(|| "rebuilt toolset has no SchedulerHandle".to_string())?;
+        }
+        let shared = self
+            .resources
+            .get()
+            .cloned()
+            .ok_or_else(|| "session resource domain is not initialized".to_string())?;
+        if Arc::ptr_eq(&shared, &toolset.resources) {
+            return Ok(PreparedResourceActivation {
+                _activation: activation,
+                shared,
+                replacement: None,
+            });
+        }
+        if let Some(cancel) = toolset.scheduler_cancel.take() {
+            cancel.cancel();
+            return Err("replacement toolset started a second session Scheduler".to_string());
+        }
+        let replacement = {
+            let mut resources = toolset.resources.lock().await;
+            std::mem::take(&mut *resources)
+        };
+        toolset.resources = shared.clone();
+        Ok(PreparedResourceActivation {
+            _activation: activation,
+            shared,
+            replacement: Some(replacement),
+        })
+    }
+}
+
+pub struct PreparedResourceActivation {
+    _activation: tokio::sync::OwnedMutexGuard<()>,
+    shared: SharedResources,
+    replacement: Option<crate::types::resources::Resources>,
+}
+
+impl PreparedResourceActivation {
+    pub async fn commit(mut self) {
+        if let Some(replacement) = self.replacement.take() {
+            self.shared.lock().await.reconfigure_from(replacement);
+        }
+    }
+}
+
+impl Default for SessionResourceDomain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SessionResourceDomain {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.scheduler_cancel.get_mut().take() {
+            cancel.cancel();
+        }
+    }
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RequirementError {
     pub tool: String,

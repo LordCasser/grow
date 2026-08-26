@@ -330,7 +330,10 @@ impl BehaviorCoordinator {
             Some("An active Goal owns automatic continuation; pause or stop it before selecting another Behavior.".to_string())
         } else if let Some(reason) = facts.unavailable_reason.clone() {
             Some(reason)
-        } else if target.owns_special_runtime() && facts.public_workflow_active {
+        } else if target != BehaviorId::Workflow
+            && target.owns_special_runtime()
+            && facts.public_workflow_active
+        {
             Some(format!(
                 "{} behavior is unavailable while a public Workflow run is active; wait for it or stop it explicitly.",
                 target.display_label()

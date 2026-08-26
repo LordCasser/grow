@@ -686,9 +686,15 @@ pub(crate) async fn resolve_preloaded_skills(
             continue;
         };
 
-        // Load the skill with body content
-        match tools::implementations::skills::skill::load_skill_with_body(skill).await {
-            Ok(loaded) => result.push(loaded),
+        // A caller may provide a frozen catalog (for example a Workflow Run).
+        // `load_skill_content` treats an existing body as authoritative and
+        // only consults disk for ordinary live-discovery entries.
+        match tools::implementations::skills::skill::load_skill_content(skill).await {
+            Ok(body) => {
+                let mut loaded = skill.clone();
+                loaded.body = (!body.is_empty()).then_some(body);
+                result.push(loaded);
+            }
             Err(e) => {
                 tracing::warn!(
                     skill_name = %name,

@@ -303,3 +303,83 @@
         assert!(agent.permission_stashed_pane.is_none());
     }
 
+    #[test]
+    fn replay_cleanup_cancels_permissions_and_restores_composer_state() {
+        use crate::app::agent_view::AgentPane;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt.set_text("draft before permission");
+            agent.force_active_pane(AgentPane::Scrollback);
+        }
+        let (msg, mut response_rx) = make_permission_message("sess-1");
+        handle(msg, &mut app);
+
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .clear_transport_interactions_for_replay();
+
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.permission_queue.is_empty());
+        assert_eq!(agent.prompt.text(), "draft before permission");
+        assert_eq!(agent.active_pane, AgentPane::Scrollback);
+        assert!(agent.permission_stashed_prompt.is_none());
+        assert!(agent.permission_stashed_pane.is_none());
+        assert!(matches!(
+            response_rx.try_recv(),
+            Ok(Ok(acp::RequestPermissionResponse {
+                outcome: acp::RequestPermissionOutcome::Cancelled,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn terminal_child_cleanup_advances_retained_permission_without_losing_stashes() {
+        use crate::views::permission_view::PermissionFocus;
+
+        let mut app = make_app_with_agent("sess-root");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .prompt
+            .set_text("root draft");
+        let (first, mut first_rx) = make_permission_message("sess-root");
+        let (second, mut second_rx) = make_permission_message("sess-root");
+        handle(first, &mut app);
+        handle(second, &mut app);
+
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.permission_queue.front_mut().unwrap().request.request.session_id =
+                acp::SessionId::new("sess-child");
+            agent.permission_queue.get_mut(1).unwrap().focus = PermissionFocus::FollowupInput;
+            agent.prompt.set_text("temporary followup");
+            assert!(agent.clear_transport_interactions_for_session("sess-child"));
+        }
+
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.permission_queue.len(), 1);
+        assert!(matches!(
+            agent.permission_queue.front().unwrap().focus,
+            PermissionFocus::Options
+        ));
+        assert_eq!(agent.prompt.text(), "");
+        assert!(
+            agent.permission_stashed_prompt.is_some(),
+            "the root draft remains stashed until the retained permission resolves"
+        );
+        assert!(matches!(
+            first_rx.try_recv(),
+            Ok(Ok(acp::RequestPermissionResponse {
+                outcome: acp::RequestPermissionOutcome::Cancelled,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }

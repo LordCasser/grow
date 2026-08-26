@@ -67,20 +67,6 @@ pub enum Event {
         previous_mode: diagnostics::enums::PermissionMode,
         mode: diagnostics::enums::PermissionMode,
     },
-    /// Runtime TodoGate nudged the model because a content-only turn ended
-    /// with pending or unbacked in_progress todos. `reason` is the
-    /// `TODO_GATE_*` discriminator constant in `shell::session::events`.
-    TodoGateFired {
-        fires: u32,
-        pending: usize,
-        in_progress: usize,
-        reason: &'static str,
-    },
-    /// TodoGate hit its per-prompt fire cap. Distinct event so cap-exhaustion
-    /// is not conflated with a normal fire in the dashboards.
-    TodoGateExhausted {
-        pending: usize,
-    },
     /// Layer-3 LazinessDetector classifier completed and produced a verdict.
     /// Fires even in observation-only mode (`max_nudges_per_session = 0`)
     /// so dashboards can validate classification quality before any nudges
@@ -351,6 +337,7 @@ mod tests {
 
     fn user_identity() -> chat_state::TurnIdentity {
         chat_state::TurnIdentity {
+            goal_definition_revision: None,
             origin: "user".into(),
             turn_kind: "user".into(),
             goal_id: None,

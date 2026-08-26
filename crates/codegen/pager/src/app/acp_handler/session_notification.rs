@@ -111,11 +111,11 @@ pub(crate) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     handle_session_notification_inner(notif, app, None)
 }
 
-/// Apply a descendant lifecycle replay to the root view that owns the durable
-/// parent→child metadata chain. Disk restoration already resolved ownership;
-/// routing it through the global session-id lookup again could select a
-/// separately opened copy of the same hidden child session.
-pub(crate) fn handle_descendant_lifecycle_replay(
+/// Apply descendant lifecycle and control replay to the root view that owns
+/// the durable parent→child metadata chain. Disk restoration already resolved
+/// ownership; routing it through the global session-id lookup again could
+/// select a separately opened copy of the same hidden child session.
+pub(crate) fn handle_descendant_state_replay(
     notif: &acp::ExtNotification,
     app: &mut AppView,
     owner_agent_id: AgentId,
@@ -189,12 +189,58 @@ fn handle_session_notification_inner(
             | GrowSessionUpdate::SubagentProgress { .. }
             | GrowSessionUpdate::SubagentFinished { .. }
     );
+    let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
     if matches!(matched, SessionMatch::Child(_)) && !descendant_lifecycle {
         let child_sid: &str = session_notif.session_id.0.as_ref();
+        let handled = matches!(
+            &session_notif.update,
+            GrowSessionUpdate::ModelChanged { .. }
+                | GrowSessionUpdate::AgentChanged { .. }
+                | GrowSessionUpdate::InteractionResolved { .. }
+                | GrowSessionUpdate::AutoCompactStarted { .. }
+                | GrowSessionUpdate::AutoCompactCompleted { .. }
+                | GrowSessionUpdate::AutoCompactFailed { .. }
+                | GrowSessionUpdate::AutoCompactCancelled { .. }
+                | GrowSessionUpdate::RetryState(_)
+                | GrowSessionUpdate::MemoryFlushCompleted { .. }
+                | GrowSessionUpdate::MemoryDreamCompleted { .. }
+                | GrowSessionUpdate::MemorySessionSaved { .. }
+        );
+        let Some(child) = agent.subagent_views.get_mut(child_sid) else {
+            return false;
+        };
+        if forced_descendant_owner.is_none()
+            && drop_unexpected_replay(child, &meta, child_sid, "grow/session/update child")
+        {
+            return false;
+        }
+        if !meta.is_replay
+            && meta.event_seq.is_some_and(|seq| {
+                child
+                    .session
+                    .last_applied_grow_event_seq
+                    .is_some_and(|last| seq <= last)
+            })
+        {
+            tracing::debug!(
+                session_id = child_sid,
+                event_seq = meta.event_seq,
+                last_applied = child.session.last_applied_grow_event_seq,
+                "child grow/session update dropped by dedup highwater"
+            );
+            return false;
+        }
         let changed = handle_child_session_notification(session_notif.update, child_sid, agent);
+        if handled && let Some(child) = agent.subagent_views.get_mut(child_sid) {
+            if let Some(seq) = meta.event_seq {
+                child.session.last_applied_grow_event_seq = Some(seq);
+            }
+            if let Some(id) = meta.event_id {
+                child.session.last_seen_event_id = Some(id);
+            }
+        }
         return changed && is_active;
     }
-    let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
     let descendant_lifecycle_from_child =
         matches!(matched, SessionMatch::Child(_)) && descendant_lifecycle;
     if descendant_lifecycle_from_child
@@ -336,6 +382,8 @@ fn handle_session_notification_inner(
             subagent_type,
             description,
             model,
+            model_state,
+            workflow_agent_names,
             effective_context_source,
             resumed_from,
             capability_mode,
@@ -358,6 +406,11 @@ fn handle_session_notification_inner(
                 .remove(&subagent_id)
                 .unwrap_or(false);
             let model_display = model.clone();
+            let has_child_model_state = model_state.is_some();
+            let child_models = match model_state {
+                Some(state) => crate::acp::model_state::ModelState::from(Some(state)),
+                None => agent.session.models.clone(),
+            };
             agent.session.subagent_sessions.insert(
                 child_session_id.clone(),
                 SubagentInfo {
@@ -413,48 +466,79 @@ fn handle_session_notification_inner(
                 &agent.session.cwd,
                 agent.session.subagent_sessions.get(&child_session_id),
             );
-            let child_session = {
-                let mut session = AgentSession::new(
-                    AgentId(0),
-                    agent.session.acp_tx.clone(),
-                    Some(acp::SessionId::new(child_session_id.clone())),
-                    agent.session.models.clone(),
-                    effective_child_cwd,
-                    effective_permission_mode
-                        .as_deref()
-                        .map(shell::util::config::parse_permission_mode_canonical)
-                        .unwrap_or(shell::util::config::PermissionMode::Ask),
+            if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
+                // A reconnect replay repeats the durable spawn fact. Reuse the
+                // existing exact-session view so its rearmed control tokens
+                // and queued user intent cannot collapse back to generation 0.
+                child_view.session.models = child_models;
+                child_view.session.workflow_agent_names = workflow_agent_names.clone();
+                if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
+                    child_view
+                        .session
+                        .models
+                        .set_current(acp::ModelId::new(model_id), None);
+                }
+                child_view.session.cwd = effective_child_cwd;
+                child_view.session.permission_mode = effective_permission_mode
+                    .as_deref()
+                    .map(shell::util::config::parse_permission_mode_canonical)
+                    .unwrap_or(shell::util::config::PermissionMode::Ask);
+                child_view
+                    .session
+                    .apply_agent_name(Some(subagent_type.clone()));
+                child_view.session.state = AgentState::TurnRunning;
+                child_view.session.set_worktree(effective_is_worktree);
+            } else {
+                let child_session = {
+                    let mut session = AgentSession::new(
+                        AgentId(0),
+                        agent.session.acp_tx.clone(),
+                        Some(acp::SessionId::new(child_session_id.clone())),
+                        child_models,
+                        effective_child_cwd,
+                        effective_permission_mode
+                            .as_deref()
+                            .map(shell::util::config::parse_permission_mode_canonical)
+                            .unwrap_or(shell::util::config::PermissionMode::Ask),
+                    );
+                    if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
+                        session
+                            .models
+                            .set_current(acp::ModelId::new(model_id), None);
+                    }
+                    session.workflow_agent_names = workflow_agent_names;
+                    session.apply_agent_name(Some(subagent_type.clone()));
+                    session.state = AgentState::TurnRunning;
+                    session.set_worktree(effective_is_worktree);
+                    session
+                };
+                let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
+                child_scrollback.set_appearance(agent.scrollback.appearance().clone());
+                let mut child_view = AgentView::new(child_session, child_scrollback);
+                child_view.input_mode = InputMode::Vim;
+                child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
+                let dashboard_visible = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("dashboard")
+                    .is_some();
+                child_view.set_dashboard_visible(dashboard_visible);
+                child_view.set_has_session_announcements(
+                    agent.prompt.slash_controller.has_session_announcements(),
                 );
-                session.state = AgentState::TurnRunning;
-                session.set_worktree(effective_is_worktree);
-                session
-            };
-            let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
-            child_scrollback.set_appearance(agent.scrollback.appearance().clone());
-            let mut child_view = AgentView::new(child_session, child_scrollback);
-            child_view.input_mode = InputMode::Vim;
-            child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
-            let dashboard_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("dashboard")
-                .is_some();
-            child_view.set_dashboard_visible(dashboard_visible);
-            child_view.set_has_session_announcements(
-                agent.prompt.slash_controller.has_session_announcements(),
-            );
-            child_view
-                .prompt
-                .set_screen_mode(agent.prompt.slash_controller.screen_mode());
-            let recap_visible = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .get("recap")
-                .is_some();
-            child_view.set_session_recap_available(recap_visible);
-            agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
+                child_view
+                    .prompt
+                    .set_screen_mode(agent.prompt.slash_controller.screen_mode());
+                let recap_visible = agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("recap")
+                    .is_some();
+                child_view.set_session_recap_available(recap_visible);
+                agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
+            }
             if !agent.session.loading_replay {
                 if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                     crate::app::subagent::replay_inherited_updates(child_view, &child_session_id);
@@ -539,6 +623,7 @@ fn handle_session_notification_inner(
                 "Subagent finished"
             );
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
+            agent.clear_transport_interactions_for_session(&child_session_id);
             let info_ref = agent.session.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
             let is_background = info_ref.is_some_and(|s| s.is_background);
@@ -849,50 +934,22 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::ModelChanged {
             model_id,
             reasoning_effort,
-        } => {
-            if agent.session.model_switch_pending {
-                tracing::debug!(
-                    session_id = session_notif.session_id.0.as_ref(),
-                    model_id = %model_id,
-                    "ignoring ModelChanged broadcast — local switch is in flight"
-                );
-                return false;
-            }
-            use shell::sampling::types::ReasoningEffort;
-            let new_model_id = acp::ModelId::new(model_id.clone());
-            if !agent.session.models.available.contains_key(&new_model_id) {
-                tracing::warn!(
-                    session_id = session_notif.session_id.0.as_ref(),
-                    model_id = %model_id,
-                    "ignoring ModelChanged broadcast — model not in local catalog"
-                );
-                return false;
-            }
-            let effort = reasoning_effort
-                .as_deref()
-                .and_then(|s| s.parse::<ReasoningEffort>().ok());
-            let prev_model = agent.session.models.current.clone();
-            let prev_effort = agent.session.models.reasoning_effort;
-            agent
-                .session
-                .models
-                .set_current(new_model_id.clone(), effort);
-            agent.session.user_model_preference = Some(new_model_id.clone());
-            let resolved_effort = agent.session.models.reasoning_effort;
-            let actually_changed =
-                prev_model.as_ref() != Some(&new_model_id) || prev_effort != resolved_effort;
-            if actually_changed {
-                tracing::info!(
-                    session_id = session_notif.session_id.0.as_ref(),
-                    model_id = %model_id,
-                    effort = ?resolved_effort,
-                    "ModelChanged broadcast applied (remote switch)"
-                );
-            }
-            actually_changed
-        }
+        } => match apply_model_changed(
+            agent,
+            session_notif.session_id.0.as_ref(),
+            model_id,
+            reasoning_effort,
+        ) {
+            Some(changed) => changed,
+            None => return false,
+        },
         GrowSessionUpdate::AgentChanged { agent_name } => {
-            agent.session.apply_agent_name(Some(agent_name))
+            if agent.session.controls_pending() {
+                agent.session.defer_authoritative_agent_change(agent_name);
+                false
+            } else {
+                agent.session.apply_agent_name(Some(agent_name))
+            }
         }
         GrowSessionUpdate::MemoryFiles { files } => {
             let entries = crate::views::memory_modal::build_entries(files);
@@ -909,6 +966,7 @@ fn handle_session_notification_inner(
             status,
             token_budget,
             tokens_used,
+            usage_incomplete,
             elapsed_ms,
             created_at,
             updated_at,
@@ -927,6 +985,7 @@ fn handle_session_notification_inner(
                     status: new_status,
                     token_budget,
                     tokens_used,
+                    usage_incomplete,
                     elapsed_ms,
                     created_at,
                     updated_at,
@@ -1005,7 +1064,26 @@ pub(super) fn handle_child_session_notification(
     child_sid: &str,
     agent: &mut AgentView,
 ) -> bool {
-    match update {
+    let changed = match update {
+        GrowSessionUpdate::ModelChanged {
+            model_id,
+            reasoning_effort,
+        } => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .and_then(|child| apply_model_changed(child, child_sid, model_id, reasoning_effort))
+            .unwrap_or(false),
+        GrowSessionUpdate::AgentChanged { agent_name } => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| {
+                if child.session.controls_pending() {
+                    child.session.defer_authoritative_agent_change(agent_name);
+                    false
+                } else {
+                    child.session.apply_agent_name(Some(agent_name))
+                }
+            }),
         GrowSessionUpdate::InteractionResolved { tool_call_id } => {
             // Permission prompts from every child are centralized on the
             // owning primary task so they cannot time out invisibly. Other
@@ -1059,7 +1137,109 @@ pub(super) fn handle_child_session_notification(
             }
         }
         _ => false,
+    };
+    sync_child_control_projection(agent, child_sid);
+    changed
+}
+
+pub(crate) fn sync_child_control_projection(agent: &mut AgentView, child_sid: &str) -> bool {
+    let Some(child) = agent.subagent_views.get(child_sid) else {
+        return false;
+    };
+    let model = child
+        .session
+        .models
+        .current
+        .as_ref()
+        .map(|id| Arc::<str>::from(id.0.to_string()));
+    let agent_name = child.session.agent_name().map(Arc::<str>::from);
+    let Some(info) = agent.session.subagent_sessions.get_mut(child_sid) else {
+        return false;
+    };
+    let changed = info.model != model
+        || agent_name
+            .as_ref()
+            .is_some_and(|name| name != &info.subagent_type);
+    info.model = model;
+    if let Some(agent_name) = agent_name {
+        info.subagent_type = agent_name;
     }
+    changed
+}
+
+fn apply_model_changed(
+    agent: &mut AgentView,
+    session_id: &str,
+    model_id: String,
+    reasoning_effort: Option<String>,
+) -> Option<bool> {
+    if agent.session.controls_pending() {
+        tracing::debug!(
+            session_id,
+            model_id = %model_id,
+            "deferring ModelChanged broadcast behind local control queue"
+        );
+        agent
+            .session
+            .defer_authoritative_model_change(model_id, reasoning_effort);
+        return Some(false);
+    }
+    use shell::sampling::types::ReasoningEffort;
+    let new_model_id = acp::ModelId::new(model_id.clone());
+    if !agent.session.models.available.contains_key(&new_model_id) {
+        tracing::warn!(
+            session_id,
+            model_id = %model_id,
+            "holding ModelChanged broadcast until the local catalog catches up"
+        );
+        agent
+            .session
+            .defer_authoritative_model_change(model_id, reasoning_effort);
+        return Some(false);
+    }
+    let effort = reasoning_effort
+        .as_deref()
+        .and_then(|value| value.parse::<ReasoningEffort>().ok());
+    agent.session.clear_deferred_authoritative_model_change();
+    let previous_model = agent.session.models.current.clone();
+    let previous_effort = agent.session.models.reasoning_effort;
+    agent
+        .session
+        .models
+        .set_current(new_model_id.clone(), effort);
+    agent.session.user_model_preference = Some(new_model_id.clone());
+    let applied_effort = agent.session.models.reasoning_effort;
+    let changed =
+        previous_model.as_ref() != Some(&new_model_id) || previous_effort != applied_effort;
+    if changed {
+        tracing::info!(
+            session_id,
+            model_id = %model_id,
+            effort = ?applied_effort,
+            "ModelChanged broadcast applied (remote switch)"
+        );
+    }
+    Some(changed)
+}
+
+/// Apply the latest server-authoritative model and Agent states that arrived
+/// while this client had a local route control in flight. Call only after
+/// that session's serialized queue reaches `Drained`; otherwise a subsequent
+/// local control would be overwritten before its own RPC runs.
+pub(crate) fn apply_deferred_authoritative_controls(
+    agent: &mut AgentView,
+    session_id: &str,
+) -> bool {
+    debug_assert!(!agent.session.controls_pending());
+    let (model_change, agent_change) = agent.session.take_deferred_authoritative_controls();
+    let model_changed = model_change
+        .and_then(|(model_id, reasoning_effort)| {
+            apply_model_changed(agent, session_id, model_id, reasoning_effort)
+        })
+        .unwrap_or(false);
+    let agent_changed =
+        agent_change.is_some_and(|agent_name| agent.session.apply_agent_name(Some(agent_name)));
+    model_changed || agent_changed
 }
 /// Apply a compaction or retry event to a session's activity state and scrollback.
 ///
@@ -1299,7 +1479,6 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     if mode != BehaviorId::Workflow {
         agent.show_workflows = false;
     }
-    agent.session.behavior_mode_pending = None;
     agent.session.plan_phase = cmu
         .meta
         .as_ref()
@@ -1340,7 +1519,6 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     let was_active = agent.session.plan_mode_active;
     let now_active = mode.is_plan();
     agent.session.plan_mode_active = now_active;
-    agent.session.plan_mode_pending = None;
     if previous != mode || was_active != now_active {
         tracing::info!(
             mode_id = %cmu.current_mode_id.0,
@@ -1357,12 +1535,14 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
 /// and must not release locally-held prompts. Plain updates and explicit
 /// `applied` responses may release the ordinary FIFO after the new identity is
 /// installed by [`detect_plan_mode_change`].
-pub(super) fn behavior_mode_update_applied(update: &acp::SessionUpdate) -> bool {
+pub(crate) fn behavior_mode_update_resolution(
+    update: &acp::SessionUpdate,
+) -> Option<crate::app::session::BehaviorControlResolution> {
     let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
-        return false;
+        return None;
     };
     let Some(mode) = tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()) else {
-        return false;
+        return None;
     };
     if !matches!(
         mode,
@@ -1372,7 +1552,7 @@ pub(super) fn behavior_mode_update_applied(update: &acp::SessionUpdate) -> bool 
             | tools::types::BehaviorId::Workflow
             | tools::types::BehaviorId::Goal
     ) {
-        return false;
+        return None;
     }
     match cmu
         .meta
@@ -1381,8 +1561,28 @@ pub(super) fn behavior_mode_update_applied(update: &acp::SessionUpdate) -> bool 
         .and_then(|change| change.get("status"))
         .and_then(serde_json::Value::as_str)
     {
-        None | Some("applied") => true,
-        Some("confirmation_required" | "rejected") => false,
-        Some(_) => false,
+        None | Some("applied") => Some(crate::app::session::BehaviorControlResolution::Applied),
+        Some("confirmation_required") => {
+            Some(crate::app::session::BehaviorControlResolution::ConfirmationRequired)
+        }
+        Some("rejected") => Some(crate::app::session::BehaviorControlResolution::Rejected),
+        Some(_) => None,
     }
+}
+
+/// The target named by an explicit rejected/confirmation outcome. Applied
+/// updates correlate through their current mode; terminal non-applied outcomes
+/// must name their target so a delayed older result cannot advance the FIFO.
+pub(crate) fn behavior_mode_update_target(
+    update: &acp::SessionUpdate,
+) -> Option<tools::types::BehaviorId> {
+    let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
+        return None;
+    };
+    cmu.meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/behaviorChange"))
+        .and_then(|change| change.get("target"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(tools::types::BehaviorId::try_from_id)
 }

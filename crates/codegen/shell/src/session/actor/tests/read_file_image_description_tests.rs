@@ -256,17 +256,17 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
                 .query_params
                 .insert("deployment".into(), "next".into());
 
-            actor
-                .handle_reload_model_config(
-                    acp::ModelId::new("provider/reloaded"),
-                    sampling,
-                    Some("provider/vision".into()),
-                    std::time::Duration::from_secs(77),
-                    2,
-                    73,
-                )
-                .await
-                .unwrap();
+            let catalog = SessionActor::published_catalog_for_test(
+                acp::ModelId::new("provider/reloaded"),
+                sampling,
+                Some("provider/vision".into()),
+                std::time::Duration::from_secs(77),
+                2,
+                73,
+            );
+            let (responds_to, response) = tokio::sync::oneshot::channel();
+            actor.admit_model_catalog_reload(catalog, responds_to).await;
+            response.await.unwrap().unwrap();
 
             let live = actor.chat_state_handle.get_sampling_config().await.unwrap();
             assert_eq!(live.base_url, "https://reloaded.example/v2");
@@ -305,19 +305,17 @@ async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
             sampling.base_url = "https://deferred.example/v2".into();
             sampling.model = "deferred-model".into();
             sampling.context_window = 32_000;
+            let catalog = SessionActor::published_catalog_for_test(
+                acp::ModelId::new("provider/deferred"),
+                sampling,
+                None,
+                std::time::Duration::from_secs(88),
+                3,
+                71,
+            );
             let (responds_to, mut response) = tokio::sync::oneshot::channel();
 
-            actor
-                .admit_model_config_reload(
-                    acp::ModelId::new("provider/deferred"),
-                    sampling,
-                    None,
-                    std::time::Duration::from_secs(88),
-                    3,
-                    71,
-                    responds_to,
-                )
-                .await;
+            actor.admit_model_catalog_reload(catalog, responds_to).await;
 
             assert!(matches!(
                 response.try_recv(),
@@ -335,7 +333,7 @@ async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
             );
 
             actor.state.lock().await.foreground = ForegroundState::Idle;
-            actor.apply_pending_model_reload_if_idle().await;
+            actor.apply_pending_step_controls_if_idle().await;
             response.await.unwrap().unwrap();
             let applied = actor.chat_state_handle.get_sampling_config().await.unwrap();
             assert_eq!(applied.model, "deferred-model");

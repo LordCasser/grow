@@ -327,24 +327,18 @@ fn evaluate_laziness_session_counter_at_cap_returns_cap_exhausted() {
 // ── nudge text builder ──────────────────────────────────────────
 
 #[test]
-fn build_laziness_nudge_quotes_rule_by_name_per_category() {
-    // Each stalled_* variant quotes the correct
-    // `<task_completion_discipline>` rule. Asserts long,
-    // unique-per-variant phrases — the bare "Rule N" substring
-    // checks were dropped so a hypothetical
-    // future "Rule 11" or copy-paste accident that includes
-    // "(formerly Rule 1)" no longer slips through.
+fn build_laziness_nudge_is_self_contained_per_category() {
     let n = build_laziness_nudge(LazinessCategory::StalledNarration, "ev1", None);
     assert!(
-        n.contains("don't narrate progress in prose"),
-        "narration nudge missing canonical rule text: {n}"
+        n.contains("Don't narrate progress without advancing the active Goal"),
+        "narration nudge missing current Goal semantics: {n}"
     );
     assert!(n.contains("ev1"));
 
     let n = build_laziness_nudge(LazinessCategory::StalledPermissionAsking, "ev2", None);
     assert!(
-        n.contains("don't ask permission to continue a task"),
-        "permission-asking nudge missing canonical rule text: {n}"
+        n.contains("Don't ask permission merely to continue work"),
+        "permission-asking nudge missing current Goal semantics: {n}"
     );
     assert!(n.contains("ev2"));
 
@@ -354,12 +348,12 @@ fn build_laziness_nudge_quotes_rule_by_name_per_category() {
         Some("todo_write"),
     );
     assert!(
-        n.contains("A todo_write list of the remaining phases"),
+        n.contains("Use todo_write to record the remaining phases as small tasks"),
         "no-todos nudge must cite resolved todo tool: {n}"
     );
     assert!(
-        !n.contains("plan/todo"),
-        "goal-active nudge must not use generic plan/todo: {n}"
+        !n.contains("task_completion_discipline"),
+        "Goal reminder must not reference the removed prompt contract: {n}"
     );
     assert!(n.contains("ev3"));
 
@@ -369,8 +363,8 @@ fn build_laziness_nudge_quotes_rule_by_name_per_category() {
         None,
     );
     assert!(
-        n.contains("A plan/todo list of the remaining phases"),
-        "Rule 3 must fall back to plan/todo when todo_tool is None: {n}"
+        n.contains("Track the remaining phases explicitly as small tasks"),
+        "offline reminder must remain self-contained when no task tool is resolved: {n}"
     );
     assert!(n.contains("ev3b"));
 
@@ -380,7 +374,7 @@ fn build_laziness_nudge_quotes_rule_by_name_per_category() {
         "false-completion nudge missing canonical rule text: {n}"
     );
     assert!(
-        n.contains("Either run the tool_calls that back your claims"),
+        n.contains("Run the checks or tool calls that support the claim"),
         "false-completion nudge missing remediation hint: {n}"
     );
     assert!(n.contains("ev4"));

@@ -7,6 +7,7 @@ Shell actor 是执行与控制权威，Pager 只消费结构化投影。核心�
 ```rust
 enum ForegroundState {
     Idle,
+    ApplyingControl,
     RegularTurn(AgentTask),
     Settling { prompt_id: String },
     Compaction,
@@ -15,13 +16,19 @@ enum ForegroundState {
 
 `InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。用户 picker 的 Behavior transition 与 foreground admission 共享 session state mutex，只允许在 `Idle` 提交；Goal lifecycle 工具可以在已 admission 的 turn 内原子提交下一状态，但不会重标当前 turn，也不会把新协议插进已经运行的因果单元。唯一的控制面例外是 Normal/Clarify foreground 中的 out-of-band `/goal`：它先持久化 Goal Behavior，再由命令平面取消原 exact foreground；Plan/Workflow 冲突和 picker 的 idle gate 均不放宽。
 
+Agent/model route control 与 Behavior admission 还共享 `step_control_gate`。pending deque 只表示尚未开始的控制，不能代表已经 pop 后异步重建中的 Agent；因此 Goal/Plan/Workflow 的能力校验、Workflow admission 校验、durable Control commit 与 live Behavior swap 必须在同一 gate 内完成，并在取得 gate 后读取当前已提交 Agent。较晚到达的 Behavior 不能越过较早的 queued route control。durable/live commit 完成后才释放 gate；随后需要取消旧 foreground 的操作在 gate 外执行，避免取消路径反向等待同一边界。
+
 Behavior 协议不再拼进或替换 system head。Timeline `control` 事件把权威选择与一个 `<behavior-context>` synthetic user 项原子提交。Idle transition 立即进入 Surface；Goal 完成、Plan 结束等 turn 内 transition 先留在 Timeline fold 的 pending slot，durable `TurnEnded` 后只激活最后一个，因此不会插进 tool call/result，也不会排在旧 Behavior 所产生的迟到输出之前。下一次请求沿原位置重放，provider-visible 前缀保持 append-only。切回 Normal 会物化明确的 reset，较早的特殊协议只保留为因果历史，不再处于活跃状态。
 
 完成顺序固定为：runner 返回后把 exact foreground owner 转入 `Settling` → 确认 Timeline turn terminal 与唯一 `TurnCompleted` 已持久化 → 释放 foreground fence → 提升用户 FIFO → 若仍 idle 再运行专用 runtime hook。`Settling` 仍然是 foreground ownership，Goal continuation 不进入 FIFO，synthetic work必须携带结构化 origin/lease，因此首条 Goal objective 的外层 user turn 不可能被 continuation 的 `TurnStarted` 越过。
 
 普通采样的 `prompt_cache_key` 由 Timeline identity、最新 rewind 分支锚点和完整 model route（backend/base URL/model）派生。普通 append、Behavior 切换和 Agent 选择不改变血统键；fork、rewind 与 model route 切换改变。血统键只负责 provider 粘性路由，不能替代 provider-visible 前缀相等校验。
 
-Session 的 catalog identity、provider sampler config、reasoning effort 与 transport 由 actor 作为一个带 revision 的 `SessionModelRoute` 提交。SessionHandle、模型菜单、subagent spawn 和 catalog reload 都只读取该原子快照，不能分别读取 handle ID 与 ChatState route 后拼接。catalog reload 在全局 publication 临界区构造并发布一个 catalog generation，再把同一代快照排入每个 session mailbox；随后立即释放全局锁，不能让一个 busy session 的 acknowledgement 阻塞其他 prompt 或模型操作。actor mailbox 顺序是 session route 的唯一提交顺序：busy foreground 只保留最新 reload 快照但挂接全部 responder，在下一 idle boundary 先应用它，再允许 prompt、notification 或 Goal。这里不再叠加一套 expected-route-revision/stale 协议；只有仍属当前 catalog generation 的真实应用失败才驱逐 session。
+Session 的 catalog identity、provider sampler config、reasoning effort 与 transport 由 actor 作为一个带 revision 的 `SessionModelRoute` 提交。SessionHandle、模型菜单、subagent spawn 和 catalog reload 都只读取该原子快照，不能分别读取 handle ID 与 ChatState route 后拼接。catalog reload 在全局 publication 临界区构造并发布一个 catalog generation，再把同一代快照排入每个 session mailbox；用户选择同样只在锁内冻结 catalog route，随后释放全局锁，不能让一个 busy session 的 acknowledgement 阻塞其他 prompt 或模型操作。
+
+model、reasoning effort 与 Agent 选择组成一个有序的 route control queue。请求在任何 Behavior 和 foreground 状态下都可被接受；活跃 step 继续使用开始采样时的 Agent/model route。模型 stream 和它产生的整个工具批次完成后，actor 显式提交 `StepEnded`，再在同一 foreground owner 内按 mailbox 顺序持久提交并切换全部已接受控制，最后提交下一次 `StepStarted`。AgentRole context 因此在 step 边界进入 Surface；Behavior context 仍等待 `TurnEnded`，因为 Behavior 负责 turn admission。若 session 已 idle，actor 用 `ApplyingControl` fence 立即完成同一事务，并在 manual compaction、用户 FIFO、notification 或 Goal continuation 前收束。只有相邻的 catalog reload 可以合并为最新快照并保留全部 responder；用户 model/effort/Agent 选择是顺序屏障，不能被 reload 或后来的选择越过。失败只回滚该项，队列继续推进，旧的已提交项不会被重放。
+
+Catalog publication 与 selection 的 actor enqueue 共用一个全局事务锁，但任何 session acknowledgement 都必须发生在锁外：锁内只做 validate、freeze 与同步 `cmd_tx.send`，锁外才等待 session-local step/idle boundary。这样 load 不会与 catalog publication 环等，旧 provider route 也不可能在较新的 reload 之后才进入 mailbox。Pager 对同一 session 只允许一个 control RPC 在途，其余 model/effort/Agent 选择在本地串行排队；队列未清空前 prompt 不能发送。每个 effect 携带 binding generation 与 sequence，reconnect 会提升 generation 并废弃旧 completion，避免旧任务覆盖 reload 后状态或提前释放 prompt barrier。
 
 ```mermaid
 flowchart LR
@@ -69,6 +76,8 @@ Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definiti
 | public Workflow active → Plan/Goal | 拒绝 |
 | Plan/Active Goal 内启动或恢复 Workflow | 拒绝；pause/stop/save 等管理操作仍可用 |
 | completed Goal receipt + 任意 Behavior 切换 | receipt 保留；只有显式 `/goal clear` 删除它 |
+| 任意 Behavior/foreground + model/effort/Agent 选择 | 接受并排队；当前 step 不变，在 `StepEnded` 后、下一次采样前按序提交；idle 时立即提交 |
+| live child + model/effort/Agent 选择 | 精确路由到 child actor；不修改父会话，也不把 child 提升进主 roster |
 | 模型切换、stage terminal、synthetic wake | 不能确认或清除 pending user switch |
 
 确认窗是 transient 用户交互状态，不持久化。只有用户的 mode selection/明确 slash control会调用该路径；runtime completion 不通过它“顺手切模式”。
@@ -88,7 +97,7 @@ Plan/Goal lifecycle 工具是采样批次的状态屏障。一个 provider batch
 
 Workflow Definition 使用同一 Agent capability、MCP binding 与 PermissionManager 交集；`deep-research` 不获得额外的 Behavior 级权限。Goal role/object 权限见 [goal-continuation.md](./goal-continuation.md)。
 
-`SubagentCapabilityState` 是子 Agent 唯一的 hard eligibility 与初始 RWX 事实源。Agent authored snapshot 以精确 wire tool identity 定义 hard ceiling，delegated mode 是不可变初始 RWX；未声明时统一取 `ReadWrite`。工具 schema 始终稳定，catalog 标出 available/locked/forbidden：初始 RWX 内的调用沿用普通快速路径，RWX 外但 hard-eligible 的精确调用直接进入 Ask/Auto，hard ceiling 外则在提示前拒绝。允许不会修改 session authority，而是只签发一次性 permit，绑定 actor epoch、call id、真实 target、canonical args、cwd、projected RWX 与 MCP generation，公共 dispatch 边界消费前重验。每个 child handle 另持不可变 `DelegableCapabilityCeiling`：nested child 在创建资源前将请求 mode 与 immediate parent 初始 mode 做偏序交（`ReadWrite ∩ Execute = ReadOnly`），且只能继承 ceiling 中同一 transport ID 的 MCP binding；父会话的审批历史永不扩大后代 ceiling。生命周期展示可以把 nested child 归并到根 Session，但 `SubagentSpawnEvent.security_parent_session_id` 永久记录直接安全父级；只有根 owner 或同一直接安全父级可以恢复该 child，兄弟 child 不共享恢复权限。
+`SubagentCapabilityState` 是子 Agent 唯一的 native identity eligibility 与初始 RWX 事实源。当前 Agent authored snapshot 以精确 wire tool identity 定义 eligibility；用户显式切换 Agent 时，这一投影在 `ApplyingControl` fence 内随新 harness 原子替换并提升 authorization epoch，不能出现新 schema 已显示、旧投影却永久拒绝的半状态。delegated mode 始终是不可变初始 RWX，未声明时统一取 `ReadWrite`；Agent 切换只重新授权 authored identity，不能扩大 RWX 或 MCP transport authority。工具 catalog 标出 available/locked/forbidden：初始 RWX 内的调用沿用普通快速路径，RWX 外但 eligible 的精确调用直接进入 Ask/Auto，当前 Agent eligibility 外则在提示前拒绝。允许不会修改 session authority，而是只签发一次性 permit，绑定 actor epoch、call id、真实 target、canonical args、cwd、projected RWX 与 MCP generation，公共 dispatch 边界消费前重验。每个 child handle 另持不可变 `DelegableCapabilityCeiling`：nested child 在创建资源前将请求 mode 与 immediate parent 初始 mode 做偏序交（`ReadWrite ∩ Execute = ReadOnly`），且只能继承 ceiling 中同一 transport ID 的 MCP binding；父会话的审批历史永不扩大后代 ceiling。生命周期展示可以把 nested child 归并到根 Session，但 `SubagentSpawnEvent.security_parent_session_id` 永久记录直接安全父级；只有根 owner 或同一直接安全父级可以恢复该 child，兄弟 child 不共享恢复权限。live child 的控制寻址使用单独的 scoped registry，随 child runner 以 RAII 注册/清理；它只开放 model/effort/Agent 这类 exact-session control，不进入 primary session roster、prompt/load 路由或权限所有权。Agent identity 与 `subagent_filter` 是 actor 提交、所有 handle clone 共享的单一 route，nested delegation 不会继续读取切换前快照；`ModelChanged`/`AgentChanged` 也在 actor fence 内发布，RPC 断连不会造成权威状态与镜像分裂。普通 child 会在注册后追赶构造期间错过的 catalog generation，自动 reload 的 convergence domain 覆盖 primary 与这些 live child，失败即 fail-closed shutdown；Workflow-owned child 携带 Run identity 并排除自动 reload，因为它的 model route 与 subagent filter 都冻结在 durable Run snapshot 中。显式 exact-session model/effort/Agent 控制仍然可用。
 
 子 Agent 的 permission mode 只有 `Ask / Auto / AlwaysApprove`，在 child 创建时独立解析；主会话后续切换 mode 不广播给 child，内部缺失 child route 时按 `Auto` 收口而不是继承 primary live mode。子 Agent 的 locked exact-call Auto 裁决由 primary session 承担，但这是裁决执行位置，不是权限模式继承。未被权威规则直接解决的精确调用按 `[subagents].classifier_input` 创建临时判断分支：默认 `context` 从主 ChatState 当前压缩状态中只提取带 first-party `PermissionEvidence` 的真实用户任务/插话，排除 assistant、tool result、summary 与 synthetic user-role 内容，再追加结构化调用事实；`request_only` 只携带待裁决动作以节省 token。`PermissionEvidence` 在真实 ingress 铸造并随本 session 的 JSONL replay 原样恢复，缺失或未知值 fail closed，不能由 role 或 `promptIndex` 推导；fork 会保留历史文本但清除该证据，因为 child 是新的权限域，subagent 的权限只能来自 typed spawn capability ceiling。两个分支都禁用工具、使用主会话 active model，并只返回严格的 `{decision, reason}`；推理强度统一服从 `[auto_mode].reasoning_effort`，未配置时保持 unset，不继承主 turn 的高推理强度。Responses/Messages 使用 native JSON Schema，Chat Completions 使用跨 OpenAI-compatible provider 的 JSON Object wire contract 后做相同的本地严格校验。完整最大 attempt（包含输出 schema）先冻结 Sideband 预算；空响应、schema 错误、可恢复 API/transport error 和单次 attempt timeout 共用最多两次的有限尝试器，两次 attempt 共享一个总 deadline，不可恢复的 auth/request error 立即 fail closed。临时消息、原始模型结果和结构化裁决都不得写回 ChatState、memory、compaction、fork context 或普通 ConversationItem。`[auto_mode].classifier_model` 只服务主会话自身分类路径，不覆盖子 Agent 的主上下文裁决模型。
 
@@ -98,7 +107,10 @@ Workflow Definition 使用同一 Agent capability、MCP binding 与 PermissionMa
 
 Timeline 的 `control` 事件包含单调 control revision，以及 Behavior snapshot、Plan phase/approval/artifact revision/hash 与 Goal state/receipt。它是唯一持久控制事实；不存在 control sidecar。
 
+每个 Control 事件同时声明本次原子退役的 model-context layer。退役只撤销该 layer 的当前 authority 与尚未跨过边界的 pending transition，不删除历史 Surface；后续 compaction 只能重投影仍然活跃的 layer。因此 Goal pause/complete/clear 与离开 Goal Behavior 会在同一 Control 事实中退役 `GoalDefinition`，旧 Goal 指令即使被 Surface replacement 遮蔽，也不能在后续修复中重新成为模型上下文。
+
 - 控制命令收到持久化 ack 后才返回 Applied/成功。
+- 成功的 PlanControl 或 Goal lifecycle 工具结果形成强制 turn control boundary：同批未开始的工具先以未执行结果闭合，当前 Step 结束并应用已排队的 step controls，然后直接写入 TurnEnded。completion requirement、Stop hook 与任何 recovery 都不得在旧 admission 下再次采样。
 - 先持久化将要到达的控制状态，再取消 exact foreground/owned run并发布 UI projection。
 - Goal finalization 的 Timeline turn identity 携带结构化 origin/turn kind/goal id/stage id，turn terminal携带 stop reason/completion kind；terminal与 Control事件共享同一有序 Timeline actor，确保 terminal先落盘，再写 Complete/Normal。若进程恰在两次写入之间退出，恢复器从 durable Timeline terminal对账并补写 Complete receipt，不读取 `updates.jsonl`，也不重复 final report。
 - Plan 的 submit/approve/reject/abandon 都等待 control ack；持久化失败时恢复内存中的前一 Behavior snapshot，不向模型或 Pager 发布不可恢复的相位。

@@ -95,7 +95,7 @@ const _: () = assert!(
 /// `LAZINESS_*` strings above as the wire format (snake_case). The
 /// `as_const_str()` mapping is exhaustive over the variants — the
 /// `laziness_category_round_trip` test asserts the variant ↔ const
-/// pairing is one-to-one. Mirrors the `TodoGateReason` pattern.
+/// pairing is one-to-one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LazinessCategory {
@@ -176,22 +176,6 @@ impl LazinessCategory {
         ]
     }
 }
-
-// ── TodoGate discriminator vocabulary ─────────────────────────────────
-//
-// Source of truth for the `reason` field on `Event::TodoGateFired`.
-// Producer wraps these via `TodoGateReason::as_str()` (the session actor).
-
-/// The TodoGate fired because a content-only turn ended with one or more
-/// pending or unbacked in-progress todos.
-pub const TODO_GATE_IN_FLIGHT: &str = "in_flight";
-
-// Compile-time non-empty check — empty would silently break dashboards' group-by.
-#[allow(clippy::const_is_empty)]
-const _: () = assert!(
-    !TODO_GATE_IN_FLIGHT.is_empty(),
-    "TodoGate discriminator consts must be non-empty",
-);
 
 /// Map a [`CancellationCategory`] to the [`PriorTurnInterrupt`] marker stamped
 /// onto the *next* real user turn — but only for the user-interruption subset.

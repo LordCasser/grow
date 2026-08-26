@@ -57,12 +57,15 @@ async fn anchors_projected_context_from_response_usage() {
                 "the immutable System governance head contributes to projected context"
             );
 
-            actor.record_response_token_usage(
-                &response_with_usage(150_000),
-                None,
-                Some("provider/model".into()),
-                None,
-            );
+            actor
+                .record_response_token_usage(
+                    &response_with_usage(150_000),
+                    None,
+                    Some("provider/model".into()),
+                    None,
+                )
+                .await
+                .unwrap();
 
             assert_eq!(
                 actor.chat_state_handle.get_projected_tokens().await,
@@ -112,6 +115,11 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                     "now".into(),
                 )
                 .unwrap();
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Goal);
+            actor.sync_goal_usage_window();
 
             let mut first = response_with_usage(1_080);
             first.usage = Some(TokenUsage {
@@ -122,7 +130,10 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 700,
                 cache_creation_prompt_tokens: 0,
             });
-            actor.record_response_token_usage(&first, None, None, Some("goal-1"));
+            actor
+                .record_response_token_usage(&first, None, None, Some("goal-1"))
+                .await
+                .unwrap();
             assert_eq!(actor.goal_tokens_used(), 380);
 
             let mut after_compaction = response_with_usage(400);
@@ -134,10 +145,62 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 300,
                 cache_creation_prompt_tokens: 0,
             });
-            actor.record_response_token_usage(&after_compaction, None, None, Some("goal-1"));
+            actor
+                .record_response_token_usage(&after_compaction, None, None, Some("goal-1"))
+                .await
+                .unwrap();
 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 400);
             assert_eq!(actor.goal_tokens_used(), 480);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let (goal_tx, mut goal_rx) = tokio::sync::mpsc::unbounded_channel();
+            let goal_tx_keepalive = goal_tx.clone();
+            actor.startup_hints.is_subagent = true;
+            actor.goal_usage_window = crate::session::actor::goal_support::GoalUsageWindow::new(
+                goal_tx,
+                Some("goal-1".into()),
+            );
+
+            let mut response = response_with_usage(1_080);
+            response.usage = Some(TokenUsage {
+                prompt_tokens: 1_000,
+                completion_tokens: 80,
+                total_tokens: 1_080,
+                reasoning_tokens: 40,
+                cached_prompt_tokens: 700,
+                cache_creation_prompt_tokens: 0,
+            });
+            let settlement =
+                actor.record_response_token_usage(&response, None, None, Some("goal-1"));
+            tokio::pin!(settlement);
+            let command = tokio::select! {
+                command = goal_rx.recv() => command.expect("Goal usage command"),
+                result = &mut settlement => panic!("settlement completed before root ack: {result:?}"),
+            };
+            let respond_to = match command {
+                crate::session::commands::SessionCommand::RecordGoalUsage {
+                    goal_id,
+                    tokens: 380,
+                    respond_to,
+                } if goal_id == "goal-1" => respond_to,
+                _ => panic!("unexpected Goal usage command"),
+            };
+            let _ = respond_to.send(Ok(true));
+            settlement.await.unwrap();
+            assert_eq!(actor.goal_tokens_used(), 0);
+            drop(goal_tx_keepalive);
         })
         .await;
 }
@@ -153,7 +216,10 @@ async fn preserves_projection_when_response_has_no_usage() {
             let actor = create_test_actor(99_999, 256_000, 85, gateway_tx, persistence_tx).await;
             let _sync = actor.chat_state_handle.get_projected_tokens().await;
 
-            actor.record_response_token_usage(&response_without_usage(), None, None, None);
+            actor
+                .record_response_token_usage(&response_without_usage(), None, None, None)
+                .await
+                .unwrap();
 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 99_999);
         })
@@ -231,7 +297,10 @@ async fn build_session_info_used_reflects_recorded_response() {
                 .await
                 .unwrap();
 
-            actor.record_response_token_usage(&response_with_usage(120_000), None, None, None);
+            actor
+                .record_response_token_usage(&response_with_usage(120_000), None, None, None)
+                .await
+                .unwrap();
 
             let info = actor.build_session_info().await;
             assert_eq!(info.context.used, 120_000);
@@ -321,7 +390,10 @@ async fn stashes_per_turn_usage_in_chat_state() {
             );
 
             // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
-            actor.record_response_token_usage(&response_with_usage(200_000), None, None, None);
+            actor
+                .record_response_token_usage(&response_with_usage(200_000), None, None, None)
+                .await
+                .unwrap();
 
             let stashed = actor
                 .chat_state_handle

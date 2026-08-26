@@ -10,6 +10,7 @@
 //! rejected before they can enter durable rewind state.
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Seek as _};
@@ -477,17 +478,25 @@ impl FileStateTracker {
             }
         };
 
-        for rel_path in paths_to_capture {
-            let content = fs
-                .try_read_file(&rel_path)
-                .await
-                .and_then(|opt| opt.map(bytes_to_string).transpose())
-                .unwrap_or(None);
-
-            let snapshot = FileSnapshot::new(rel_path, content);
-
-            let mut points = self.rewind_points.lock().await;
-            if let Some(point) = points.get_mut(&prompt_index) {
+        // Rewind capture is post-turn bookkeeping on the cancellation path.
+        // Bound filesystem fan-out so many touched files do not serialize the
+        // time before the cancelled prompt can settle, while avoiding an
+        // unbounded burst against remote/ACP filesystems.
+        let snapshots = futures::stream::iter(paths_to_capture)
+            .map(|rel_path| async move {
+                let content = fs
+                    .try_read_file(&rel_path)
+                    .await
+                    .and_then(|opt| opt.map(bytes_to_string).transpose())
+                    .unwrap_or(None);
+                FileSnapshot::new(rel_path, content)
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        let mut points = self.rewind_points.lock().await;
+        if let Some(point) = points.get_mut(&prompt_index) {
+            for snapshot in snapshots {
                 point.set_after_snapshot(snapshot);
             }
         }

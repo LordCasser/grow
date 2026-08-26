@@ -391,8 +391,10 @@ pub fn is_synthetic_extracted_query(text: &str) -> bool {
 /// user turns — they must anchor the compaction boundary even though
 /// they have no extractable text query.
 ///
-/// This is the single source of truth for "real user" classification
-/// in the compaction pipeline.
+/// This is the single source of truth for human-authored query extraction and
+/// statistics. Compaction lifecycle boundaries use `UserItem::prompt_index`
+/// instead, because runtime-owned Goal/task/monitor turns are also causal
+/// prompt turns.
 pub fn is_real_user_turn(item: &ConversationItem) -> bool {
     match item {
         ConversationItem::User(u) => {
@@ -426,9 +428,11 @@ pub struct CompactionRangePlan {
 
 /// Select one old Surface range while retaining a recent verbatim tail.
 ///
-/// The normal path shadows complete old user turns and starts the retained
-/// tail at a real user message. For a single very long turn, it can instead
-/// shadow older completed response groups after that user; the retained tail
+/// The normal path shadows complete old prompt turns and starts the retained
+/// tail at a causally recorded prompt boundary. This includes runtime-owned
+/// turns such as Goal continuations: whether input was human-authored is not a
+/// valid lifecycle boundary. For a single very long turn, it can instead
+/// shadow older completed response groups after that prompt; the retained tail
 /// starts only at a complete response-group boundary, never at a
 /// `ToolResult` or in the middle of a
 /// `[Reasoning, BackendToolCall, ..., Assistant]` group. `SurfaceId` is the
@@ -451,14 +455,17 @@ pub fn plan_compaction_range(
     let range_tokens = |start: usize, end: usize| {
         suffix_tokens[start].saturating_sub(suffix_tokens[end.saturating_add(1)])
     };
-    let real_users = surface
+    let prompt_turns = surface
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| is_real_user_turn(item).then_some(index))
+        .filter_map(|(index, item)| {
+            matches!(item, ConversationItem::User(user) if user.prompt_index.is_some())
+                .then_some(index)
+        })
         .collect::<Vec<_>>();
-    let first_user = *real_users.first()?;
-    let last_user = *real_users.last()?;
-    let source_start = surface[..first_user]
+    let first_prompt = *prompt_turns.first()?;
+    let last_prompt = *prompt_turns.last()?;
+    let source_start = surface[..first_prompt]
         .iter()
         .rposition(|item| {
             !matches!(
@@ -471,18 +478,18 @@ pub fn plan_compaction_range(
         .map_or(0, |index| index + 1);
 
     // Prefer complete old turns. Walk backwards until the retained suffix has
-    // the desired budget, then keep everything from that user message onward.
+    // the desired budget, then keep everything from that prompt onward.
     // A prior summary immediately before the oldest live user turn belongs to
     // the same rolling context layer; absorb it into the next summary instead
     // of accumulating one permanent Surface node per compaction.
-    let mut tail_start = last_user;
-    for &candidate in real_users.iter().rev() {
+    let mut tail_start = last_prompt;
+    for &candidate in prompt_turns.iter().rev() {
         tail_start = candidate;
         if suffix_tokens[candidate] >= retain_tokens {
             break;
         }
     }
-    if tail_start > first_user {
+    if tail_start > first_prompt {
         let end = tail_start - 1;
         let source_tokens = range_tokens(source_start, end);
         if source_tokens >= min_source_tokens {
@@ -494,7 +501,7 @@ pub fn plan_compaction_range(
     // prompt and newest response groups verbatim, and summarize only older
     // completed response groups. A valid boundary is the first item in a
     // model response group, not merely any assistant-role item.
-    let start = last_user.saturating_add(1);
+    let start = last_prompt.saturating_add(1);
     if start >= surface.len() {
         return None;
     }
@@ -889,20 +896,30 @@ mod tests {
     fn surface_with_ids(
         items: Vec<ConversationItem>,
     ) -> (Vec<ConversationItem>, Vec<crate::SurfaceId>) {
-        let timeline = crate::Timeline::from_seed(items).unwrap();
-        (timeline.surface().to_vec(), timeline.surface_ids().to_vec())
+        let ids = items
+            .iter()
+            .enumerate()
+            .map(|(index, _)| crate::SurfaceId {
+                event: crate::EventSeq::new(index as u64),
+                item: 0,
+            })
+            .collect();
+        (items, ids)
     }
 
     #[test]
     fn partial_compaction_preserves_prefix_and_recent_user_turn() {
-        let (surface, ids) = surface_with_ids(vec![
+        let mut items = vec![
             ConversationItem::system("system"),
             ConversationItem::project_instructions("rules"),
             ConversationItem::user("old task"),
             ConversationItem::assistant("x".repeat(800)),
             ConversationItem::user("recent task"),
             ConversationItem::assistant("y".repeat(800)),
-        ]);
+        ];
+        items[2].set_prompt_index(0);
+        items[4].set_prompt_index(1);
+        let (surface, ids) = surface_with_ids(items);
 
         let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
@@ -913,7 +930,7 @@ mod tests {
 
     #[test]
     fn repeated_partial_compaction_rolls_prior_summary_into_next_range() {
-        let (surface, ids) = surface_with_ids(vec![
+        let mut items = vec![
             ConversationItem::system("system"),
             ConversationItem::project_instructions("rules"),
             ConversationItem::user_meta("prior compacted history"),
@@ -921,7 +938,10 @@ mod tests {
             ConversationItem::assistant("x".repeat(800)),
             ConversationItem::user("recent task"),
             ConversationItem::assistant("y".repeat(800)),
-        ]);
+        ];
+        items[3].set_prompt_index(0);
+        items[5].set_prompt_index(1);
+        let (surface, ids) = surface_with_ids(items);
 
         let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 4));
@@ -930,7 +950,7 @@ mod tests {
 
     #[test]
     fn partial_compaction_of_long_turn_keeps_tool_pair_whole() {
-        let (surface, ids) = surface_with_ids(vec![
+        let mut items = vec![
             ConversationItem::system("system"),
             ConversationItem::user("one long task"),
             ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
@@ -940,7 +960,9 @@ mod tests {
             }]),
             ConversationItem::tool_result("call-1", "x".repeat(800)),
             ConversationItem::assistant("newest response".repeat(80)),
-        ]);
+        ];
+        items[1].set_prompt_index(0);
+        let (surface, ids) = surface_with_ids(items);
 
         let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 3));
@@ -956,7 +978,7 @@ mod tests {
 
     #[test]
     fn partial_compaction_keeps_reasoning_with_its_assistant_response() {
-        let (surface, ids) = surface_with_ids(vec![
+        let mut items = vec![
             ConversationItem::system("system"),
             ConversationItem::user("one long task"),
             ConversationItem::assistant("older response".repeat(80)),
@@ -964,7 +986,9 @@ mod tests {
                 "newest reasoning",
             )),
             ConversationItem::assistant("newest response"),
-        ]);
+        ];
+        items[1].set_prompt_index(0);
+        let (surface, ids) = surface_with_ids(items);
 
         let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
         assert_eq!((plan.start_index, plan.end_index), (2, 2));
@@ -980,11 +1004,47 @@ mod tests {
 
     #[test]
     fn partial_compaction_rejects_mismatched_identity_projection() {
-        let surface = vec![
+        let mut surface = vec![
             ConversationItem::system("system"),
             ConversationItem::user("task"),
         ];
+        surface[1].set_prompt_index(0);
         assert!(plan_compaction_range(&surface, &[], 1, 1).is_none());
+    }
+
+    #[test]
+    fn goal_continuations_are_prompt_turn_boundaries() {
+        let mut items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("runtime context"),
+            ConversationItem::system_reminder("continue goal revision 1"),
+            ConversationItem::assistant("old work".repeat(80)),
+            ConversationItem::system_reminder("continue goal revision 2"),
+            ConversationItem::assistant("recent work".repeat(80)),
+        ];
+        items[2].set_prompt_index(0);
+        items[4].set_prompt_index(1);
+        let (surface, ids) = surface_with_ids(items);
+
+        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 3));
+        assert_eq!(plan.target.shadowed, ids[2..=3]);
+    }
+
+    #[test]
+    fn synthetic_reminder_without_prompt_index_is_not_a_turn_boundary() {
+        let mut items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+            ConversationItem::assistant("older response".repeat(80)),
+            ConversationItem::system_reminder("mid-turn reminder"),
+            ConversationItem::assistant("newest response".repeat(80)),
+        ];
+        items[1].set_prompt_index(0);
+        let (surface, ids) = surface_with_ids(items);
+
+        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 3));
     }
     #[test]
     fn test_extract_user_query_with_tags() {

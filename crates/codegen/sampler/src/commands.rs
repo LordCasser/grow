@@ -6,10 +6,9 @@
 
 use tokio::sync::oneshot;
 
-use sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
+use sampling_types::ConversationRequest;
 
 use crate::config::SamplerConfig;
-use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
 /// Commands sent from a [`SamplerHandle`](crate::handle::SamplerHandle)
@@ -25,9 +24,9 @@ pub(crate) enum SamplerCommand {
         request_id: RequestId,
         request: Box<ConversationRequest>,
         config: Option<Box<SamplerConfig>>,
-        completion_tx: Option<
-            oneshot::Sender<Result<(ConversationResponse, InferenceLatencyStats), SamplingError>>,
-        >,
+        completion_tx: Option<oneshot::Sender<crate::actor::request_task::CompletionResult>>,
+        scope_capture: Option<crate::handle::AttemptScopeCapture>,
+        usage_sink: Option<crate::handle::AttemptUsageSink>,
     },
 
     /// Cancel an in-flight request.

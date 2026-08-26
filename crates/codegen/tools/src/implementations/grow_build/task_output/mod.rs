@@ -954,6 +954,7 @@ pub(crate) mod test_helpers {
             explicitly_killed: false,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
             is_backgrounded: false,
         }

@@ -67,6 +67,15 @@ impl WebFetchClient {
         })
     }
 
+    /// Update the model-relative inline output cap for future calls.
+    ///
+    /// A tool call clones this resource before fetching, so an already-running
+    /// call keeps the route that admitted it while the next step observes the
+    /// new model window.
+    pub fn set_context_window_tokens(&mut self, tokens: u64) {
+        self.params.context_window_tokens = Some(tokens);
+    }
+
     /// Fetch a URL and return its content as markdown.
     ///
     /// Handles: validation, HTTPS upgrade, SSRF check, HTTP fetch with

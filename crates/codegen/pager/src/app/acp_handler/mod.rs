@@ -56,16 +56,46 @@ use routing::{
     mcp_target_agent, resolve_notif_agent, resolve_target_agent_view, resolve_target_view,
 };
 
+pub(crate) use settings::apply_models_state_update;
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 
 use session_notification::{
-    advance_reconnect_cursor, behavior_mode_update_applied, confirm_context_used,
-    detect_plan_mode_change, drop_unexpected_replay,
+    advance_reconnect_cursor, behavior_mode_update_resolution, behavior_mode_update_target,
+    confirm_context_used, detect_plan_mode_change, drop_unexpected_replay,
 };
 pub(crate) use session_notification::{
-    handle_descendant_lifecycle_replay, handle_session_notification,
+    apply_deferred_authoritative_controls, handle_descendant_state_replay,
+    handle_session_notification, sync_child_control_projection,
 };
+
+pub(crate) fn sync_child_control_projection_by_session_id(
+    app: &mut AppView,
+    child_session_id: &str,
+) -> bool {
+    fn visit(agent: &mut AgentView, child_session_id: &str) -> bool {
+        if agent.subagent_views.contains_key(child_session_id) {
+            return sync_child_control_projection(agent, child_session_id);
+        }
+        agent
+            .subagent_views
+            .values_mut()
+            .any(|child| visit(child, child_session_id))
+    }
+    app.agents
+        .values_mut()
+        .any(|agent| visit(agent, child_session_id))
+}
+
+pub(crate) fn sync_all_subagent_control_projections(agent: &mut AgentView) {
+    let child_ids = agent.subagent_views.keys().cloned().collect::<Vec<_>>();
+    for child_id in child_ids {
+        if let Some(child) = agent.subagent_views.get_mut(&child_id) {
+            sync_all_subagent_control_projections(child);
+        }
+        sync_child_control_projection(agent, &child_id);
+    }
+}
 
 use queue::handle_queue_changed;
 
@@ -229,6 +259,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     let mut settings_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
                     let mut behavior_drain = None;
+                    let mut behavior_control_effect = None;
 
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
@@ -329,8 +360,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // always has `attached_as_viewer == false`).
                         !agent.session.loading_replay
                     } else {
-                        let release_behavior_fifo =
-                            !meta.is_replay && behavior_mode_update_applied(&notif.request.update);
+                        let behavior_resolution = (!meta.is_replay)
+                            .then(|| behavior_mode_update_resolution(&notif.request.update))
+                            .flatten();
+                        let behavior_target = (!meta.is_replay)
+                            .then(|| behavior_mode_update_target(&notif.request.update))
+                            .flatten();
                         if !meta.is_replay {
                             agent.session.last_prompt_event_at = Some(observed_at);
                         }
@@ -493,21 +528,48 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         advance_reconnect_cursor(agent, &mut meta);
 
-                        if release_behavior_fifo {
-                            let admission_applied = agent
-                                .session
-                                .deferred_session_mode
-                                .is_none_or(|target| target == agent.session.behavior_mode);
-                            if admission_applied {
-                                // The matching applied CurrentModeUpdate is the
-                                // completion boundary for a Dashboard/Worktree
-                                // first-prompt admission. An initial Normal update
-                                // may arrive before the staged mode RPC; it must not
-                                // release a Plan/Clarify/etc. prompt under Normal.
-                                agent.session.deferred_session_mode = None;
-                                behavior_drain =
-                                    Some(crate::app::root::dispatch::maybe_drain_queue(agent));
+                        if let Some(resolution) = behavior_resolution
+                            && let Some(completion) = agent.session.resolve_in_flight_behavior(
+                                agent.session.behavior_mode,
+                                resolution,
+                                behavior_target,
+                            )
+                        {
+                            if completion == crate::app::session::SessionControlCompletion::Next {
+                                behavior_control_effect =
+                                    crate::app::root::dispatch::next_control_effect(
+                                        id,
+                                        notif.request.session_id.clone(),
+                                        &agent.session,
+                                    );
+                            } else {
+                                // Every terminal control boundary releases any
+                                // server-authoritative state parked behind the
+                                // FIFO, even when this Behavior was rejected.
+                                // Rejection/confirmation still retains the
+                                // prompt admission latch below.
+                                crate::app::acp_handler::apply_deferred_authoritative_controls(
+                                    agent,
+                                    notif.request.session_id.0.as_ref(),
+                                );
                             }
+                        }
+                        if matches!(
+                            behavior_resolution,
+                            Some(crate::app::session::BehaviorControlResolution::Applied)
+                        ) && agent
+                            .session
+                            .deferred_session_mode
+                            .is_some_and(|target| target == agent.session.behavior_mode)
+                        {
+                            // The admission latch can predate the live control
+                            // FIFO (for example, a session created from the
+                            // Dashboard). Any matching authoritative applied
+                            // update releases it; an unrelated initial update,
+                            // rejection, or confirmation never does.
+                            agent.session.deferred_session_mode = None;
+                            behavior_drain =
+                                Some(crate::app::root::dispatch::maybe_drain_queue(agent));
                         }
 
                         !meta.is_replay && !agent.session.loading_replay
@@ -520,6 +582,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             drain.page_flip_entry,
                         );
                         app.pending_effects.extend(drain.effects);
+                    }
+                    if let Some(effect) = behavior_control_effect {
+                        app.pending_effects.push(effect);
                     }
 
                     if settings_modal_refresh_needed {
@@ -535,6 +600,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                 }
                 Some(SessionMatch::Child(parent_id)) => {
                     let is_active = is_matched_agent_active(app, parent_id);
+                    let mut child_behavior_effect = None;
+                    let mut child_behavior_drain = None;
                     let parent = app
                         .agents
                         .get_mut(&parent_id)
@@ -554,6 +621,13 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if let Some(ts) = meta.turn_start_ms {
                             child_view.session.turn_start_ms = Some(ts);
                         }
+                        let behavior_resolution = (!meta.is_replay)
+                            .then(|| behavior_mode_update_resolution(&notif.request.update))
+                            .flatten();
+                        let behavior_target = (!meta.is_replay)
+                            .then(|| behavior_mode_update_target(&notif.request.update))
+                            .flatten();
+                        let _ = detect_plan_mode_change(&notif.request.update, child_view);
                         child_view.session.handle_update(
                             notif.request.update,
                             &meta,
@@ -562,10 +636,55 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         for entry_id in child_view.session.tracker.take_pending_edit_hl() {
                             child_view.submit_edit_highlight(entry_id);
                         }
+                        if let Some(resolution) = behavior_resolution
+                            && let Some(completion) = child_view.session.resolve_in_flight_behavior(
+                                child_view.session.behavior_mode,
+                                resolution,
+                                behavior_target,
+                            )
+                        {
+                            if completion == crate::app::session::SessionControlCompletion::Next {
+                                child_behavior_effect =
+                                    crate::app::root::dispatch::next_control_effect(
+                                        parent_id,
+                                        notif.request.session_id.clone(),
+                                        &child_view.session,
+                                    );
+                            } else {
+                                crate::app::acp_handler::apply_deferred_authoritative_controls(
+                                    child_view,
+                                    notif.request.session_id.0.as_ref(),
+                                );
+                            }
+                        }
+                        if matches!(
+                            behavior_resolution,
+                            Some(crate::app::session::BehaviorControlResolution::Applied)
+                        ) && child_view
+                            .session
+                            .deferred_session_mode
+                            .is_some_and(|target| target == child_view.session.behavior_mode)
+                        {
+                            child_view.session.deferred_session_mode = None;
+                            child_behavior_drain =
+                                Some(crate::app::root::dispatch::maybe_drain_queue(child_view));
+                        }
                         subagent_activity_label(child_view)
                     };
 
                     sync_subagent_activity(parent, child_key, activity_label);
+
+                    if let Some(drain) = child_behavior_drain {
+                        crate::app::root::dispatch::note_peek_page_flip(
+                            app,
+                            parent_id,
+                            drain.page_flip_entry,
+                        );
+                        app.pending_effects.extend(drain.effects);
+                    }
+                    if let Some(effect) = child_behavior_effect {
+                        app.pending_effects.push(effect);
+                    }
 
                     is_active
                 }

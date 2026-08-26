@@ -17,7 +17,9 @@ pub(crate) fn test_gateway_with_receiver() -> (GatewaySender, mpsc::UnboundedRec
 }
 pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnContext {
     let (tx, _rx) = mpsc::unbounded_channel();
+    let (goal_tx, _goal_rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
+        active_child_sessions: Default::default(),
         lsp: None,
         process_scope: None,
         parent_max_turns: None,
@@ -73,16 +75,17 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
         parent_cmd_tx: None,
+        goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(goal_tx, None),
         parent_session_info: None,
         delegation_session_info: None,
         parent_chat_state: None,
         workflow_tracker: None,
         delegation_chat_state: None,
         available_models: indexmap::IndexMap::new(),
+        catalog_revision: 0,
         subagent_model_overrides: HashMap::new(),
         subagent_toggle: toggle,
         subagent_filter: Default::default(),
-        todo_gate: false,
         remote_settings: None,
         laziness_debug_log: None,
         respect_gitignore: false,

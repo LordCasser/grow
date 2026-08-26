@@ -10,7 +10,10 @@ use crate::app::root::dispatch::ctx::{
 };
 use crate::app::root::dispatch::modes::inherit_permission_mode;
 use crate::app::root::dispatch::prompt::dispatch_initial_prompt;
-use crate::app::root::dispatch::queue::{QueueDrain, maybe_drain_queue, note_peek_page_flip};
+use crate::app::root::dispatch::queue::{
+    QueueDrain, enqueue_behavior_control, enqueue_model_control, maybe_drain_queue,
+    note_peek_page_flip,
+};
 use crate::app::root::dispatch::router::dispatch;
 use crate::app::root::dispatch::status::notify_session_ready;
 use crate::app::root::dispatch::task_result::unregister_session_effect;
@@ -714,8 +717,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
         }
         agent.bind_session_id(session_id);
         if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
+            agent.session.models = Some(m).into();
         }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         // Keep the staged mode as the admission token until either an
@@ -723,9 +725,17 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
         // chooses the current Behavior as the fallback for the parked prompt.
         let deferred_mode = agent.session.deferred_session_mode;
         let cwd = agent.session.cwd.clone();
-        if deferred.is_some() {
-            agent.session.model_switch_pending = true;
-        }
+        let deferred_effects = deferred
+            .map(|(model_id, effort)| {
+                enqueue_model_control(
+                    agent_id,
+                    session_id_clone.clone(),
+                    &mut agent.session,
+                    model_id,
+                    effort,
+                )
+            })
+            .unwrap_or_default();
         // A staged Behavior owns the first-turn admission boundary. Keep the
         // queued prompt parked until the Shell's authoritative
         // CurrentModeUpdate reports that the transition applied; that update
@@ -746,9 +756,11 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
+        let revision = agent.session.begin_agent_metadata_read();
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),
+            revision,
         });
         effects.push(Effect::RefreshAvailableCommands {
             agent_id,
@@ -764,20 +776,14 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        if let Some((model_id, effort)) = deferred {
-            effects.push(Effect::SwitchModel {
-                agent_id,
-                session_id: session_id_clone.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
-            });
-        }
+        effects.extend(deferred_effects);
         if let Some(mode) = deferred_mode {
-            effects.push(Effect::SetSessionMode {
-                session_id: session_id_clone.clone(),
-                mode_id: acp::SessionModeId::new(mode.as_id()),
-            });
+            effects.extend(enqueue_behavior_control(
+                agent_id,
+                session_id_clone.clone(),
+                &mut agent.session,
+                mode,
+            ));
         }
         if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
@@ -814,8 +820,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
+            agent.session.models = Some(m).into();
         }
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(
@@ -825,9 +830,17 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         let deferred_mode = agent.session.deferred_session_mode;
         let cwd = agent.session.cwd.clone();
-        if deferred.is_some() {
-            agent.session.model_switch_pending = true;
-        }
+        let deferred_effects = deferred
+            .map(|(model_id, effort)| {
+                enqueue_model_control(
+                    agent_id,
+                    session_id_clone.clone(),
+                    &mut agent.session,
+                    model_id,
+                    effort,
+                )
+            })
+            .unwrap_or_default();
         // Mirror the ordinary SessionCreated barrier above. Worktree creation
         // must not make its first prompt race the deferred Behavior RPC.
         let mut drain = if app.reconnect_pending || deferred_mode.is_some() {
@@ -845,9 +858,11 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
+        let revision = agent.session.begin_agent_metadata_read();
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),
+            revision,
         });
         effects.push(Effect::RefreshAvailableCommands {
             agent_id,
@@ -863,20 +878,14 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        if let Some((model_id, effort)) = deferred {
-            effects.push(Effect::SwitchModel {
-                agent_id,
-                session_id: session_id_clone.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
-            });
-        }
+        effects.extend(deferred_effects);
         if let Some(mode) = deferred_mode {
-            effects.push(Effect::SetSessionMode {
-                session_id: session_id_clone.clone(),
-                mode_id: acp::SessionModeId::new(mode.as_id()),
-            });
+            effects.extend(enqueue_behavior_control(
+                agent_id,
+                session_id_clone.clone(),
+                &mut agent.session,
+                mode,
+            ));
         }
         if agent.session.take_pending_extensions_fetch()
             && let Some(modal) = agent.extensions_modal.as_mut()
@@ -1014,13 +1023,19 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_failed(
 pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: acp::SessionId,
+    control_token: crate::app::session::SessionControlToken,
     model_id: acp::ModelId,
     effort: Option<ReasoningEffort>,
     result: Result<(), String>,
-    prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.session.model_switch_pending = false;
+    if let Some(agent) =
+        super::super::ctx::find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+    {
+        let completion = agent.session.complete_control(control_token);
+        if completion == crate::app::session::SessionControlCompletion::Stale {
+            return vec![];
+        }
         let mut effects = match result {
             Ok(()) => {
                 // Session-scoped only: never write `[models].default` here.
@@ -1049,18 +1064,35 @@ pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
                 vec![]
             }
             Err(msg) => {
-                if let Some(ref prev) = prev_model_id {
-                    agent.session.models.set_current(prev.clone(), None);
-                }
                 agent
                     .scrollback
                     .push_block(RenderBlock::system(format!("Couldn't switch model: {msg}")));
                 vec![]
             }
         };
-        let drain = maybe_drain_queue(agent);
-        effects.extend(drain.effects);
-        note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+        let page_flip_entry = if completion == crate::app::session::SessionControlCompletion::Next {
+            if let Some(next) = crate::app::root::dispatch::queue::next_control_effect(
+                agent_id,
+                session_id.clone(),
+                &agent.session,
+            ) {
+                effects.push(next);
+            }
+            None
+        } else {
+            crate::app::acp_handler::apply_deferred_authoritative_controls(
+                agent,
+                session_id.0.as_ref(),
+            );
+            let drain = maybe_drain_queue(agent);
+            effects.extend(drain.effects);
+            drain.page_flip_entry
+        };
+        crate::app::acp_handler::sync_child_control_projection_by_session_id(
+            app,
+            session_id.0.as_ref(),
+        );
+        note_peek_page_flip(app, agent_id, page_flip_entry);
         effects
     } else {
         vec![]

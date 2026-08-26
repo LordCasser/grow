@@ -111,6 +111,7 @@ async fn implicit_goal_objective_commits_its_turn_terminal_before_continuation()
                 .behavior
                 .lock()
                 .select_behavior(tool_types::BehaviorId::Goal);
+            install_test_foreground(&actor, "goal-objective").await;
 
             let result = actor
                 .handle_prompt(

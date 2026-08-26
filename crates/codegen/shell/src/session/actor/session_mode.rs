@@ -19,10 +19,22 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         .collect()
 }
 impl SessionActor {
+    pub(super) fn workflow_behavior_context(&self) -> Result<String, acp::Error> {
+        let workspace = crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+            &self.session_directory,
+            std::path::Path::new(self.session_info.cwd.as_str()),
+        )
+        .map_err(|error| {
+            acp::Error::internal_error()
+                .data(format!("active Workflow workspace is unavailable: {error}"))
+        })?;
+        Ok(workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str())))
+    }
+
     pub(super) async fn behavior_capability_support(&self) -> (bool, bool, bool) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let tool_names: Vec<String> = bridge
-            .tool_definitions()
+            .tool_definitions_builtins_only()
             .await
             .into_iter()
             .map(|definition| definition.function.name)
@@ -125,7 +137,7 @@ impl SessionActor {
     pub(super) async fn request_behavior_change(
         &self,
         session_mode_id: acp::SessionModeId,
-    ) -> BehaviorChangeOutcome {
+    ) -> Result<BehaviorChangeOutcome, acp::Error> {
         self.request_behavior_change_with_admission(session_mode_id, false)
             .await
     }
@@ -135,7 +147,9 @@ impl SessionActor {
     /// command-plane caller cancels that exact foreground turn. The generic
     /// Behavior picker remains idle-only, and Plan/Workflow ownership rules
     /// are unchanged.
-    pub(super) async fn request_goal_behavior_entry(&self) -> BehaviorChangeOutcome {
+    pub(super) async fn request_goal_behavior_entry(
+        &self,
+    ) -> Result<BehaviorChangeOutcome, acp::Error> {
         self.request_behavior_change_with_admission(acp::SessionModeId::new("goal"), true)
             .await
     }
@@ -144,10 +158,16 @@ impl SessionActor {
         &self,
         session_mode_id: acp::SessionModeId,
         allow_out_of_band_goal_entry: bool,
-    ) -> BehaviorChangeOutcome {
+    ) -> Result<BehaviorChangeOutcome, acp::Error> {
         use crate::session::behavior::{BehaviorEffect, BehaviorSwitchFacts};
         use tool_types::BehaviorAvailabilityDisposition;
         use tools::types::BehaviorId;
+
+        // Behavior admission and next-step Agent/model controls share one
+        // linearization boundary. An Agent candidate is built asynchronously
+        // after leaving the pending deque, so inspecting that deque alone
+        // cannot prove there is no in-flight route transition.
+        let step_control = self.step_control_gate.lock().await;
 
         // Workflow launch and special-Behavior admission share the manager
         // lock as their linearization point. Every public launch rechecks the
@@ -170,19 +190,33 @@ impl SessionActor {
             );
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(previous_behavior.as_id()),
-                serde_json::json!({ "status": "rejected", "message": message }),
+                serde_json::json!({
+                    "status": "rejected",
+                    "source": previous_behavior.as_id(),
+                    "target": session_mode_id.0.as_ref(),
+                    "message": message,
+                }),
             );
-            return BehaviorChangeOutcome::Rejected { message };
+            return Ok(BehaviorChangeOutcome::Rejected { message });
         };
         let Some(choice) = availability.choice(mode) else {
             let message = format!("{} behavior is unavailable.", mode.display_label());
-            return BehaviorChangeOutcome::Rejected { message };
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(previous_behavior.as_id()),
+                serde_json::json!({
+                    "status": "rejected",
+                    "source": previous_behavior.as_id(),
+                    "target": mode.as_id(),
+                    "message": message,
+                }),
+            );
+            return Ok(BehaviorChangeOutcome::Rejected { message });
         };
 
         // Confirmation is durable control-plane intent, not a side effect of
         // an inadmissible request. Reject a busy foreground before touching
         // the coordinator's confirmation latch.
-        let foreground_admission = self.state.lock().await;
+        let mut foreground_admission = self.state.lock().await;
         let host_control_turn = foreground_admission
             .foreground
             .regular()
@@ -191,6 +225,22 @@ impl SessionActor {
             && mode == BehaviorId::Goal
             && matches!(previous_behavior, BehaviorId::Normal | BehaviorId::Clarify)
             && foreground_admission.foreground.regular().is_some();
+        if !foreground_admission.pending_step_controls.is_empty() {
+            let message = format!(
+                "{} Behavior cannot overtake an earlier model or Agent control. Retry after the current step reaches its boundary.",
+                mode.display_label()
+            );
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(previous_behavior.as_id()),
+                serde_json::json!({
+                    "status": "rejected",
+                    "source": previous_behavior.as_id(),
+                    "target": mode.as_id(),
+                    "message": message,
+                }),
+            );
+            return Ok(BehaviorChangeOutcome::Rejected { message });
+        }
         if !foreground_admission.foreground.is_idle() && !host_control_turn && !goal_control_turn {
             let message = format!(
                 "Stop the active foreground work before selecting {} Behavior.",
@@ -198,9 +248,14 @@ impl SessionActor {
             );
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(previous_behavior.as_id()),
-                serde_json::json!({ "status": "rejected", "message": message }),
+                serde_json::json!({
+                    "status": "rejected",
+                    "source": previous_behavior.as_id(),
+                    "target": mode.as_id(),
+                    "message": message,
+                }),
             );
-            return BehaviorChangeOutcome::Rejected { message };
+            return Ok(BehaviorChangeOutcome::Rejected { message });
         }
         let decision = self.behavior.lock().decide_switch(
             mode,
@@ -232,7 +287,12 @@ impl SessionActor {
                     "remainingMs": remaining_ms,
                 }),
                 BehaviorChangeOutcome::Rejected { message } => {
-                    serde_json::json!({ "status": "rejected", "message": message })
+                    serde_json::json!({
+                        "status": "rejected",
+                        "source": previous_behavior.as_id(),
+                        "target": mode.as_id(),
+                        "message": message,
+                    })
                 }
                 BehaviorChangeOutcome::Applied => unreachable!(),
             };
@@ -240,18 +300,17 @@ impl SessionActor {
                 acp::SessionModeId::new(previous_behavior.as_id()),
                 meta,
             );
-            return decision.outcome;
+            return Ok(decision.outcome);
         }
 
         if !decision.effects.is_empty() {
             let persisted_goal = self.goal_tracker.lock().snapshot().cloned();
-            if self
+            if let Err(error) = self
                 .persist_behavior_transition_durably(
                     crate::session::behavior::BehaviorSnapshot::selected(mode),
                     persisted_goal,
                 )
                 .await
-                .is_err()
             {
                 let message = format!(
                     "Could not durably select {} Behavior.",
@@ -259,9 +318,17 @@ impl SessionActor {
                 );
                 self.enqueue_current_mode_update_with_behavior_change(
                     acp::SessionModeId::new(previous_behavior.as_id()),
-                    serde_json::json!({ "status": "rejected", "message": message }),
+                    serde_json::json!({
+                        "status": "rejected",
+                        "source": previous_behavior.as_id(),
+                        "target": mode.as_id(),
+                        "message": message,
+                    }),
                 );
-                return BehaviorChangeOutcome::Rejected { message };
+                return Err(crate::session::commands::fatal_turn_boundary_error(
+                    "Behavior control",
+                    error.to_string(),
+                ));
             }
         }
 
@@ -273,9 +340,13 @@ impl SessionActor {
             _ => None,
         }) {
             self.behavior.lock().select_behavior(target);
+            if target != previous_behavior && foreground_admission.foreground.regular().is_some() {
+                foreground_admission.terminal_preemption_pending = true;
+            }
         }
         drop(foreground_admission);
         drop(workflow_admission);
+        drop(step_control);
 
         for effect in decision.effects {
             match effect {
@@ -290,7 +361,7 @@ impl SessionActor {
                             false,
                             Some("behavior_switch".to_string()),
                         )
-                        .await;
+                        .await?;
                     }
                 }
                 BehaviorEffect::Select(_) => {}
@@ -298,7 +369,7 @@ impl SessionActor {
         }
         self.enqueue_current_mode_update(session_mode_id.clone());
         self.send_available_commands_update().await;
-        BehaviorChangeOutcome::Applied
+        Ok(BehaviorChangeOutcome::Applied)
     }
     /// Inject active Behavior guidance into the conversation.
     ///
@@ -313,17 +384,7 @@ impl SessionActor {
         };
         let admitted = *self.turn_behavior.lock();
         if admitted == tool_types::BehaviorId::Workflow {
-            let workspace =
-                crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
-                    &self.session_directory,
-                    std::path::Path::new(self.session_info.cwd.as_str()),
-                )
-                .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("active Workflow workspace is unavailable: {error}"))
-                })?;
-            let context =
-                workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()));
+            let context = self.workflow_behavior_context()?;
             self.push_system_reminder_with_tag(&context, self.reminder_wrapper_tag());
             return Ok(());
         }
@@ -406,7 +467,7 @@ impl SessionActor {
             .saturating_add(1);
         let snapshot = crate::session::control::SessionControlSnapshot::new(
             revision,
-            self.agent.borrow().name(),
+            self.agent.borrow().definition().selector_identity(),
             self.behavior.lock().snapshot(),
             self.goal_tracker.lock().snapshot().cloned(),
         );

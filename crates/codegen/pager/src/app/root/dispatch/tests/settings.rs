@@ -265,7 +265,7 @@ fn slash_model_valid_switches_session_without_persisting_default() {
             ..
         }
     )));
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
 }
 #[test]
 fn model_switch_pending_resets_correctly_across_success_and_failure() {
@@ -280,18 +280,20 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
         },
         &mut app,
     );
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
+    let control_token = app.agents[&id].session.current_control_token_for_test();
     dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_a,
             effort: None,
             result: Ok(()),
-            prev_model_id: None,
         }),
         &mut app,
     );
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
     dispatch(
         Action::SwitchModel {
             model_id: model_b.clone(),
@@ -299,18 +301,20 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
         },
         &mut app,
     );
-    assert!(app.agents[&id].session.model_switch_pending);
+    assert!(app.agents[&id].session.model_switch_pending());
+    let control_token = app.agents[&id].session.current_control_token_for_test();
     dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
             model_id: model_b,
             effort: None,
             result: Err("network error".into()),
-            prev_model_id: None,
         }),
         &mut app,
     );
-    assert!(!app.agents[&id].session.model_switch_pending);
+    assert!(!app.agents[&id].session.model_switch_pending());
 }
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`

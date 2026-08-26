@@ -16,7 +16,7 @@ use crate::{
 ///
 /// This is intentionally independent from the Timeline event schema: changing
 /// a debug projection must not pretend that the durable ledger format changed.
-pub const TRAJECTORY_SCHEMA_VERSION: u8 = 2;
+pub const TRAJECTORY_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +24,13 @@ pub enum SurfaceVisibility {
     Current,
     Shadowed,
     LogOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryIssueSeverity {
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +65,10 @@ pub struct TrajectoryRow {
     pub correlation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_severity: Option<TrajectoryIssueSeverity>,
     pub summary: String,
     pub details: serde_json::Value,
 }
@@ -99,13 +110,13 @@ pub struct TrajectoryProjector {
     rows: Vec<TrajectoryRow>,
     dirty_rows: BTreeSet<usize>,
     request_scopes: BTreeMap<String, (String, u32)>,
-    tool_scopes: BTreeMap<String, (String, u32)>,
+    tool_scopes: BTreeMap<String, (String, u32, String)>,
     surface_rows: BTreeMap<SurfaceId, usize>,
     current_items_per_row: Vec<usize>,
     control_snapshot: Option<serde_json::Value>,
     active_turn: Option<String>,
     active_step: Option<u32>,
-    pending_control_row: Option<(SurfaceId, usize)>,
+    pending_control_rows: BTreeMap<ControlContextLayer, (SurfaceId, usize)>,
 }
 
 impl TrajectoryProjector {
@@ -130,10 +141,13 @@ impl TrajectoryProjector {
                 call_id,
                 turn,
                 step,
+                name,
                 ..
             }) => {
-                self.tool_scopes
-                    .insert(call_id.clone(), (turn.0.to_string(), step.index));
+                self.tool_scopes.insert(
+                    call_id.clone(),
+                    (turn.0.to_string(), step.index, name.clone()),
+                );
             }
             _ => {}
         }
@@ -187,18 +201,25 @@ impl TrajectoryProjector {
                 input: None, ..
             }) => 0,
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(_),
-                ..
-            }) if self.active_turn.is_none() => {
-                self.surface_rows.insert(
-                    SurfaceId {
-                        event: event.seq,
-                        item: 0,
-                    },
-                    row_index,
-                );
-                1
+            TimelineEventKind::Control(ControlEvent { model_contexts, .. }) => {
+                let mut current = 0;
+                for (item, context) in model_contexts.iter().enumerate() {
+                    if !crate::timeline::control_transition_waits_for_boundary(
+                        self.active_turn.is_some(),
+                        self.active_step.is_some(),
+                        context,
+                    ) {
+                        self.surface_rows.insert(
+                            SurfaceId {
+                                event: event.seq,
+                                item: item as u32,
+                            },
+                            row_index,
+                        );
+                        current += 1;
+                    }
+                }
+                current
             }
             _ => 0,
         };
@@ -214,8 +235,7 @@ impl TrajectoryProjector {
             &self.tool_scopes,
         );
         if let TimelineEventKind::Control(control) = &event.kind {
-            projected.summary =
-                describe_control_transition(self.control_snapshot.as_ref(), &control.snapshot);
+            projected.summary = describe_control_event(self.control_snapshot.as_ref(), control);
             self.control_snapshot = Some(control.snapshot.clone());
         }
         if projected.turn_id.is_none() {
@@ -227,29 +247,50 @@ impl TrajectoryProjector {
         self.rows.push(projected);
         self.dirty_rows.insert(row_index);
         match &event.kind {
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(_),
-                ..
-            }) if self.active_turn.is_some() => {
-                self.pending_control_row = Some((
-                    SurfaceId {
-                        event: event.seq,
-                        item: 0,
-                    },
-                    row_index,
-                ));
+            TimelineEventKind::Control(ControlEvent { model_contexts, .. }) => {
+                for (item, context) in model_contexts.iter().enumerate() {
+                    if crate::timeline::control_transition_waits_for_boundary(
+                        self.active_turn.is_some(),
+                        self.active_step.is_some(),
+                        context,
+                    ) {
+                        self.pending_control_rows.insert(
+                            context.layer,
+                            (
+                                SurfaceId {
+                                    event: event.seq,
+                                    item: item as u32,
+                                },
+                                row_index,
+                            ),
+                        );
+                    }
+                }
             }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                if let Some((id, pending_row)) = self.pending_control_row.take() {
+                for (_layer, (id, pending_row)) in std::mem::take(&mut self.pending_control_rows) {
                     self.surface_rows.insert(id, pending_row);
-                    self.current_items_per_row[pending_row] = 1;
+                    self.current_items_per_row[pending_row] += 1;
                     self.rows[pending_row].visibility = SurfaceVisibility::Current;
                     self.dirty_rows.insert(pending_row);
                 }
                 self.active_turn = None;
                 self.active_step = None;
             }
-            TimelineEventKind::Step(StepEvent::Ended { .. }) => self.active_step = None,
+            TimelineEventKind::Step(StepEvent::Ended { .. }) => {
+                for layer in [
+                    ControlContextLayer::AgentRole,
+                    ControlContextLayer::GoalDefinition,
+                ] {
+                    if let Some((id, pending_row)) = self.pending_control_rows.remove(&layer) {
+                        self.surface_rows.insert(id, pending_row);
+                        self.current_items_per_row[pending_row] += 1;
+                        self.rows[pending_row].visibility = SurfaceVisibility::Current;
+                        self.dirty_rows.insert(pending_row);
+                    }
+                }
+                self.active_step = None;
+            }
             _ => {}
         }
     }
@@ -295,11 +336,13 @@ fn row(
     event: &TimelineEvent,
     visibility: SurfaceVisibility,
     request_scopes: &BTreeMap<String, (String, u32)>,
-    tool_scopes: &BTreeMap<String, (String, u32)>,
+    tool_scopes: &BTreeMap<String, (String, u32, String)>,
 ) -> TrajectoryRow {
     let (_, _, state, turn_id, step_index, correlation_id, duration_ms, summary) =
         describe(&event.kind, request_scopes, tool_scopes);
-    let (layer, class, producer, kind) = dimensions(&event.kind, &state);
+    let (layer, class, producer, kind) = dimensions(&event.kind, &state, tool_scopes);
+    let outcome = event_outcome(&event.kind);
+    let issue_severity = trajectory_issue_severity(&state, outcome.as_deref());
     TrajectoryRow {
         entry_id: format!("t:local/{}", event.seq.get()),
         seq: event.seq.get(),
@@ -317,14 +360,20 @@ fn row(
         step_index,
         correlation_id,
         duration_ms,
+        outcome,
+        issue_severity,
         summary,
         details: serde_json::Value::Null,
     }
 }
 
-fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String, String) {
+fn dimensions(
+    event: &TimelineEventKind,
+    state: &str,
+    tool_scopes: &BTreeMap<String, (String, u32, String)>,
+) -> (String, String, String, String) {
     match event {
-        TimelineEventKind::Messages(message) => message_dimensions(message),
+        TimelineEventKind::Messages(message) => message_dimensions(message, tool_scopes),
         TimelineEventKind::Turn(_) => coordinates("meta", "lifecycle", "core", "turn", state),
         TimelineEventKind::Step(_) => coordinates("meta", "lifecycle", "core", "step", state),
         TimelineEventKind::Request(_) => {
@@ -372,16 +421,58 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
                 format!("{}.{}", observation.scope, observation.name),
             )
         }
-        TimelineEventKind::Control(control) => coordinates(
-            match control.model_context.as_ref().map(|context| context.layer) {
-                Some(ControlContextLayer::AgentRole) => "system.role",
-                Some(ControlContextLayer::Behavior) | None => "system.behavior",
-            },
-            "lifecycle",
-            "core",
-            "control",
-            state,
-        ),
+        TimelineEventKind::Control(control) if control.model_contexts.len() > 1 => {
+            coordinates(
+                "system.control",
+                "governance",
+                "core",
+                if control.model_contexts.iter().all(|context| {
+                    context.activation == crate::ControlContextActivation::Reprojection
+                }) {
+                    "prompt.control.reprojected"
+                } else {
+                    "prompt.control.updated"
+                },
+                state,
+            )
+        }
+        TimelineEventKind::Control(control) => match control.model_contexts.first() {
+            Some(context) => {
+                let (layer, kind) = match (context.layer, context.activation) {
+                    (
+                        ControlContextLayer::AgentRole,
+                        crate::ControlContextActivation::Transition,
+                    ) => ("system.role", "prompt.agent_role.updated"),
+                    (
+                        ControlContextLayer::GoalDefinition,
+                        crate::ControlContextActivation::Transition,
+                    ) => ("system.goal", "prompt.goal_definition.updated"),
+                    (
+                        ControlContextLayer::Behavior,
+                        crate::ControlContextActivation::Transition,
+                    ) => ("system.behavior", "prompt.behavior.updated"),
+                    (
+                        ControlContextLayer::AgentRole,
+                        crate::ControlContextActivation::Reprojection,
+                    ) => ("system.role", "prompt.agent_role.reprojected"),
+                    (
+                        ControlContextLayer::GoalDefinition,
+                        crate::ControlContextActivation::Reprojection,
+                    ) => ("system.goal", "prompt.goal_definition.reprojected"),
+                    (
+                        ControlContextLayer::Behavior,
+                        crate::ControlContextActivation::Reprojection,
+                    ) => ("system.behavior", "prompt.behavior.reprojected"),
+                };
+                (
+                    layer.into(),
+                    "governance".into(),
+                    "core".into(),
+                    kind.into(),
+                )
+            }
+            None => coordinates("system.behavior", "lifecycle", "core", "control", state),
+        },
         TimelineEventKind::SessionTitle(title) => coordinates(
             "meta",
             "lifecycle",
@@ -439,7 +530,10 @@ fn coordinates(
     )
 }
 
-fn message_dimensions(message: &MessageEvent) -> (String, String, String, String) {
+fn message_dimensions(
+    message: &MessageEvent,
+    tool_scopes: &BTreeMap<String, (String, u32, String)>,
+) -> (String, String, String, String) {
     let governance = matches!(
         message.cause,
         crate::MessageCause::IntegrityRepair
@@ -478,8 +572,17 @@ fn message_dimensions(message: &MessageEvent) -> (String, String, String, String
         | Some(sampling_types::ConversationItem::Reasoning(_)) => {
             ("assistant", "model", "assistant.message")
         }
-        Some(sampling_types::ConversationItem::ToolResult(_)) => {
-            ("tool.result", "tool", "tool.result")
+        Some(sampling_types::ConversationItem::ToolResult(result)) => {
+            let producer = tool_scopes
+                .get(&result.tool_call_id)
+                .map(|(_, _, name)| format!("tool:{name}"))
+                .unwrap_or_else(|| "tool:unknown".into());
+            return (
+                "tool.result".into(),
+                "message".into(),
+                producer,
+                "tool.result".into(),
+            );
         }
         Some(sampling_types::ConversationItem::BackendToolCall(_)) => {
             ("tool.call", "model", "tool.call")
@@ -502,7 +605,7 @@ fn producer_from_scope(scope: &str) -> String {
 fn describe(
     kind: &TimelineEventKind,
     request_scopes: &BTreeMap<String, (String, u32)>,
-    tool_scopes: &BTreeMap<String, (String, u32)>,
+    tool_scopes: &BTreeMap<String, (String, u32, String)>,
 ) -> (
     String,
     String,
@@ -933,6 +1036,29 @@ fn describe_model_transition(data: Option<&serde_json::Value>) -> String {
     format!("model {to_model} selected")
 }
 
+fn describe_control_event(previous: Option<&serde_json::Value>, control: &ControlEvent) -> String {
+    if control.model_contexts.len() > 1
+        && control
+            .model_contexts
+            .iter()
+            .all(|context| context.activation == crate::ControlContextActivation::Reprojection)
+    {
+        return "Control prompt contexts reassembled".into();
+    }
+    if let Some(context) = control.model_contexts.first()
+        && context.activation == crate::ControlContextActivation::Reprojection
+    {
+        return match context.layer {
+            ControlContextLayer::AgentRole => "Agent role prompt context reassembled".into(),
+            ControlContextLayer::GoalDefinition => {
+                "Goal definition prompt context reassembled".into()
+            }
+            ControlContextLayer::Behavior => "Behavior prompt context reassembled".into(),
+        };
+    }
+    describe_control_transition(previous, &control.snapshot)
+}
+
 fn describe_control_transition(
     previous: Option<&serde_json::Value>,
     current: &serde_json::Value,
@@ -1065,13 +1191,18 @@ fn describe_message(event: &MessageEvent) -> ReturnTuple {
         SurfaceOp::Append => "appended",
         SurfaceOp::Replace { .. } => "replaced",
     };
+    let correlation_id = event.items.iter().find_map(|item| match item {
+        sampling_types::ConversationItem::ToolResult(result) => Some(result.tool_call_id.clone()),
+        sampling_types::ConversationItem::BackendToolCall(call) => Some(call.id().to_owned()),
+        _ => None,
+    });
     tuple(
         "message",
         &format!("{:?}", event.cause).to_lowercase(),
         state,
         None,
         None,
-        None,
+        correlation_id,
         None,
         if summary.is_empty() {
             format!("{} item(s)", event.items.len())
@@ -1088,7 +1219,8 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
             turn,
             step,
             model_id,
-            ..
+            input_message_count,
+            tool_count,
         } => tuple(
             "request",
             "model_request",
@@ -1097,7 +1229,7 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
             Some(step.index),
             Some(id.clone()),
             None,
-            model_id.clone(),
+            format!("{model_id} · {input_message_count} messages · {tool_count} tools"),
         ),
         RequestEvent::Retrying {
             id,
@@ -1121,9 +1253,21 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
             id,
             duration_ms,
             time_to_first_token_ms,
-            ..
+            usage,
+            response_message_count,
         } => {
             let (turn, step) = scope(scopes, id);
+            let mut metrics = Vec::new();
+            if let Some(ttft) = time_to_first_token_ms {
+                metrics.push(format!("TTFT {ttft} ms"));
+            }
+            if let Some(tokens) = usage.input_tokens {
+                metrics.push(format!("input {tokens} tok"));
+            }
+            if let Some(tokens) = usage.output_tokens {
+                metrics.push(format!("output {tokens} tok"));
+            }
+            metrics.push(format!("{response_message_count} responses"));
             tuple(
                 "request",
                 "model_request",
@@ -1132,9 +1276,7 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
                 step,
                 Some(id.clone()),
                 Some(*duration_ms),
-                time_to_first_token_ms
-                    .map(|ttft| format!("ttft {ttft} ms"))
-                    .unwrap_or_else(|| "completed".into()),
+                metrics.join(" · "),
             )
         }
         RequestEvent::Failed {
@@ -1176,14 +1318,17 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
     }
 }
 
-fn describe_tool(event: &ToolEvent, scopes: &BTreeMap<String, (String, u32)>) -> ReturnTuple {
+fn describe_tool(
+    event: &ToolEvent,
+    scopes: &BTreeMap<String, (String, u32, String)>,
+) -> ReturnTuple {
     match event {
         ToolEvent::Started {
             call_id,
             turn,
             step,
             name,
-            ..
+            input,
         } => tuple(
             "tool",
             name,
@@ -1192,16 +1337,19 @@ fn describe_tool(event: &ToolEvent, scopes: &BTreeMap<String, (String, u32)>) ->
             Some(step.index),
             Some(call_id.clone()),
             None,
-            name.clone(),
+            summarize_tool_payload(input.as_ref()).unwrap_or_else(|| "call admitted".into()),
         ),
         ToolEvent::Completed {
             call_id,
             name,
             outcome,
             duration_ms,
-            ..
+            details,
         } => {
-            let (turn, step) = scope(scopes, call_id);
+            let (turn, step) = tool_scope(scopes, call_id);
+            let summary = summarize_tool_payload(details.as_ref())
+                .map(|details| format!("{outcome} · {details}"))
+                .unwrap_or_else(|| outcome.clone());
             tuple(
                 "tool",
                 name,
@@ -1210,9 +1358,54 @@ fn describe_tool(event: &ToolEvent, scopes: &BTreeMap<String, (String, u32)>) ->
                 step,
                 Some(call_id.clone()),
                 Some(*duration_ms),
-                outcome.clone(),
+                summary,
             )
         }
+    }
+}
+
+fn summarize_tool_payload(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    let rendered = match value {
+        serde_json::Value::Object(fields) => {
+            const PREFERRED: [&str; 11] = [
+                "path",
+                "file_path",
+                "command",
+                "cmd",
+                "query",
+                "url",
+                "pattern",
+                "name",
+                "stage",
+                "reason",
+                "description",
+            ];
+            let parts = PREFERRED
+                .into_iter()
+                .filter_map(|key| {
+                    fields
+                        .get(key)
+                        .map(|value| format!("{key}={}", summarize_json_value(value)))
+                })
+                .take(2)
+                .collect::<Vec<_>>();
+            if parts.is_empty() {
+                format!("{} input fields", fields.len())
+            } else {
+                parts.join(" · ")
+            }
+        }
+        other => summarize_json_value(other),
+    };
+    (!rendered.is_empty()).then(|| truncate(&rendered, 180))
+}
+
+fn summarize_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => truncate(value, 120),
+        serde_json::Value::Null => "null".into(),
+        other => truncate(&other.to_string(), 120),
     }
 }
 
@@ -1221,6 +1414,85 @@ fn scope(scopes: &BTreeMap<String, (String, u32)>, id: &str) -> (Option<String>,
         .get(id)
         .map(|(turn, step)| (Some(turn.clone()), Some(*step)))
         .unwrap_or((None, None))
+}
+
+fn tool_scope(
+    scopes: &BTreeMap<String, (String, u32, String)>,
+    id: &str,
+) -> (Option<String>, Option<u32>) {
+    scopes
+        .get(id)
+        .map(|(turn, step, _)| (Some(turn.clone()), Some(*step)))
+        .unwrap_or((None, None))
+}
+
+fn event_outcome(event: &TimelineEventKind) -> Option<String> {
+    match event {
+        TimelineEventKind::Turn(TurnEvent::Ended { outcome, .. })
+        | TimelineEventKind::Step(StepEvent::Ended { outcome, .. }) => Some(outcome.clone()),
+        TimelineEventKind::Request(RequestEvent::Retrying { .. }) => Some("retrying".into()),
+        TimelineEventKind::Request(RequestEvent::Completed { .. }) => Some("completed".into()),
+        TimelineEventKind::Request(RequestEvent::Failed { .. }) => Some("failed".into()),
+        TimelineEventKind::Request(RequestEvent::Cancelled { .. }) => Some("cancelled".into()),
+        TimelineEventKind::Tool(ToolEvent::Completed { outcome, .. }) => Some(outcome.clone()),
+        TimelineEventKind::Workflow(WorkflowEvent::Ended { status, .. })
+        | TimelineEventKind::Workflow(WorkflowEvent::Closed { status, .. }) => {
+            Some(status.as_str().into())
+        }
+        TimelineEventKind::Subagent(SubagentEvent::Ended(end)) => Some(
+            match end.outcome {
+                crate::SubagentOutcome::Completed => "completed",
+                crate::SubagentOutcome::Failed => "failed",
+                crate::SubagentOutcome::Cancelled => "cancelled",
+            }
+            .into(),
+        ),
+        TimelineEventKind::SubagentResult(result) => Some(
+            match result.outcome {
+                crate::SubagentOutcome::Completed => "completed",
+                crate::SubagentOutcome::Failed => "failed",
+                crate::SubagentOutcome::Cancelled => "cancelled",
+            }
+            .into(),
+        ),
+        _ => None,
+    }
+}
+
+pub fn trajectory_issue_severity(
+    state: &str,
+    outcome: Option<&str>,
+) -> Option<TrajectoryIssueSeverity> {
+    let state = state.to_ascii_lowercase();
+    let outcome = outcome.unwrap_or_default().to_ascii_lowercase();
+    if [
+        "failed",
+        "error",
+        "invalid_tool",
+        "hook_denied",
+        "not_dispatched",
+        "outcome_unknown",
+        "rejected",
+    ]
+    .iter()
+    .any(|value| state == *value || outcome == *value)
+    {
+        return Some(TrajectoryIssueSeverity::Error);
+    }
+    if [
+        "cancelled",
+        "interrupted",
+        "retrying",
+        "permission_rejected",
+        "permission_cancelled",
+        "permission_timed_out",
+    ]
+    .iter()
+    .any(|value| state == *value || outcome == *value)
+    {
+        return Some(TrajectoryIssueSeverity::Warning);
+    }
+    None
 }
 
 fn describe_compaction(event: &CompactionEvent) -> ReturnTuple {
@@ -1389,6 +1661,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1423,7 +1696,8 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 3,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
 
@@ -1444,18 +1718,63 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "agent_name": "reviewer" }),
-                model_context: Some(crate::ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
                     layer: crate::ControlContextLayer::AgentRole,
                     activation: crate::ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("role"),
-                }),
+                }],
             }))
             .unwrap();
 
         let row = timeline.trajectory().rows.pop().unwrap();
         assert_eq!(row.layer, "system.role");
+        assert_eq!(row.class, "governance");
+        assert_eq!(row.producer, "core");
+        assert_eq!(row.kind, "prompt.agent_role.updated");
         assert_eq!(row.visibility, SurfaceVisibility::Current);
         assert_eq!(row.summary, "Agent reviewer selected");
+    }
+
+    #[test]
+    fn projection_exposes_prompt_context_reprojection_explicitly() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
+                    layer: crate::ControlContextLayer::Behavior,
+                    activation: crate::ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("plan"),
+                }],
+            }))
+            .unwrap();
+        timeline
+            .replace_all(
+                vec![ConversationItem::system("system")],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
+                    layer: crate::ControlContextLayer::Behavior,
+                    activation: crate::ControlContextActivation::Reprojection,
+                    item: ConversationItem::system_reminder("plan"),
+                }],
+            }))
+            .unwrap();
+
+        let row = timeline.trajectory().rows.pop().unwrap();
+        assert_eq!(row.layer, "system.behavior");
+        assert_eq!(row.class, "governance");
+        assert_eq!(row.kind, "prompt.behavior.reprojected");
+        assert_eq!(row.summary, "Behavior prompt context reassembled");
     }
 
     #[test]
@@ -1473,6 +1792,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1488,11 +1808,12 @@ mod tests {
                 .record(TimelineEventKind::Control(crate::ControlEvent {
                     revision,
                     snapshot: serde_json::json!({ "behavior": behavior }),
-                    model_context: Some(crate::ControlContext {
+                    retired_context_layers: vec![],
+                    model_contexts: vec![crate::ControlContext {
                         layer: crate::ControlContextLayer::Behavior,
                         activation: crate::ControlContextActivation::Transition,
                         item: ConversationItem::system_reminder(behavior),
-                    }),
+                    }],
                 }))
                 .unwrap();
         }
@@ -1524,6 +1845,120 @@ mod tests {
             .unwrap();
         assert_eq!(first.visibility, SurfaceVisibility::LogOnly);
         assert_eq!(latest.visibility, SurfaceVisibility::Current);
+    }
+
+    #[test]
+    fn projection_activates_atomic_goal_context_at_step_boundary() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = crate::TurnId(8);
+        let step = crate::StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 2,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "control_boundary".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({
+                    "behavior": { "state": "Goal" },
+                    "goal": { "goal_id": "goal-1", "definition_revision": 2 }
+                }),
+                retired_context_layers: vec![],
+                model_contexts: vec![
+                    crate::ControlContext {
+                        layer: crate::ControlContextLayer::Behavior,
+                        activation: crate::ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder("goal behavior"),
+                    },
+                    crate::ControlContext {
+                        layer: crate::ControlContextLayer::GoalDefinition,
+                        activation: crate::ControlContextActivation::Transition,
+                        item: ConversationItem::goal_directive(
+                            "goal revision 2",
+                            sampling_types::SyntheticReason::SystemReminder,
+                            sampling_types::GoalDirectiveTag {
+                                goal_id: "goal-1".into(),
+                                definition_revision: 2,
+                            },
+                        ),
+                    },
+                ],
+            }))
+            .unwrap();
+
+        let snapshot = timeline.trajectory();
+        let control = snapshot
+            .rows
+            .iter()
+            .find(|row| row.correlation_id.as_deref() == Some("1"))
+            .unwrap();
+        assert_eq!(control.layer, "system.control");
+        assert_eq!(control.kind, "prompt.control.updated.committed");
+        assert_eq!(control.visibility, SurfaceVisibility::Current);
+        assert_eq!(snapshot.current_surface_items, timeline.surface().len());
+        assert!(
+            timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal revision 2")
+        );
+        assert!(
+            !timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal behavior")
+        );
+
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: crate::TurnTerminal {
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "control_boundary".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        let snapshot = timeline.trajectory();
+        assert_eq!(snapshot.current_surface_items, timeline.surface().len());
+        assert!(
+            timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal behavior")
+        );
     }
 
     #[test]
@@ -1577,7 +2012,8 @@ mod tests {
                     "behavior": { "state": "Normal" },
                     "goal": null,
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
         timeline
@@ -1593,7 +2029,8 @@ mod tests {
                         "tokens_used": 0,
                     },
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
         timeline
@@ -1609,7 +2046,8 @@ mod tests {
                         "tokens_used": 380,
                     },
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
 
@@ -1634,6 +2072,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1662,7 +2101,11 @@ mod tests {
                 id: "request".into(),
                 duration_ms: 4,
                 time_to_first_token_ms: Some(2),
-                usage: crate::RequestUsage::default(),
+                usage: crate::RequestUsage {
+                    input_tokens: Some(120),
+                    output_tokens: Some(24),
+                    ..Default::default()
+                },
                 response_message_count: 1,
             }))
             .unwrap();
@@ -1670,6 +2113,137 @@ mod tests {
         let terminal = timeline.trajectory().rows.pop().unwrap();
         assert_eq!(terminal.turn_id.as_deref(), Some("9"));
         assert_eq!(terminal.step_index, Some(2));
+        assert_eq!(
+            terminal.summary,
+            "TTFT 2 ms · input 120 tok · output 24 tok · 1 responses"
+        );
+    }
+
+    #[test]
+    fn tool_calls_and_results_expose_the_same_pairing_identity() {
+        let turn = crate::TurnId(4);
+        let step = crate::StepId { turn, index: 1 };
+        let call = ToolEvent::Started {
+            call_id: "call-pair".into(),
+            turn,
+            step,
+            name: "read_file".into(),
+            input: None,
+        };
+        let result = ToolEvent::Completed {
+            call_id: "call-pair".into(),
+            name: "read_file".into(),
+            outcome: "completed".into(),
+            duration_ms: 3,
+            details: None,
+        };
+
+        assert_eq!(
+            describe_tool(&call, &BTreeMap::new()).5.as_deref(),
+            Some("call-pair")
+        );
+        assert_eq!(
+            describe_tool(&result, &BTreeMap::new()).5.as_deref(),
+            Some("call-pair")
+        );
+
+        let message = MessageEvent {
+            cause: MessageCause::ToolResult,
+            items: vec![ConversationItem::tool_result("call-pair", "done")],
+            surface: SurfaceOp::Append,
+        };
+        assert_eq!(describe_message(&message).5.as_deref(), Some("call-pair"));
+    }
+
+    #[test]
+    fn tool_rows_preserve_name_input_pairing_and_diagnostic_outcome() {
+        let turn = crate::TurnId(4);
+        let step = crate::StepId { turn, index: 1 };
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "read".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: vec![ConversationItem::assistant_tool_calls(vec![
+                    sampling_types::ToolCall {
+                        id: std::sync::Arc::from("call-pair"),
+                        name: "read_file".into(),
+                        arguments: std::sync::Arc::from(r#"{"path":"/tmp/input.txt"}"#),
+                    },
+                ])],
+                surface: SurfaceOp::Append,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Tool(ToolEvent::Started {
+                call_id: "call-pair".into(),
+                turn,
+                step,
+                name: "read_file".into(),
+                input: Some(serde_json::json!({ "path": "/tmp/input.txt" })),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Tool(ToolEvent::Completed {
+                call_id: "call-pair".into(),
+                name: "read_file".into(),
+                outcome: "not_dispatched".into(),
+                duration_ms: 3,
+                details: Some(serde_json::json!({ "reason": "policy" })),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::ToolResult,
+                items: vec![ConversationItem::tool_result("call-pair", "blocked")],
+                surface: SurfaceOp::Append,
+            }))
+            .unwrap();
+
+        let rows = timeline.trajectory().rows;
+        let call = rows
+            .iter()
+            .find(|row| row.kind == "tool.call" && row.state == "started")
+            .unwrap();
+        assert_eq!(call.producer, "tool:read_file");
+        assert_eq!(call.summary, "path=/tmp/input.txt");
+        let completion = rows
+            .iter()
+            .find(|row| row.kind == "tool.result" && row.state == "completed")
+            .unwrap();
+        assert_eq!(completion.producer, "tool:read_file");
+        assert_eq!(completion.outcome.as_deref(), Some("not_dispatched"));
+        assert_eq!(
+            completion.issue_severity,
+            Some(TrajectoryIssueSeverity::Error)
+        );
+        assert_eq!(completion.summary, "not_dispatched · reason=policy");
+        let result = rows
+            .iter()
+            .find(|row| row.kind == "tool.result" && row.state != "completed")
+            .unwrap();
+        assert_eq!(result.producer, "tool:read_file");
+        assert_eq!(result.correlation_id.as_deref(), Some("call-pair"));
     }
 
     #[test]

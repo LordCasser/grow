@@ -447,15 +447,22 @@ fn by_name_in_cwd_with_plugins_and_home(
     home: Option<&Path>,
     grow_home: Option<&Path>,
 ) -> Option<AgentDefinition> {
-    // First try native resolution (project > built-in > user > bundled)
-    if let Some(def) = by_name_in_cwd_with_home(name, cwd, home, grow_home) {
+    let qualified_plugin_name = name.split_once(':');
+
+    // `plugin:agent` is a reserved, reconstructable namespace. A native file
+    // whose stem contains `:` must never shadow a persisted plugin identity.
+    // Bare selectors retain native precedence (project > built-in > user >
+    // bundled) before the unambiguous single-plugin fallback below.
+    if qualified_plugin_name.is_none()
+        && let Some(def) = by_name_in_cwd_with_home(name, cwd, home, grow_home)
+    {
         return Some(def);
     }
 
     // Try plugin agents
     if let Some(registry) = plugins {
         // Check if name is qualified (plugin-name:agent-name)
-        if let Some((plugin_name, agent_name)) = name.split_once(':')
+        if let Some((plugin_name, agent_name)) = qualified_plugin_name
             && let Some(plugin) = registry.get(plugin_name)
             && plugin.enabled
         {
@@ -468,6 +475,11 @@ fn by_name_in_cwd_with_plugins_and_home(
                     return Some(def);
                 }
             }
+            return None;
+        }
+
+        if qualified_plugin_name.is_some() {
+            return None;
         }
 
         // Bare name lookup: only resolve if exactly one plugin has this agent.
@@ -1346,6 +1358,39 @@ mod tests {
     }
 
     #[test]
+    fn qualified_plugin_identity_cannot_be_shadowed_by_native_colon_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let project_agents = cwd.join(".grow/agents");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&project_agents).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        write_agent_file(
+            &project_agents,
+            "plugin-one:reviewer.md",
+            "ignored",
+            "Native colon shadow",
+        );
+
+        let plugin_root = tempfile::tempdir().unwrap();
+        let plugin_agents = plugin_root.path().join("agents");
+        fs::create_dir_all(&plugin_agents).unwrap();
+        write_agent_file(&plugin_agents, "reviewer.md", "reviewer", "Plugin reviewer");
+        let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![plugin_agents]);
+
+        let definition = by_name_in_cwd_with_plugins_and_home(
+            "plugin-one:reviewer",
+            &cwd,
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grow")),
+        )
+        .unwrap();
+        assert_eq!(definition.description, "Plugin reviewer");
+        assert_eq!(definition.selector_identity(), "plugin-one:reviewer");
+    }
+
+    #[test]
     fn test_plugin_agent_body_resolves_plugin_root() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
@@ -1394,6 +1439,7 @@ mod tests {
         )
         .unwrap();
         let qualified_body = qualified.prompt_body.as_deref().unwrap();
+        assert_eq!(qualified.selector_identity(), "plugin-one:runner");
         assert!(
             qualified_body.contains(&resolved),
             "expected resolved root in: {qualified_body}"

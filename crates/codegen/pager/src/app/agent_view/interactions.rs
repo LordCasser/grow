@@ -21,6 +21,109 @@ use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 impl AgentView {
+    /// Drop reverse-request presentation owned by the previous transport.
+    /// Permissions and questions are deliberately ephemeral; persisted Plan
+    /// approval is re-issued from the server's durable approval artifact after
+    /// reload, so retaining the old response sender would expose a stale UI or
+    /// accidentally answer the wrong transport generation.
+    pub(crate) fn clear_transport_interactions_for_replay(&mut self) {
+        let permissions = self.take_permission_queue();
+        let had_permissions = !permissions.is_empty();
+        for permission in permissions {
+            let _ = permission.request.response_tx.send(Ok(
+                agent_client_protocol::RequestPermissionResponse::new(
+                    agent_client_protocol::RequestPermissionOutcome::Cancelled,
+                ),
+            ));
+        }
+        if had_permissions {
+            crate::app::root::dispatch::resolve_permission_queue_transition(self);
+        }
+        if let Some(question) = self.take_question_view() {
+            self.prompt.restore(question.stashed_prompt);
+        }
+        self.cleanup_question_state();
+        if let Some(approval) = self.plan_approval_view.take() {
+            self.plan_next_comment_id = approval.next_comment_id;
+            self.prompt.restore(approval.stashed_prompt);
+            self.line_viewer = None;
+            self.casual_commenting_range = None;
+            self.casual_editing_comment_id = None;
+        }
+        self.cancel_turn_view = None;
+        self.cancel_turn_buttons.clear();
+        for child in self.subagent_views.values_mut() {
+            child.clear_transport_interactions_for_replay();
+        }
+    }
+
+    /// Remove every ephemeral interaction attributed to one terminal child,
+    /// including permissions centralized on an ancestor view.
+    pub(crate) fn clear_transport_interactions_for_session(&mut self, session_id: &str) -> bool {
+        let original_front = self.permission_queue.front().map(|permission| {
+            (
+                permission.request.request.session_id.clone(),
+                permission.request.request.tool_call.tool_call_id.clone(),
+            )
+        });
+        let mut permissions = self.take_permission_queue();
+        let mut retained = std::collections::VecDeque::new();
+        let mut changed = false;
+        for permission in permissions.drain(..) {
+            if permission.request.request.session_id.0.as_ref() == session_id {
+                changed = true;
+                let _ = permission.request.response_tx.send(Ok(
+                    agent_client_protocol::RequestPermissionResponse::new(
+                        agent_client_protocol::RequestPermissionOutcome::Cancelled,
+                    ),
+                ));
+            } else {
+                retained.push_back(permission);
+            }
+        }
+        self.replace_permission_queue(retained);
+        let front_removed = changed
+            && original_front.is_some_and(|(owner, tool_call_id)| {
+                self.permission_queue.front().is_none_or(|permission| {
+                    permission.request.request.session_id != owner
+                        || permission.request.request.tool_call.tool_call_id != tool_call_id
+                })
+            });
+        if front_removed {
+            crate::app::root::dispatch::resolve_permission_queue_transition(self);
+        }
+
+        if self
+            .question_view
+            .as_ref()
+            .is_some_and(|question| question.source_session_id.as_deref() == Some(session_id))
+        {
+            if let Some(question) = self.take_question_view() {
+                self.prompt.restore(question.stashed_prompt);
+            }
+            self.cleanup_question_state();
+            changed = true;
+        }
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|approval| approval.source_session_id == session_id)
+        {
+            if let Some(approval) = self.plan_approval_view.take() {
+                self.plan_next_comment_id = approval.next_comment_id;
+                self.prompt.restore(approval.stashed_prompt);
+            }
+            self.line_viewer = None;
+            self.casual_commenting_range = None;
+            self.casual_editing_comment_id = None;
+            changed = true;
+        }
+        for child in self.subagent_views.values_mut() {
+            changed |= child.clear_transport_interactions_for_session(session_id);
+        }
+        changed
+    }
+
     /// Add a pending permission while keeping the session's runtime fact in
     /// sync with the presentation queue.
     pub(crate) fn push_permission(

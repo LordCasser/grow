@@ -500,13 +500,6 @@ pub struct PagerArgs {
     /// Disable automatic updates for this session.
     #[arg(long = "no-auto-update", hide = true)]
     pub no_auto_update: bool,
-    /// Enable the runtime turn-end TodoGate for this session.
-    ///
-    /// Session-scoped (not persisted). Highest precedence —
-    /// overrides remote `todo_gate_enabled` and the built-in
-    /// default (which is `false`).
-    #[arg(long = "todo-gate", hide = true)]
-    pub todo_gate: bool,
     /// Set the installer field in config.toml.
     #[arg(long = "installer", value_name = "VALUE", hide = true)]
     pub installer: Option<String>,
