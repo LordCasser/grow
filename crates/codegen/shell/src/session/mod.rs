@@ -69,6 +69,7 @@ pub enum PromptOrigin {
     /// Idle-admitted implementer continuation for an active Goal.
     GoalContinuation {
         goal_id: String,
+        definition_revision: u64,
     },
     /// Turn injected after a resumed plan-approval decision: the
     /// shell re-parked Plan approval on resume, the user approved/revised,
@@ -85,14 +86,18 @@ pub enum TurnKind {
 }
 impl PromptOrigin {
     pub fn turn_identity(&self, turn_kind: TurnKind) -> chat_state::TurnIdentity {
-        let (goal_id, stage_id) = match self {
-            Self::GoalContinuation { goal_id } => (Some(goal_id.clone()), None),
-            _ => (None, None),
+        let (goal_id, goal_definition_revision, stage_id) = match self {
+            Self::GoalContinuation {
+                goal_id,
+                definition_revision,
+            } => (Some(goal_id.clone()), Some(*definition_revision), None),
+            _ => (None, None, None),
         };
         chat_state::TurnIdentity {
             origin: self.wire_name().to_string(),
             turn_kind: turn_kind.wire_name().to_string(),
             goal_id,
+            goal_definition_revision,
             stage_id,
         }
     }
@@ -174,6 +179,7 @@ mod turn_identity_tests {
     fn origin_and_kind_are_structured_independently_of_prompt_id() {
         let origin = PromptOrigin::GoalContinuation {
             goal_id: "g1".into(),
+            definition_revision: 1,
         };
         assert_eq!(origin.wire_name(), "goal_continuation");
         assert!(origin.is_synthetic());
@@ -187,6 +193,7 @@ mod turn_identity_tests {
         assert!(
             !PromptOrigin::GoalContinuation {
                 goal_id: "g1".into(),
+                definition_revision: 1,
             }
             .is_preemptible_wake()
         );

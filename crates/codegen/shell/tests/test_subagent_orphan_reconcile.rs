@@ -91,6 +91,7 @@ async fn resume_reconciles_orphaned_running_subagent() {
                     effective_permission_mode: None,
                     workflow_run_id: None,
                     goal_id: None,
+                    goal_definition_revision: None,
                     surface_completion: true,
                     child_cwd: workdir.workspace().to_string_lossy().into_owned(),
                     worktree_path: None,

@@ -3585,6 +3585,7 @@ mod tests {
         child_cwd: &str,
     ) -> chat_state::SubagentSpawnEvent {
         chat_state::SubagentSpawnEvent {
+            goal_definition_revision: None,
             subagent_id: subagent_id.into(),
             child_session_id: child_session_id.into(),
             security_parent_session_id: "parent-session".into(),
@@ -4732,6 +4733,7 @@ mod tests {
                 chat_state::TurnEvent::Started {
                     id: turn,
                     identity: chat_state::TurnIdentity {
+                        goal_definition_revision: None,
                         origin: "user".into(),
                         turn_kind: "user".into(),
                         goal_id: None,
@@ -4800,11 +4802,12 @@ mod tests {
                 chat_state::ControlEvent {
                     revision: 1,
                     snapshot: serde_json::json!({ "behavior": "plan" }),
-                    model_context: Some(chat_state::ControlContext {
+                    retired_context_layers: vec![],
+                    model_contexts: vec![chat_state::ControlContext {
                         layer: chat_state::ControlContextLayer::Behavior,
                         activation: chat_state::ControlContextActivation::Transition,
                         item: sampling_types::ConversationItem::system_reminder("plan"),
-                    }),
+                    }],
                 },
             ))
             .unwrap();

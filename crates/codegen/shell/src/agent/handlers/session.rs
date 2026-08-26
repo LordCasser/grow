@@ -41,22 +41,55 @@ async fn handle_set_session_agent(
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
     let session_id = acp::SessionId::new(request.session_id);
     let handle = agent
-        .sessions
-        .borrow()
-        .get(&session_id)
-        .cloned()
+        .control_session_handle_waiting_for_load(&session_id)
+        .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
 
-    let definition = agent::discovery::by_name_in_cwd_with_plugins(
-        &request.agent_name,
-        handle.tool_context.cwd.as_path(),
-        agent.plugin_registry_handle.snapshot().as_deref(),
-    )
-    .ok_or_else(|| {
-        acp::Error::invalid_params().data(format!("unknown agent: {}", request.agent_name))
-    })?;
-    let selected_name = definition.name.clone();
-    let subagent_filter = definition.subagent_filter();
+    let workflow_pinned = handle.workflow_run_id.is_some();
+    let mut definition = if let Some(run_id) = handle.workflow_run_id.as_deref() {
+        let tracker = handle.workflow_tracker.lock();
+        let route = &tracker
+            .get(run_id)
+            .ok_or_else(|| {
+                acp::Error::invalid_params()
+                    .data(format!("Workflow Run '{run_id}' is no longer registered"))
+            })?
+            .runtime_route;
+        route
+            .agent_definition(&request.agent_name)
+            .map_err(|error| acp::Error::invalid_params().data(error))?
+    } else {
+        let plugins = handle.plugin_registry.read().clone();
+        agent::discovery::by_name_in_cwd_with_plugins(
+            &request.agent_name,
+            handle.tool_context.cwd.as_path(),
+            plugins.as_deref(),
+        )
+        .ok_or_else(|| {
+            acp::Error::invalid_params().data(format!("unknown agent: {}", request.agent_name))
+        })?
+    };
+    let is_child = agent
+        .active_child_sessions
+        .borrow()
+        .contains_key(&session_id);
+    // Agent selection changes the authored profile, never the session
+    // operator's capability clamp. Child clamps remain layered so the new
+    // profile also stays below its parent-owned authority boundary.
+    if !workflow_pinned && is_child {
+        agent
+            .cfg
+            .borrow()
+            .cli_agent_overrides
+            .apply_to_subagent_definition(&mut definition);
+    } else if !workflow_pinned {
+        agent
+            .cfg
+            .borrow()
+            .cli_agent_overrides
+            .apply_to_definition(&mut definition);
+    }
+    let selected_name = definition.selector_identity();
     let (responds_to, response) = tokio::sync::oneshot::channel();
     handle
         .cmd_tx
@@ -68,33 +101,9 @@ async fn handle_set_session_agent(
     response
         .await
         .map_err(|_| acp::Error::internal_error().data("session actor closed"))??;
-
-    if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
-        handle.agent_name = selected_name.clone();
-        handle.subagent_filter = subagent_filter;
-    }
-    broadcast_agent_changed(agent, &session_id, &selected_name);
     ExtMethodResult::success(serde_json::json!({ "agentName": selected_name }))
         .to_ext_response()
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))
-}
-
-fn broadcast_agent_changed(agent: &MvpAgent, session_id: &acp::SessionId, agent_name: &str) {
-    let notification = crate::extensions::notification::SessionNotification {
-        session_id: session_id.clone(),
-        update: crate::extensions::notification::SessionUpdate::AgentChanged {
-            agent_name: agent_name.to_owned(),
-        },
-        meta: None,
-    };
-    if let Ok(params) = serde_json::value::to_raw_value(&notification) {
-        agent
-            .gateway
-            .forward_fire_and_forget(acp::ExtNotification::new(
-                "grow/session_notification",
-                params.into(),
-            ));
-    }
 }
 
 /// `grow/sessions/list` — the FleetView roster. Returns every
@@ -140,7 +149,7 @@ async fn handle_session_info(
     };
 
     let sid = acp::SessionId::new(session_id.clone());
-    let Some(session) = agent.sessions.borrow().get(&sid).cloned() else {
+    let Some(session) = agent.control_session_handle_waiting_for_load(&sid).await else {
         return ExtMethodResult::success(serde_json::json!({}))
             .to_ext_response()
             .map_err(|e| acp::Error::internal_error().data(e.to_string()));

@@ -1,4 +1,31 @@
 use super::*;
+
+/// Scoped ACP control route for a live child actor. Dropping the child run
+/// removes the route even on cancellation or an early error return.
+struct ActiveChildRegistration {
+    sessions: ActiveChildSessions,
+    session_id: acp::SessionId,
+}
+
+impl ActiveChildRegistration {
+    fn install(
+        sessions: ActiveChildSessions,
+        session_id: acp::SessionId,
+        handle: SessionHandle,
+    ) -> Self {
+        sessions.borrow_mut().insert(session_id.clone(), handle);
+        Self {
+            sessions,
+            session_id,
+        }
+    }
+}
+
+impl Drop for ActiveChildRegistration {
+    fn drop(&mut self) {
+        self.sessions.borrow_mut().remove(&self.session_id);
+    }
+}
 use sampling_types::ReasoningEffort;
 use tools::implementations::grow_build;
 
@@ -69,7 +96,15 @@ pub(super) fn task_model_override_error(
 fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
     use tools::implementations::grow_build::task::types::SubagentOwner;
     match (&request.owner, &request.goal_context) {
-        (SubagentOwner::Goal { goal_id }, Some(context)) if context.view.goal_id == *goal_id => {
+        (
+            SubagentOwner::Goal {
+                goal_id,
+                definition_revision,
+            },
+            Some(context),
+        ) if context.view.goal_id == *goal_id
+            && context.view.definition_revision == *definition_revision =>
+        {
             Ok(())
         }
         (SubagentOwner::Goal { .. }, _) => Err(
@@ -87,7 +122,7 @@ fn resolve_workflow_sampler(
     request: &SubagentRequest,
     model_id: &str,
     ctx: &SubagentSpawnContext,
-) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
+) -> Result<crate::agent::models::PublishedSessionRoute, String> {
     let run_id = request
         .owner
         .workflow_run_id()
@@ -99,12 +134,92 @@ fn resolve_workflow_sampler(
         .lock()
         .get(run_id)
         .ok_or_else(|| format!("Workflow Run '{run_id}' is no longer registered"))?;
-    let sampler = state.runtime_route.sampler_for(
-        model_id,
-        &ctx.models_manager,
-        ctx.alpha_test_key.clone(),
-    )?;
-    Ok((sampler, acp::ModelId::new(model_id)))
+    state
+        .runtime_route
+        .session_route_for(model_id, &ctx.models_manager, ctx.alpha_test_key.clone())
+}
+
+fn model_state_for_catalog(
+    catalog: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    model_id: &acp::ModelId,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> acp::SessionModelState {
+    let selectable = crate::agent::models::task_selectable_catalog(catalog);
+    let mut available_models: Vec<_> = crate::agent::config::to_acp_model_info(&selectable)
+        .into_values()
+        .collect();
+    if let Some(info) = available_models
+        .iter_mut()
+        .find(|info| info.model_id == *model_id)
+        && let Some(reasoning_effort) = reasoning_effort
+        && info
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.contains_key(sampling_types::REASONING_EFFORTS_META_KEY))
+    {
+        let mut meta = info.meta.clone().unwrap_or_default();
+        meta.insert(
+            sampling_types::REASONING_EFFORT_META_KEY.to_owned(),
+            sampling_types::reasoning_effort_meta_value(reasoning_effort),
+        );
+        info.meta = Some(meta);
+    }
+    acp::SessionModelState::new(model_id.clone(), available_models)
+}
+
+fn frozen_workflow_agent_definition(
+    request: &SubagentRequest,
+    ctx: &SubagentSpawnContext,
+) -> Result<
+    Option<(
+        agent::config::AgentDefinition,
+        Vec<tools::implementations::skills::types::SkillInfo>,
+        Vec<String>,
+    )>,
+    String,
+> {
+    let Some(run_id) = request.owner.workflow_run_id() else {
+        return Ok(None);
+    };
+    let tracker = ctx
+        .workflow_tracker
+        .as_ref()
+        .ok_or_else(|| "Workflow Agent resolution requires the root Workflow tracker".to_owned())?;
+    let tracker = tracker.lock();
+    let route = &tracker
+        .get(run_id)
+        .ok_or_else(|| format!("Workflow Run '{run_id}' is no longer registered"))?
+        .runtime_route;
+    Ok(Some((
+        route.agent_definition(&request.subagent_type)?,
+        route.frozen_skills(),
+        route.frozen_agent_names(),
+    )))
+}
+
+async fn catch_up_child_catalog_generation(
+    ctx: &SubagentSpawnContext,
+    child_handle: &SessionHandle,
+) -> Result<(), String> {
+    if child_handle.workflow_run_id.is_some()
+        || ctx.models_manager.catalog_revision() == ctx.catalog_revision
+    {
+        return Ok(());
+    }
+    let catalog = std::sync::Arc::new(ctx.models_manager.published_catalog());
+    let revision = catalog.revision;
+    let (responds_to, response) = tokio::sync::oneshot::channel();
+    child_handle
+        .cmd_tx
+        .send(SessionCommand::ReloadModelConfig {
+            catalog,
+            responds_to,
+        })
+        .map_err(|_| format!("child actor closed before catalog revision {revision} catch-up"))?;
+    response
+        .await
+        .map_err(|_| format!("child dropped catalog revision {revision} catch-up"))?
+        .map_err(|error| format!("child rejected catalog revision {revision}: {error:?}"))
 }
 
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
@@ -136,12 +251,28 @@ pub(crate) async fn run_shell_child(
     if let Err(message) = validate_goal_context(&request) {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
-    let definition = resolve_agent_definition(&request.subagent_type, &ctx);
+    let (definition, frozen_workflow_skills, frozen_subagent_names) =
+        match frozen_workflow_agent_definition(&request, &ctx) {
+            Ok(Some((definition, skills, names))) => (Some(definition), Some(skills), Some(names)),
+            Ok(None) => (
+                resolve_agent_definition(&request.subagent_type, &ctx),
+                None,
+                None,
+            ),
+            Err(message) => {
+                return child_run_output(failure_result(&request, &message), completion_data);
+            }
+        };
+    let workflow_agent_names = frozen_subagent_names.clone();
     let Some(mut definition) = definition else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
         return child_run_output(failure_result(&request, &msg), completion_data);
     };
-    match gate_subagent_type(&request.subagent_type, &ctx) {
+    match if request.owner.is_workflow() {
+        SubagentValidateTypeOutcome::Ok
+    } else {
+        gate_subagent_type(&request.subagent_type, &ctx)
+    } {
         SubagentValidateTypeOutcome::Disabled => {
             let msg = format!(
                 "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
@@ -160,7 +291,9 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data);
         }
     }
-    resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
+    if !request.owner.is_workflow() {
+        resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
+    }
     let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
         &request.runtime_overrides,
         &definition,
@@ -388,13 +521,6 @@ pub(crate) async fn run_shell_child(
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
     let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
-    crate::agent::subagent::resolution::apply_child_tool_policy(
-        &mut definition,
-        allow_nested_subagents,
-    );
-    if request.owner.goal_id().is_some() {
-        crate::agent::subagent::resolution::apply_goal_object_tool_policy(&mut definition);
-    }
     tracing::info!(
         subagent_id = %request.id,
         capability_mode = ?effective_runtime.capability_mode,
@@ -407,14 +533,6 @@ pub(crate) async fn run_shell_child(
             child_depth,
             "Marked task tool forbidden for child at max depth"
         );
-    }
-    if request.owner.is_workflow() {
-        definition.tool_config.tools.retain(|tool| {
-            !matches!(
-                tool.id.rsplit(':').next(),
-                Some("workflow" | "scheduler_create" | "scheduler_list" | "scheduler_delete")
-            )
-        });
     }
     // Ordinary Task forks pin the live parent model to preserve exact radix
     // reuse. A Workflow Run already owns a durable route snapshot; replacing
@@ -440,13 +558,31 @@ pub(crate) async fn run_shell_child(
             &ctx,
         )
         .await
+        .map(|(sampling_config, model_id)| {
+            let auto_compact_threshold_percent =
+                ctx.resolve_auto_compact_threshold_percent(&model_id.0);
+            let inference_idle_timeout = std::time::Duration::from_secs(
+                ctx.resolve_inference_idle_timeout_secs(&model_id.0),
+            );
+            let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
+            crate::agent::models::PublishedSessionRoute {
+                model_id,
+                sampling_config,
+                image_description_model: ctx.image_description_model.clone(),
+                inference_idle_timeout,
+                max_retries,
+                auto_compact_threshold_percent,
+            }
+        })
     };
-    let (mut effective_sampling_config, mut effective_model_id) = match resolved_model {
+    let mut effective_route = match resolved_model {
         Ok(resolved) => resolved,
         Err(error) => {
             return child_run_output(failure_result(&request, &error), completion_data);
         }
     };
+    let mut effective_sampling_config = effective_route.sampling_config.clone();
+    let mut effective_model_id = effective_route.model_id.clone();
     let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
     // Workflow routes came from the immutable Run catalog; ordinary explicit
     // routes came from the live catalog. The remaining route is an
@@ -463,8 +599,9 @@ pub(crate) async fn run_shell_child(
                     return child_run_output(failure_result(&request, &message), completion_data);
                 }
             };
-            effective_sampling_config = resolved.0;
-            effective_model_id = resolved.1;
+            effective_route = resolved;
+            effective_sampling_config = effective_route.sampling_config.clone();
+            effective_model_id = effective_route.model_id.clone();
         } else if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
             tracing::info!(
                 subagent_id = %request.id,
@@ -474,6 +611,15 @@ pub(crate) async fn run_shell_child(
             );
             effective_sampling_config = resolved.0;
             effective_model_id = resolved.1;
+            effective_route.model_id = effective_model_id.clone();
+            effective_route.sampling_config = effective_sampling_config.clone();
+            effective_route.auto_compact_threshold_percent =
+                ctx.resolve_auto_compact_threshold_percent(&effective_model_id.0);
+            effective_route.inference_idle_timeout = std::time::Duration::from_secs(
+                ctx.resolve_inference_idle_timeout_secs(&effective_model_id.0),
+            );
+            effective_route.max_retries =
+                sampler::resolve_max_retries(effective_sampling_config.max_retries);
         } else {
             let msg = format!(
                 "Cannot resume from subagent '{}': source model '{source_model}' \
@@ -643,6 +789,40 @@ pub(crate) async fn run_shell_child(
         .to_owned()
     });
     let workflow_run_id = request.owner.workflow_run_id().map(str::to_string);
+    let workflow_runtime_route = workflow_run_id.as_deref().and_then(|run_id| {
+        ctx.workflow_tracker.as_ref().and_then(|tracker| {
+            tracker
+                .lock()
+                .get(run_id)
+                .map(|state| state.runtime_route.clone())
+        })
+    });
+    if workflow_run_id.is_some() && workflow_runtime_route.is_none() {
+        return child_run_output(
+            failure_result(
+                &request,
+                "Workflow Run route disappeared before child spawn",
+            ),
+            completion_data,
+        );
+    }
+    let child_model_state = match workflow_runtime_route.as_ref() {
+        Some(route) => match route.model_state_for(
+            effective_model_id.0.as_ref(),
+            effective_sampling_config.reasoning_effort,
+        ) {
+            Ok(state) => state,
+            Err(message) => {
+                return child_run_output(failure_result(&request, &message), completion_data);
+            }
+        },
+        None => model_state_for_catalog(
+            &ctx.available_models,
+            &effective_model_id,
+            effective_sampling_config.reasoning_effort,
+        ),
+    };
+    let effective_model_name = effective_model_id.0.to_string();
     let goal_id = request.owner.goal_id().map(str::to_string);
     let Some(parent_chat_state) = ctx.parent_chat_state.as_ref() else {
         return child_run_output(
@@ -672,6 +852,7 @@ pub(crate) async fn run_shell_child(
                 effective_permission_mode: effective_permission_mode.clone(),
                 workflow_run_id: workflow_run_id.clone(),
                 goal_id: goal_id.clone(),
+                goal_definition_revision: request.owner.goal_definition_revision(),
                 surface_completion: request.surface_completion,
                 child_cwd: child_session_info.cwd.clone(),
                 worktree_path: worktree_path
@@ -795,29 +976,6 @@ pub(crate) async fn run_shell_child(
         return child_run_output(result, completion_data);
     }
 
-    emit_subagent_notification(
-        gateway,
-        &ctx.parent_session_id,
-        SessionUpdate::SubagentSpawned {
-            subagent_id: subagent_id.clone(),
-            child_session_id: child_session_id.0.to_string(),
-            parent_session_id: ctx.parent_session_id.clone(),
-            parent_prompt_id: request.parent_prompt_id.clone(),
-            subagent_type: request.subagent_type.clone(),
-            description: request.description.clone(),
-            effective_context_source: Some(effective_source_str.to_string()),
-            context_normalized,
-            capability_mode,
-            permission_mode,
-            effective_permission_mode,
-            model: Some(effective_model_id.0.to_string()),
-            resumed_from: request.resume_from.clone(),
-            workflow_run_id,
-            goal_id,
-        },
-        ctx.parent_cmd_tx.as_ref(),
-    );
-    completion_data.spawned_notification_emitted = true;
     let (persistence, child_timeline_events, child_session_directory) =
         match session::persistence::new_child(
             &child_session_info,
@@ -1037,7 +1195,7 @@ pub(crate) async fn run_shell_child(
     }
     let inherit_skills = definition.inherit_skills;
     let definition_background = definition.background.unwrap_or(false);
-    if inherit_skills && ctx.parent_skills.is_none() {
+    if frozen_workflow_skills.is_none() && inherit_skills && ctx.parent_skills.is_none() {
         let parent_cwd_str = ctx.parent_cwd.to_string_lossy().to_string();
         ctx.parent_skills = Some(
             agent::prompt::skills::list_skills_with_plugins(
@@ -1075,15 +1233,14 @@ pub(crate) async fn run_shell_child(
         mcp_owned_count,
         skills_inherited_count,
     });
-    let subagent_model_id = effective_sampling_config.model.clone();
     let effective_inference_idle_timeout_secs = effective_sampling_config
         .idle_timeout_secs
-        .unwrap_or(ctx.inference_idle_timeout_secs);
+        .unwrap_or(effective_route.inference_idle_timeout.as_secs());
     let _ = persistence
         .tx
         .send(crate::session::persistence::PersistenceMsg::CurrentModel {
             model_id: effective_model_id.clone(),
-            agent_name: Some(definition.name.clone()),
+            agent_name: Some(definition.selector_identity()),
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
         });
     let recovery_persistence = persistence.clone();
@@ -1113,6 +1270,10 @@ pub(crate) async fn run_shell_child(
             is_subagent: true,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
+            workflow_run_id: request.owner.workflow_run_id().map(str::to_owned),
+            workflow_runtime_route,
+            delegated_goal: request.owner.goal_id().is_some(),
+            goal_usage_window: Some(ctx.goal_usage_window.clone()),
             subagent_permission_mode: Some(ctx.subagent_permission_mode),
             subagent_description: Some(request.description.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
@@ -1120,7 +1281,7 @@ pub(crate) async fn run_shell_child(
         },
         workspace::permission::ClientType::Generic,
         ctx.permission_prompt_timeout,
-        ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
+        effective_route.auto_compact_threshold_percent,
         agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_compaction_pre_prune(),
@@ -1141,11 +1302,8 @@ pub(crate) async fn run_shell_child(
         } else {
             agent::prompt::skills::SkillsConfig::default()
         },
-        if inherit_skills {
-            ctx.parent_skills.take()
-        } else {
-            None
-        },
+        frozen_workflow_skills
+            .or_else(|| inherit_skills.then(|| ctx.parent_skills.take()).flatten()),
         false,
         None,
         None,
@@ -1171,7 +1329,7 @@ pub(crate) async fn run_shell_child(
         ctx.permission_mode,
         None,
         effective_inference_idle_timeout_secs,
-        None,
+        Some(effective_route.max_retries),
         ctx.web_fetch_config.clone(),
         ctx.app_builder_deployer_config.clone(),
         ctx.write_file_enabled,
@@ -1184,6 +1342,16 @@ pub(crate) async fn run_shell_child(
         ctx.client_hooks.clone(),
         None,
         ctx.subagent_toggle.clone(),
+        ctx.agent_config
+            .as_ref()
+            .map(|config| config.cli_agents.clone())
+            .unwrap_or_default(),
+        ctx.agent_config
+            .as_ref()
+            .map(|config| config.cli_agent_overrides.clone())
+            .unwrap_or_default(),
+        ctx.file_tool_overrides.clone(),
+        frozen_subagent_names,
         agent::prompt::context::PromptAudience::Subagent,
         ctx.respect_gitignore,
         ctx.path_not_found_hints,
@@ -1193,23 +1361,18 @@ pub(crate) async fn run_shell_child(
         ctx.models_manager.clone(),
         ctx.permission_handle.clone(),
         None,
-        ctx.image_description_model.clone(),
+        effective_route.image_description_model.clone(),
         ctx.hook_registry.clone(),
         ctx.workspace_ops.clone(),
         vec![],
-        ctx.todo_gate,
         std::mem::take(&mut ctx.remote_settings),
         std::mem::take(&mut ctx.laziness_debug_log),
         ctx.parent_terminal_backend.clone(),
-        if request.owner.is_workflow() {
-            None
-        } else {
-            ctx.parent_scheduler_handle.clone()
-        },
+        None,
         subagent_max_turns,
     )
     .await;
-    let (child_handle, child_thread) = match spawn_result {
+    let (mut child_handle, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("Failed to spawn child session: {e}");
@@ -1237,6 +1400,42 @@ pub(crate) async fn run_shell_child(
             return child_run_output(result, completion_data);
         }
     };
+    if request.owner.is_workflow()
+        && let Some(tracker) = ctx.workflow_tracker.clone()
+    {
+        child_handle.workflow_tracker = tracker;
+    }
+    let _active_child_registration = ActiveChildRegistration::install(
+        ctx.active_child_sessions.clone(),
+        child_session_id.clone(),
+        child_handle.clone(),
+    );
+    if let Err(error) = catch_up_child_catalog_generation(&ctx, &child_handle).await {
+        let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        drop(child_thread);
+        let message = format!("Failed to converge child model catalog: {error}");
+        let result = fail_subagent(
+            &message,
+            &subagent_id,
+            &child_session_id,
+            start.elapsed().as_millis() as u64,
+        );
+        let result_ref = record_child_result_with_persistence(
+            &recovery_persistence,
+            recovery_timeline_events,
+            &result,
+        )
+        .await
+        .ok();
+        if record_parent_subagent_end(parent_chat_state, &result, result_ref, None)
+            .await
+            .is_ok()
+        {
+            completion_data.mark_terminal_committed();
+            admit_completion_receipt_before_result(&request, &result, &mut completion_data).await;
+        }
+        return child_run_output(result, completion_data);
+    }
     let promoted = reporter
         .started(StartedChild {
             child_session_id: child_session_id.0.to_string(),
@@ -1275,6 +1474,36 @@ pub(crate) async fn run_shell_child(
         }
         return child_run_output(result, completion_data);
     }
+    // Publish an interactive child only after its exact handle has been
+    // registered, its model catalog has converged, and the runtime owner has
+    // accepted it. Timeline admission remains the earlier durable write-ahead
+    // fact, but Pager can now act on this projection immediately without an
+    // `unknown session id` race.
+    emit_subagent_notification(
+        gateway,
+        &ctx.parent_session_id,
+        SessionUpdate::SubagentSpawned {
+            subagent_id: subagent_id.clone(),
+            child_session_id: child_session_id.0.to_string(),
+            parent_session_id: ctx.parent_session_id.clone(),
+            parent_prompt_id: request.parent_prompt_id.clone(),
+            subagent_type: request.subagent_type.clone(),
+            description: request.description.clone(),
+            effective_context_source: Some(effective_source_str.to_string()),
+            context_normalized,
+            capability_mode,
+            permission_mode,
+            effective_permission_mode,
+            model: Some(effective_model_name),
+            model_state: Some(child_model_state),
+            workflow_agent_names,
+            resumed_from: request.resume_from.clone(),
+            workflow_run_id,
+            goal_id,
+        },
+        ctx.parent_cmd_tx.as_ref(),
+    );
+    completion_data.spawned_notification_emitted = true;
     spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),
@@ -1283,7 +1512,6 @@ pub(crate) async fn run_shell_child(
         child_session_id.0.to_string(),
         start,
         cancel_token.clone(),
-        goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
     );
     if let Some(snapshot) = request.goal_context.clone() {
         let _ = child_handle
@@ -1657,6 +1885,10 @@ pub(crate) async fn run_shell_child(
                 {
                     let _ = cmd_tx.send(SessionCommand::RecordGoalOwnedTaskIds {
                         goal_id: goal_id.to_owned(),
+                        definition_revision: request
+                            .owner
+                            .goal_definition_revision()
+                            .unwrap_or_default(),
                         task_ids: reparented_task_ids,
                     });
                 }

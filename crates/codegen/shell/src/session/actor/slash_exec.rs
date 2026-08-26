@@ -11,19 +11,10 @@ fn completed_goal_control_cancel_trigger(
             != after_goal.as_ref().map(|goal| &goal.0)
             || behavior_changed)
             .then_some("goal_set"),
-        "goal_edit" => before_goal
-            .zip(after_goal)
-            .is_some_and(|(before, after)| {
-                before.2 == crate::session::goal_tracker::GoalStatus::Active
-                    && (before.0 != after.0 || before.1 != after.1)
-            })
-            .then_some("goal_edit"),
-        "goal_budget" => before_goal
-            .zip(after_goal)
-            .is_some_and(|(before, after)| {
-                before.2 == crate::session::goal_tracker::GoalStatus::Active && before.1 != after.1
-            })
-            .then_some("goal_budget"),
+        // Definition edits are durable GoalDefinition transitions. They do
+        // not abort the current stream/tool batch; Timeline activates the new
+        // directive after StepEnded and the next sample uses the new revision.
+        "goal_edit" | "goal_budget" => None,
         "goal_enter" => behavior_changed.then_some("goal_enter"),
         "goal_pause" => before_goal
             .zip(after_goal)
@@ -39,6 +30,14 @@ fn completed_goal_control_cancel_trigger(
             .then_some("goal_clear"),
         _ => None,
     }
+}
+
+pub(super) struct GoalControlCancellation {
+    pub(super) trigger: &'static str,
+    /// Goal owner frozen before the control mutation. The post-cancel terminal
+    /// sweep uses this identity so `/goal clear` cannot lose the owner while a
+    /// background process admission is still crossing the terminal mailbox.
+    pub(super) retired_goal_owner: Option<(String, u64)>,
 }
 
 impl SessionActor {
@@ -71,7 +70,7 @@ impl SessionActor {
     pub(super) async fn execute_out_of_band_slash_command(
         self: &Arc<Self>,
         command: String,
-    ) -> Result<Option<&'static str>, String> {
+    ) -> Result<Option<GoalControlCancellation>, String> {
         let command = command.trim().to_string();
         if !command.starts_with('/') {
             return Err("Grow commands must start with '/'.".to_string());
@@ -140,12 +139,17 @@ impl SessionActor {
                     .snapshot()
                     .map(|goal| (goal.goal_id.clone(), goal.definition_revision, goal.status));
                 let behavior_changed = before_mode != self.behavior.lock().behavior();
+                let retired_goal_owner = before_goal.as_ref().map(|goal| (goal.0.clone(), goal.1));
                 Ok(completed_goal_control_cancel_trigger(
                     control,
                     before_goal,
                     after_goal,
                     behavior_changed,
-                ))
+                )
+                .map(|trigger| GoalControlCancellation {
+                    trigger,
+                    retired_goal_owner,
+                }))
             }
             other => {
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
@@ -166,52 +170,37 @@ impl SessionActor {
     }
 
     pub(super) async fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
-        let previous = self.goal_tracker.lock().snapshot().cloned();
-        let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
-        let was_budget_limited = {
-            let mut tracker = self.goal_tracker.lock();
-            if tracker.snapshot().is_none() {
-                return "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string();
-            }
-            if tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Complete) {
-                return "Goal is already complete. Clear it before starting a new Goal."
-                    .to_string();
-            }
-            let was_budget_limited =
-                tracker.status() == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
-            if tracker
-                .snapshot()
-                .is_some_and(|goal| goal.token_budget == token_budget)
-            {
-                return token_budget.map_or_else(
-                    || "Goal token budget is already unlimited.".to_string(),
-                    |budget| format!("Goal token budget is already {budget} tokens."),
-                );
-            }
-            if !tracker.set_token_budget(token_budget) {
-                return "Goal token budget must be a positive integer.".to_string();
-            }
-            was_budget_limited
+        if token_budget.is_some_and(|budget| budget <= 0) {
+            return "Goal token budget must be a positive integer.".to_string();
+        }
+        let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
+            return "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string();
         };
-        if let Some(previous) = previous
-            && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
-        {
-            return format!("Goal budget was not changed: {error}");
-        }
-        if let Some(goal_id) = retired_goal_id {
-            self.cancel_goal_owned_work(&goal_id).await;
-        }
-        let tokens_used = self.goal_tokens_used();
-        self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+        let was_budget_limited =
+            goal.status == crate::session::goal_tracker::GoalStatus::BudgetLimited;
         let budget_label = token_budget.map_or_else(
             || "unlimited".to_string(),
             |budget| format!("{budget} tokens"),
         );
-        if was_budget_limited {
-            format!("User set current Goal budget to {budget_label}. Restart it to continue.")
-        } else {
-            format!("User set current Goal budget to {budget_label}.")
+        match self
+            .admit_goal_definition_control(
+                goal.goal_id,
+                PendingGoalDefinitionMutation::Budget { token_budget },
+            )
+            .await
+        {
+            Ok(None) => {
+                format!("Goal budget change scheduled for the next step boundary: {budget_label}.")
+            }
+            Ok(Some(false)) => token_budget.map_or_else(
+                || "Goal token budget is already unlimited.".to_string(),
+                |budget| format!("Goal token budget is already {budget} tokens."),
+            ),
+            Ok(Some(true)) if was_budget_limited => {
+                format!("User set current Goal budget to {budget_label}. Restart it to continue.")
+            }
+            Ok(Some(true)) => format!("User set current Goal budget to {budget_label}."),
+            Err(error) => format!("Goal budget was not changed: {error}"),
         }
     }
 
@@ -418,7 +407,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsList => {
-                let text = match &*self.plugin_registry.borrow() {
+                let text = match &*self.plugin_registry.read() {
                     Some(registry) if !registry.is_empty() => {
                         let mut lines = Vec::new();
                         for plugin in registry.list() {
@@ -954,6 +943,7 @@ impl SessionActor {
                             let backend: std::sync::Arc<
                                 dyn tools::types::memory_backend::MemoryBackend,
                             > = std::sync::Arc::new(backend);
+                            *self.rebuild_spec.memory_runtime.write() = Some(backend.clone());
                             let bridge = self.agent.borrow().tool_bridge().clone();
                             bridge.update_resource(backend.clone()).await;
                             if let Err(e) = self.register_memory_tools(&bridge).await {
@@ -967,6 +957,12 @@ impl SessionActor {
                     }
                 } else if !enabled && self.memory.is_enabled() {
                     let bridge = self.agent.borrow().tool_bridge().clone();
+                    *self.rebuild_spec.memory_runtime.write() = None;
+                    let _ = bridge
+                        .remove_resource::<std::sync::Arc<
+                            dyn tools::types::memory_backend::MemoryBackend,
+                        >>()
+                        .await;
                     if !bridge.unregister_tool_by_name(
                         tools::implementations::memory::MEMORY_SEARCH_TOOL_NAME,
                     ) {
@@ -1008,76 +1004,48 @@ impl SessionActor {
                 objective,
                 token_budget,
             } => {
-                if self.goal_tracker.lock().snapshot().is_none() {
+                let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
                     self.send_host_turn_slash_command_output(
                         "No Goal can be edited. Use /goal set <objective>.",
                     )
                     .await;
                     return ok_end_turn(0, None);
-                }
-                let used = self.goal_tokens_used();
-                let previous = self.goal_tracker.lock().snapshot().cloned();
-                let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
-                let previous_revision = previous.as_ref().map(|goal| goal.definition_revision);
-                let effective_budget = token_budget.or_else(|| {
-                    self.goal_tracker
-                        .lock()
-                        .snapshot()
-                        .and_then(|goal| goal.token_budget)
-                });
-                let revised = self
-                    .goal_tracker
-                    .lock()
-                    .revise_goal(objective.clone(), effective_budget);
-                if revised {
-                    let active = self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    let committed = if active {
-                        self.commit_goal_activation_or_restore(previous).await
-                    } else if let Some(previous) = previous {
-                        self.commit_goal_mutation_or_restore(previous).await
-                    } else {
-                        Err("Goal state disappeared while it was being edited.".to_string())
-                    };
-                    if let Err(error) = committed {
-                        self.send_host_turn_slash_command_output(&format!(
-                            "Goal edit was not applied: {error}"
-                        ))
-                        .await;
-                        return ok_end_turn(0, None);
-                    }
-                    let definition_changed =
-                        self.goal_tracker.lock().snapshot().is_some_and(|goal| {
-                            Some(goal.definition_revision) != previous_revision
-                        });
-                    if definition_changed && let Some(goal_id) = retired_goal_id {
-                        self.cancel_goal_owned_work(&goal_id).await;
-                    }
-                    self.goal_notify_sender()
-                        .emit_goal_updated(&self.goal_tracker.lock(), used);
-                    if active {
-                        self.idle_arbiter.notify_one();
-                    }
-                    let lifecycle = if active {
-                        "automatic continuation is active"
-                    } else {
-                        "the Goal remains stopped; use /goal restart when ready"
-                    };
-                    self.send_host_turn_slash_command_output(&format!(
-                        "Goal objective revised; {lifecycle}.\nObjective: {objective}"
-                    ))
-                    .await;
-                } else {
-                    self.send_host_turn_slash_command_output(
-                        "Goal already has that objective and token budget; nothing changed.",
+                };
+                let message = match self
+                    .admit_goal_definition_control(
+                        goal.goal_id,
+                        PendingGoalDefinitionMutation::Edit {
+                            objective: objective.clone(),
+                            token_budget,
+                        },
                     )
-                    .await;
-                }
+                    .await
+                {
+                    Ok(None) => format!(
+                        "Goal edit scheduled for the next step boundary.\nObjective: {objective}"
+                    ),
+                    Ok(Some(false)) => {
+                        "Goal already has that objective and token budget; nothing changed."
+                            .to_string()
+                    }
+                    Ok(Some(true)) => {
+                        let active = self.goal_tracker.lock().status()
+                            == Some(crate::session::goal_tracker::GoalStatus::Active);
+                        let lifecycle = if active {
+                            "automatic continuation is active"
+                        } else {
+                            "the Goal remains stopped; use /goal restart when ready"
+                        };
+                        format!("Goal objective revised; {lifecycle}.\nObjective: {objective}")
+                    }
+                    Err(error) => format!("Goal edit was not applied: {error}"),
+                };
+                self.send_host_turn_slash_command_output(&message).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalEnter => {
                 use crate::session::behavior::BehaviorChangeOutcome;
-                let message = match self.request_goal_behavior_entry().await {
+                let message = match self.request_goal_behavior_entry().await? {
                     BehaviorChangeOutcome::Applied => {
                         if self.goal_tracker.lock().snapshot().is_some() {
                             "Goal behavior selected. Use /goal status, /goal restart, or send additional context."
@@ -1143,9 +1111,12 @@ impl SessionActor {
             }
             BuiltinAction::GoalPause => {
                 use crate::session::goal_tracker::{GoalPauseReason, GoalStatus};
+                let boundary = self.step_control_gate.lock().await;
                 let tokens_used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
-                let retired_goal_id = previous.as_ref().map(|goal| goal.goal_id.clone());
+                let retired_goal_owner = previous
+                    .as_ref()
+                    .map(|goal| (goal.goal_id.clone(), goal.definition_revision));
                 let (msg, changed) = {
                     let mut tracker = self.goal_tracker.lock();
                     match tracker.status() {
@@ -1167,17 +1138,23 @@ impl SessionActor {
                     if let Some(previous) = previous
                         && let Err(error) = self.commit_goal_stop_or_restore(previous).await
                     {
+                        drop(boundary);
                         self.send_host_turn_slash_command_output(&format!(
                             "Goal was not paused: {error}"
                         ))
                         .await;
                         return ok_end_turn(0, None);
                     }
+                    self.arm_terminal_preemption_if_running().await;
+                    drop(boundary);
                     self.goal_notify_sender()
                         .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-                    if let Some(goal_id) = retired_goal_id {
-                        self.cancel_goal_owned_work(&goal_id).await;
+                    if let Some((goal_id, definition_revision)) = retired_goal_owner {
+                        self.cancel_goal_owned_work(&goal_id, definition_revision)
+                            .await;
                     }
+                } else {
+                    drop(boundary);
                 }
                 self.send_host_turn_slash_command_output(msg).await;
                 ok_end_turn(0, None)
@@ -1188,11 +1165,12 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalClear => {
-                let retired_goal_id = self
+                let boundary = self.step_control_gate.lock().await;
+                let retired_goal_owner = self
                     .goal_tracker
                     .lock()
                     .snapshot()
-                    .map(|goal| goal.goal_id.clone());
+                    .map(|goal| (goal.goal_id.clone(), goal.definition_revision));
                 let selected = self.behavior.lock().behavior();
                 let behavior = if selected == tool_types::BehaviorId::Goal {
                     crate::session::behavior::BehaviorSnapshot::normal()
@@ -1206,16 +1184,37 @@ impl SessionActor {
                     self.persist_control_snapshot_durably(behavior, None).await
                 };
                 if persisted.is_err() {
+                    drop(boundary);
                     self.send_host_turn_slash_command_output(
                         "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
                     )
                     .await;
                     return ok_end_turn(0, None);
                 }
-                self.goal_tracker.lock().clear();
-                if let Some(goal_id) = retired_goal_id {
-                    self.cancel_goal_owned_work(&goal_id).await;
+                self.arm_terminal_preemption_if_running().await;
+                if let Some((goal_id, _)) = retired_goal_owner.as_ref() {
+                    let mut admission = self.state.lock().await;
+                    let mut retained =
+                        VecDeque::with_capacity(admission.pending_step_controls.len());
+                    while let Some(control) = admission.pending_step_controls.pop_front() {
+                        match control {
+                            PendingStepControl::GoalDefinition(pending)
+                                if pending.goal_id == *goal_id =>
+                            {
+                                if let Some(respond_to) = pending.responds_to {
+                                    let _ = respond_to.send(Err(
+                                        "The Goal was cleared before this scheduled definition change applied."
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                            control => retained.push_back(control),
+                        }
+                    }
+                    admission.pending_step_controls = retained;
                 }
+                self.goal_tracker.lock().clear();
+                self.sync_goal_usage_window();
                 if selected == tool_types::BehaviorId::Goal {
                     self.behavior
                         .lock()
@@ -1223,6 +1222,11 @@ impl SessionActor {
                     self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
                         tools::types::BehaviorId::Normal.as_id(),
                     ));
+                }
+                drop(boundary);
+                if let Some((goal_id, definition_revision)) = retired_goal_owner {
+                    self.cancel_goal_owned_work(&goal_id, definition_revision)
+                        .await;
                 }
                 self.send_available_commands_update().await;
                 self.send_grow_notification(crate::session::goal_notification::build_goal_cleared())
@@ -1258,7 +1262,8 @@ mod out_of_band_goal_control_tests {
                 goal("g", 2, GoalStatus::Active),
                 false,
             ),
-            Some("goal_edit")
+            None,
+            "an active edit waits for StepEnded instead of cancelling the turn"
         );
         assert_eq!(
             completed_goal_control_cancel_trigger(
@@ -1276,8 +1281,8 @@ mod out_of_band_goal_control_tests {
                 goal("g", 3, GoalStatus::Active),
                 false,
             ),
-            Some("goal_budget"),
-            "a budget edit invalidates the active turn's frozen Goal definition"
+            None,
+            "a budget edit is a next-step Goal definition transition"
         );
         assert_eq!(
             completed_goal_control_cancel_trigger(
@@ -1394,6 +1399,22 @@ mod out_of_band_goal_control_tests {
                     actor.update_goal_token_budget(Some(200)).await,
                     "User set current Goal budget to 200 tokens."
                 );
+                let materialized = actor
+                    .chat_state_handle
+                    .materialize_timeline("test".into())
+                    .await
+                    .unwrap();
+                let directive = &materialized.active_control_contexts
+                    [&chat_state::ControlContextLayer::GoalDefinition]
+                    .item;
+                assert!(matches!(
+                    directive,
+                    sampling_types::ConversationItem::User(user)
+                        if user.goal_directive.as_ref().is_some_and(|tag| {
+                            tag.goal_id == "goal-1" && tag.definition_revision == 2
+                        })
+                ));
+                assert!(directive.text_content().contains("token budget: 200"));
                 assert_eq!(
                     actor.update_goal_token_budget(None).await,
                     "User set current Goal budget to unlimited."
@@ -1417,6 +1438,49 @@ mod out_of_band_goal_control_tests {
                     projected,
                     "a durable budget mutation must refresh GoalUpdated"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn goal_budget_mutation_waits_for_the_step_control_gate() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish".into(),
+                        Some(100),
+                        "2026-08-27T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                let boundary = actor.step_control_gate.lock().await;
+                let session = actor.clone();
+                let update = tokio::task::spawn_local(async move {
+                    session.update_goal_token_budget(Some(200)).await
+                });
+                tokio::task::yield_now().await;
+
+                let before = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert_eq!(before.definition_revision, 1);
+                assert_eq!(before.token_budget, Some(100));
+
+                drop(boundary);
+                assert_eq!(
+                    update.await.unwrap(),
+                    "User set current Goal budget to 200 tokens."
+                );
+                let after = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert_eq!(after.definition_revision, 2);
+                assert_eq!(after.token_budget, Some(200));
             })
             .await;
     }

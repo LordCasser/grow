@@ -242,12 +242,33 @@ impl SessionActor {
         } else {
             chat_state::TurnInputKind::Prompt
         };
+        let mut turn_identity = origin.turn_identity(turn_kind);
+        if matches!(origin, super::super::PromptOrigin::User)
+            && admitted_behavior == tool_types::BehaviorId::Goal
+            && let Some(goal) = self.goal_tracker.lock().snapshot()
+            && goal.status == crate::session::goal_tracker::GoalStatus::Active
+        {
+            turn_identity.goal_id = Some(goal.goal_id.clone());
+            turn_identity.goal_definition_revision = Some(goal.definition_revision);
+        }
+        if turn_identity.goal_id.is_none() {
+            turn_identity.goal_id = self.goal_usage_window.active_goal_id();
+            if let Some(goal_id) = turn_identity.goal_id.as_deref()
+                && let Some(goal) = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .filter(|goal| goal.goal_id == goal_id)
+            {
+                turn_identity.goal_definition_revision = Some(goal.definition_revision);
+            }
+        }
         if let Err(error) = self
             .events
             .start_turn(crate::session::events::Event::TurnStarted {
                 session_id: self.session_id_string(),
                 turn_number,
-                identity: origin.turn_identity(turn_kind),
+                identity: turn_identity,
                 model_id: model_id.clone(),
                 permission_mode,
                 conversation_message_count: msg_count,
@@ -260,6 +281,7 @@ impl SessionActor {
             })
             .await
         {
+            super::super::tasks_cancel::signal_durable_turn_start(false);
             if let Some(extension) = &self.idle_prompt_extension {
                 extension.on_turn_failed();
             }
@@ -268,6 +290,18 @@ impl SessionActor {
                 error.to_string(),
             ));
         }
+        super::super::tasks_cancel::signal_durable_turn_start(true);
+        // SUPPRESS_TURN is scoped to the durable Timeline turn, not to one
+        // invocation of the model/recovery wrapper. Stop-hook continuations
+        // and completion recovery may sample several times under this same
+        // TurnStarted fact and must not resurrect a known-impossible compact
+        // plan between those samples.
+        let _ = self.compaction.auto_compact_suppressed.compare_exchange(
+            crate::session::compaction_config::SUPPRESS_TURN,
+            crate::session::compaction_config::SUPPRESS_NONE,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut model_path_started = false;
         // `turn_number` is the coordinate admitted for this turn. Recording the
         // durable Turn::Started advances Timeline's *next* prompt index, so it
@@ -864,6 +898,24 @@ impl SessionActor {
                     None,
                     None,
                 ),
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::ControlBoundary { .. })) => (
+                    crate::session::events::TurnOutcomeLabel::Completed,
+                    chat_state::TurnTerminal {
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "control_boundary".into(),
+                    },
+                    None,
+                    None,
+                ),
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::GoalSpendingStopped { .. })) => (
+                    crate::session::events::TurnOutcomeLabel::Completed,
+                    chat_state::TurnTerminal {
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "goal_spending_stopped".into(),
+                    },
+                    None,
+                    None,
+                ),
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::StationarityEnded { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
@@ -910,6 +962,24 @@ impl SessionActor {
                         .map(|(_, context)| context.clone()),
                 ),
             };
+        // Transfer foreground ownership before the durable terminal command is
+        // enqueued. Stop may still arrive while the writer acknowledgement or
+        // post-turn hooks are pending, but it must then observe Settling and
+        // leave this single terminal transaction in charge.
+        let terminalization_owned = {
+            let _boundary = self.step_control_gate.lock().await;
+            self.state
+                .lock()
+                .await
+                .foreground
+                .begin_terminalization(prompt_id)
+        };
+        if !terminalization_owned {
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "terminal ownership",
+                format!("turn {prompt_id} lost foreground ownership before terminalization"),
+            ));
+        }
         if let Err(error) = self
             .emit_turn_ended(
                 timeline_outcome,
@@ -999,6 +1069,48 @@ impl SessionActor {
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
                     cancellation_category: None,
+                    error_category: None,
+                });
+            }
+            Ok(TurnOutcome::ControlBoundary { .. }) => {
+                self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
+                    turn_number: current_prompt_index as u64,
+                    outcome: tool_protocol::turn_hook::TurnHookOutcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id.clone(),
+                    written_repo_paths: Vec::new(),
+                    cancellation_category: Some("control_boundary".to_string()),
+                    cancellation_context: None,
+                })
+                .await;
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::TurnCompleted {
+                    outcome: ::diagnostics::events::Outcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: Some("control_boundary".to_string()),
+                    error_category: None,
+                });
+            }
+            Ok(TurnOutcome::GoalSpendingStopped { .. }) => {
+                self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
+                    turn_number: current_prompt_index as u64,
+                    outcome: tool_protocol::turn_hook::TurnHookOutcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id.clone(),
+                    written_repo_paths: Vec::new(),
+                    cancellation_category: Some("goal_spending_stopped".to_string()),
+                    cancellation_context: None,
+                })
+                .await;
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::TurnCompleted {
+                    outcome: ::diagnostics::events::Outcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: Some("goal_spending_stopped".to_string()),
                     error_category: None,
                 });
             }
@@ -1132,7 +1244,10 @@ impl SessionActor {
             );
         }
         match &result {
-            Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
+            Ok(TurnOutcome::Completed { .. })
+            | Ok(TurnOutcome::ControlBoundary { .. })
+            | Ok(TurnOutcome::GoalSpendingStopped { .. })
+            | Ok(TurnOutcome::StationarityEnded { .. }) => {
                 if let Some(extension) = &self.idle_prompt_extension {
                     extension.on_turn_done();
                 }
@@ -1190,6 +1305,18 @@ impl SessionActor {
                         *snapshot,
                         PromptCompletionKind::Completed,
                         structured_output,
+                    ),
+                    TurnOutcome::ControlBoundary { snapshot } => (
+                        acp::StopReason::EndTurn,
+                        *snapshot,
+                        PromptCompletionKind::Completed,
+                        None,
+                    ),
+                    TurnOutcome::GoalSpendingStopped { snapshot } => (
+                        acp::StopReason::EndTurn,
+                        *snapshot,
+                        PromptCompletionKind::Completed,
+                        None,
                     ),
                     TurnOutcome::StationarityEnded { snapshot, .. } => (
                         acp::StopReason::EndTurn,

@@ -1,5 +1,50 @@
 # Changelog
 
+# 2.0.1 — 2026-08-27
+
+> [!WARNING]
+> **Breaking release.** Timeline schema v21 rejects earlier session logs, including 2.0.0. Older active Workflow Run manifests without the complete frozen route and delegation contract must be restarted from their Definitions.
+
+## Step-boundary session controls
+
+- Model、reasoning effort 与 Agent 切换统一为 actor-owned route FIFO；所有 Behavior 和活动 turn
+  都可接受切换，当前 stream 与工具批次保持路由不变，root/child 精确 session 在随后 step 边界按序提交。
+- Pager 为每个 session 串行控制 RPC、延迟合并权威通知，并在重连时递归失效 descendant generation；
+  旧的活动模型乐观更新与 `prev_model_id` rollback 已删除。
+- Catalog reload 发布不可变 generation；普通 child 在 started 前补齐注册窗口内的 catalog 变更，Workflow
+  child 保持 Run 冻结路由。Agent 切换重投影可调用 child，同时不扩大创建时 RWX/MCP ceiling。
+- Goal definition edit 与 Behavior/route control 使用同一 step-boundary FIFO；原子 Control 可以同时携带
+  Behavior 与 GoalDefinition 上下文，下一次采样不会看到只切换 Behavior 却缺少新目标定义的半状态。
+
+## Lifecycle and cancellation
+
+- Stop 删除 actor 对自身 `FlushReplay` mailbox 的超时等待；Timeline terminal 仍是 durability barrier，
+  terminal 失败会显式终止 actor，避免 Goal 或后续 turn 被因果上未闭合的 turn 锁死。
+- Workflow Run 现在冻结 Agent `subagentFilter`，后续模型/Agent 切换只影响新 Run。缺少该事实的
+  2.0.0 Run manifest 不再兼容，需要重新启动 Run。
+- Behavior 切换和 session controls 都是 prompt drain 屏障；Workflow 活动 Run 可在用户确认后离开或
+  重新进入管理，不改变 Plan/Goal 的互斥边界。
+- Goal token 统计覆盖活跃窗口内 root、descendant、retry、compaction 与 Sideband 的全部 provider
+  attempt；暂停窗口不计费，restart 后恢复。预算或未知 usage 先关闭全局 admission，只能在
+  `StepEnded` 后提交终态，避免 active Goal 与关闭的 provider window 分裂锁死。
+- Goal 终态清理从 root actor 分离并并发回收后台任务；运行时 owner 包含 definition revision，旧目标修订
+  的迟到清理不会误杀新修订刚创建的 task/subagent。
+
+## Compaction and multimodal context
+
+- Compaction 以 Timeline `prompt_index` 的因果 prompt turn 作为边界，覆盖 Goal、Task、Workflow、
+  notification、Plan resume 与 host command；Workflow 历史被 shadow 后会恢复且只恢复一次权威工作区协议。
+- 严格的图片能力 400 被确认为推理前零消耗，Goal 不会误入 usage-incomplete；随后通过 Sideband 描述
+  写入不可逆 ImageProjection，并以文字 shadow 重采样。其余无 usage 错误继续 fail closed。
+
+## Pager and Trajectory
+
+- Trajectory 使用中性的 shadcn 风格深浅色主题、turn/step 分组、稳定的 canonical-event 展开与长会话
+  分层 lazy disclosure；重复 streaming phase tick 不再污染 Timeline。
+- Pager 的 root/child 控制队列、重连 generation 和 prompt barrier 只服从 Shell 权威确认，不再乐观修改。
+
+完整发布说明见 [changelogs/2.0.1.md](changelogs/2.0.1.md)。
+
 # 2.0.0 — 2026-08-26
 
 ## Timeline runtime

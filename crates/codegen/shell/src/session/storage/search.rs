@@ -1610,6 +1610,7 @@ mod tests {
                 chat_state::TurnEvent::Started {
                     id: turn,
                     identity: chat_state::TurnIdentity {
+                        goal_definition_revision: None,
                         origin: "user".into(),
                         turn_kind: "interactive".into(),
                         goal_id: None,

@@ -48,6 +48,91 @@
     }
 
     #[test]
+    fn child_model_and_agent_updates_refresh_parent_task_projection() {
+        let mut app = make_app_with_agent("root-session");
+        handle(
+            make_ext_session_notification(
+                "root-session",
+                test_subagent_spawned("root-session", "child-session"),
+            ),
+            &mut app,
+        );
+        {
+            let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
+                .get_mut("child-session")
+                .unwrap();
+            let model_id = acp::ModelId::new("grow-child");
+            child.session.models.available.insert(
+                model_id.clone(),
+                acp::ModelInfo::new(model_id, "Grow Child"),
+            );
+        }
+
+        handle(
+            make_ext_session_notification(
+                "child-session",
+                GrowSessionUpdate::ModelChanged {
+                    model_id: "grow-child".into(),
+                    reasoning_effort: None,
+                },
+            ),
+            &mut app,
+        );
+        handle(
+            make_ext_session_notification(
+                "child-session",
+                GrowSessionUpdate::AgentChanged {
+                    agent_name: "reviewer".into(),
+                },
+            ),
+            &mut app,
+        );
+
+        let info = &app.agents[&AgentId(0)].session.subagent_sessions["child-session"];
+        assert_eq!(info.model.as_deref(), Some("grow-child"));
+        assert_eq!(info.subagent_type.as_ref(), "reviewer");
+    }
+
+    #[test]
+    fn replayed_spawn_preserves_rearmed_child_control_identity() {
+        let mut app = make_app_with_agent("root-session");
+        let spawn = || {
+            make_ext_session_notification(
+                "root-session",
+                test_subagent_spawned("root-session", "child-session"),
+            )
+        };
+        handle(spawn(), &mut app);
+        {
+            let root = app.agents.get_mut(&AgentId(0)).unwrap();
+            root.subagent_views
+                .get_mut("child-session")
+                .unwrap()
+                .session
+                .begin_model_switch_for_test();
+            root.begin_session_reload(7);
+        }
+        let expected = app.agents[&AgentId(0)].subagent_views["child-session"]
+            .session
+            .in_flight_control()
+            .unwrap()
+            .0;
+        assert!(expected.generation > 0, "reload must rearm the child token");
+
+        handle(spawn(), &mut app);
+
+        let actual = app.agents[&AgentId(0)].subagent_views["child-session"]
+            .session
+            .in_flight_control()
+            .unwrap()
+            .0;
+        assert_eq!(
+            actual, expected,
+            "durable spawn replay must reuse the exact child view instead of resetting its FIFO"
+        );
+    }
+
+    #[test]
     fn subagent_permission_decision_renders_in_parent_scrollback_only() {
         let mut app = make_app_with_agent("root-session");
         handle(
@@ -190,7 +275,40 @@
                 "method": "_grow/session/update",
                 "params": serde_json::to_value(&nested).unwrap(),
             });
-            write_child_updates_jsonl(home, child_sid, &persisted.to_string());
+            let control_line = |event_id: &str, update: GrowSessionUpdate| {
+                let notification = SessionNotification {
+                    session_id: acp::SessionId::new(child_sid),
+                    update,
+                    meta: Some(serde_json::json!({ "eventId": event_id })),
+                };
+                serde_json::json!({
+                    "timestamp": 1,
+                    "method": "_grow/session/update",
+                    "params": serde_json::to_value(notification).unwrap(),
+                })
+                .to_string()
+            };
+            write_child_updates_jsonl(
+                home,
+                child_sid,
+                &[
+                    persisted.to_string(),
+                    control_line(
+                        &format!("{child_sid}-11"),
+                        GrowSessionUpdate::ModelChanged {
+                            model_id: "restored-model".into(),
+                            reasoning_effort: Some("high".into()),
+                        },
+                    ),
+                    control_line(
+                        &format!("{child_sid}-12"),
+                        GrowSessionUpdate::AgentChanged {
+                            agent_name: "quality:reviewer".into(),
+                        },
+                    ),
+                ]
+                .join("\n"),
+            );
 
             let mut app = make_app_with_agent(root_sid);
             handle(
@@ -200,9 +318,19 @@
                 ),
                 &mut app,
             );
+            {
+                let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
+                    .get_mut(child_sid)
+                    .unwrap();
+                let model = acp::ModelId::new("restored-model");
+                child.session.models.available.insert(
+                    model.clone(),
+                    acp::ModelInfo::new(model, "Restored Model"),
+                );
+            }
             let before_restore = app.agents[&AgentId(0)].scrollback.len();
 
-            crate::app::subagent::restore_descendant_lifecycle(&mut app, AgentId(0));
+            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0));
 
             let root = &app.agents[&AgentId(0)];
             assert!(root.session.subagent_sessions.contains_key(grandchild_sid));
@@ -210,8 +338,16 @@
             assert_eq!(root.scrollback.len(), before_restore + 1);
             assert_eq!(
                 root.subagent_views[child_sid].session.last_applied_grow_event_seq,
-                Some(10),
+                Some(12),
                 "the persisted child eventId must seed the child-source highwater"
+            );
+            assert_eq!(
+                root.subagent_views[child_sid].session.agent_name(),
+                Some("quality:reviewer")
+            );
+            assert_eq!(
+                root.subagent_views[child_sid].session.models.current.as_ref().map(|id| id.0.as_ref()),
+                Some("restored-model")
             );
             assert!(matches!(
                 find_session_match(&app, &acp::SessionId::new(grandchild_sid)),

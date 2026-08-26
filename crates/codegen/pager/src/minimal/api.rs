@@ -553,9 +553,7 @@ pub fn hovered_permission_item(v: &AgentView) -> Option<usize> {
 
 /// Confirmed or optimistically selected user-facing Behavior.
 pub fn effective_behavior_mode(v: &AgentView) -> BehaviorId {
-    v.session
-        .behavior_mode_pending
-        .unwrap_or(v.session.behavior_mode)
+    v.session.effective_behavior()
 }
 
 /// Current Plan phase supplied by `CurrentModeUpdate` metadata.
@@ -1026,7 +1024,6 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: BehaviorId) {
     v.session.behavior_mode = mode;
-    v.session.behavior_mode_pending = None;
 }
 
 /// Test-only mutable access to `PromptWidget::suggestions`.

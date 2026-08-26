@@ -19,12 +19,13 @@ use tracing::Instrument;
 
 use sampling_types::{
     ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError, SentCredential,
-    error::Result as SamplingResult,
+    TokenUsage, error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+use crate::handle::{AttemptScopeCapture, AttemptUsage, AttemptUsageSink};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
@@ -39,13 +40,13 @@ use crate::types::RequestId;
 /// to detect dead streams before the user gives up).
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
+pub(crate) type CompletionResult =
+    Result<(ConversationResponse, InferenceLatencyStats), SamplingError>;
+
 /// Result type for the `submit_and_collect` oneshot. Carries the rich
 /// `SamplingError` so callers can inspect retryability, status code,
 /// etc., without losing information through the
 /// `SamplingErrorInfo` round trip.
-pub(crate) type CompletionResult =
-    Result<(ConversationResponse, InferenceLatencyStats), SamplingError>;
-
 /// Outcome of a single attempt within the retry loop.
 enum AttemptOutcome {
     /// Stream emitted [`SamplingEvent::Completed`] with a non-empty
@@ -59,13 +60,19 @@ enum AttemptOutcome {
     /// as a transient failure (the model returned reasoning-only or
     /// the stream was truncated). Metrics from the empty attempt are
     /// discarded; a successful retry produces fresh ones.
-    Empty { context: EmptyResponseContext },
+    Empty {
+        context: EmptyResponseContext,
+        usage: Option<TokenUsage>,
+    },
     /// Stream emitted [`SamplingEvent::Failed`]. The captured raw
     /// error is what the retry loop classifies; if no rich error was
     /// captured (e.g. the failure was synthesised inside the L2
     /// transform), `error` was reconstructed from the
     /// [`SamplingErrorInfo`].
-    Failed { error: SamplingError },
+    Failed {
+        error: SamplingError,
+        usage: Option<TokenUsage>,
+    },
     /// `cancel_token` fired mid-attempt. The retry loop bails out
     /// without further attempts.
     Cancelled,
@@ -94,6 +101,12 @@ enum AttemptOutcome {
     },
 }
 
+struct AttemptRun {
+    outcome: AttemptOutcome,
+    scope: Option<String>,
+    provider_started: bool,
+}
+
 /// Run a single sampling request to completion (or final failure).
 ///
 /// Returns the request id so the actor can clean it up from
@@ -106,6 +119,8 @@ pub(crate) async fn run_request_task(
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: CancellationToken,
     completion_tx: Option<oneshot::Sender<CompletionResult>>,
+    scope_capture: Option<AttemptScopeCapture>,
+    usage_sink: Option<AttemptUsageSink>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
     let idle_timeout = Duration::from_secs(
@@ -152,7 +167,6 @@ pub(crate) async fn run_request_task(
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
     let output_observed = Arc::new(AtomicBool::new(false));
-
     loop {
         if cancel_token.is_cancelled() {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
@@ -162,7 +176,7 @@ pub(crate) async fn run_request_task(
         // Once the resample budget is spent, the attempt runs with the abort
         // disarmed so it can complete and be accepted as-is.
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
-        let outcome = run_one_attempt(
+        let attempt = run_one_attempt(
             &client,
             request.clone(),
             request_id.clone(),
@@ -171,9 +185,91 @@ pub(crate) async fn run_request_task(
             &cancel_token,
             doom_check,
             Arc::clone(&output_observed),
+            scope_capture.as_ref(),
         )
         .instrument(sampling_span.clone())
         .await;
+        let AttemptRun {
+            outcome,
+            scope: attempt_scope,
+            provider_started,
+        } = match attempt {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                let error = SamplingError::EventStreamError(format!(
+                    "provider attempt admission failed: {error}"
+                ));
+                emit_failed(&event_tx, &request_id, &error);
+                send_completion(&mut completion_tx, Err(error));
+                return request_id;
+            }
+        };
+
+        let outcome_usage = match &outcome {
+            AttemptOutcome::Completed { response, .. }
+            | AttemptOutcome::Truncated {
+                partial_response: response,
+                ..
+            }
+            | AttemptOutcome::ContextWindowExceeded {
+                partial_response: response,
+                ..
+            }
+            | AttemptOutcome::PauseTurn { response, .. } => response.usage.clone(),
+            AttemptOutcome::Empty { usage, .. } | AttemptOutcome::Failed { usage, .. } => {
+                usage.clone()
+            }
+            AttemptOutcome::Cancelled | AttemptOutcome::InitFailed { .. } => None,
+        }
+        .or_else(|| {
+            // An unconditional image-capability rejection is a provider-side
+            // request validation failure: inference never started, so the
+            // attempt has exact zero usage. Keeping it out of the generic
+            // unknown-usage path is what lets the session durably install an
+            // ImageShadow and resubmit to the text-only model. The matcher is
+            // intentionally strict; malformed-image, policy, transport, and
+            // every other usage-less failure remain incomplete.
+            let error = match &outcome {
+                AttemptOutcome::Failed { error, .. } | AttemptOutcome::InitFailed { error } => {
+                    Some(error)
+                }
+                _ => None,
+            }?;
+            let info = crate::events::SamplingErrorInfo::from(error);
+            sampling_types::is_unconditional_image_input_unsupported(
+                info.status_code,
+                &info.message,
+                request.image_count(),
+            )
+            .then(sampling_types::TokenUsage::default)
+        });
+        if provider_started && let Some(usage) = outcome_usage {
+            if let Some(sink) = &usage_sink {
+                if let Err(error) = sink(AttemptUsage::Known {
+                    scope: attempt_scope.clone(),
+                    usage: usage.clone(),
+                })
+                .await
+                {
+                    finish_usage_settlement_failure(
+                        &event_tx,
+                        &request_id,
+                        &mut completion_tx,
+                        error,
+                    );
+                    return request_id;
+                }
+            }
+        } else if provider_started && let Some(sink) = &usage_sink {
+            if let Err(error) = sink(AttemptUsage::Incomplete {
+                scope: attempt_scope,
+            })
+            .await
+            {
+                finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
+                return request_id;
+            }
+        }
 
         let effective_max_retries =
             if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
@@ -216,7 +312,7 @@ pub(crate) async fn run_request_task(
                 send_completion(&mut completion_tx, Ok((*response, metrics)));
                 return request_id;
             }
-            AttemptOutcome::Empty { context } => {
+            AttemptOutcome::Empty { context, .. } => {
                 tracing::warn!(
                     target: crate::sampling_log::TARGET,
                     empty_response = true,
@@ -250,7 +346,7 @@ pub(crate) async fn run_request_task(
                     return request_id;
                 }
             }
-            AttemptOutcome::Failed { error } => {
+            AttemptOutcome::Failed { error, .. } => {
                 // Doom-loop resamples run on their own budget and never
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
@@ -490,6 +586,32 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
     }
 }
 
+fn capture_attempt_scope(capture: Option<&AttemptScopeCapture>) -> Result<Option<String>, String> {
+    capture.map_or(Ok(None), |capture| capture())
+}
+
+fn take_started_attempt_scope(slot: &Mutex<Option<Option<String>>>) -> Option<String> {
+    slot.lock()
+        .expect("attempt scope slot poisoned")
+        .take()
+        .expect("provider result requires a first-poll admission")
+}
+
+fn cancelled_attempt_from_scope_slot(slot: &Mutex<Option<Option<String>>>) -> AttemptRun {
+    match slot.lock().expect("attempt scope slot poisoned").take() {
+        Some(scope) => AttemptRun {
+            outcome: AttemptOutcome::Cancelled,
+            scope,
+            provider_started: true,
+        },
+        None => AttemptRun {
+            outcome: AttemptOutcome::Cancelled,
+            scope: None,
+            provider_started: false,
+        },
+    }
+}
+
 /// Run a single attempt: build the raw stream, drive it through the
 /// matching L2 transform, and forward all non-terminal events to
 /// `event_tx`. Captures the rich `SamplingError` from the underlying
@@ -508,32 +630,82 @@ async fn run_one_attempt(
     cancel_token: &CancellationToken,
     doom_check: Option<sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
-) -> AttemptOutcome {
+    scope_capture: Option<&AttemptScopeCapture>,
+) -> Result<AttemptRun, String> {
+    // The provider-open future can be dropped by the cancellation branch
+    // after an earlier poll admitted Goal usage but before it returns a raw
+    // stream. Keep that lease outside the selected future so cancellation can
+    // still settle the exact scope as incomplete. `None` means never polled;
+    // `Some(None)` means polled with no active Goal.
+    let scope_slot: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
-            let (raw, metadata) = match client.conversation_stream(request).await {
+            let branch_scope = Arc::clone(&scope_slot);
+            let opened = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
+                },
+                result = async {
+                    let scope = capture_attempt_scope(scope_capture)?;
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let opened = client.conversation_stream(request).await;
+                    Ok::<_, String>(opened)
+                } => result?,
+            };
+            let scope = take_started_attempt_scope(&scope_slot);
+            let (raw, metadata) = match opened {
                 Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
+                Err(error) => {
+                    return Ok(AttemptRun {
+                        outcome: AttemptOutcome::InitFailed { error },
+                        scope,
+                        provider_started: true,
+                    });
+                }
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                None,
-                output_observed,
-            )
-            .await
+            Ok(AttemptRun {
+                outcome: drive_l2(
+                    l2,
+                    request_id,
+                    event_tx,
+                    cancel_token,
+                    captured,
+                    None,
+                    output_observed,
+                )
+                .await,
+                scope,
+                provider_started: true,
+            })
         }
         ApiBackend::Responses => {
-            let (raw, metadata, doom_loop) =
-                match client.conversation_stream_responses(request).await {
-                    Ok(parts) => parts,
-                    Err(e) => return AttemptOutcome::InitFailed { error: e },
-                };
+            let branch_scope = Arc::clone(&scope_slot);
+            let opened = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
+                },
+                result = async {
+                    let scope = capture_attempt_scope(scope_capture)?;
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let opened = client.conversation_stream_responses(request).await;
+                    Ok::<_, String>(opened)
+                } => result?,
+            };
+            let scope = take_started_attempt_scope(&scope_slot);
+            let (raw, metadata, doom_loop) = match opened {
+                Ok(parts) => parts,
+                Err(error) => {
+                    return Ok(AttemptRun {
+                        outcome: AttemptOutcome::InitFailed { error },
+                        scope,
+                        provider_started: true,
+                    });
+                }
+            };
             if doom_check.is_none()
                 && let Some(collector) = &doom_loop
             {
@@ -548,34 +720,62 @@ async fn run_one_attempt(
                 doom_loop,
                 Arc::clone(&output_observed),
             );
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                doom_check,
-                output_observed,
-            )
-            .await
+            Ok(AttemptRun {
+                outcome: drive_l2(
+                    l2,
+                    request_id,
+                    event_tx,
+                    cancel_token,
+                    captured,
+                    doom_check,
+                    output_observed,
+                )
+                .await,
+                scope,
+                provider_started: true,
+            })
         }
         ApiBackend::Messages => {
-            let (raw, metadata) = match client.conversation_stream_messages(request).await {
+            let branch_scope = Arc::clone(&scope_slot);
+            let opened = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
+                },
+                result = async {
+                    let scope = capture_attempt_scope(scope_capture)?;
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let opened = client.conversation_stream_messages(request).await;
+                    Ok::<_, String>(opened)
+                } => result?,
+            };
+            let scope = take_started_attempt_scope(&scope_slot);
+            let (raw, metadata) = match opened {
                 Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
+                Err(error) => {
+                    return Ok(AttemptRun {
+                        outcome: AttemptOutcome::InitFailed { error },
+                        scope,
+                        provider_started: true,
+                    });
+                }
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                None,
-                output_observed,
-            )
-            .await
+            Ok(AttemptRun {
+                outcome: drive_l2(
+                    l2,
+                    request_id,
+                    event_tx,
+                    cancel_token,
+                    captured,
+                    None,
+                    output_observed,
+                )
+                .await,
+                scope,
+                provider_started: true,
+            })
         }
     }
 }
@@ -629,9 +829,6 @@ async fn drive_l2(
     loop {
         tokio::select! {
             biased;
-            _ = cancel_token.cancelled() => {
-                return AttemptOutcome::Cancelled;
-            }
             next = l2.next() => match next {
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
                     output_observed.store(true, Ordering::Relaxed);
@@ -645,6 +842,7 @@ async fn drive_l2(
                                     triggers,
                                     aborted_at_chunk: None,
                                 },
+                                usage: response.usage.clone(),
                             };
                         }
                     }
@@ -678,7 +876,8 @@ async fn drive_l2(
                         == Some(sampling_types::StopReason::ContentFilter);
                     if !content_filtered && let Some(reason) = response.empty_reason() {
                         let context = build_empty_context(reason, &response);
-                        return AttemptOutcome::Empty { context };
+                        let usage = response.usage.clone();
+                        return AttemptOutcome::Empty { context, usage };
                     }
                     return AttemptOutcome::Completed { response, metrics };
                 }
@@ -688,7 +887,7 @@ async fn drive_l2(
                         .ok()
                         .and_then(|mut g| g.take());
                     let error = raw.unwrap_or_else(|| synthesize_from_info(&info));
-                    return AttemptOutcome::Failed { error };
+                    return AttemptOutcome::Failed { error, usage: None };
                 }
                 Some(other) => {
                     if matches!(
@@ -700,6 +899,13 @@ async fn drive_l2(
                         output_observed.store(true, Ordering::Relaxed);
                     }
                     let _ = event_tx.send(retag(other, &request_id));
+                    // Give a buffered terminal priority over cancellation so
+                    // its provider-reported usage is never discarded.  For a
+                    // non-terminal backlog, however, observe cancellation
+                    // immediately after one item to keep Stop latency bounded.
+                    if cancel_token.is_cancelled() {
+                        return AttemptOutcome::Cancelled;
+                    }
                 }
                 None => {
                     // L2 streams always terminate with Completed or
@@ -710,8 +916,12 @@ async fn drive_l2(
                         error: SamplingError::EventStreamError(
                             "stream dropped without terminal event".to_string(),
                         ),
+                        usage: None,
                     };
                 }
+            },
+            _ = cancel_token.cancelled() => {
+                return AttemptOutcome::Cancelled;
             }
         }
     }
@@ -839,6 +1049,22 @@ fn handle_cancellation(
     );
 }
 
+fn finish_usage_settlement_failure(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+    error: String,
+) {
+    let error =
+        SamplingError::EventStreamError(format!("attempt usage settlement failed: {error}"));
+    // RequestStarted must always have a sampler terminal. Shell's stream
+    // drain barrier consumes this event; completing only the oneshot would
+    // otherwise manufacture a fixed five-second timeout during persistence
+    // failure or teardown.
+    emit_failed(event_tx, request_id, &error);
+    send_completion(completion_tx, Err(error));
+}
+
 fn send_completion(
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     result: CompletionResult,
@@ -852,6 +1078,154 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+
+    #[test]
+    fn attempt_scope_capture_is_evaluated_once_per_attempt() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_capture = Arc::clone(&calls);
+        let capture: AttemptScopeCapture = Arc::new(move || {
+            let n = calls_for_capture.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(format!("scope-{n}")))
+        });
+
+        assert_eq!(
+            capture_attempt_scope(Some(&capture)),
+            Ok(Some("scope-0".into()))
+        );
+        assert_eq!(
+            capture_attempt_scope(Some(&capture)),
+            Ok(Some("scope-1".into()))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_attempt_never_enters_provider_usage_scope() {
+        let client = SamplingClient::new(SamplerConfig {
+            base_url: "http://127.0.0.1:9".into(),
+            model: "test-model".into(),
+            api_backend: ApiBackend::Responses,
+            ..SamplerConfig::default()
+        })
+        .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_capture = Arc::clone(&calls);
+        let capture: AttemptScopeCapture = Arc::new(move || {
+            calls_for_capture.fetch_add(1, Ordering::Relaxed);
+            Ok(Some("must-not-be-created".into()))
+        });
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+        let attempt = run_one_attempt(
+            &client,
+            ConversationRequest::default(),
+            RequestId::from("pre-cancelled"),
+            Duration::from_secs(1),
+            &event_tx,
+            &cancel,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Some(&capture),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(attempt.outcome, AttemptOutcome::Cancelled));
+        assert!(!attempt.provider_started);
+        assert!(attempt.scope.is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_stream_open_settles_the_first_poll_scope_for_every_backend() {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (_socket, _) = listener.accept().await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            let config = SamplerConfig {
+                api_key: Some("test-key".into()),
+                base_url: format!("http://{address}"),
+                model: "test-model".into(),
+                api_backend: backend.clone(),
+                max_retries: Some(0),
+                ..SamplerConfig::default()
+            };
+            let (scope_tx, mut scope_rx) = mpsc::unbounded_channel();
+            let capture: AttemptScopeCapture = Arc::new(move || {
+                let _ = scope_tx.send(());
+                Ok(Some("scope-on-wire".into()))
+            });
+            let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
+            let sink: AttemptUsageSink = Arc::new(move |usage| {
+                let usage_tx = usage_tx.clone();
+                Box::pin(async move { usage_tx.send(usage).map_err(|error| error.to_string()) })
+            });
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let task = tokio::spawn(run_request_task(
+                RequestId::from(format!("cancel-open-{backend:?}")),
+                ConversationRequest {
+                    model: Some("test-model".into()),
+                    ..ConversationRequest::default()
+                },
+                config,
+                RetryPolicy::default(),
+                event_tx,
+                task_cancel,
+                None,
+                Some(capture),
+                Some(sink),
+            ));
+
+            tokio::time::timeout(Duration::from_secs(2), scope_rx.recv())
+                .await
+                .expect("provider future was first-polled")
+                .expect("scope notification channel remains open");
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("cancel must stop stream-open")
+                .expect("request task must not panic");
+
+            assert!(matches!(
+                usage_rx.recv().await,
+                Some(AttemptUsage::Incomplete { scope: Some(scope) })
+                    if scope == "scope-on-wire"
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_settlement_failure_emits_terminal_before_completion() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let mut completion_tx = Some(completion_tx);
+        let request_id = RequestId::from("usage-settlement-failure");
+
+        finish_usage_settlement_failure(
+            &event_tx,
+            &request_id,
+            &mut completion_tx,
+            "timeline unavailable".into(),
+        );
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SamplingEvent::Failed { request_id: id, .. }) if id == request_id
+        ));
+        assert!(completion_rx.await.expect("completion sent").is_err());
+    }
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {
@@ -1150,6 +1524,7 @@ mod tests {
         match outcome {
             AttemptOutcome::Failed {
                 error: SamplingError::DoomLoopDetected { .. },
+                ..
             } => {}
             _ => panic!("expected Failed(DoomLoopDetected) outcome"),
         }

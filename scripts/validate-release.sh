@@ -7,7 +7,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-release_tag="${1:-v2.0.0}"
+release_tag="${1:-v2.0.1}"
 release_workflow=".github/workflows/release.yml"
 build_workflow=".github/workflows/build-one.yml"
 
@@ -36,6 +36,11 @@ version="$({ cargo metadata --locked --no-deps --format-version 1; } \
   | python3 -c 'import json, sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "cli"))')"
 if [[ "${release_tag#v}" != "$version" ]]; then
   echo "release tag $release_tag does not match cli / workspace $version" >&2
+  exit 1
+fi
+release_notes="crates/codegen/shell/changelogs/${version}.md"
+if [[ ! -s "$release_notes" ]]; then
+  echo "release notes are missing or empty: $release_notes" >&2
   exit 1
 fi
 

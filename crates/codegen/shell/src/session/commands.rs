@@ -203,7 +203,8 @@ pub enum SessionCommand {
     },
     BehaviorChange {
         session_mode: acp::SessionModeId,
-        responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,
+        responds_to:
+            oneshot::Sender<Result<crate::session::behavior::BehaviorChangeOutcome, acp::Error>>,
     },
     /// Serialize model-initiated Goal lifecycle changes with every other
     /// session control mutation. The tool-facing channel is only an ingress
@@ -211,40 +212,50 @@ pub enum SessionCommand {
     GoalControl {
         command: tools::implementations::grow_build::update_goal::GoalCommand,
     },
+    /// Charge one model call settled inside the root session's active Goal
+    /// usage window. Descendant sessions and sideband runtimes capture the
+    /// Goal id at settlement time and submit it to the root actor through this
+    /// single accounting ingress.
+    RecordGoalUsage {
+        goal_id: String,
+        tokens: i64,
+        respond_to: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Fail closed when a provider attempt admitted inside a Goal window did
+    /// not return usage. The Goal ledger becomes a lower bound and autonomous
+    /// continuation is paused durably.
+    RecordGoalUsageIncomplete {
+        goal_id: String,
+        respond_to: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Settle one provider attempt whose immutable Goal ownership and usage
+    /// outcome were already claimed in the shared usage window. The attempt id
+    /// makes retries and owner-future destruction idempotent at the root.
+    SettleGoalUsageAttempt {
+        attempt_id: String,
+        respond_to: oneshot::Sender<Result<bool, String>>,
+    },
     SetSessionModel {
-        /// Stable `provider/model` catalog identity used by the UI and
-        /// persistence. This is intentionally distinct from
-        /// `sampling_config.model`, which is the provider-facing wire name.
-        model_id: acp::ModelId,
-        sampling_config: sampler::SamplerConfig,
-        /// Re-resolved auto-compact threshold for the new model. Computed
-        /// by `MvpAgent` against the new model id so per-model remote settings
-        /// and per-model user TOML overrides target the right model after a
-        /// `/model` switch. The session actor stores this on
-        /// `compaction.threshold_percent` (which is `Cell<u8>` so it can
-        /// update without `&mut self`).
-        auto_compact_threshold_percent: u8,
+        /// Complete route resolved under one catalog/Workflow authority
+        /// snapshot. Every model-sensitive execution knob is applied together
+        /// at the next completed-step boundary, or immediately when idle.
+        route: crate::agent::models::PublishedSessionRoute,
+        /// Exact ordinary-session catalog generation that authorized this
+        /// selection. Workflow children carry `None` because their Run route
+        /// is already the complete authority.
+        catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
     },
     /// Apply a validated hot-reload snapshot to an existing session without
     /// changing its harness or treating the update as a user model switch.
     ReloadModelConfig {
-        model_id: acp::ModelId,
-        sampling_config: sampler::SamplerConfig,
-        image_description_model: Option<String>,
-        inference_idle_timeout: std::time::Duration,
-        max_retries: u32,
-        auto_compact_threshold_percent: u8,
+        catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
         responds_to: oneshot::Sender<Result<(), acp::Error>>,
     },
-    /// Zero-turn harness rebuild: build a brand-new `Agent` from the
-    /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
-    /// durably append the selected role through Timeline Control, swap the
-    /// live `Agent`, and re-register its MCP tools and resource projections.
-    ///
-    /// Triggered by `MvpAgent::set_session_model` when the new model's
-    /// `agent_type` differs from the session's current one and no user
-    /// message has been sent yet (`turn_count == 0`).
+    /// Select a new Agent profile. The actor admits this command immediately,
+    /// applies it after the current step without interrupting its stream or
+    /// tool batch, durably appends the role through Timeline Control, then
+    /// swaps the harness and re-registers runtime resources.
     RebuildAgentForDefinition {
         definition: agent::AgentDefinition,
         responds_to: oneshot::Sender<Result<(), acp::Error>>,
@@ -473,6 +484,7 @@ pub enum SessionCommand {
     /// parent must not re-sample its current Goal when the child exits.
     RecordGoalOwnedTaskIds {
         goal_id: String,
+        definition_revision: u64,
         task_ids: Vec<String>,
     },
     /// Remove a queued (not-yet-running) prompt from the authoritative prompt

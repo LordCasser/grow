@@ -57,6 +57,9 @@ pub enum WaitingReason {
     /// prompt is sent, or the gap after a tool completes before the next
     /// inference step begins.
     Model,
+    /// The previous step has closed and the Shell is rebuilding the selected
+    /// Agent harness before it admits the next model request.
+    AgentSwitch,
     /// Blocked on a running foreground subagent (`task` / `spawn_subagent`).
     Subagent,
     /// Blocked polling/awaiting a background task's output
@@ -120,6 +123,7 @@ impl WaitingReason {
     pub fn label(&self) -> String {
         match self {
             Self::Model => "Waiting for response…".to_string(),
+            Self::AgentSwitch => "Switching Agent…".to_string(),
             Self::Subagent => "Waiting on subagent…".to_string(),
             Self::TaskOutput {
                 subject: Some(subject),
@@ -133,6 +137,7 @@ impl WaitingReason {
     pub fn as_diagnostics_label(&self) -> &'static str {
         match self {
             Self::Model => "waiting_model",
+            Self::AgentSwitch => "switching_agent",
             Self::Subagent => "waiting_subagent",
             Self::TaskOutput { .. } => "waiting_task_output",
             Self::Sleep => "waiting_sleep",
@@ -455,6 +460,7 @@ impl AcpUpdateTracker {
                 WaitingReason::Sleep => 1,
                 WaitingReason::Subagent => 2,
                 WaitingReason::Model => 3,
+                WaitingReason::AgentSwitch => 4,
             })
             .map(|w| w.reason.clone())
     }

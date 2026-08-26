@@ -149,6 +149,7 @@ async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<PromptTurnOk, acp::Error> {
+    install_test_foreground(actor, prompt_id).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
@@ -268,11 +269,16 @@ fn stop_cancelled_emitted_with_reason_and_never_blocks_cancel() {
             // task spawn); cancel reads it to attribute the torn-down turn.
             *actor.current_prompt_id.lock().unwrap() = Some("sc-cancel".to_string());
             tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                // Regression guard: cancellation runs inside the Session
+                // actor and must never call the public replay flush API,
+                // whose acknowledgement is consumed by that same actor. The
+                // old self-wait consistently hit its five-second timeout.
+                std::time::Duration::from_secs(2),
                 actor.cancel_running_task(false, false, false, Some("esc".to_string())),
             )
             .await
-            .expect("cancel_running_task must not hang");
+            .expect("cancel_running_task must not self-wait on replay persistence")
+            .expect("cancel_running_task must succeed");
 
             // The cancel — including the hook dispatch — completed while the
             // turn task is still parked: an observe-only hook cannot block or
@@ -307,9 +313,17 @@ fn stop_cancelled_emitted_with_reason_and_never_blocks_cancel() {
                 .await
                 .expect("turn task must resolve after release")
                 .expect("turn task must not panic");
+            let error = result.expect_err(
+                "the direct fixture turn no longer owns foreground after cancellation",
+            );
             assert!(
-                result.is_ok(),
-                "the cancelled turn's prompt must resolve, got {result:?}"
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("error_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("turn_boundary_persistence_failed"),
+                "the cancelled turn must resolve with its lost-ownership terminal, got {error:?}"
             );
         }));
     });
@@ -339,7 +353,8 @@ fn stop_cancelled_not_emitted_without_a_cancelled_turn() {
 
             actor
                 .cancel_running_task(false, false, false, Some("esc".to_string()))
-                .await;
+                .await
+                .expect("idle cancellation must succeed");
 
             let observed = drain_hook_observations(&mut gateway_rx);
             assert!(

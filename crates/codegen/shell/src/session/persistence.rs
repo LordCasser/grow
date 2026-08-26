@@ -1535,19 +1535,16 @@ impl std::error::Error for DurableAppendError {}
 impl DurableAppendError {
     /// Whether the caller must retry the exact immutable fact. Committed and
     /// acknowledgement-unknown outcomes can only be resolved by idempotent
-    /// replay; transient pre-commit failures use the same pending slot.
+    /// replay; transient pre-commit failures use the same pending slot. A
+    /// permanent storage error cannot be resolved by replay and must fail the
+    /// writer epoch instead of spinning forever.
     pub(crate) fn retry_exact(&self) -> bool {
-        match self {
-            Self::Committed(_) | Self::AcknowledgementLost(_) => true,
-            Self::NotCommitted(error) => !matches!(
-                error.kind(),
-                io::ErrorKind::InvalidData
-                    | io::ErrorKind::PermissionDenied
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::Unsupported
-                    | io::ErrorKind::BrokenPipe
-            ),
-        }
+        let error = match self {
+            Self::NotCommitted(error)
+            | Self::Committed(error)
+            | Self::AcknowledgementLost(error) => error,
+        };
+        !chat_state::persistence_error_is_permanent(error)
     }
 }
 

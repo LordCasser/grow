@@ -75,10 +75,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 permission_mode: agent.session.permission_mode(),
                 current_model_id: default_model_id.clone(),
                 available_models: default_model_catalog.clone(),
-                behavior_mode: agent
-                    .session
-                    .behavior_mode_pending
-                    .unwrap_or(agent.session.behavior_mode),
+                behavior_mode: agent.session.effective_behavior(),
                 workflows_available,
                 goal_available,
                 show_tips: show_tips_from_app,
@@ -218,10 +215,7 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
         permission_mode: agent.session.permission_mode(),
         current_model_id: default_model_id,
         available_models: default_model_catalog,
-        behavior_mode: agent
-            .session
-            .behavior_mode_pending
-            .unwrap_or(agent.session.behavior_mode),
+        behavior_mode: agent.session.effective_behavior(),
         workflows_available: agent.behavior_supported(tools::types::BehaviorId::Workflow),
         goal_available: agent.behavior_supported(tools::types::BehaviorId::Goal),
         show_tips: show_tips_from_app,
@@ -637,10 +631,7 @@ fn agent_behavior_mode(app: &AppView) -> tools::types::BehaviorId {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent
-            .session
-            .behavior_mode_pending
-            .unwrap_or(agent.session.behavior_mode);
+        return agent.session.effective_behavior();
     }
     tools::types::BehaviorId::Normal
 }

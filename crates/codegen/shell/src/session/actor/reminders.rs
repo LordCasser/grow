@@ -1,178 +1,5 @@
-//! System-reminder injection concern for `SessionActor`: reminder policy,
-//! the TodoGate, date/interrupt reminders, workflow status snapshots, and
-//! formatting for durable workflow-completion notifications.
+//! System-reminder injection concern for `SessionActor`.
 use super::*;
-/// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
-///
-/// The borrowed `TodoGateInput<'_>` consumed by [`evaluate_todo_gate`]
-/// is built from this owned data via [`Self::as_input`], which performs
-/// the "first N in_progress are backed" insertion-order partition.
-///
-/// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can drive the gate against synthetic JSON
-/// fixtures. Not part of the public API.
-#[doc(hidden)]
-pub struct CollectedTodoGateInput {
-    /// Pairs of `(id, content, status)` in `TodoState.todo_items_with_ids()`
-    /// (insertion) order — `IndexMap` preserves this so the partition
-    /// between backed and unbacked in-progress items is deterministic.
-    pub todos: Vec<(String, String, crate::tools::todo::TodoStatus)>,
-    /// `|outstanding subagents| + |incomplete bash/monitor tasks|` at
-    /// the moment of gate evaluation.
-    pub backing_task_count: usize,
-}
-impl CollectedTodoGateInput {
-    /// Borrowed view used by [`evaluate_todo_gate`]. Pure transformation —
-    /// no I/O, no clones (besides the borrow into `&str`).
-    ///
-    /// Allocates exactly two `Vec<&str>`s: one for pending, one for
-    /// in-progress (which is then split in place via `split_off` —
-    /// the leading slice is reused as `in_progress_backed`, no extra
-    /// allocation).
-    pub fn as_input(&self) -> TodoGateInput<'_> {
-        use crate::tools::todo::TodoStatus;
-        let mut pending = Vec::new();
-        let mut in_progress: Vec<&str> = Vec::new();
-        for (_, content, status) in &self.todos {
-            match status {
-                TodoStatus::Pending => pending.push(content.as_str()),
-                TodoStatus::InProgress => in_progress.push(content.as_str()),
-                TodoStatus::Completed | TodoStatus::Cancelled => {}
-            }
-        }
-        let backed_count = in_progress.len().min(self.backing_task_count);
-        let in_progress_unbacked = in_progress.split_off(backed_count);
-        let in_progress_backed = in_progress;
-        TodoGateInput {
-            pending,
-            in_progress_unbacked,
-            in_progress_backed,
-            backing_task_count: self.backing_task_count,
-        }
-    }
-}
-/// Inputs to `evaluate_todo_gate`. All fields are deliberately owned
-/// borrows from the gate's call-site so the helper is a pure function.
-///
-/// The struct itself is `pub` (with `#[doc(hidden)]`) only so the
-/// replay-trace integration test in `tests/trace_replay.rs` can name
-/// the type as `&TodoGateInput<'_>` when calling `evaluate_todo_gate`.
-/// Fields stay crate-private — the test never constructs the struct
-/// directly; it obtains an instance via `CollectedTodoGateInput::as_input()`.
-#[doc(hidden)]
-pub struct TodoGateInput<'a> {
-    pub(super) pending: Vec<&'a str>,
-    pub(super) in_progress_unbacked: Vec<&'a str>,
-    pub(super) in_progress_backed: Vec<&'a str>,
-    pub(super) backing_task_count: usize,
-}
-impl TodoGateReason {
-    /// Wire-string form, byte-identical to a `TODO_GATE_*` const in
-    /// `crate::session::events`.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::InFlight => crate::session::events::TODO_GATE_IN_FLIGHT,
-        }
-    }
-}
-/// Pure decision function: does the gate fire, and with what reminder?
-///
-/// The function does NOT consult the cap — the caller folds the cap check
-/// in around this function. Keeping cap logic out makes `evaluate_todo_gate`
-/// trivially testable.
-///
-/// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can call the gate directly. Not part of the
-/// public API.
-#[doc(hidden)]
-pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {
-    if input.pending.is_empty() && input.in_progress_unbacked.is_empty() {
-        return TodoGateDecision::Continue;
-    }
-    TodoGateDecision::Nudge {
-        reminder: build_todo_gate_reminder(&input.pending, &input.in_progress_unbacked),
-        reason: TodoGateReason::InFlight,
-    }
-}
-/// Build the in-flight TodoGate reminder text.
-///
-/// Uses the doubled-`${{{{ tools.by_kind.* }}}}` convention so the
-/// caller's `format!` pass leaves a single `${{ tools.by_kind.* }}`
-/// for `TemplateRenderer` / `render_prompt` to resolve into the
-/// model-facing tool name.
-pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &[&str]) -> String {
-    use std::fmt::Write as _;
-    let mut buf =
-        String::from("You have outstanding todos but ended your turn without a tool call.\n\n");
-    if !unbacked_in_progress.is_empty() {
-        buf.push_str("In-progress (no backing background task):\n");
-        for c in unbacked_in_progress {
-            let _ = writeln!(buf, "- {c}");
-        }
-        buf.push('\n');
-    }
-    if !pending.is_empty() {
-        buf.push_str("Pending:\n");
-        for c in pending {
-            let _ = writeln!(buf, "- {c}");
-        }
-        buf.push('\n');
-    }
-    let _ = write!(
-        buf,
-        "Per <task_completion_discipline>, advance the next pending todo \
-         with the appropriate tool call NOW. If you have a genuine external \
-         blocker (missing credential, denied permission, network unreachable), \
-         state it explicitly AND mark the affected todos `cancelled` via \
-         ${{{{ tools.by_kind.plan }}}} with a reason in the same turn."
-    );
-    buf
-}
-/// Default per-prompt fire cap for the runtime turn-end TodoGate.
-pub(crate) const DEFAULT_TODO_GATE_MAX_FIRES: u32 = 2;
-
-/// Session-owned TodoGate policy. Other reminders are typed Timeline inputs
-/// or tool-output annotations and do not share a mutable global switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TodoGateConfig {
-    pub enabled: bool,
-    pub max_fires_per_prompt: u32,
-}
-
-impl Default for TodoGateConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
-        }
-    }
-}
-
-/// Resolve the session TodoGate from the resolved inputs.
-///
-/// Precedence: CLI `--todo-gate` > remote `/settings` > built-in default
-/// (which is disabled). Extracted from `spawn_session_actor` so the
-/// precedence rules are unit-testable. Named `resolve_*` to match the
-/// sibling precedence helpers in `crate::util::config`
-/// (`resolve_zdr_access_enabled`, `resolve_restore_code`, …).
-pub(crate) fn resolve_todo_gate_config(
-    remote: Option<&crate::util::config::RemoteSettings>,
-    todo_gate: bool,
-) -> TodoGateConfig {
-    let mut config = TodoGateConfig::default();
-    if let Some(remote) = remote {
-        if let Some(enabled) = remote.todo_gate_enabled {
-            config.enabled = enabled;
-        }
-        if let Some(cap) = remote.todo_gate_max_fires_per_prompt {
-            config.max_fires_per_prompt = cap;
-        }
-    }
-    if todo_gate {
-        config.enabled = true;
-    }
-    config
-}
 /// Build the date-rollover reminder when the local calendar
 /// date has advanced past the date last surfaced to the model.
 ///
@@ -302,7 +129,7 @@ impl SessionActor {
         .flatten()
     }
 }
-fn format_workflow_status_reminder(
+pub(super) fn format_workflow_status_reminder(
     runs: &[crate::session::workflow::tracker::WorkflowRunState],
 ) -> String {
     use std::fmt::Write as _;
@@ -593,29 +420,17 @@ fn format_running_task_checkpoint_notification(
 
 fn running_task_notification_owner(
     task: &tools::computer::types::TaskSnapshot,
-) -> chat_state::NotificationOwner {
-    task.goal_id
-        .clone()
-        .map(|goal_id| chat_state::NotificationOwner::Goal { goal_id })
-        .unwrap_or(chat_state::NotificationOwner::Session)
-}
-/// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
-/// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
-/// continuation directive drives the loop there (see the body).
-pub(super) fn todo_gate_active(
-    config: TodoGateConfig,
-    audience: agent::prompt::context::PromptAudience,
-    definition: &AgentDefinition,
-    goal_runtime_available: bool,
-    goal_status: Option<crate::session::goal_tracker::GoalStatus>,
-) -> bool {
-    if !config.enabled {
-        return false;
+) -> Option<chat_state::NotificationOwner> {
+    match (task.goal_id.clone(), task.goal_definition_revision) {
+        (None, None) => Some(chat_state::NotificationOwner::Session),
+        (Some(goal_id), Some(definition_revision)) if definition_revision > 0 => {
+            Some(chat_state::NotificationOwner::Goal {
+                goal_id,
+                definition_revision,
+            })
+        }
+        _ => None,
     }
-    if laziness_injection_active(goal_runtime_available, goal_status) {
-        return false;
-    }
-    definition.carries_task_completion_discipline(audience)
 }
 impl SessionActor {
     /// Injects a one-shot date-rollover `<system-reminder>` when a long session crosses local
@@ -691,10 +506,19 @@ impl SessionActor {
                     chat_state::NotificationTaskKind::Monitor
                 }
             };
+            let Some(owner) = running_task_notification_owner(&task) else {
+                tracing::error!(
+                    task_id = task.task_id,
+                    goal_id = ?task.goal_id,
+                    goal_definition_revision = ?task.goal_definition_revision,
+                    "refusing to checkpoint a task with an incomplete Goal owner"
+                );
+                continue;
+            };
             let source = chat_state::NotificationSource::TaskStillRunning {
                 task_id: task.task_id.clone(),
                 task_kind,
-                owner: running_task_notification_owner(&task),
+                owner,
             };
             let body = format_running_task_checkpoint_notification(&task, checkpoint_time);
             match self
@@ -723,67 +547,6 @@ impl SessionActor {
             checkpoint_id,
             "checkpointed running background tasks into durable notifications"
         );
-    }
-    /// Turn-end TodoGate config, or `None` when [`todo_gate_active`] is false.
-    pub(super) fn todo_gate_policy(&self) -> Option<TodoGateConfig> {
-        let goal_status = self.goal_tracker.lock().status();
-        let agent = self.agent.borrow();
-        let active = todo_gate_active(
-            self.todo_gate,
-            agent.prompt_audience(),
-            agent.definition(),
-            self.goal_runtime_available(),
-            goal_status,
-        );
-        tracing::debug!(
-            enabled = self.todo_gate.enabled,
-            goal_runtime_available = self.goal_runtime_available(),
-            ?goal_status,
-            active,
-            "todo_gate_policy"
-        );
-        if !active {
-            return None;
-        }
-        Some(self.todo_gate)
-    }
-    /// Gather the inputs needed by `evaluate_todo_gate` from live session
-    /// state.
-    ///
-    /// Each `.await` is preceded by an owned `Arc<ToolBridge>` clone
-    /// from `tool_bridge_handle()` — no `RefCell::Ref<Agent>` guard is
-    /// held across a suspension point.
-    pub(super) async fn collect_todo_gate_input(&self, prompt_id: &str) -> CollectedTodoGateInput {
-        use crate::tools::todo::{TodoState, TodoStatus};
-        use tools::types::resources::State;
-        let bridge = self.tool_bridge_handle();
-        let todos: Vec<(String, String, TodoStatus)> = bridge
-            .read_resource::<State<TodoState>>()
-            .await
-            .map(|state| {
-                state
-                    .0
-                    .todo_items_with_ids()
-                    .map(|(id, item)| (id.clone(), item.content.clone(), item.status))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let outstanding_live = self
-            .outstanding_reply_for_prompt(prompt_id)
-            .await
-            .map(|r| r.live_ids.len())
-            .unwrap_or(0);
-        let incomplete_terminal_tasks = bridge
-            .list_background_tasks()
-            .await
-            .into_iter()
-            .filter(tools::computer::types::TaskSnapshot::is_outstanding)
-            .count();
-        let backing_task_count = outstanding_live + incomplete_terminal_tasks;
-        CollectedTodoGateInput {
-            todos,
-            backing_task_count,
-        }
     }
 }
 #[cfg(test)]
@@ -870,6 +633,7 @@ mod workflow_reminder_tests {
     fn running_task_checkpoint_preserves_model_facing_command_and_output_path() {
         let start = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10_000);
         let task = tools::computer::types::TaskSnapshot {
+            goal_definition_revision: None,
             task_id: "monitor-1".into(),
             command: "internal isolation wrapper".into(),
             display_command: Some("cargo test -p shell".into()),
@@ -907,6 +671,7 @@ mod workflow_reminder_tests {
     #[test]
     fn running_task_checkpoint_keeps_immutable_goal_owner() {
         let mut task = tools::computer::types::TaskSnapshot {
+            goal_definition_revision: Some(1),
             task_id: "goal-monitor".into(),
             command: "watch".into(),
             display_command: None,
@@ -929,14 +694,16 @@ mod workflow_reminder_tests {
         };
         assert_eq!(
             running_task_notification_owner(&task),
-            chat_state::NotificationOwner::Goal {
+            Some(chat_state::NotificationOwner::Goal {
+                definition_revision: 1,
                 goal_id: "goal-1".into()
-            }
+            })
         );
         task.goal_id = None;
+        task.goal_definition_revision = None;
         assert_eq!(
             running_task_notification_owner(&task),
-            chat_state::NotificationOwner::Session
+            Some(chat_state::NotificationOwner::Session)
         );
     }
 }

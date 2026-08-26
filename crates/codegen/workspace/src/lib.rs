@@ -38,7 +38,7 @@ pub use hunk_tracker::HunkTrackerHandle;
 pub use permission::*;
 pub use session::{WorkspaceSession, WorkspaceShared};
 pub use session::{file_state, git, jj};
-pub use workspace_ops::{WorkspaceOp, WorkspaceOps};
+pub use workspace_ops::{PreparedLocalSessionBind, WorkspaceOp, WorkspaceOps};
 pub use workspace_types::WorkspaceEvent;
 /// Zero-init every workspace metric family so idle panels render a `0` baseline
 /// instead of "No data". Idempotent; call once at workspace startup.

@@ -254,8 +254,12 @@ impl SessionActor {
             | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
         };
         let goal_owner = task_id.as_ref().and_then(|task_id| {
-            if let Some(goal_id) = self.goal_turn_task_ids.lock().get(task_id).cloned() {
-                return Some(chat_state::NotificationOwner::Goal { goal_id });
+            if let Some((goal_id, revision)) = self.goal_turn_task_ids.lock().get(task_id).cloned()
+            {
+                return Some(chat_state::NotificationOwner::Goal {
+                    goal_id,
+                    definition_revision: revision,
+                });
             }
             pending_before.iter().find_map(|notification| {
                 let pending_task_id = match &notification.source {
@@ -266,10 +270,10 @@ impl SessionActor {
                     | chat_state::NotificationSource::WorkflowCompleted { .. } => return None,
                 };
                 match notification.source.owner() {
-                    chat_state::NotificationOwner::Goal { goal_id }
+                    chat_state::NotificationOwner::Goal { goal_id, .. }
                         if pending_task_id == task_id =>
                     {
-                        Some(chat_state::NotificationOwner::Goal { goal_id })
+                        Some(notification.source.owner())
                     }
                     _ => None,
                 }
@@ -401,6 +405,7 @@ impl SessionActor {
                 .combine_queued_prompts
                 .unwrap_or(false);
 
+        let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if !state.foreground.is_idle() || state.pending_inputs.is_empty() {
@@ -496,6 +501,7 @@ impl SessionActor {
         self.broadcast_queue_changed_promoting(&state, running_display);
 
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let (durable_start_tx, durable_start_rx) = tokio::sync::oneshot::channel();
         state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
             self.clone(),
             prompt_id.clone(),
@@ -509,6 +515,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             Some(start_rx),
+            Some(durable_start_tx),
             completion_tx,
             persist_ack,
         ));
@@ -519,6 +526,9 @@ impl SessionActor {
         self.publish_turn_scope_resources(prompt_id, &origin, admitted_behavior)
             .await;
         let _ = start_tx.send(());
+        if durable_start_rx.await != Ok(true) {
+            tracing::error!("queued prompt failed before durable turn admission");
+        }
     }
 
     /// Consume pending receipts into the active turn at the next safe sampling
@@ -627,30 +637,36 @@ impl SessionActor {
         if notifications.is_empty() {
             return;
         }
-        let current_goal_id = self.goal_tracker.lock().snapshot().and_then(|goal| {
-            (goal.status == crate::session::goal_tracker::GoalStatus::Active)
-                .then(|| goal.goal_id.clone())
-        });
-
         // A Goal-owned receipt belongs only to that Goal epoch. Matching
         // evidence remains pending for the Goal continuation; stale or stopped
         // Goal evidence is resolved without ever becoming a Normal turn.
-        let mut stale_goal_receipts = std::collections::BTreeMap::<String, Vec<String>>::new();
+        let mut stale_goal_receipts =
+            std::collections::BTreeMap::<(String, u64), Vec<String>>::new();
         for notification in &notifications {
-            if let chat_state::NotificationOwner::Goal { goal_id } = notification.source.owner()
-                && current_goal_id.as_deref() != Some(goal_id.as_str())
+            if let chat_state::NotificationOwner::Goal {
+                goal_id,
+                definition_revision,
+            } = notification.source.owner()
+                && self.goal_tracker.lock().snapshot().is_none_or(|goal| {
+                    goal.status != crate::session::goal_tracker::GoalStatus::Active
+                        || goal.goal_id != *goal_id
+                        || goal.definition_revision != definition_revision
+                })
             {
                 stale_goal_receipts
-                    .entry(goal_id.clone())
+                    .entry((goal_id.clone(), definition_revision))
                     .or_default()
                     .push(notification.id.clone());
             }
         }
-        for (goal_id, notification_ids) in stale_goal_receipts {
+        for ((goal_id, definition_revision), notification_ids) in stale_goal_receipts {
             if let Err(error) = self
                 .dismiss_notifications_durably(
                     notification_ids,
-                    chat_state::NotificationDismissReason::GoalOwnedAutostart { goal_id },
+                    chat_state::NotificationDismissReason::GoalOwnedAutostart {
+                        goal_id,
+                        definition_revision,
+                    },
                 )
                 .await
             {
@@ -782,10 +798,13 @@ impl SessionActor {
     fn notification_owned_by_goal(
         notification: &chat_state::PendingNotification,
         expected_goal_id: &str,
+        expected_definition_revision: u64,
     ) -> bool {
         matches!(
             notification.source.owner(),
-            chat_state::NotificationOwner::Goal { goal_id } if goal_id == expected_goal_id
+            chat_state::NotificationOwner::Goal { goal_id, definition_revision }
+                if goal_id == expected_goal_id
+                    && definition_revision == expected_definition_revision
         )
     }
 
@@ -795,11 +814,15 @@ impl SessionActor {
     ) -> bool {
         match notification.source.owner() {
             chat_state::NotificationOwner::Session => true,
-            chat_state::NotificationOwner::Goal { goal_id } => matches!(
+            chat_state::NotificationOwner::Goal {
+                goal_id,
+                definition_revision,
+            } => matches!(
                 origin,
                 crate::session::PromptOrigin::GoalContinuation {
-                    goal_id: active_goal_id
-                } if active_goal_id == &goal_id
+                    goal_id: active_goal_id,
+                    definition_revision: active_revision,
+                } if active_goal_id == &goal_id && active_revision == &definition_revision
             ),
         }
     }
@@ -810,6 +833,7 @@ impl SessionActor {
     pub(super) async fn goal_notification_evidence(
         &self,
         goal_id: &str,
+        definition_revision: u64,
     ) -> (Vec<String>, Vec<acp::ContentBlock>) {
         let notifications = self
             .chat_state_handle
@@ -817,7 +841,9 @@ impl SessionActor {
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|notification| Self::notification_owned_by_goal(notification, goal_id))
+            .filter(|notification| {
+                Self::notification_owned_by_goal(notification, goal_id, definition_revision)
+            })
             .collect::<Vec<_>>();
         if notifications.is_empty() {
             return (Vec::new(), Vec::new());
@@ -1288,6 +1314,7 @@ mod tests {
                             task_id: "goal-monitor".into(),
                             owner: chat_state::NotificationOwner::Goal {
                                 goal_id: "goal-1".into(),
+                                definition_revision: 1,
                             },
                         },
                         chat_state::NotificationSourceVersion::Opaque {
@@ -1304,6 +1331,7 @@ mod tests {
                             task_kind: chat_state::NotificationTaskKind::Monitor,
                             owner: chat_state::NotificationOwner::Goal {
                                 goal_id: "goal-1".into(),
+                                definition_revision: 1,
                             },
                         },
                         chat_state::NotificationSourceVersion::Ordinal { value: 1 },
@@ -1370,7 +1398,7 @@ mod tests {
                 actor
                     .goal_turn_task_ids
                     .lock()
-                    .insert("goal-build".into(), "goal-1".into());
+                    .insert("goal-build".into(), ("goal-1".into(), 1));
                 actor
                     .receive_notification(
                         chat_state::NotificationSource::TaskCompleted {
@@ -1392,6 +1420,7 @@ mod tests {
                     pending[0].source.owner(),
                     chat_state::NotificationOwner::Goal {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     }
                 );
                 actor.goal_turn_task_ids.lock().clear();
@@ -1418,7 +1447,7 @@ mod tests {
                     let state = actor.state.lock().await;
                     assert!(matches!(
                         state.foreground.regular().map(|task| &task.origin),
-                        Some(crate::session::PromptOrigin::GoalContinuation { goal_id })
+                        Some(crate::session::PromptOrigin::GoalContinuation { goal_id, .. })
                             if goal_id == "goal-1"
                     ));
                 }
@@ -1481,7 +1510,7 @@ mod tests {
                     )
                     .unwrap();
                 assert!(actor.goal_tracker.lock().complete());
-                actor.record_goal_owned_task_ids("goal-1", ["goal-build".to_owned()]);
+                actor.record_goal_owned_task_ids("goal-1", 1, ["goal-build".to_owned()]);
                 // A completed Goal remains a durable receipt and cannot be
                 // replaced implicitly. Model the explicit clear before the
                 // next Goal epoch so the fixture exercises admitted-owner
@@ -1500,8 +1529,8 @@ mod tests {
                         .goal_turn_task_ids
                         .lock()
                         .get("goal-build")
-                        .map(String::as_str),
-                    Some("goal-1"),
+                        .map(|(goal_id, revision)| (goal_id.as_str(), *revision)),
+                    Some(("goal-1", 1)),
                     "new Goal epoch must retain admission ownership for old running work"
                 );
 
@@ -1527,8 +1556,77 @@ mod tests {
                     pending[0].source.owner(),
                     chat_state::NotificationOwner::Goal {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     }
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn delayed_completion_from_edited_goal_revision_cannot_enter_new_continuation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "original objective".into(),
+                        None,
+                        "2026-08-27T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor.record_goal_owned_task_ids("goal-1", 1, ["goal-build".to_owned()]);
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .revise_goal("revised objective".into(), None)
+                );
+
+                actor
+                    .receive_notification(
+                        chat_state::NotificationSource::TaskCompleted {
+                            task_id: "goal-build".into(),
+                            task_kind: chat_state::NotificationTaskKind::Task,
+                            owner: chat_state::NotificationOwner::Session,
+                        },
+                        chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                        "old revision completed late".into(),
+                    )
+                    .await
+                    .expect("receive delayed completion");
+
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .expect("pending notification");
+                assert!(matches!(
+                    pending[0].source.owner(),
+                    chat_state::NotificationOwner::Goal {
+                        ref goal_id,
+                        definition_revision: 1,
+                    } if goal_id == "goal-1"
+                ));
+                let (ids, evidence) = actor.goal_notification_evidence("goal-1", 2).await;
+                assert!(ids.is_empty());
+                assert!(evidence.is_empty());
+
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.clone().maybe_drain_notifications(completion_tx).await;
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("stale notification dismissed")
+                        .is_empty()
+                );
+                assert!(actor.state.lock().await.foreground.is_idle());
             })
             .await;
     }
@@ -1543,8 +1641,8 @@ mod tests {
                     .goal_tracker
                     .lock()
                     .create_goal(
-                        "goal-2".into(),
-                        "a new objective".into(),
+                        "goal-1".into(),
+                        "the original objective".into(),
                         None,
                         "2026-08-25T00:00:00Z".into(),
                     )
@@ -1556,6 +1654,7 @@ mod tests {
                             task_kind: chat_state::NotificationTaskKind::Task,
                             owner: chat_state::NotificationOwner::Goal {
                                 goal_id: "goal-1".into(),
+                                definition_revision: 1,
                             },
                         },
                         chat_state::NotificationSourceVersion::Ordinal { value: 1 },
@@ -1563,6 +1662,20 @@ mod tests {
                     )
                     .await
                     .expect("receive prior Goal completion");
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .revise_goal("a revised objective".into(), None)
+                );
+                assert_eq!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .map(|goal| goal.definition_revision),
+                    Some(2)
+                );
                 let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 actor
@@ -1601,10 +1714,11 @@ mod tests {
                         chat_state::NotificationEvent::Dismissed {
                             reason: chat_state::NotificationDismissReason::GoalOwnedAutostart {
                                 goal_id,
+                                definition_revision,
                             },
                             ..
                         }
-                    )) if goal_id == "goal-1"
+                    )) if goal_id == "goal-1" && *definition_revision == 1
                 ));
             })
             .await;
@@ -1644,6 +1758,7 @@ mod tests {
                                 task_kind: chat_state::NotificationTaskKind::Task,
                                 owner: chat_state::NotificationOwner::Goal {
                                     goal_id: "goal-1".into(),
+                                    definition_revision: 1,
                                 },
                             },
                             chat_state::NotificationSourceVersion::Ordinal { value: 1 },
@@ -1695,6 +1810,7 @@ mod tests {
                             task_kind: chat_state::NotificationTaskKind::Task,
                             owner: chat_state::NotificationOwner::Goal {
                                 goal_id: "goal-1".into(),
+                                definition_revision: 1,
                             },
                         },
                         chat_state::NotificationSourceVersion::Opaque {
@@ -1754,6 +1870,7 @@ mod tests {
                     terminal.source.owner(),
                     chat_state::NotificationOwner::Goal {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     }
                 );
             })

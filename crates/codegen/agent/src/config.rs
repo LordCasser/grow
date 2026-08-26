@@ -1,7 +1,7 @@
 //! Agent definition types — parsed from `.grow/agents/*.md` files.
 use crate::error::AgentBuildError;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
@@ -297,10 +297,11 @@ fn explore_toolset() -> ToolServerConfig {
 /// definition may be launched anywhere another Agent permits it; primary
 /// visibility is decided independently by `subagentOnly` and the capability
 /// floor.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentFilter {
-    allow: Option<HashSet<String>>,
-    deny: HashSet<String>,
+    allow: Option<BTreeSet<String>>,
+    deny: BTreeSet<String>,
 }
 
 /// Explicit subagent authorization, independent of ordinary tool names.
@@ -531,6 +532,54 @@ pub struct AgentDefinition {
     #[serde(skip)]
     pub scope: AgentScope,
 }
+
+impl AgentDefinition {
+    /// Stable selector identity used by runtime controls and persistence.
+    ///
+    /// Native Agents are addressed by their authored name. Plugin Agents must
+    /// retain their namespace so a resumed session cannot silently resolve a
+    /// same-named native Agent or a definition from another plugin.
+    pub fn selector_identity(&self) -> String {
+        self.plugin_name
+            .as_ref()
+            .map(|plugin| format!("{plugin}:{}", self.name))
+            .unwrap_or_else(|| self.name.clone())
+    }
+
+    /// Whether two resolved definitions produce the same executable Agent
+    /// profile. The public manifest serialization deliberately omits resolved
+    /// tool, source, and operator-clamp fields, so name or manifest equality
+    /// alone is not sufficient for idempotent control replay.
+    pub fn runtime_equivalent(&self, other: &Self) -> bool {
+        let manifests_equal = matches!(
+            (serde_json::to_value(self), serde_json::to_value(other)),
+            (Ok(left), Ok(right)) if left == right
+        );
+        let tool_configs_equal = matches!(
+            (
+                serde_json::to_value(&self.tool_config),
+                serde_json::to_value(&other.tool_config),
+            ),
+            (Ok(left), Ok(right)) if left == right
+        );
+        let authored_tools_equal = matches!(
+            (
+                serde_json::to_value(&self.authored_capability_tools),
+                serde_json::to_value(&other.authored_capability_tools),
+            ),
+            (Ok(left), Ok(right)) if left == right
+        );
+        manifests_equal
+            && tool_configs_equal
+            && authored_tools_equal
+            && self.session_tools_allowlist == other.session_tools_allowlist
+            && self.session_tools_denylist == other.session_tools_denylist
+            && self.prompt_body == other.prompt_body
+            && self.source_path == other.source_path
+            && self.scope == other.scope
+            && self.plugin_name == other.plugin_name
+    }
+}
 /// Declares that the agent must call a specific tool before the turn ends.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -694,6 +743,19 @@ pub enum McpInheritance {
     None,
     Named(Vec<String>),
     Except(Vec<String>),
+}
+impl McpInheritance {
+    /// Whether this Agent admits one server from the parent-owned MCP pool.
+    /// Transport identity and the child's immutable inherited scope are
+    /// checked separately by the shell authority.
+    pub fn permits(&self, server: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Named(names) => names.iter().any(|name| name == server),
+            Self::Except(names) => !names.iter().any(|name| name == server),
+        }
+    }
 }
 impl<'de> Deserialize<'de> for McpInheritance {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -1199,21 +1261,6 @@ impl AgentDefinition {
     /// Replace the file-operation tools (read/edit/search) in the tool config
     /// with the given set. Used by the shell layer to swap from standard to
     /// hashline toolset based on `config.toml` / remote settings.
-    /// True iff the active system prompt template for `audience` carries
-    /// the `<task_completion_discipline>` block.
-    ///
-    /// Used by the runtime turn-end TodoGate to gate firing on sessions
-    /// whose prompt actually references the rules the gate's reminder
-    /// text invokes. The block has been removed from every built-in
-    /// template, so this returns `false` unconditionally. Kept as a
-    /// helper so the gate's call-site stays stable in case the block
-    /// is reintroduced behind a future flag.
-    pub fn carries_task_completion_discipline(
-        &self,
-        _audience: crate::prompt::context::PromptAudience,
-    ) -> bool {
-        false
-    }
     /// True iff this Agent's curated tool schema must not be replaced by a
     /// client-selected generic profile.
     pub fn is_strict_harness(&self) -> bool {
@@ -1615,6 +1662,17 @@ You are a test agent.
             worker.primary_agent_issues(),
             vec![PrimaryAgentIssue::SubagentOnly]
         );
+    }
+
+    #[test]
+    fn selector_identity_preserves_plugin_namespace() {
+        let native = AgentDefinition::default_grow_build();
+        assert_eq!(native.selector_identity(), native.name);
+
+        let mut plugin = native.clone();
+        plugin.name = "reviewer".into();
+        plugin.plugin_name = Some("quality".into());
+        assert_eq!(plugin.selector_identity(), "quality:reviewer");
     }
 
     #[test]
@@ -2238,17 +2296,20 @@ description: Test default tool config
         assert_eq!(recovered.mcp_inheritance, def.mcp_inheritance);
     }
     #[test]
-    fn carries_discipline_false_for_every_audience() {
-        let def = AgentDefinition::default_grow_build();
-        for audience in [
-            crate::prompt::context::PromptAudience::Primary,
-            crate::prompt::context::PromptAudience::Subagent,
-        ] {
-            assert!(
-                !def.carries_task_completion_discipline(audience),
-                "discipline block was removed; helper must return false \
-                 (audience: {audience:?})"
-            );
-        }
+    fn runtime_equivalence_includes_fields_omitted_from_public_manifest() {
+        let original = AgentDefinition::default_grow_build();
+        assert!(original.runtime_equivalent(&original.clone()));
+
+        let mut changed_prompt = original.clone();
+        changed_prompt.prompt_body = Some("updated role".into());
+        assert!(!original.runtime_equivalent(&changed_prompt));
+
+        let mut changed_clamp = original.clone();
+        changed_clamp.session_tools_denylist = Some(vec!["run_terminal_command".into()]);
+        assert!(!original.runtime_equivalent(&changed_clamp));
+
+        let mut changed_scope = original.clone();
+        changed_scope.scope = AgentScope::Project;
+        assert!(!original.runtime_equivalent(&changed_scope));
     }
 }

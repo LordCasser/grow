@@ -145,7 +145,7 @@ impl SessionActor {
     pub(super) async fn reload_skills_from_disk(&self) -> usize {
         let cwd = &self.session_info.cwd;
         let skills_config = crate::util::config::load_config().await.skills;
-        let plugin_snapshot = self.plugin_registry.borrow().clone();
+        let plugin_snapshot = self.plugin_registry.read().clone();
         let new_skills = agent::prompt::skills::list_skills_with_plugins(
             Some(cwd),
             &skills_config,
@@ -174,7 +174,7 @@ impl SessionActor {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let skills = bridge.slash_skills().await;
         let tool_names: Vec<String> = bridge
-            .tool_definitions()
+            .tool_definitions_builtins_only()
             .await
             .into_iter()
             .map(|td| td.function.name)
@@ -394,7 +394,7 @@ impl SessionActor {
         let free_tokens = token_estimation::free_tokens(context_window, total_tokens);
         let usage_pct = token_estimation::usage_percentage_u8(total_tokens, context_window);
         let api_backend = config.as_ref().map(|c| format!("{:?}", c.api_backend));
-        let agent_name = self.agent.borrow().definition().name.clone();
+        let agent_name = self.agent.borrow().definition().selector_identity();
         let show_model_fingerprint = model
             .as_deref()
             .map(|id| self.models_manager.model_show_model_fingerprint(id))

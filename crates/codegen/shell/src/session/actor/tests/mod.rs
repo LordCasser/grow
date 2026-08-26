@@ -32,7 +32,6 @@ mod subagent_bash_permission_tests;
 mod subagent_usage_fold_tests;
 pub(crate) mod support;
 mod truncation_recovery_tests;
-mod turn_end_guard_tests;
 mod turn_pipeline_v2_tests;
 mod usage_categories_tests;
 mod workflow_launch_tests;

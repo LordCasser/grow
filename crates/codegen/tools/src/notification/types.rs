@@ -134,6 +134,11 @@ pub struct BashExecutionBackgrounded {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub goal_id: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub goal_definition_revision: Option<u64>,
 
     /// When `Some`, this backgrounded task is a **monitor** (not an ordinary
     /// bash command), and the string is the monitor's human-readable
@@ -343,6 +348,8 @@ pub struct MonitorEvent {
     /// session's current Goal when an event happens to arrive.
     #[cfg_attr(feature = "serde", serde(default))]
     pub goal_id: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub goal_definition_revision: Option<u64>,
 }
 
 /// A notification emitted by a tool during or after execution.

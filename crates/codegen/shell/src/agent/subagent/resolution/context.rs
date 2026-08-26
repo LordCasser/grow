@@ -45,7 +45,58 @@ const FORK_NOISE_TAGS: &[&str] = &[
 /// Returns `(normalized_items, inherited_prefix_len)` where
 /// `inherited_prefix_len` is the number of items the child should treat as
 /// pre-existing context (typically 2 for `[System, BackgroundContext]`).
-pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<ConversationItem>, usize) {
+pub fn normalize_forked_context(
+    mut items: Vec<ConversationItem>,
+) -> (Vec<ConversationItem>, usize) {
+    // Normalization changes the shape of the history, but it must never erase
+    // multimodal evidence. Move every raw image into the single normalized
+    // User item so the child keeps one causal image group. Sanitize the cloned
+    // source locations with the same projection primitives used by Timeline:
+    // a text-only child will durably describe these images before sampling,
+    // while a vision child receives them directly. Tool arguments and native
+    // response carriers cannot retain a second path that would outlive that
+    // child-side projection.
+    let image_groups = sampling_types::conversation::conversation_image_groups(&items);
+    let preserved_images = image_groups
+        .iter()
+        .flat_map(|group| group.image_urls.iter().cloned())
+        .collect::<Vec<_>>();
+    if !image_groups.is_empty() {
+        let mut tool_calls = std::collections::BTreeMap::<usize, Vec<String>>::new();
+        let mut carrier_indices = BTreeSet::new();
+        for group in &image_groups {
+            let _ = sampling_types::conversation::replace_item_images_with_text(
+                &mut items[group.item_index],
+                "[Image preserved below for child projection.]",
+            );
+            if let Some(tool_call) = &group.tool_call {
+                tool_calls
+                    .entry(tool_call.item_index)
+                    .or_default()
+                    .push(tool_call.tool_call_id.to_string());
+                carrier_indices.extend(
+                    sampling_types::conversation::assistant_response_carrier_indices(
+                        &items,
+                        tool_call.item_index,
+                    ),
+                );
+            }
+        }
+        for (assistant_index, call_ids) in tool_calls {
+            for call_id in call_ids {
+                let _ = sampling_types::conversation::redact_projected_image_tool_call(
+                    &mut items[assistant_index],
+                    &call_id,
+                );
+            }
+        }
+        for carrier_index in carrier_indices {
+            let _ = sampling_types::conversation::redact_projected_image_response_carrier(
+                &mut items[carrier_index],
+            );
+        }
+    }
+
     // Extract system prompt (position 0) - kept as placeholder for spawn_session_actor.
     let system = items
         .first()
@@ -90,7 +141,11 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     }
     background.push_str("</background_context>");
 
-    let conversation = vec![system, ConversationItem::user(&background)];
+    let mut normalized = ConversationItem::user(&background);
+    for image in preserved_images {
+        normalized.add_image(image.to_string());
+    }
+    let conversation = vec![system, normalized];
     (conversation, 2)
 }
 
@@ -528,6 +583,69 @@ mod tests {
             !text.contains("REASONING_NOISE"),
             "reasoning content must be stripped from background: {text}"
         );
+    }
+
+    #[test]
+    fn normalized_fork_preserves_images_without_recoverable_source_paths() {
+        use sampling_types::conversation::{ContentPart, UserItem};
+
+        let user_path = "/secret/user-image.png";
+        let carrier_path = "/secret/carrier-image.png";
+        let tool_path = "/secret/tool-image.png";
+        let user = ConversationItem::User(UserItem {
+            content: vec![
+                ContentPart::Text {
+                    text: format!("<image_files>\n1. {user_path}\n</image_files>\ninspect these")
+                        .into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,user".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let items = vec![
+            system_item("System"),
+            user,
+            reasoning_item(&format!("opening {carrier_path}")),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call-image".into(),
+                name: "read_file".into(),
+                arguments: format!(r#"{{"target_file":"{tool_path}"}}"#).into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call-image",
+                "loaded image",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,tool".into(),
+                }],
+            ),
+        ];
+
+        let (normalized, prefix_len) = normalize_forked_context(items);
+
+        assert_eq!(prefix_len, 2);
+        let ConversationItem::User(background) = &normalized[1] else {
+            panic!("normalized context must be one User item");
+        };
+        assert_eq!(
+            background
+                .content
+                .iter()
+                .filter(|part| matches!(part, ContentPart::Image { .. }))
+                .count(),
+            2,
+            "both user and tool-result images must survive normalization"
+        );
+        let serialized = serde_json::to_string(&normalized).unwrap();
+        for path in [user_path, carrier_path, tool_path] {
+            assert!(
+                !serialized.contains(path),
+                "normalized model view retained raw image source {path}"
+            );
+        }
+        assert!(serialized.contains("Image preserved below for child projection"));
+        assert!(serialized.contains("image projected to durable text"));
     }
 
     #[test]

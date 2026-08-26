@@ -635,8 +635,8 @@ impl SessionActor {
         }
         *self.hooks.load_errors.borrow_mut() = errors.iter().map(|e| e.to_string()).collect();
         // Re-append plugin hooks from current plugin registry.
-        // Clone the Arc out of the RefCell so the borrow is dropped immediately.
-        let plugin_registry_snapshot = self.plugin_registry.borrow().clone();
+        // Clone the Arc so the registry lock is dropped immediately.
+        let plugin_registry_snapshot = self.plugin_registry.read().clone();
         if let Some(ref pr) = plugin_registry_snapshot {
             for plugin in pr.active_plugins() {
                 if let Some(ref hooks_path) = plugin.hooks_path {
@@ -787,7 +787,7 @@ impl SessionActor {
     /// built with; empty when the session has none.
     pub(crate) fn session_plugin_dirs(&self) -> Vec<std::path::PathBuf> {
         self.plugin_registry
-            .borrow()
+            .read()
             .as_ref()
             .map(|r| r.session_plugin_dirs().to_vec())
             .unwrap_or_default()
@@ -829,7 +829,7 @@ impl SessionActor {
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
 
         // Update session's plugin registry snapshot
-        *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
+        *self.plugin_registry.write() = new_registry_snapshot.clone();
 
         // Reload hooks in the current session
         let t_hooks = std::time::Instant::now();
@@ -1000,7 +1000,7 @@ impl SessionActor {
 
             use crate::extensions::plugins::loaded_plugin_to_info;
             let plugins = {
-                let reg = self.plugin_registry.borrow();
+                let reg = self.plugin_registry.read();
                 match &*reg {
                     Some(registry) => registry
                         .list()

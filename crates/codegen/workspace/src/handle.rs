@@ -1766,6 +1766,7 @@ pub(crate) mod tests {
             kind: tools::computer::types::TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         }
     }

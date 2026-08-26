@@ -50,7 +50,9 @@
             .models
             .available
             .insert(id_3.clone(), make_model_info("grow-3"));
-        agent.session.models.current = Some(id_3);
+        agent.session.models.current = Some(id_3.clone());
+        app.models.available.insert(id_3.clone(), make_model_info("grow-3"));
+        app.models.current = Some(id_3);
 
         let notif = make_models_update_notif("grow-4", &["grow-3", "grow-4"]);
         handle_models_update(&notif, &mut app);
@@ -231,7 +233,7 @@
         seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
         let scrollback_before = agent.scrollback.len();
         // Follower: no local switch in flight.
-        assert!(!agent.session.model_switch_pending);
+        assert!(!agent.session.model_switch_pending());
 
         let notif = model_changed_ext("sess-1", "grow-4", None);
         let changed = handle_ext_notification(&notif, &mut app);
@@ -258,7 +260,7 @@
              the invoking client's job (SwitchModelComplete owns the system message)"
         );
         assert!(
-            !agent.session.model_switch_pending,
+            !agent.session.model_switch_pending(),
             "follower's pending flag must stay false (no local switch was issued)"
         );
     }
@@ -277,7 +279,7 @@
         seed_models(agent, "heavy", &["auto", "heavy"]);
         agent.session.user_model_preference =
             Some(acp::ModelId::new(std::sync::Arc::from("heavy")));
-        assert!(!agent.session.model_switch_pending);
+        assert!(!agent.session.model_switch_pending());
 
         let notif = model_changed_ext("sess-1", "auto", None);
         let changed = handle_ext_notification(&notif, &mut app);
@@ -328,7 +330,7 @@
         seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
         // Invoker: a local switch is in flight (set by Action::SwitchModel /
         // set_default_model before the SetSessionModelRequest is sent).
-        agent.session.model_switch_pending = true;
+        agent.session.begin_model_switch_for_test();
         let scrollback_before = agent.scrollback.len();
 
         let notif = model_changed_ext("sess-1", "grow-4", None);
@@ -356,18 +358,69 @@
             "broadcast must not push any scrollback entry on the invoker"
         );
         assert!(
-            agent.session.model_switch_pending,
+            agent.session.model_switch_pending(),
             "pending flag must remain set until SwitchModelComplete arrives"
         );
     }
 
-    /// A `ModelChanged` broadcast carrying a model id the local catalog
-    /// doesn't know about must be dropped — applying it would render an
-    /// unresolvable id in the status bar and desync the `/model` dropdown.
-    /// This can happen when leader and a follower client briefly disagree
-    /// on the model catalog (etag drift, custom-model config skew).
     #[test]
-    fn model_changed_dropped_when_model_unknown_to_catalog() {
+    fn model_changed_is_applied_after_the_local_control_queue_drains() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
+        let token = agent.session.begin_model_switch_for_test();
+
+        let notif = model_changed_ext("sess-1", "grow-4", Some("high"));
+        assert!(
+            !handle_ext_notification(&notif, &mut app),
+            "the notification is deferred until the local control terminal"
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].session.models.current.as_ref().unwrap().0.as_ref(),
+            "grow-3"
+        );
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.complete_control(token),
+            crate::app::session::SessionControlCompletion::Drained
+        );
+        assert!(apply_deferred_authoritative_controls(agent, "sess-1"));
+        assert_eq!(
+            agent.session.models.current.as_ref().unwrap().0.as_ref(),
+            "grow-4",
+            "the newest server state wins once the local queue is terminal"
+        );
+    }
+
+    #[test]
+    fn agent_changed_is_applied_after_an_unrelated_local_control_drains() {
+        let mut app = make_app_with_agent("sess-1");
+        let token = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .begin_model_switch_for_test();
+
+        let notif = agent_changed_ext("sess-1", "reviewer");
+        assert!(!handle_ext_notification(&notif, &mut app));
+        assert_ne!(app.agents[&AgentId(0)].session.agent_name(), Some("reviewer"));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.complete_control(token),
+            crate::app::session::SessionControlCompletion::Drained
+        );
+        assert!(apply_deferred_authoritative_controls(agent, "sess-1"));
+        assert_eq!(agent.session.agent_name(), Some("reviewer"));
+    }
+
+    /// A `ModelChanged` can race ahead of the matching catalog generation.
+    /// It remains authoritative, but must not be projected until the model
+    /// metadata exists locally.
+    #[test]
+    fn model_changed_waits_for_matching_catalog_generation() {
         let mut app = make_app_with_agent("sess-1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
@@ -389,6 +442,22 @@
                 .map(|id| id.0.as_ref()),
             Some("grow-3"),
             "models.current must stay on the previously-known model"
+        );
+
+        let update = make_models_update_notif(
+            "grow-99-unknown",
+            &["grow-3", "grow-4", "grow-99-unknown"],
+        );
+        assert!(handle_models_update(&update, &mut app));
+        assert_eq!(
+            app.agents[&AgentId(0)]
+                .session
+                .models
+                .current
+                .as_ref()
+                .map(|id| id.0.as_ref()),
+            Some("grow-99-unknown"),
+            "catalog publication must retry the held authoritative state"
         );
     }
 
@@ -439,5 +508,174 @@
                 .map(|id| id.0.as_ref()),
             Some("grow-3"),
             "unrelated-session broadcast must not touch this agent's model"
+        );
+    }
+
+    #[test]
+    fn model_changed_broadcast_updates_only_the_target_child() {
+        let mut app = make_app_with_agent("root-session");
+        seed_models(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "grow-3",
+            &["grow-3", "grow-4"],
+        );
+        let spawned = make_ext_session_notification(
+            "root-session",
+            test_subagent_spawned("root-session", "child-session"),
+        );
+        let AcpClientMessage::ExtNotification(spawned) = spawned else {
+            panic!("helper must produce an extension notification");
+        };
+        assert!(handle_ext_notification(&spawned.request, &mut app));
+
+        let changed = model_changed_ext("child-session", "grow-4", Some("high"));
+        assert!(handle_ext_notification(&changed, &mut app));
+
+        let root = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(root.session.models.current.as_ref().unwrap().0.as_ref(), "grow-3");
+        assert_eq!(
+            root.subagent_views["child-session"]
+                .session
+                .models
+                .current
+                .as_ref()
+                .unwrap()
+                .0
+                .as_ref(),
+            "grow-4"
+        );
+    }
+
+    #[test]
+    fn models_update_refreshes_child_catalog_without_clobbering_its_selection() {
+        let mut app = make_app_with_agent("root-session");
+        seed_models(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "grow-3",
+            &["grow-3", "grow-4"],
+        );
+        let spawned = make_ext_session_notification(
+            "root-session",
+            test_subagent_spawned("root-session", "child-session"),
+        );
+        let AcpClientMessage::ExtNotification(spawned) = spawned else {
+            panic!("helper must produce an extension notification");
+        };
+        assert!(handle_ext_notification(&spawned.request, &mut app));
+        let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
+            .get_mut("child-session")
+            .unwrap();
+        seed_models(child, "grow-3", &["grow-3", "grow-4"]);
+
+        let update = make_models_update_notif("grow-4", &["grow-3", "grow-4", "grow-5"]);
+        assert!(handle_models_update(&update, &mut app));
+
+        let child = &app.agents[&AgentId(0)].subagent_views["child-session"];
+        assert_eq!(child.session.models.current.as_ref().unwrap().0.as_ref(), "grow-3");
+        assert!(child
+            .session
+            .models
+            .available
+            .contains_key(&acp::ModelId::new("grow-5")));
+        assert!(handle_ext_notification(
+            &model_changed_ext("child-session", "grow-5", None),
+            &mut app
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].subagent_views["child-session"]
+                .session
+                .models
+                .current
+                .as_ref()
+                .unwrap()
+                .0
+                .as_ref(),
+            "grow-5",
+            "the child can resolve the authoritative model after a catalog refresh"
+        );
+    }
+
+    #[test]
+    fn child_model_changed_uses_its_own_event_highwater() {
+        let mut app = make_app_with_agent("root-session");
+        seed_models(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "grow-3",
+            &["grow-3", "grow-4", "grow-5"],
+        );
+        let spawned = make_ext_session_notification(
+            "root-session",
+            test_subagent_spawned("root-session", "child-session"),
+        );
+        let AcpClientMessage::ExtNotification(spawned) = spawned else {
+            panic!("helper must produce an extension notification");
+        };
+        assert!(handle_ext_notification(&spawned.request, &mut app));
+
+        assert!(handle_ext_notification(
+            &model_changed_ext_with_event("child-session", "grow-5", "child-session-12"),
+            &mut app
+        ));
+        assert!(!handle_ext_notification(
+            &model_changed_ext_with_event("child-session", "grow-4", "child-session-11"),
+            &mut app
+        ));
+
+        let child = &app.agents[&AgentId(0)].subagent_views["child-session"];
+        assert_eq!(child.session.models.current.as_ref().unwrap().0.as_ref(), "grow-5");
+        assert_eq!(child.session.last_applied_grow_event_seq, Some(12));
+        assert_eq!(
+            child.session.last_seen_event_id.as_deref(),
+            Some("child-session-12")
+        );
+    }
+
+    #[test]
+    fn workflow_pinned_child_ignores_process_catalog_reload() {
+        let mut app = make_app_with_agent("root-session");
+        seed_models(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "grow-3",
+            &["grow-3", "grow-4"],
+        );
+        let mut update = test_subagent_spawned("root-session", "workflow-child");
+        let GrowSessionUpdate::SubagentSpawned {
+            workflow_run_id,
+            model_state,
+            workflow_agent_names,
+            ..
+        } = &mut update
+        else {
+            unreachable!()
+        };
+        *workflow_run_id = Some("run-1".to_string());
+        *model_state = Some(acp::SessionModelState::new(
+            acp::ModelId::new("grow-3"),
+            vec![make_model_info("grow-3"), make_model_info("grow-4")],
+        ));
+        *workflow_agent_names = Some(vec!["reviewer".into(), "researcher".into()]);
+        let spawned = make_ext_session_notification("root-session", update);
+        let AcpClientMessage::ExtNotification(spawned) = spawned else {
+            panic!("helper must produce an extension notification");
+        };
+        assert!(handle_ext_notification(&spawned.request, &mut app));
+        let catalog = make_models_update_notif("grow-5", &["grow-4", "grow-5"]);
+        assert!(handle_models_update(&catalog, &mut app));
+
+        let child = &app.agents[&AgentId(0)].subagent_views["workflow-child"];
+        assert_eq!(child.session.models.current.as_ref().unwrap().0.as_ref(), "grow-3");
+        assert!(child
+            .session
+            .models
+            .available
+            .contains_key(&acp::ModelId::new("grow-3")));
+        assert!(!child
+            .session
+            .models
+            .available
+            .contains_key(&acp::ModelId::new("grow-5")));
+        assert_eq!(
+            child.session.workflow_agent_names.as_deref(),
+            Some(["reviewer".to_string(), "researcher".to_string()].as_slice())
         );
     }

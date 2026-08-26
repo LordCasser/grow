@@ -1,6 +1,5 @@
-//! Replay an offline session trace against the Layer-2 TodoGate and
-//! Layer-3 LazinessDetector classifier, emitting one JSONL line per
-//! turn.
+//! Replay an offline session trace against the LazinessDetector classifier,
+//! emitting one JSONL line per turn.
 //!
 //! Usage:
 //!   cargo run --bin trace_classify -- \
@@ -29,7 +28,7 @@ use shell::trace_classifier::{RunArgs, run, validate_min_confidence};
 #[derive(Parser, Debug)]
 #[command(
     name = "trace_classify",
-    about = "Replay a session trace against the TodoGate + Laziness classifier"
+    about = "Replay a session trace against the Laziness classifier"
 )]
 struct Cli {
     /// Path to the offline trace JSON (a top-level array of turn records).

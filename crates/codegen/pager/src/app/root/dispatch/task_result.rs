@@ -4,11 +4,12 @@ use super::cta::{
     handle_plugin_cta_catalog_loaded, handle_plugin_cta_debounce_expired,
     handle_plugin_cta_mcps_loaded,
 };
-use super::ctx::{find_agent_by_session_id, get_active_agent_mut};
+use super::ctx::{find_agent_by_session_id, find_agent_view_by_session_id, get_active_agent_mut};
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
     handle_compact_complete, handle_prompt_response, handle_suggestion_debounce_expired,
 };
+use super::queue::{maybe_drain_queue, next_control_effect};
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
     handle_rewind_preview_complete, handle_rewind_preview_failed,
@@ -384,38 +385,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
-        TaskResult::SessionModeSet { session_id, result } => {
-            if let Err(error) = result {
-                tracing::warn!(%error, session_id = %session_id.0, "failed to set Behavior");
-                if let Some(agent) =
-                    find_agent_by_session_id(&mut app.agents, session_id.0.as_ref())
-                {
-                    // The transport request is no longer in flight. Keep the
-                    // deferred first-prompt admission token, but clear the
-                    // optimistic target so selecting it again actually emits a
-                    // retry instead of being mistaken for an idempotent click.
-                    agent.session.behavior_mode_pending = None;
-                    agent.session.plan_mode_pending = None;
-                    let fallback = agent.session.behavior_mode.display_label();
-                    let retry = agent
-                        .session
-                        .deferred_session_mode
-                        .map(|mode| mode.display_label())
-                        .unwrap_or("the requested");
-                    let message = format!(
-                        "Behavior change failed: {}. The prompt is still queued; retry {retry} or choose {fallback} to send it now.",
-                        scrub_error_for_toast(&error)
-                    );
-                    agent.show_toast(&message);
-                } else {
-                    app.show_toast(&format!(
-                        "Behavior change failed; the prompt remains queued: {}",
-                        scrub_error_for_toast(&error)
-                    ));
-                }
-            }
-            vec![]
-        }
         TaskResult::PromptStatusResolved {
             agent_id,
             prompt_id,
@@ -543,66 +512,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
             }
         }
-        TaskResult::PromptRequiresBehaviorConfirmation {
-            agent_id,
-            session_id,
-            mode_id,
-            text,
-            prompt_id,
-            skill_token_ranges,
-            message,
-            remaining_ms,
-        } => {
-            // This prompt's RPC resolved without running: retire its
-            // optimistic echo exactly like the resolved-without-running arm
-            // of `handle_prompt_response`, so a later queue broadcast can't
-            // re-pin a stale placeholder.
-            let sid = session_id.0.to_string();
-            super::queue::retire_optimistic_echo(
-                &mut app.optimistic_prompt_echoes,
-                &mut app.shared_prompt_queues,
-                &sid,
-                &prompt_id,
-            );
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.session.shared_queue.retain(|e| e.id != prompt_id);
-                agent.session.note_queue_echo_retired(&prompt_id);
-                // `maybe_drain_queue` painted a provisional user bubble and
-                // entered TurnSubmitting before the sequential mode RPC ran.
-                // The Shell explicitly says no turn was admitted, so unwind
-                // that presentation boundary before returning the same user
-                // message to the ordinary FIFO. Otherwise the Pager stays
-                // busy forever and the eventual admitted turn paints a second
-                // bubble with a fresh message id.
-                if agent.session.current_prompt_id.as_deref() == Some(prompt_id.as_str())
-                    && matches!(
-                        agent.session.state,
-                        crate::app::session::AgentState::TurnSubmitting
-                    )
-                {
-                    if let Some(in_flight) = agent.session.in_flight_prompt.take() {
-                        for entry_id in in_flight.combined_scrollback_entries {
-                            agent.scrollback.remove_entry(entry_id);
-                        }
-                        agent.scrollback.remove_entry(in_flight.scrollback_entry);
-                    }
-                    agent.session.finish_turn(&mut agent.scrollback);
-                    agent.mark_turn_finished();
-                    agent.session.activity_started_at = None;
-                    agent.session.last_activity = None;
-                }
-                agent
-                    .session
-                    .enqueue_prompt_with_skill_tokens(text, skill_token_ranges);
-                agent.show_behavior_switch_warning(&message, remaining_ms);
-                tracing::debug!(
-                    target_behavior = %mode_id.0,
-                    prompt_id,
-                    "Behavior confirmation returned prompt to the local FIFO"
-                );
-            }
-            vec![]
-        }
         TaskResult::PreferredModelPersisted { result } => {
             if let Err(err) = result
                 && let Some(agent) = get_active_agent_mut(app)
@@ -640,29 +549,42 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => handle_compact_complete(app, agent_id, track_foreground, result),
         TaskResult::SwitchModelComplete {
             agent_id,
+            session_id,
+            control_token,
             model_id,
             effort,
             result,
-            prev_model_id,
-        } => handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id),
+        } => handle_switch_model_complete(
+            app,
+            agent_id,
+            session_id,
+            control_token,
+            model_id,
+            effort,
+            result,
+        ),
         TaskResult::SwitchAgentComplete {
             agent_id,
+            session_id,
+            control_token,
             agent_name,
             result,
         } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                // Local dispatch sets `agent_switch_pending`; clear it here.
-                // `AgentChanged` may have already written `session_agent_name`,
-                // so success feedback keys off pending intent, not name equality.
-                let local_switch = agent.session.complete_agent_switch();
+            let mut page_flip_entry = None;
+            let mut effects = vec![];
+            if let Some(agent) =
+                find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+            {
+                let completion = agent.session.complete_control(control_token);
+                if completion == crate::app::session::SessionControlCompletion::Stale {
+                    return vec![];
+                }
                 match result {
                     Ok(()) => {
                         agent.session.apply_agent_name(Some(agent_name.clone()));
-                        if local_switch {
-                            agent.scrollback.push_block(RenderBlock::system(format!(
-                                "Switched to {agent_name}"
-                            )));
-                        }
+                        agent
+                            .scrollback
+                            .push_block(RenderBlock::system(format!("Switched to {agent_name}")));
                     }
                     Err(error) => {
                         agent.scrollback.push_block(RenderBlock::system(format!(
@@ -670,8 +592,80 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         )));
                     }
                 }
+                if completion == crate::app::session::SessionControlCompletion::Next {
+                    if let Some(next) =
+                        next_control_effect(agent_id, session_id.clone(), &agent.session)
+                    {
+                        effects.push(next);
+                    }
+                } else {
+                    crate::app::acp_handler::apply_deferred_authoritative_controls(
+                        agent,
+                        session_id.0.as_ref(),
+                    );
+                    let drain = maybe_drain_queue(agent);
+                    page_flip_entry = drain.page_flip_entry;
+                    effects.extend(drain.effects);
+                }
             }
-            vec![]
+            crate::app::acp_handler::sync_child_control_projection_by_session_id(
+                app,
+                session_id.0.as_ref(),
+            );
+            super::queue::note_peek_page_flip(app, agent_id, page_flip_entry);
+            effects
+        }
+        TaskResult::SwitchBehaviorComplete {
+            agent_id,
+            session_id,
+            control_token,
+            mode,
+            result,
+        } => {
+            // Success is intentionally not a completion: only the shell's
+            // CurrentModeUpdate commits a Behavior transition. This prevents a
+            // successful transport response from releasing a first prompt when
+            // the shell subsequently reports rejected/confirmation_required.
+            let Err(error) = result else {
+                return vec![];
+            };
+            let mut effects = vec![];
+            let mut page_flip_entry = None;
+            if let Some(agent) =
+                find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+            {
+                let completion = agent.session.complete_control(control_token);
+                if completion == crate::app::session::SessionControlCompletion::Stale {
+                    return vec![];
+                }
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Couldn't switch to {} Behavior: {error}",
+                    mode.display_label()
+                )));
+                if completion == crate::app::session::SessionControlCompletion::Next
+                    && let Some(next) =
+                        next_control_effect(agent_id, session_id.clone(), &agent.session)
+                {
+                    effects.push(next);
+                } else if completion == crate::app::session::SessionControlCompletion::Drained {
+                    crate::app::acp_handler::apply_deferred_authoritative_controls(
+                        agent,
+                        session_id.0.as_ref(),
+                    );
+                    let drain = maybe_drain_queue(agent);
+                    page_flip_entry = drain.page_flip_entry;
+                    effects.extend(drain.effects);
+                }
+                // On a terminal transport failure the deferred admission latch
+                // deliberately remains: its prompt stays in the local FIFO and
+                // cannot be accidentally sent under the old server mode.
+            }
+            crate::app::acp_handler::sync_child_control_projection_by_session_id(
+                app,
+                session_id.0.as_ref(),
+            );
+            super::queue::note_peek_page_flip(app, agent_id, page_flip_entry);
+            effects
         }
         TaskResult::BgTaskKilled {
             session_id,
@@ -952,9 +946,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SessionAgentNameResolved {
             agent_id,
+            session_id,
+            revision,
             agent_name,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                if agent.session.session_id.as_ref() != Some(&session_id)
+                    || !agent.session.agent_metadata_read_is_current(revision)
+                {
+                    return vec![];
+                }
                 agent.session.apply_agent_name(agent_name.clone());
                 if let Some(modal) = agent.agents_modal.as_mut() {
                     modal.active_agent = agent_name;
@@ -964,6 +965,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SessionInfoComplete {
             agent_id,
+            session_id,
+            revision,
             info,
             text,
             title,
@@ -972,6 +975,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => handle_session_info_complete(
             app,
             agent_id,
+            session_id,
+            revision,
             info,
             text,
             title,

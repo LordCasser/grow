@@ -1201,6 +1201,21 @@ pub struct WorkspaceOps {
     handle: WorkspaceHandle,
 }
 
+/// Exclusive right to replace one local session toolset. Acquisition may
+/// wait for a workspace rebuild, but commit is synchronous so callers can
+/// keep their own causal transition gate short.
+pub struct PreparedLocalSessionBind {
+    session: Arc<crate::session::WorkspaceSession>,
+    _update_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl PreparedLocalSessionBind {
+    pub fn commit(self, toolset: Arc<tools::registry::types::FinalizedToolset>) {
+        self.session
+            .replace(self.session.effective_tool_config(), toolset);
+    }
+}
+
 impl WorkspaceOps {
     pub fn local(handle: WorkspaceHandle) -> Self {
         Self { handle }
@@ -1218,6 +1233,20 @@ impl WorkspaceOps {
         toolset: Arc<tools::registry::types::FinalizedToolset>,
         viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
     ) -> WorkspaceResult<()> {
+        let binding = self
+            .prepare_local_session_bind(session_id, cwd, hunk_tracker, viewer_ctx)
+            .await?;
+        binding.commit(toolset);
+        Ok(())
+    }
+
+    pub async fn prepare_local_session_bind(
+        &self,
+        session_id: &str,
+        cwd: std::path::PathBuf,
+        hunk_tracker: hunk_tracker::HunkTrackerHandle,
+        viewer_ctx: Option<tool_runtime::WorkspaceViewerContext>,
+    ) -> WorkspaceResult<PreparedLocalSessionBind> {
         if self.handle.session(session_id).is_none() {
             self.handle.create_session_with_tracker_and_viewer_ctx(
                 session_id,
@@ -1232,9 +1261,11 @@ impl WorkspaceOps {
             .handle
             .session(session_id)
             .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
-        let _update_guard = session.update_lock.lock().await;
-        session.replace(session.effective_tool_config(), toolset);
-        Ok(())
+        let update_guard = session.update_lock.clone().lock_owned().await;
+        Ok(PreparedLocalSessionBind {
+            session,
+            _update_guard: update_guard,
+        })
     }
 
     pub fn end_local_session(&self, session_id: &str) {

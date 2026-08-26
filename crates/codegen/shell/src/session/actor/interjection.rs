@@ -12,14 +12,12 @@ use super::*;
 // through the actor's private namespace.
 pub(crate) use tools::interjection::format_interjection;
 
-/// Requeue payload for an auto-promoted follow-up: the exact fields needed to
-/// rebuild a fresh [`InputItem`] when the turn terminal turns a residual
-/// auto-promoted entry back into the user FIFO (as a brand-new turn — the
-/// original prompt id, origin, and turn kind are preserved). Explicit steers
-/// carry `None`; their residuals are discarded at the same fence (turn
-/// identity: an explicit steer belongs to the exact turn it named).
+/// Requeue payload for accepted user input: the exact fields needed to rebuild
+/// a fresh [`InputItem`] when an authority/budget/cancel terminal prevents the
+/// named turn from consuming it. Queue-promoted input preserves its original
+/// identity; direct steering receives a new fallback prompt identity.
 #[derive(Debug, Clone)]
-pub(crate) struct AutoPromotedRequeue {
+pub(crate) struct ResidualInterjectionRequeue {
     pub prompt_id: String,
     pub origin: crate::session::PromptOrigin,
     pub turn_kind: crate::session::TurnKind,
@@ -29,15 +27,14 @@ pub(crate) struct AutoPromotedRequeue {
     pub json_schema: Option<serde_json::Value>,
 }
 
-/// Shell instantiation of the shared pending-interjection entry. `auto_promoted`
-/// is `Some` only for plain-Enter QueuePrompts admitted under
-/// `follow_up_behavior = "steer"`; explicit steers (Ctrl+Enter / queue
-/// "Send now") carry `None`.
+/// Shell instantiation of the shared pending-interjection entry. `requeue`
+/// is `Some` for every production user steer. `None` is reserved for internal
+/// synthetic/test entries that may be discarded at a terminal fence.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingInterjection<Attachment> {
     pub text: String,
     pub attachments: Vec<Attachment>,
-    pub auto_promoted: Option<AutoPromotedRequeue>,
+    pub requeue: Option<ResidualInterjectionRequeue>,
 }
 
 /// Same-turn steering buffer: one buffer, one safe-point drain, one terminal
@@ -46,6 +43,24 @@ pub(crate) type InterjectionBuffer<Attachment> =
     tools::interjection::EventQueue<PendingInterjection<Attachment>>;
 
 impl SessionActor {
+    pub(super) async fn admit_mid_turn_interjection(
+        &self,
+        expected_turn_id: &str,
+        text: String,
+        attachments: Vec<acp::ImageContent>,
+    ) -> bool {
+        let state = self.state.lock().await;
+        let admitted = state.foreground.regular().is_some_and(|task| {
+            task.prompt_id == expected_turn_id && !task.is_finished() && task.steering_open
+        });
+        if admitted {
+            // The terminal path closes this admission gate under the same state
+            // lock before its final drain.
+            self.queue_mid_turn_interjection(text, attachments);
+        }
+        admitted
+    }
+
     /// Common same-turn steering buffer shared by direct and queued input.
     /// Supplemental user input joins the running turn; only explicit Goal
     /// lifecycle commands can replace or stop the durable objective.
@@ -57,7 +72,15 @@ impl SessionActor {
         self.pending_interjections.push(PendingInterjection {
             text,
             attachments,
-            auto_promoted: None,
+            requeue: Some(ResidualInterjectionRequeue {
+                prompt_id: format!("steer-{}", uuid::Uuid::now_v7()),
+                origin: crate::session::PromptOrigin::User,
+                turn_kind: crate::session::TurnKind::User,
+                client_identifier: None,
+                screen_mode: None,
+                verbatim: false,
+                json_schema: None,
+            }),
         });
     }
 
@@ -70,25 +93,21 @@ impl SessionActor {
         &self,
         text: String,
         attachments: Vec<acp::ImageContent>,
-        requeue: AutoPromotedRequeue,
+        requeue: ResidualInterjectionRequeue,
     ) {
         self.pending_interjections.push(PendingInterjection {
             text,
             attachments,
-            auto_promoted: Some(requeue),
+            requeue: Some(requeue),
         });
     }
 
     /// Close the current turn's steering scope.
     ///
-    /// The buffer is deliberately not a cross-turn queue: every entry was
-    /// admitted against an exact running turn id. Explicit-steer residuals
-    /// (Ctrl+Enter / "Send now") are discarded — carrying them into the next
-    /// foreground owner would violate turn identity. Auto-promoted follow-ups
-    /// (`follow_up_behavior = "steer"`) are different: they were admitted as
-    /// queue prompts, so a residual is turned back into the user FIFO front as
-    /// a fresh turn (original prompt id / origin / turn kind preserved) before
-    /// the next promotion — no user input is silently swallowed.
+    /// The buffer itself is not cross-turn context. Accepted user entries that
+    /// could not be consumed are upgraded to fresh FIFO turns; only explicitly
+    /// non-requeueable internal entries are discarded. This preserves exact
+    /// turn conditioning without ever acknowledging and losing user input.
     pub(super) async fn discard_residual_interjections_at_turn_end(&self) {
         let drained = self.pending_interjections.drain_all();
         if drained.is_empty() {
@@ -97,7 +116,7 @@ impl SessionActor {
         let mut discarded = 0usize;
         let mut to_requeue: Vec<PendingInterjection<acp::ImageContent>> = Vec::new();
         for entry in drained {
-            if entry.auto_promoted.is_some() {
+            if entry.requeue.is_some() {
                 to_requeue.push(entry);
             } else {
                 discarded += 1;
@@ -130,29 +149,29 @@ impl SessionActor {
     /// Runs under the state lock at the terminal fence, before any promotion,
     /// so the FIFO head is settled before clients can observe a new owner.
     fn requeue_auto_promoted(entry: PendingInterjection<acp::ImageContent>) -> InputItem {
-        let auto = entry
-            .auto_promoted
-            .expect("only auto-promoted entries reach the requeue path");
+        let requeue = entry
+            .requeue
+            .expect("only requeueable entries reach the requeue path");
         let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
             entry.text.clone(),
         ))];
         prompt_blocks.extend(entry.attachments.into_iter().map(acp::ContentBlock::Image));
-        let owner = auto.client_identifier.clone();
+        let owner = requeue.client_identifier.clone();
         let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
         InputItem {
-            prompt_id: auto.prompt_id.clone(),
-            turn_kind: auto.turn_kind,
+            prompt_id: requeue.prompt_id.clone(),
+            turn_kind: requeue.turn_kind,
             prompt_blocks,
-            client_identifier: auto.client_identifier,
-            screen_mode: auto.screen_mode,
-            verbatim: auto.verbatim,
-            json_schema: auto.json_schema,
-            origin: auto.origin,
+            client_identifier: requeue.client_identifier,
+            screen_mode: requeue.screen_mode,
+            verbatim: requeue.verbatim,
+            json_schema: requeue.json_schema,
+            origin: requeue.origin,
             notification_ids: Vec::new(),
             respond_to,
             persist_ack: None,
             queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
-                id: auto.prompt_id,
+                id: requeue.prompt_id,
                 version: 0,
                 owner,
                 last_editor: None,
@@ -326,6 +345,14 @@ impl SessionActor {
             return false;
         }
 
+        self.inject_pending_interjections(entries).await;
+        true
+    }
+
+    async fn inject_pending_interjections(
+        &self,
+        entries: Vec<PendingInterjection<acp::ImageContent>>,
+    ) {
         for PendingInterjection {
             text, attachments, ..
         } in entries
@@ -368,6 +395,75 @@ impl SessionActor {
         // next user turn (that field is reserved for fatal aborts). The
         // interjection itself is recorded at enqueue time via
         // `Event::Interjected` (carrying the shared `redirect_kind`).
+    }
+
+    /// Linearize final-response settlement against `SteerTurn` admission.
+    /// Both sides hold `state`: an accepted steer is queued before this fence
+    /// and injected into a successor step, or observes the closed gate and is
+    /// rejected. It cannot be acknowledged behind the final drain.
+    pub(super) async fn close_steering_and_drain(&self, prompt_id: &str) -> bool {
+        let entries = {
+            let mut state = self.state.lock().await;
+            let Some(task) = state.foreground.regular_mut() else {
+                return false;
+            };
+            if task.prompt_id != prompt_id {
+                return false;
+            }
+            task.steering_open = false;
+            self.pending_interjections.drain_all()
+        };
+        if entries.is_empty() {
+            return false;
+        }
+        self.inject_pending_interjections(entries).await;
         true
+    }
+
+    pub(super) async fn reopen_steering(&self, prompt_id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(task) = state.foreground.regular_mut()
+            && task.prompt_id == prompt_id
+        {
+            task.steering_open = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::actor::tests::support::{
+        begin_test_causal_turn, build_actor, install_test_foreground,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn final_steering_fence_injects_accepted_input_and_rejects_late_input() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                begin_test_causal_turn(&actor).await;
+                install_test_foreground(&actor, "turn-1").await;
+
+                assert!(
+                    actor
+                        .admit_mid_turn_interjection("turn-1", "accepted".into(), Vec::new())
+                        .await
+                );
+                assert!(actor.close_steering_and_drain("turn-1").await);
+                assert!(
+                    !actor
+                        .admit_mid_turn_interjection("turn-1", "too late".into(), Vec::new())
+                        .await
+                );
+                assert!(actor.pending_interjections.is_empty());
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                assert!(
+                    serde_json::to_string(&conversation)
+                        .unwrap()
+                        .contains("accepted")
+                );
+            })
+            .await;
     }
 }

@@ -54,6 +54,106 @@ const PARENT_SID: &str = "parent-bash-perm-repro";
 const BASH_ARGS: &str = r#"{"command":"sh -c 'echo repro-ok'","description":"repro bash permission test","is_background":false}"#;
 const TOOL_CALL_ID: &str = "call_bash_repro";
 
+#[tokio::test(flavor = "current_thread")]
+async fn agent_switch_reprojects_native_identity_without_widening_child_rwx() {
+    let initial = test_agent_with_tools(vec![]).await;
+    let empty_authored = tools::registry::types::ToolServerConfig { tools: vec![] };
+    let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+        initial.tool_bridge(),
+        &empty_authored,
+        tool_types::SubagentCapabilityMode::ReadOnly,
+        None,
+        Default::default(),
+    )
+    .await;
+    assert!(
+        !capabilities
+            .native_call_eligible("run_terminal_cmd", tool_protocol::ToolAccess::ReadExecute,)
+    );
+
+    let bash_config = ToolConfig::for_tool::<BashTool>().with_param("enabled_background", false);
+    let replacement = test_agent_with_tools(vec![bash_config.clone()]).await;
+    let authored = tools::registry::types::ToolServerConfig {
+        tools: vec![bash_config],
+    };
+    let original_catalog = capabilities.native_catalog_prompt();
+    let candidate_catalog =
+        capabilities.preview_native_catalog_prompt(replacement.tool_bridge(), &authored);
+    assert_ne!(candidate_catalog, original_catalog);
+    let epoch = capabilities.authorization_epoch();
+    capabilities.replace_agent_harness(replacement.tool_bridge(), &authored, Default::default());
+
+    assert_ne!(capabilities.authorization_epoch(), epoch);
+    assert_eq!(capabilities.native_catalog_prompt(), candidate_catalog);
+    assert!(
+        capabilities
+            .native_call_eligible("run_terminal_cmd", tool_protocol::ToolAccess::ReadExecute,)
+    );
+    assert!(
+        !capabilities
+            .native_call_available("run_terminal_cmd", tool_protocol::ToolAccess::ReadExecute,),
+        "an Agent selection may replace authored identities but cannot widen the child's initial RWX"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_switch_reprojects_mcp_inheritance_without_exceeding_spawn_ceiling() {
+    let initial = test_agent_with_tools(vec![]).await;
+    let empty_authored = tools::registry::types::ToolServerConfig { tools: vec![] };
+
+    // The parent owns both servers, but the child was created from a pool
+    // narrowed to github. This is the immutable transport ceiling that an
+    // Agent switch must never widen.
+    let mut parent_mcp = crate::session::mcp_servers::McpState::new(vec![]);
+    let github = Arc::new(crate::session::mcp_servers::McpClient::stub("github"));
+    let linear = Arc::new(crate::session::mcp_servers::McpClient::stub("linear"));
+    parent_mcp
+        .owned_clients
+        .insert("github".to_owned(), Arc::clone(&github));
+    parent_mcp
+        .owned_clients
+        .insert("linear".to_owned(), Arc::clone(&linear));
+    parent_mcp.publish_eligibility(std::collections::HashSet::new());
+    let mut pool = crate::session::mcp_servers::SharedMcpPool::from_state(&parent_mcp);
+    pool.restrict_to_servers(["github".to_owned()]);
+    let inherited = pool.eligibility();
+    let initial_bindings = inherited
+        .current_clients()
+        .into_iter()
+        .map(|(server, _, client_id)| (server, client_id))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+        initial.tool_bridge(),
+        &empty_authored,
+        tool_types::SubagentCapabilityMode::ReadOnly,
+        Some(inherited),
+        initial_bindings.clone(),
+    )
+    .await;
+    assert!(capabilities.mcp_server_eligible("github"));
+    assert!(!capabilities.mcp_server_eligible("linear"));
+
+    // Selecting an Agent with `mcp_inheritance = none` removes the inherited
+    // projection immediately, while retaining the child authority itself.
+    let none = agent::config::McpInheritance::None;
+    let projected_none = crate::session::subagent_capability::project_agent_mcp_bindings(
+        &none,
+        initial_bindings.clone(),
+    );
+    capabilities.replace_agent_harness(initial.tool_bridge(), &empty_authored, projected_none);
+    assert!(!capabilities.mcp_server_eligible("github"));
+
+    // Switching back to `all` restores only the transport that was inside the
+    // creation ceiling; the parent-only linear server remains unavailable.
+    let all = agent::config::McpInheritance::All;
+    let projected_all =
+        crate::session::subagent_capability::project_agent_mcp_bindings(&all, initial_bindings);
+    capabilities.replace_agent_harness(initial.tool_bridge(), &empty_authored, projected_all);
+    assert!(capabilities.mcp_server_eligible("github"));
+    assert!(!capabilities.mcp_server_eligible("linear"));
+}
+
 #[derive(Default)]
 struct ImmediateSubagentBackend {
     spawn_count: AtomicUsize,

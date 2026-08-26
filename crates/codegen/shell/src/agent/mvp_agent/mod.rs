@@ -400,6 +400,10 @@ struct RetainedResources {
 pub struct MvpAgent {
     /// LEADER-SAFE(per-session). Removed by `remove_session` / `sweep_dead_sessions`.
     pub(crate) sessions: RefCell<HashMap<acp::SessionId, SessionHandle>>,
+    /// Live child actors addressable by session-scoped control APIs. Kept
+    /// separate from `sessions` so child lifecycle never leaks into the
+    /// primary roster/load/unload domain.
+    pub(crate) active_child_sessions: crate::agent::subagent::ActiveChildSessions,
     /// LEADER-SAFE(shared): `Send + Sync` mirror of per-session activity for the
     /// leader's auto-update checker, which cannot read the `!Send` maps. Expires
     /// when the actor exits. See [`crate::agent::activity::AgentActivity`].
@@ -1233,6 +1237,7 @@ impl MvpAgent {
                 explicitly_killed: false,
                 owner_session_id: None,
                 goal_id: None,
+            goal_definition_revision: None,
                 description: None,
                 is_backgrounded: true,
             };

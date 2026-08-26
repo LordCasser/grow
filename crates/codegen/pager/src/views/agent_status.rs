@@ -192,11 +192,16 @@ pub fn goal_status_line(
     let label = goal_phase_label(goal);
 
     let tokens_str = format_tokens_compact(goal.tokens_used);
+    let lower_bound = if goal.usage_incomplete { "≥" } else { "" };
     let tokens_display = match goal.token_budget {
         Some(budget) if budget > 0 => {
-            format!("{}/{} tokens", tokens_str, format_tokens_compact(budget))
+            format!(
+                "{lower_bound}{}/{} tokens",
+                tokens_str,
+                format_tokens_compact(budget)
+            )
         }
-        _ => format!("{} tokens", tokens_str),
+        _ => format!("{lower_bound}{} tokens", tokens_str),
     };
 
     let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms_at(frame_stamp.now()));

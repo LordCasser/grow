@@ -56,7 +56,7 @@ pub struct WorkspaceSession {
     pub(crate) async_fs: AsyncFsWrapper,
     inner: RwLock<WorkspaceSessionInner>,
     /// Per-session lock that serialises `update_tool_config` calls.
-    pub(crate) update_lock: tokio::sync::Mutex<()>,
+    pub(crate) update_lock: Arc<tokio::sync::Mutex<()>>,
     /// Per-session feature-flag bag resolved at creation time, frozen for
     /// the session lifetime. `None` → tools use their safe defaults.
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
@@ -142,7 +142,7 @@ impl WorkspaceSession {
                 toolset,
             }),
             terminal_backend,
-            update_lock: tokio::sync::Mutex::new(()),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
             tool_config_fingerprint: std::sync::Mutex::new(None),
             stale_resolve: std::sync::atomic::AtomicBool::new(false),
             viewer_ctx,

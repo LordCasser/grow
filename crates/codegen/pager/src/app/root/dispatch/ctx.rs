@@ -277,3 +277,26 @@ pub(super) fn find_agent_by_session_id<'a>(
     let id = find_agent_id_by_session_id(agents, session_id)?;
     agents.get_mut(&id)
 }
+
+/// Resolve an exact root or child view for a session-scoped control result.
+/// Unlike roster helpers, this deliberately traverses subagent views because
+/// model/effort/Agent selection belongs to the concrete child actor.
+pub(super) fn find_agent_view_by_session_id<'a>(
+    agents: &'a mut indexmap::IndexMap<AgentId, AgentView>,
+    session_id: &str,
+) -> Option<&'a mut AgentView> {
+    for agent in agents.values_mut() {
+        if agent
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == session_id)
+        {
+            return Some(agent);
+        }
+        if let Some(child) = agent.subagent_views.get_mut(session_id) {
+            return Some(child);
+        }
+    }
+    None
+}

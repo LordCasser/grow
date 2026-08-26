@@ -162,7 +162,7 @@ impl SessionActor {
             self.startup_hints
                 .subagent_type
                 .clone()
-                .unwrap_or_else(|| self.agent.borrow().definition().name.clone()),
+                .unwrap_or_else(|| self.agent.borrow().definition().selector_identity()),
         )
     }
 
@@ -316,6 +316,7 @@ mod notification_hook_filter_tests {
     fn task_completed_does_not_fire_via_filter() {
         let update = GrowSessionUpdate::TaskCompleted {
             task_snapshot: tools::types::TaskSnapshot {
+                goal_definition_revision: None,
                 task_id: "task-1".into(),
                 command: "echo hi".into(),
                 display_command: None,

@@ -116,6 +116,18 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    pub async fn settle_open_compaction_durably(
+        &self,
+        reason: impl Into<String>,
+    ) -> Result<Option<crate::TimelineEvent>, TimelineWriteError> {
+        let reason = reason.into();
+        self.query("SettleOpenCompactionDurably", |reply| {
+            ChatStateCommand::SettleOpenCompactionDurably { reason, reply }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     /// Push a user message and return only after its Timeline event is durable.
     pub async fn push_user_message_durably(
         &self,

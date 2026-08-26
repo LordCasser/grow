@@ -50,6 +50,47 @@ impl SessionModelRoute {
         route.clone()
     }
 }
+
+#[derive(Clone)]
+struct SessionAgentProfileSnapshot {
+    name: String,
+    subagent_filter: agent::config::SubagentFilter,
+}
+
+/// Actor-committed Agent identity shared by every clone of a session handle.
+/// Nested delegation reads this object, so an Agent switch cannot leave a
+/// child runtime enforcing the profile that existed when its handle was first
+/// cloned.
+#[derive(Clone)]
+pub(crate) struct SessionAgentProfile(
+    std::sync::Arc<parking_lot::RwLock<SessionAgentProfileSnapshot>>,
+);
+
+impl SessionAgentProfile {
+    pub(crate) fn new(name: String, subagent_filter: agent::config::SubagentFilter) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(
+            SessionAgentProfileSnapshot {
+                name,
+                subagent_filter,
+            },
+        )))
+    }
+
+    pub(crate) fn name(&self) -> String {
+        self.0.read().name.clone()
+    }
+
+    pub(crate) fn subagent_filter(&self) -> agent::config::SubagentFilter {
+        self.0.read().subagent_filter.clone()
+    }
+
+    pub(crate) fn replace(&self, name: String, subagent_filter: agent::config::SubagentFilter) {
+        *self.0.write() = SessionAgentProfileSnapshot {
+            name,
+            subagent_filter,
+        };
+    }
+}
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
 /// A grow session has no
@@ -78,7 +119,15 @@ pub enum SessionLiveState {
 /// and should be stored/managed by the caller.
 #[derive(Clone)]
 pub struct SessionHandle {
+    /// External ownership lease. Internal actor bridges may retain command
+    /// senders, but they do not retain this lease; dropping the last real
+    /// handle therefore requests deterministic teardown instead of waiting
+    /// for a sender cycle to disappear.
+    pub(crate) lifecycle_owner: std::sync::Arc<SessionLifecycleOwner>,
     pub cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    /// Root Goal activity/accounting route. Nested children are re-parented to
+    /// the lifecycle root and inherit this exact handle.
+    pub(crate) goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow,
     /// Persistence channel shared with the actor (used by extension handlers).
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     /// Current running prompt/turn id, if any.
@@ -166,12 +215,16 @@ pub struct SessionHandle {
     /// child-local capability state and never update this ceiling.
     pub(crate) delegable_capability_ceiling:
         Option<super::subagent_capability::DelegableCapabilityCeiling>,
-    /// The agent definition name for this session.
-    pub agent_name: String,
-    /// Peer-Agent visibility derived from the active Agent's task-tool policy.
-    /// Kept beside `agent_name` so runtime spawn validation matches the tool
-    /// description even after an in-session Agent switch.
-    pub subagent_filter: agent::config::SubagentFilter,
+    /// Canonical Agent identity and nested-delegation filter. This is shared
+    /// with the actor and every runtime handle clone.
+    pub(crate) agent_profile: SessionAgentProfile,
+    /// Present when this child is pinned to an immutable Workflow Run route.
+    /// Explicit controls remain legal; automatic catalog fanout excludes it.
+    pub(crate) workflow_run_id: Option<String>,
+    /// Session-authoritative plugin snapshot shared with reload and Agent
+    /// rebuild. Per-session plugin directories are intentionally absent from
+    /// the process-global registry.
+    pub(crate) plugin_registry: crate::session::workflow::tracker::SharedWorkflowPluginRegistry,
     /// Hook registry for this session (snapshot from spawn time).
     pub hook_registry: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     /// Typed workspace operations handle (agent sessions use local ops).
@@ -187,6 +240,26 @@ pub struct SessionHandle {
     /// handle so scheduled tasks survive the subagent's exit.
     pub scheduler_handle:
         Option<tools::implementations::grow_build::scheduler::types::SchedulerHandle>,
+}
+
+pub(crate) struct SessionLifecycleOwner {
+    cmd_tx: mpsc::WeakUnboundedSender<SessionCommand>,
+}
+
+impl SessionLifecycleOwner {
+    pub(crate) fn new(cmd_tx: &mpsc::UnboundedSender<SessionCommand>) -> Self {
+        Self {
+            cmd_tx: cmd_tx.downgrade(),
+        }
+    }
+}
+
+impl Drop for SessionLifecycleOwner {
+    fn drop(&mut self) {
+        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+            let _ = cmd_tx.send(SessionCommand::Shutdown);
+        }
+    }
 }
 impl SessionHandle {
     /// Last assistant `model_id` / `model_fingerprint` in conversation (global, not turn-scoped).
@@ -512,5 +585,26 @@ impl SessionHandle {
         let _ = self
             .cmd_tx
             .send(SessionCommand::NotifyPluginUpdates { updates });
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn last_external_owner_requests_shutdown_despite_internal_senders() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let _internal_sender = cmd_tx.clone();
+        let owner = std::sync::Arc::new(SessionLifecycleOwner::new(&cmd_tx));
+        let second_handle_owner = owner.clone();
+        drop(owner);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(second_handle_owner);
+        assert!(matches!(cmd_rx.try_recv(), Ok(SessionCommand::Shutdown)));
     }
 }

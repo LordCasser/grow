@@ -7,6 +7,20 @@ use tools::types::tool::ToolKind;
 
 pub(crate) const CAPABILITY_CATALOG_TAG: &str = "subagent-capability-catalog";
 
+/// Project live inherited transports through the currently selected Agent.
+/// The input is already bounded by the child's immutable creation ceiling;
+/// every Agent switch and transport-generation refresh must use this same
+/// intersection so neither path can silently re-expand the other.
+pub(crate) fn project_agent_mcp_bindings(
+    inheritance: &agent::config::McpInheritance,
+    bindings: HashMap<String, u64>,
+) -> HashMap<String, u64> {
+    bindings
+        .into_iter()
+        .filter(|(server, _)| inheritance.permits(server))
+        .collect()
+}
+
 /// Immutable authority a live child may delegate to descendants. Transport
 /// membership is retained for every initial mode; the descendant's RWX
 /// intersection and each server's live trust-domain mask still gate calls.
@@ -45,7 +59,9 @@ struct CapabilityAuthority {
     initial_mode: tool_types::SubagentCapabilityMode,
     /// Every native tool visible to the model, keyed by exact wire identity.
     visible_native: HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
-    /// Immutable authored/harness eligibility ceiling.
+    /// Current Agent harness eligibility. An explicit user Agent selection may
+    /// replace this catalog, while `initial_mode` remains the immutable RWX
+    /// ceiling for the lifetime of the child.
     eligible_native: HashMap<String, tool_protocol::ToolAccess>,
     /// Live upstream membership/tool authority for inherited MCP transports.
     mcp_eligibility: Option<mcp::servers::SharedMcpEligibility>,
@@ -84,13 +100,13 @@ fn native_descriptor_is_eligible(
 }
 
 impl SubagentCapabilityState {
-    pub(crate) async fn from_bridge(
+    fn native_catalog(
         bridge: &tools::bridge::ToolBridge,
         authored_tools: &tools::registry::types::ToolServerConfig,
-        initial_mode: tool_types::SubagentCapabilityMode,
-        mcp_eligibility: Option<mcp::servers::SharedMcpEligibility>,
-        bound_mcp_client_ids: HashMap<String, u64>,
-    ) -> Self {
+    ) -> (
+        HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
+        HashMap<String, tool_protocol::ToolAccess>,
+    ) {
         let authored_names = bridge.authored_native_tool_names(authored_tools);
         let mut visible_native = HashMap::new();
         let mut eligible_native = HashMap::new();
@@ -100,6 +116,17 @@ impl SubagentCapabilityState {
                 eligible_native.insert(name, max_access);
             }
         }
+        (visible_native, eligible_native)
+    }
+
+    pub(crate) async fn from_bridge(
+        bridge: &tools::bridge::ToolBridge,
+        authored_tools: &tools::registry::types::ToolServerConfig,
+        initial_mode: tool_types::SubagentCapabilityMode,
+        mcp_eligibility: Option<mcp::servers::SharedMcpEligibility>,
+        bound_mcp_client_ids: HashMap<String, u64>,
+    ) -> Self {
+        let (visible_native, eligible_native) = Self::native_catalog(bridge, authored_tools);
         let observed_mcp_generation = mcp_eligibility
             .as_ref()
             .map_or(0, mcp::servers::SharedMcpEligibility::generation);
@@ -116,6 +143,45 @@ impl SubagentCapabilityState {
 
     pub(crate) fn authorization_epoch(&self) -> u64 {
         self.0.read().authorization_epoch
+    }
+
+    /// Rebind exact native identities to a newly selected Agent harness. The
+    /// session actor calls this under its step-boundary control fence, so no
+    /// prepared call can cross the replacement. The immutable child RWX mode
+    /// and inherited MCP authority are intentionally untouched.
+    pub(crate) fn replace_agent_harness(
+        &self,
+        bridge: &tools::bridge::ToolBridge,
+        authored_tools: &tools::registry::types::ToolServerConfig,
+        bound_mcp_client_ids: HashMap<String, u64>,
+    ) {
+        let (visible_native, eligible_native) = Self::native_catalog(bridge, authored_tools);
+        let mut state = self.0.write();
+        if state.visible_native != visible_native
+            || state.eligible_native != eligible_native
+            || state.bound_mcp_client_ids != bound_mcp_client_ids
+        {
+            state.visible_native = visible_native;
+            state.eligible_native = eligible_native;
+            state.bound_mcp_client_ids = bound_mcp_client_ids;
+            state.authorization_epoch = state.authorization_epoch.wrapping_add(1);
+        }
+    }
+
+    /// Render the model-facing catalog for a candidate Agent harness without
+    /// mutating live authority. Agent switching persists this projection in
+    /// the same Control event as the Agent role before activating the harness.
+    pub(crate) fn preview_native_catalog_prompt(
+        &self,
+        bridge: &tools::bridge::ToolBridge,
+        authored_tools: &tools::registry::types::ToolServerConfig,
+    ) -> String {
+        let (visible_native, eligible_native) = Self::native_catalog(bridge, authored_tools);
+        Self::render_native_catalog_prompt(
+            self.0.read().initial_mode,
+            &visible_native,
+            &eligible_native,
+        )
     }
 
     fn mode_access(mode: tool_types::SubagentCapabilityMode) -> tool_protocol::ToolAccess {
@@ -215,16 +281,19 @@ impl SubagentCapabilityState {
         true
     }
 
-    pub(crate) fn native_catalog_prompt(&self) -> String {
-        let state = self.0.read();
-        let initial = Self::effective_access_locked(&state);
+    fn render_native_catalog_prompt(
+        initial_mode: tool_types::SubagentCapabilityMode,
+        visible_native: &HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
+        eligible_native: &HashMap<String, tool_protocol::ToolAccess>,
+    ) -> String {
+        let initial = Self::mode_access(initial_mode);
         let mut lines = vec![
             "Subagent capability catalog (visibility is not authorization):".to_owned(),
             format!("- initial RWX: {initial:?}"),
         ];
         let mut available = Vec::new();
         let mut call_projected = Vec::new();
-        for (name, max_access) in &state.eligible_native {
+        for (name, max_access) in eligible_native {
             let rendered = format!("{name}({max_access:?})");
             if initial.covers(*max_access) {
                 available.push(rendered);
@@ -246,10 +315,9 @@ impl SubagentCapabilityState {
                 call_projected.join(", ")
             ));
         }
-        let mut forbidden = state
-            .visible_native
+        let mut forbidden = visible_native
             .keys()
-            .filter(|name| !state.eligible_native.contains_key(*name))
+            .filter(|name| !eligible_native.contains_key(*name))
             .cloned()
             .collect::<Vec<_>>();
         forbidden.sort();
@@ -264,6 +332,15 @@ impl SubagentCapabilityState {
                 .to_owned(),
         );
         lines.join("\n")
+    }
+
+    pub(crate) fn native_catalog_prompt(&self) -> String {
+        let state = self.0.read();
+        Self::render_native_catalog_prompt(
+            state.initial_mode,
+            &state.visible_native,
+            &state.eligible_native,
+        )
     }
 }
 

@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build (for example v2.0.0)
+        description: Existing release tag to build (for example v2.0.1)
         required: true
         type: string
       build_linux:
@@ -377,6 +377,11 @@ jobs:
     if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
       - uses: actions/download-artifact@v8
         with:
           pattern: grow-*
@@ -484,12 +489,19 @@ jobs:
               exit 1
             fi
           else
-            release_args=(--verify-tag --draft --title "$RELEASE_TAG" --generate-notes)
+            notes_file="crates/codegen/shell/changelogs/${version}.md"
+            test -s "$notes_file"
+            release_args=(--verify-tag --draft --title "$RELEASE_TAG" --notes-file "$notes_file")
             if [[ "$expected_prerelease" == "true" ]]; then
               release_args+=(--prerelease)
             fi
             gh release create "$RELEASE_TAG" "${release_args[@]}"
           fi
+
+          # A retried draft must still use the immutable notes from its tag,
+          # never whatever partial/generated body an earlier attempt left.
+          gh release edit "$RELEASE_TAG" \
+            --notes-file "crates/codegen/shell/changelogs/${version}.md"
 
           actual_prerelease="$(gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease')"
           if [[ "$actual_prerelease" != "$expected_prerelease" ]]; then

@@ -50,7 +50,7 @@ pub use events::ChatStateEvent;
 pub use handle::ChatStateHandle;
 pub use persistence::{
     MockPersistenceReceiver, MockTimelinePersistence, NullTimelinePersistence, PersistenceRecord,
-    TimelinePersistence,
+    TimelinePersistence, persistence_error_is_permanent,
 };
 pub use sideband::{
     RecallMaterialization, SIDEBAND_SCHEMA_VERSION, SidebandAssemblyManifest, SidebandAttempt,

@@ -479,12 +479,9 @@ pub fn peek_model_and_mode(
     match row {
         DashboardRowId::TopLevel(id) => match agents.get(id) {
             Some(agent) => {
-                // Prefer the optimistic pending plan state over the
-                // confirmed one (matches `dispatch_cycle_mode`).
-                let plan = agent
-                    .session
-                    .plan_mode_pending
-                    .unwrap_or(agent.session.plan_mode_active);
+                // The serialized Behavior FIFO provides the one optimistic
+                // projection; authoritative CurrentModeUpdate commits it.
+                let plan = agent.session.effective_plan_mode();
                 PeekModeBadge {
                     agent: Some(agent.session.agent_name().unwrap_or("grow").to_owned()),
                     model: agent.session.models.current_model_name(),

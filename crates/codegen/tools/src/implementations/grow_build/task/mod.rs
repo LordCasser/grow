@@ -199,7 +199,10 @@ impl tool_runtime::Tool for TaskTool {
         };
 
         let goal_context = match &owner {
-            SubagentOwner::Goal { goal_id } => {
+            SubagentOwner::Goal {
+                goal_id,
+                definition_revision,
+            } => {
                 let view = if let Some(inherited) = inherited_goal_context {
                     inherited.view
                 } else {
@@ -250,7 +253,7 @@ impl tool_runtime::Tool for TaskTool {
                     }
                     current
                 };
-                if view.goal_id != *goal_id {
+                if view.goal_id != *goal_id || view.definition_revision != *definition_revision {
                     return Err(tool_runtime::ToolError::custom(
                         "stale_goal_context",
                         "Goal subagent ownership and delegated Goal snapshot do not match.",
@@ -590,6 +593,7 @@ mod tests {
             status: "active".into(),
             token_budget: None,
             tokens_used: 0,
+            usage_incomplete: false,
             elapsed_ms: 0,
             created_at: "2026-08-24T00:00:00Z".into(),
             updated_at: "2026-08-24T00:00:00Z".into(),
@@ -812,6 +816,7 @@ mod tests {
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
             "goal-123",
+            goal_view().definition_revision,
         )));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
@@ -897,6 +902,7 @@ mod tests {
         resources.insert(SessionIdResource("parent-session".to_string()));
         resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
             "other-goal",
+            goal_view().definition_revision,
         )));
         resources.insert(
             crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(

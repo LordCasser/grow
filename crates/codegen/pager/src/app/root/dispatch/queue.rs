@@ -9,11 +9,94 @@ use crate::acp::meta::user_prompt_meta;
 use crate::app::actions::Effect;
 use crate::app::agent_view::{AgentView, PromptMode};
 use crate::app::root::{ActiveView, AppView};
-use crate::app::session::{AgentCommand, AgentId};
+use crate::app::session::{AgentCommand, AgentId, AgentSession, PendingSessionControl};
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
 use std::time::Instant;
+
+fn control_effect(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    token: crate::app::session::SessionControlToken,
+    control: PendingSessionControl,
+) -> Effect {
+    match control {
+        PendingSessionControl::Model { model_id, effort } => Effect::SwitchModel {
+            agent_id,
+            session_id,
+            control_token: token,
+            model_id,
+            effort,
+        },
+        PendingSessionControl::Agent { agent_name } => Effect::SwitchAgent {
+            agent_id,
+            session_id,
+            control_token: token,
+            agent_name,
+        },
+        PendingSessionControl::Behavior { mode } => Effect::SwitchBehavior {
+            agent_id,
+            session_id,
+            control_token: token,
+            mode,
+        },
+    }
+}
+
+pub(super) fn enqueue_model_control(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &mut AgentSession,
+    model_id: acp::ModelId,
+    effort: Option<shell::sampling::types::ReasoningEffort>,
+) -> Vec<Effect> {
+    session
+        .enqueue_control(PendingSessionControl::Model { model_id, effort })
+        .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+        .into_iter()
+        .collect()
+}
+
+pub(super) fn enqueue_agent_control(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &mut AgentSession,
+    agent_name: String,
+) -> Vec<Effect> {
+    session
+        .enqueue_control(PendingSessionControl::Agent { agent_name })
+        .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+        .into_iter()
+        .collect()
+}
+
+/// Enqueue an authoritative Behavior transition in the same per-session FIFO
+/// as model and Agent changes. The CurrentModeUpdate, rather than the RPC
+/// response, commits this control because the server may reject or require
+/// confirmation while returning a successful transport response.
+pub(super) fn enqueue_behavior_control(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &mut AgentSession,
+    mode: tools::types::BehaviorId,
+) -> Vec<Effect> {
+    session
+        .enqueue_control(PendingSessionControl::Behavior { mode })
+        .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn next_control_effect(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &AgentSession,
+) -> Option<Effect> {
+    session
+        .in_flight_control()
+        .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+}
 
 fn page_flip_on_send() -> bool {
     crate::appearance::cache::load_page_flip_on_send()
@@ -66,7 +149,8 @@ pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
         && !matches!(agent.prompt_mode, PromptMode::EditingQueued { .. })
-        && !agent.session.model_switch_pending
+        && !agent.session.controls_pending()
+        && agent.session.deferred_session_mode.is_none()
         && !agent.session.loading_replay
 }
 
@@ -214,10 +298,26 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         log_blocked("prompt_submitting", sid);
         return QueueDrain::blocked();
     }
-    // Hold the drain during an in-flight model switch. See the
-    // `model_switch_pending` field doc for why a reconnect must clear it.
-    if agent.session.model_switch_pending {
-        log_blocked("model_switch_pending", sid);
+    if let Some(mode) = agent.session.behavior_control_target() {
+        // A normal prompt submitted after a Behavior selection must use the
+        // same admission token as a first prompt. `CurrentModeUpdate(applied)`
+        // clears this token and re-enters this drain; confirmation/rejection
+        // deliberately leaves the FIFO untouched.
+        agent.session.deferred_session_mode = Some(mode);
+        log_blocked("behavior_control_pending", sid);
+        return QueueDrain::blocked();
+    }
+    // Model/effort/Agent controls own the next sampling-step boundary (or the
+    // idle boundary), but do not create a Behavior admission latch.
+    if agent.session.controls_pending() {
+        log_blocked("session_control_pending", sid);
+        return QueueDrain::blocked();
+    }
+    // A rejected/failed/confirmation-gated Behavior control deliberately
+    // leaves its prompt admission latch in place. It can only be released by
+    // the matching authoritative update or an explicit fallback selection.
+    if agent.session.deferred_session_mode.is_some() {
+        log_blocked("behavior_admission_pending", sid);
         return QueueDrain::blocked();
     }
     if agent.session.loading_replay {

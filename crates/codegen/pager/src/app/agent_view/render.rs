@@ -775,14 +775,8 @@ impl AgentView {
             .models
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
-        let effective_plan = self
-            .session
-            .plan_mode_pending
-            .unwrap_or(self.session.plan_mode_active);
-        let effective_behavior = self
-            .session
-            .behavior_mode_pending
-            .unwrap_or(self.session.behavior_mode);
+        let effective_plan = self.session.effective_plan_mode();
+        let effective_behavior = self.session.effective_behavior();
         // Expiration is reduced by AppView's UI deadline clock. Rendering is
         // read-only with respect to lifecycle and transient input state.
         let leader_active = self

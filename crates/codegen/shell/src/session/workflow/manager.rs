@@ -15,7 +15,10 @@ use super::host_service::{
 use super::notify::WorkflowNotifySender;
 use super::registry::ResolvedWorkflow;
 use super::store::WorkflowRunStore;
-use super::tracker::{WorkflowRunState, WorkflowRunStatus, WorkflowRuntimeRoute, WorkflowTracker};
+use super::tracker::{
+    WorkflowAgentCatalogSource, WorkflowRunState, WorkflowRunStatus, WorkflowRuntimeRoute,
+    WorkflowTracker,
+};
 
 pub(crate) const WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION: usize = 4;
 pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = workflow::DEFAULT_AGENT_BUDGET;
@@ -136,6 +139,9 @@ pub(crate) struct WorkflowManager {
     /// Route captured by the next newly-created Run. Existing Runs carry
     /// their own immutable snapshot in `WorkflowRunState`.
     next_run_route: WorkflowRuntimeRoute,
+    /// Live discovery inputs consulted only at new-Run admission. The resolved
+    /// definitions are copied into that Run's immutable route.
+    agent_catalog_source: WorkflowAgentCatalogSource,
     active: HashMap<String, ActiveRun>,
 }
 
@@ -175,6 +181,7 @@ impl WorkflowManager {
         timeline: chat_state::ChatStateHandle,
         templates: HashMap<String, String>,
         next_run_route: WorkflowRuntimeRoute,
+        agent_catalog_source: WorkflowAgentCatalogSource,
     ) -> Self {
         Self {
             session_id,
@@ -189,6 +196,7 @@ impl WorkflowManager {
             timeline,
             templates,
             next_run_route,
+            agent_catalog_source,
             active: HashMap::new(),
         }
     }
@@ -200,6 +208,17 @@ impl WorkflowManager {
             .validate()
             .expect("session model selection must provide a valid Workflow route");
         self.next_run_route = route;
+    }
+
+    /// Update the complete parent-Agent projection used to admit future Runs.
+    /// Active Runs already own both their filter and resolved child harnesses.
+    pub(crate) fn set_next_run_agent_profile(
+        &mut self,
+        name: String,
+        filter: agent::config::SubagentFilter,
+    ) {
+        self.next_run_route.set_subagent_filter(filter);
+        self.agent_catalog_source.set_parent_agent_name(name);
     }
 
     pub(crate) fn tracker(&self) -> Arc<parking_lot::Mutex<WorkflowTracker>> {
@@ -332,6 +351,11 @@ impl WorkflowManager {
                 let max_concurrency = spec.max_concurrency.unwrap_or(
                     tools::implementations::grow_build::workflow::WorkflowToolInput::DEFAULT_MAX_CONCURRENCY,
                 );
+                let mut runtime_route = self.next_run_route.clone();
+                runtime_route
+                    .capture_agent_definitions(&self.agent_catalog_source)
+                    .await
+                    .map_err(|error| LaunchError::Store(error.to_owned()))?;
                 self.store
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
@@ -354,7 +378,7 @@ impl WorkflowManager {
                     resolved.meta.phases,
                     Some(agent_budget),
                     self.session_directory.as_ref().map(|_| journal_rel),
-                    self.next_run_route.clone(),
+                    runtime_route,
                 );
                 let state = {
                     let mut tracker = self.tracker.lock();
@@ -429,10 +453,14 @@ impl WorkflowManager {
             && let Err(error) = journal.prune_trailing_host_error(failure_message.as_str())
         {
             let message = error.to_string();
-            if let Some(interrupted) = self.tracker.lock().interrupt(
-                &run_id,
-                format!("workflow journal could not prepare resume: {message}"),
-            ) {
+            let interrupted = {
+                let mut tracker = self.tracker.lock();
+                tracker.interrupt(
+                    &run_id,
+                    format!("workflow journal could not prepare resume: {message}"),
+                )
+            };
+            if let Some(interrupted) = interrupted {
                 let _ = self.store.persist_ack(&interrupted).await;
             }
             let _ = self
@@ -760,6 +788,9 @@ impl WorkflowManager {
             test_timeline(),
             std::collections::HashMap::new(),
             crate::session::workflow::tracker::test_runtime_route(),
+            crate::session::workflow::tracker::WorkflowAgentCatalogSource::for_test(
+                std::env::temp_dir(),
+            ),
         )));
         (manager, tracker)
     }
@@ -1169,6 +1200,9 @@ mod tests {
             test_timeline(),
             HashMap::new(),
             crate::session::workflow::tracker::test_runtime_route(),
+            crate::session::workflow::tracker::WorkflowAgentCatalogSource::for_test(
+                std::env::temp_dir(),
+            ),
         );
         (manager, event_rx, cancels)
     }
@@ -1373,6 +1407,9 @@ mod tests {
             test_timeline(),
             HashMap::new(),
             crate::session::workflow::tracker::test_runtime_route(),
+            crate::session::workflow::tracker::WorkflowAgentCatalogSource::for_test(
+                dir.path().to_path_buf(),
+            ),
         );
         let resolved = resolve_inline(
             "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
@@ -1945,6 +1982,11 @@ mod tests {
             sampling_types::ModelImageInputKey::new("first-model", "responses", "test-endpoint"),
         )
         .unwrap();
+        let mut expected_first_route = first_route.clone();
+        expected_first_route
+            .capture_agent_definitions(&manager.agent_catalog_source)
+            .await
+            .unwrap();
         manager.set_next_run_route(first_route.clone());
         let completed = || {
             resolve_inline(
@@ -1962,14 +2004,25 @@ mod tests {
             sampling_types::ModelImageInputKey::new("second-model", "responses", "test-endpoint"),
         )
         .unwrap();
+        let mut expected_second_route = second_route.clone();
+        expected_second_route
+            .capture_agent_definitions(&manager.agent_catalog_source)
+            .await
+            .unwrap();
         manager.set_next_run_route(second_route.clone());
         let (second_id, second_outcome) = manager.launch(completed(), spec()).await.unwrap();
         let _ = first_outcome.await.unwrap();
         let _ = second_outcome.await.unwrap();
 
         let tracker = manager.tracker.lock();
-        assert_eq!(tracker.get(&first_id).unwrap().runtime_route, first_route);
-        assert_eq!(tracker.get(&second_id).unwrap().runtime_route, second_route);
+        assert_eq!(
+            tracker.get(&first_id).unwrap().runtime_route,
+            expected_first_route
+        );
+        assert_eq!(
+            tracker.get(&second_id).unwrap().runtime_route,
+            expected_second_route
+        );
     }
 
     #[tokio::test]

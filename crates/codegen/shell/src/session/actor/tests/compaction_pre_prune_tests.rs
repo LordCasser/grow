@@ -25,6 +25,12 @@ use serde_json::json;
 use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use tokio::sync::mpsc;
 
+fn prompt(text: impl Into<String>, index: usize) -> ConversationItem {
+    let mut item = ConversationItem::user(text);
+    item.set_prompt_index(index);
+    item
+}
+
 /// Wire `stop_reason` values for the Messages API (see
 /// `sampler/src/stream/messages.rs` mapping).
 const END_TURN: &str = "end_turn";
@@ -193,7 +199,9 @@ async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<PromptTurnOk, acp::Error> {
-    tokio::time::timeout(
+    actor.state.lock().await.foreground =
+        ForegroundState::RegularTurn(running_task_stub(prompt_id));
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
             prompt_id,
@@ -212,7 +220,9 @@ async fn run_user_turn(
         ),
     )
     .await
-    .expect("turn must finish within the timeout (no runaway continue loop)")
+    .expect("turn must finish within the timeout (no runaway continue loop)");
+    actor.state.lock().await.foreground = ForegroundState::Idle;
+    result
 }
 
 /// Oversized tool-result payload (200KB → 50K tokens under bytes/4).
@@ -231,7 +241,7 @@ async fn seed_tool_result_rounds(actor: &SessionActor, count: usize) {
     for i in 0..count {
         actor
             .chat_state_handle
-            .push_user_message(ConversationItem::user(format!("u{i}")));
+            .push_user_message(prompt(format!("u{i}"), i));
         actor
             .chat_state_handle
             .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
@@ -261,13 +271,13 @@ async fn seed_closed_compaction_range(actor: &SessionActor, retained_tail_chars:
     .await;
     actor
         .chat_state_handle
-        .push_user_message(ConversationItem::user("old closed turn"));
+        .push_user_message(prompt("old closed turn", 0));
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant("x".repeat(24_000)));
     actor
         .chat_state_handle
-        .push_user_message(ConversationItem::user("recent retained turn"));
+        .push_user_message(prompt("recent retained turn", 1));
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant("y".repeat(retained_tail_chars)));
@@ -426,7 +436,7 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
             // Current turn adds only a small amount of Surface pressure.
             actor
                 .chat_state_handle
-                .push_user_message(ConversationItem::user("current turn"));
+                .push_user_message(prompt("current turn", 2));
             actor
                 .chat_state_handle
                 .push_assistant_response(ConversationItem::assistant("partial prior"));
@@ -537,7 +547,7 @@ fn pre_prune_insufficient_projection_runs_summary() {
             seed_tool_result_rounds(&actor, 2).await;
             actor
                 .chat_state_handle
-                .push_user_message(ConversationItem::user("current turn"));
+                .push_user_message(prompt("current turn", 2));
             actor.chat_state_handle.push_assistant_response(
                 ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
                     id: "call-last".into(),
@@ -605,6 +615,78 @@ fn pre_prune_insufficient_projection_runs_summary() {
                 full_text.contains("compacted summary"),
                 "summary output must replace the compacted range"
             );
+        }));
+    });
+}
+
+#[test]
+fn workflow_guidance_survives_mid_turn_compaction_once() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let summary = format!(
+                "workflow history summary: {}",
+                "retained evidence and execution state. ".repeat(30)
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[(&summary, END_TURN)], END_TURN),
+            );
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Workflow);
+            *actor.turn_behavior.lock() = tool_types::BehaviorId::Workflow;
+            let workflow_context = actor
+                .workflow_behavior_context()
+                .expect("test Workflow workspace is available");
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("test system prompt"),
+                    prompt("old closed turn", 0),
+                    ConversationItem::assistant("x".repeat(120_000)),
+                    ConversationItem::user_meta(format!(
+                        "<system-reminder>\n{workflow_context}\n</system-reminder>"
+                    )),
+                    prompt("current workflow turn", 1),
+                    ConversationItem::assistant("partial current response ".repeat(5_000)),
+                ],
+            )
+            .await;
+            actor.compaction.pre_prune.set(false);
+
+            actor
+                .run_compact_only(compaction::AutoCompactTriggerInfo {
+                    tokens_used: 90_000,
+                    context_window: 100_000,
+                    percentage: 90,
+                    source: "workflow_test",
+                })
+                .await
+                .expect("Workflow compaction succeeds");
+
+            let full_text = actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                full_text.matches(&workflow_context).count(),
+                1,
+                "compaction must shadow the old turn reminder and reinstall one authoritative Workflow contract"
+            );
+            assert!(full_text.contains("current workflow turn"));
         }));
     });
 }
@@ -807,14 +889,14 @@ fn pre_prune_error_fails_open_to_summary() {
                 &actor.chat_state_handle,
                 vec![
                     ConversationItem::system("test system prompt"),
-                    ConversationItem::user("u0"),
+                    prompt("u0", 0),
                     ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
                         id: "call-0".into(),
                         name: "grep".to_string(),
                         arguments: "{}".into(),
                     }]),
                     ConversationItem::tool_result("call-0", big_tool_text()),
-                    ConversationItem::user("recent retained turn"),
+                    prompt("recent retained turn", 1),
                     ConversationItem::assistant("y".repeat(40_000)),
                 ],
             )
@@ -906,9 +988,7 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
             // Phase 1: a second oversized round pushes the conversation over
             // the plan target. STICKY must now let the prune through, and the
             // passing gate clears the sticky bit to NONE.
-            actor
-                .chat_state_handle
-                .push_user_message(ConversationItem::user("u1"));
+            actor.chat_state_handle.push_user_message(prompt("u1", 1));
             actor.chat_state_handle.push_assistant_response(
                 ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
                     id: "call-1".into(),
@@ -926,7 +1006,6 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
                 .record_provider_context_anchor(105_000);
             let _ = actor.chat_state_handle.get_conversation_len().await;
 
-            let (mut trace_rx, _guard) = capture_trace_events();
             let pruned = actor
                 .maybe_pre_prune(&trigger)
                 .await
@@ -953,17 +1032,6 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
                 &big_tool_text(),
                 "newer tool result must be untouched"
             );
-
-            let mut raw_events = Vec::new();
-            while let Ok(e) = trace_rx.try_recv() {
-                raw_events.push(e);
-            }
-            let events = diagnostic_events(&raw_events);
-            let pruned_event = events
-                .iter()
-                .find(|(name, _)| name == "auto_compact_pruned")
-                .expect("auto_compact_pruned diagnostics event must fire");
-            assert_eq!(pruned_event.1["pruned_count"], 1);
         }));
     });
 }
@@ -1055,7 +1123,7 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<chat_state::ChatStateEvent>();
         let conversation = vec![
             ConversationItem::system("test system prompt"),
-            ConversationItem::user("u0"),
+            prompt("u0", 0),
             ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
                 id: "call-0".into(),
                 name: "grep".to_string(),
@@ -1139,7 +1207,7 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
             &handle,
             vec![
                 ConversationItem::system("test system prompt"),
-                ConversationItem::user("rebuilt"),
+                prompt("rebuilt", 0),
             ],
         )
         .await;

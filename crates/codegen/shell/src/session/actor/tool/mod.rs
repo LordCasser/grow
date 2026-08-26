@@ -512,8 +512,14 @@ impl SessionActor {
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // A successful PlanControl is a state transition just like
+                    // a GoalLifecycle update.  The remaining calls in this
+                    // provider batch were sampled against the pre-transition
+                    // state and must be durably cancelled before the next
+                    // sample.  Failed/invalid controls stay Continue so an
+                    // otherwise valid sibling can still run.
                     if !tool_failed
-                        && is_goal_lifecycle_kind(
+                        && is_state_control_kind(
                             self.agent
                                 .borrow()
                                 .tool_bridge()
@@ -1863,7 +1869,7 @@ mod wait_interrupt_tests {
         buf.push(PendingInterjection {
             text: "user message".into(),
             attachments: Vec::new(),
-            auto_promoted: None,
+            requeue: None,
         });
         let out = tokio::select! {
             biased;

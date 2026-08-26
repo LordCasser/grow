@@ -81,7 +81,7 @@ impl tool_runtime::Tool for MonitorTool {
         let resolved_timeout = input.resolved_timeout_ms();
         let description = input.description;
 
-        let (terminal, notification_handle, cwd, session_folder, owner_session_id, goal_id) = {
+        let (terminal, notification_handle, cwd, session_folder, owner_session_id, goal_owner) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let notif = res
@@ -99,10 +99,17 @@ impl tool_runtime::Tool for MonitorTool {
             let owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            let goal_id = res
+            let goal_owner = res
                 .get::<crate::implementations::grow_build::task::types::CurrentSubagentOwnerResource>()
-                .and_then(|owner| owner.0.goal_id().map(str::to_owned));
-            (terminal, notif, cwd, session_folder, owner, goal_id)
+                .map(|owner| (owner.0.goal_id().map(str::to_owned), owner.0.goal_definition_revision()));
+            (
+                terminal,
+                notif,
+                cwd,
+                session_folder,
+                owner,
+                goal_owner.unwrap_or_default(),
+            )
         };
 
         // Output file lives in the session folder alongside bash terminal logs.
@@ -131,7 +138,8 @@ impl tool_runtime::Tool for MonitorTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Monitor,
                 owner_session_id,
-                goal_id: goal_id.clone(),
+                goal_id: goal_owner.0.clone(),
+                goal_definition_revision: goal_owner.1,
                 description: Some(description.clone()).filter(|d| !d.trim().is_empty()),
             })
             .await
@@ -157,7 +165,8 @@ impl tool_runtime::Tool for MonitorTool {
             },
             output_file: bg_handle.output_file.clone(),
             task_id: task_id.clone(),
-            goal_id,
+            goal_id: goal_owner.0,
+            goal_definition_revision: goal_owner.1,
             monitor_description: tray_description.clone(),
             description: tray_description,
         });
@@ -279,6 +288,7 @@ pub(crate) async fn run_monitor_pipeline(
         }
         let owner_session_id = snapshot_owner.or_else(|| last_owner.clone());
         let snapshot_goal = snapshot.as_ref().and_then(|s| s.goal_id.clone());
+        let goal_definition_revision = snapshot.as_ref().and_then(|s| s.goal_definition_revision);
         if snapshot_goal.is_some() {
             last_goal.clone_from(&snapshot_goal);
         }
@@ -298,6 +308,7 @@ pub(crate) async fn run_monitor_pipeline(
                     notification_handle,
                     owner_session_id.as_deref(),
                     goal_id.as_deref(),
+                    goal_definition_revision,
                 )
                 .await;
             }
@@ -314,6 +325,7 @@ pub(crate) async fn run_monitor_pipeline(
                     notification_handle,
                     owner_session_id.as_deref(),
                     goal_id.as_deref(),
+                    goal_definition_revision,
                 )
                 .await;
             }
@@ -377,6 +389,7 @@ async fn process_event(
     notification_handle: &ToolNotificationHandle,
     owner_session_id: Option<&str>,
     goal_id: Option<&str>,
+    goal_definition_revision: Option<u64>,
 ) {
     let owner = || owner_session_id.map(str::to_string);
     let goal = || goal_id.map(str::to_string);
@@ -392,6 +405,7 @@ async fn process_event(
                     raw_text: notice,
                     owner_session_id: owner(),
                     goal_id: goal(),
+                    goal_definition_revision,
                 });
             }
             let wrapped = event::wrap_monitor_event(description, event_text, task_id);
@@ -402,6 +416,7 @@ async fn process_event(
                 raw_text: event_text.to_string(),
                 owner_session_id: owner(),
                 goal_id: goal(),
+                goal_definition_revision,
             });
         }
         RateLimitOutcome::Suppressed => {
@@ -416,6 +431,7 @@ async fn process_event(
                 raw_text: message,
                 owner_session_id: owner(),
                 goal_id: goal(),
+                goal_definition_revision,
             });
         }
     }
@@ -466,6 +482,7 @@ mod tests {
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
                 goal_id: None,
+                goal_definition_revision: None,
                 description: None,
             })
             .await
@@ -544,6 +561,7 @@ mod tests {
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
                 goal_id: None,
+                goal_definition_revision: None,
                 description: None,
             })
             .await
@@ -615,6 +633,7 @@ mod tests {
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("child-session".to_string()),
                 goal_id: None,
+                goal_definition_revision: None,
                 description: None,
             })
             .await

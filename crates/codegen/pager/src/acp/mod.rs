@@ -65,6 +65,8 @@ pub struct AcpConnection {
     /// disabled feature produces zero `grow/recap` traffic. Defaults to `false`
     /// when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
+    /// Exact initialize/capability request inputs for leader reconnection.
+    pub(crate) connect_flags: ConnectFlags,
 }
 
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
@@ -73,9 +75,6 @@ pub struct ConnectFlags {
     pub subagents: bool,
     pub experimental_memory: bool,
     pub no_memory: bool,
-    /// Session-scoped `--todo-gate` override. Forces
-    /// Enables the session-owned TodoGate for this session.
-    pub todo_gate: bool,
     /// Session-scoped `--laziness-debug-log <path>` override. When set,
     /// the Layer-3 classifier fires after every turn regardless of the
     /// per-model enable gate, and the full outcome is appended to the
@@ -125,7 +124,6 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cli_session_title_model: None,
         cli_experimental_memory: flags.experimental_memory,
         cli_no_memory: flags.no_memory,
-        todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
     });
 
@@ -169,6 +167,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         leader_status_rx: None,
         cancel_rewind_enabled,
         session_recap_available,
+        connect_flags: flags,
     })
 }
 
@@ -249,6 +248,7 @@ pub async fn connect_via_leader(
         leader_status_rx: Some(status_rx),
         cancel_rewind_enabled,
         session_recap_available,
+        connect_flags: flags,
     })
 }
 
@@ -355,7 +355,7 @@ pub fn parse_default_auth_method_id(meta: Option<&acp::Meta>) -> Option<acp::Aut
 }
 
 /// Send InitializeRequest and parse the response.
-async fn initialize(
+pub(crate) async fn initialize(
     tx: &AcpAgentTx,
     flags: &ConnectFlags,
 ) -> Result<(
@@ -446,7 +446,7 @@ pub fn parse_session_recap_available(meta: Option<&acp::Meta>) -> bool {
 /// Prefer `defaultAuthMethodId` from initialize meta when present and listed.
 /// The BYOK-only agent advertises one method; the metadata default remains the
 /// source of truth for protocol peers that advertise more than one.
-async fn authenticate(
+pub(crate) async fn authenticate(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,

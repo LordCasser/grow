@@ -426,6 +426,7 @@ impl AgentView {
     /// replay-window entry: the fresh/restore load ctor paths and the
     /// reconnect/fork reuse paths.
     pub(crate) fn begin_replay_window(&mut self) {
+        self.clear_transport_interactions_for_replay();
         self.clear_minimal_btw_lifecycle();
         self.reset_inline_media_loader();
         self.reset_edit_hl_runtime();
@@ -458,6 +459,13 @@ impl AgentView {
     /// `session/load` replay. The transcript is NOT cleared — it stays
     /// recoverable until [`finish_session_reload`](Self::finish_session_reload)
     /// decides the outcome.
+    fn rearm_controls_for_reconnect_recursively(&mut self) {
+        self.session.rearm_controls_for_reconnect();
+        for child in self.subagent_views.values_mut() {
+            child.rearm_controls_for_reconnect_recursively();
+        }
+    }
+
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
         self.dismiss_jump_picker();
         if let Some(prev) = self.session_reload.take() {
@@ -484,8 +492,7 @@ impl AgentView {
         // would otherwise leave a restored block marked Pending without its
         // discarded worker runtime.
         self.reset_edit_hl_runtime();
-        self.session.model_switch_pending = false;
-        self.session.complete_agent_switch();
+        self.rearm_controls_for_reconnect_recursively();
         let fresh = self.scrollback.fresh_continuation();
         self.session_reload = Some(SessionReload {
             generation,
@@ -755,6 +762,9 @@ impl AgentView {
         use crate::app::session::AgentState;
         if let Some(activity) = self.session.turn_activity() {
             return Some(self.enrich_waiting_activity(activity));
+        }
+        if self.session.agent_switch_in_flight() {
+            return Some(TurnActivity::Waiting(WaitingReason::AgentSwitch));
         }
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
@@ -1238,6 +1248,15 @@ mod resolve_turn_activity_tests {
         assert_eq!(
             view.resolve_turn_activity(),
             Some(TurnActivity::Waiting(WaitingReason::Model))
+        );
+    }
+    #[test]
+    fn in_flight_agent_control_names_the_rebuild_wait() {
+        let mut view = running_view();
+        view.session.begin_agent_switch("reviewer");
+        assert_eq!(
+            view.resolve_turn_activity(),
+            Some(TurnActivity::Waiting(WaitingReason::AgentSwitch))
         );
     }
     #[test]
@@ -1949,6 +1968,38 @@ mod reconnect_workflow_maps_tests {
                 .find(|r| r.run_id == "wf-keep")
                 .map(|r| r.status.as_str()),
             Some("complete")
+        );
+    }
+}
+
+#[cfg(test)]
+mod reconnect_control_tests {
+    use super::super::test_agent_view;
+    use crate::app::session::SessionControlCompletion;
+
+    #[test]
+    fn reconnect_invalidates_controls_for_every_descendant_view() {
+        let mut root = test_agent_view(Some("root"), std::path::PathBuf::from("/tmp"));
+        let root_token = root.session.begin_model_switch_for_test();
+        let mut child = test_agent_view(Some("child"), std::path::PathBuf::from("/tmp"));
+        let child_token = child.session.begin_agent_switch("reviewer");
+        root.insert_subagent_view("child".into(), Box::new(child));
+
+        root.begin_session_reload(7);
+
+        assert_eq!(
+            root.session.complete_control(root_token),
+            SessionControlCompletion::Stale,
+            "a pre-reconnect root completion cannot mutate the new generation"
+        );
+        assert_eq!(
+            root.subagent_views
+                .get_mut("child")
+                .expect("child view remains indexed after reconnect")
+                .session
+                .complete_control(child_token),
+            SessionControlCompletion::Stale,
+            "a pre-reconnect child completion cannot mutate the new generation"
         );
     }
 }

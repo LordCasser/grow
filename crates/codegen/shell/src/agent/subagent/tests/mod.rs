@@ -515,7 +515,7 @@ async fn goal_waiter_cannot_outrun_receipt_admission_or_emit_it_twice() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     ctx.parent_cmd_tx = Some(cmd_tx);
     let mut request = auto_wake_test_request("goal-child");
-    request.owner = SubagentOwner::goal("goal-1");
+    request.owner = SubagentOwner::goal("goal-1", 1);
     let result = SubagentResult {
         success: true,
         subagent_id: request.id.clone(),
@@ -573,6 +573,7 @@ async fn completion_receipt_retries_a_dropped_ack_with_the_same_identity() {
             "retry-child",
             &SubagentOwner::Goal {
                 goal_id: "goal-1".into(),
+                definition_revision: 1,
             },
             "done".into(),
         )
@@ -602,7 +603,7 @@ async fn completion_receipt_retries_a_dropped_ack_with_the_same_identity() {
     assert!(matches!(
         &first_source,
         chat_state::NotificationSource::SubagentCompleted {
-            owner: chat_state::NotificationOwner::Goal { goal_id },
+            owner: chat_state::NotificationOwner::Goal { goal_id, .. },
             ..
         } if goal_id == "goal-1"
     ));
@@ -735,6 +736,7 @@ fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::Suba
         context_normalized: false,
         resumed_from: None,
         parent_prompt_id: None,
+        goal_definition_revision: None,
         capability_mode: None,
         permission_mode: None,
         effective_permission_mode: None,
@@ -994,6 +996,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
         &format!("child-receipt-{}", uuid::Uuid::now_v7()),
     );
     spawn.goal_id = Some("goal-receipt".into());
+    spawn.goal_definition_revision = Some(1);
     let (parent, _persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
     let terminal = chat_state::SubagentTerminalEvent {
         subagent_id: spawn.subagent_id.clone(),
@@ -1032,6 +1035,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
                 &backend,
                 &parent_id,
                 &parent,
+                None,
                 &gateway,
                 Some(&cmd_tx),
             )
@@ -1053,7 +1057,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
         &source,
         chat_state::NotificationSource::SubagentCompleted {
             subagent_id,
-            owner: chat_state::NotificationOwner::Goal { goal_id },
+            owner: chat_state::NotificationOwner::Goal { goal_id, .. },
         } if subagent_id == "sa-receipt" && goal_id == "goal-receipt"
     ));
     let receipt = parent
@@ -1172,6 +1176,7 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
         &backend,
         &parent_id,
         &parent,
+        None,
         &gateway,
         None,
     )
@@ -1248,6 +1253,7 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
         &backend,
         &parent_id,
         &parent,
+        None,
         &gateway,
         None,
     )
@@ -1320,6 +1326,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
         &backend,
         &parent_id,
         &parent,
+        None,
         &gateway,
         None,
     )
@@ -1368,6 +1375,7 @@ async fn missing_unpublished_child_closes_without_forging_result_ref() {
         &backend,
         &parent_id,
         &parent,
+        None,
         &gateway,
         None,
     )

@@ -81,7 +81,27 @@ async fn actor_with_sampler(
         sampler::RetryPolicy::default(),
         sampler_event_tx,
     );
+    let (goal_usage_tx, mut goal_usage_rx) = tokio::sync::mpsc::unbounded_channel();
+    actor.goal_usage_window =
+        crate::session::actor::goal_support::GoalUsageWindow::new(goal_usage_tx.clone(), None);
     let actor = std::sync::Arc::new(actor);
+    let usage_actor = actor.clone();
+    tokio::task::spawn_local(async move {
+        let _keepalive = goal_usage_tx;
+        while let Some(command) = goal_usage_rx.recv().await {
+            let crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                attempt_id,
+                respond_to,
+            } = command
+            else {
+                panic!("unexpected Goal accounting command in image recovery test");
+            };
+            let result = usage_actor
+                .settle_claimed_goal_usage_attempt(&attempt_id)
+                .await;
+            let _ = respond_to.send(result);
+        }
+    });
     let drainer = actor.clone();
     tokio::task::spawn_local(async move {
         let mut sampler_event_rx = sampler_event_rx;
@@ -167,6 +187,7 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
                 ),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, None).await;
+            install_test_foreground(&actor, "image-400-recovery").await;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -238,7 +259,7 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
 }
 
 #[test]
-fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
+fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -269,6 +290,22 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                 messages_text_turn("Recovered from the image context.", "test-model"),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
+            install_test_foreground(&actor, "image-400-aux-recovery").await;
+            actor
+                .goal_tracker
+                .lock()
+                .create_goal(
+                    "goal-image-recovery".into(),
+                    "diagnose the screenshot".into(),
+                    None,
+                    "2026-08-27T00:00:00Z".into(),
+                )
+                .unwrap();
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Goal);
+            actor.sync_goal_usage_window();
 
             actor
                 .handle_prompt(
@@ -280,8 +317,8 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                         acp::ContentBlock::Text(acp::TextContent::new("diagnose this screenshot")),
                         acp::ContentBlock::Image(test_image_content()),
                     ],
-                    tool_types::BehaviorId::Normal,
-                    None,
+                    tool_types::BehaviorId::Goal,
+                    Some("goal-image-recovery".into()),
                     None,
                     false,
                     None,
@@ -318,6 +355,12 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                     .iter()
                     .any(|item| item.text_content().contains("code E42"))
             );
+            let goal = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                goal.status,
+                crate::session::goal_tracker::GoalStatus::Active
+            );
+            assert!(!goal.usage_incomplete);
 
             let mut notes = Vec::new();
             let mut terminal_retry_failure = false;
@@ -378,6 +421,7 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
                 messages_text_turn("Continued without visual context.", "test-model"),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
+            install_test_foreground(&actor, "image-400-aux-400").await;
 
             actor
                 .handle_prompt(

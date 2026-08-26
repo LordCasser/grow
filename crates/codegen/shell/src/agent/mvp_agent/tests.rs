@@ -300,6 +300,7 @@ fn resolve_agent_definition_defaults_to_grow_build() {
     let def = MvpAgent::resolve_agent_definition(
         tmp.path(),
         None,
+        None,
         &config::AgentSelectionConfig::default(),
         None,
         None,
@@ -321,6 +322,7 @@ fn resolve_agent_definition_restores_persisted_agent() {
     let def = MvpAgent::resolve_agent_definition(
         tmp.path(),
         None,
+        None,
         &config::AgentSelectionConfig::default(),
         None,
         Some("browser-use"),
@@ -328,6 +330,58 @@ fn resolve_agent_definition_restores_persisted_agent() {
     assert_eq!(def.name, "browser-use");
     if let Some(v) = prev {
         unsafe { std::env::set_var("GROW_AGENT", v) }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn resolve_agent_definition_restores_qualified_plugin_agent() {
+    use agent::plugins::discovery::{DiscoveredPlugin, PluginId};
+    use agent::plugins::{PluginOrigin, PluginRegistry, PluginScope};
+
+    let previous = std::env::var("GROW_AGENT").ok();
+    unsafe {
+        std::env::remove_var("GROW_AGENT");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let agents = root.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("reviewer.md"),
+        "---\nname: reviewer\ndescription: Plugin reviewer\n---\nReview carefully.\n",
+    )
+    .unwrap();
+    let manifest = serde_json::from_value(serde_json::json!({ "name": "quality" })).unwrap();
+    let plugin = DiscoveredPlugin {
+        id: PluginId::new(PluginScope::User, root.path(), "quality"),
+        manifest,
+        root: root.path().to_path_buf(),
+        canonical_root: root.path().to_path_buf(),
+        scope: PluginScope::User,
+        origin: PluginOrigin::UserGrow,
+        trusted: true,
+        skill_dirs: vec![],
+        command_dirs: vec![],
+        agent_dirs: vec![agents],
+        hooks_path: None,
+        mcp_config_path: None,
+        lsp_config_path: None,
+        conflict: None,
+    };
+    let registry = PluginRegistry::from_discovered(vec![plugin], &[], &["quality".into()]);
+    let cwd = tempfile::tempdir().unwrap();
+    let definition = MvpAgent::resolve_agent_definition(
+        cwd.path(),
+        Some(&registry),
+        None,
+        &config::AgentSelectionConfig::default(),
+        None,
+        Some("quality:reviewer"),
+    );
+    assert_eq!(definition.selector_identity(), "quality:reviewer");
+    assert_eq!(definition.prompt_body.as_deref(), Some("Review carefully."));
+    if let Some(value) = previous {
+        unsafe { std::env::set_var("GROW_AGENT", value) }
     }
 }
 /// A new session may still receive an explicit ACP Agent profile.
@@ -347,6 +401,7 @@ fn resolve_agent_definition_acp_profile_wins_for_new_session() {
     .expect("agent definition must parse");
     let def = MvpAgent::resolve_agent_definition(
         tmp.path(),
+        None,
         None,
         &config::AgentSelectionConfig::default(),
         Some(acp_profile),
@@ -377,6 +432,7 @@ fn resolve_agent_definition_cli_agent_profile_wins_for_new_session() {
     .unwrap();
     let def = MvpAgent::resolve_agent_definition(
         tmp.path(),
+        None,
         Some(&profile_path),
         &config::AgentSelectionConfig::default(),
         None,
@@ -475,6 +531,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
     let mut def = MvpAgent::resolve_agent_definition(
         tmp.path(),
         None,
+        None,
         &config::AgentSelectionConfig::default(),
         None,
         None,
@@ -542,7 +599,17 @@ fn file_toolset_override_invalid_config_returns_error() {
 /// Helper: creates a real SessionHandle with the given model and client id.
 /// Requires a tokio runtime for SessionSignalsHandle::new().
 fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::SessionHandle {
-    let (cmd_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    make_test_handle_with_receiver(model, client_id).0
+}
+
+fn make_test_handle_with_receiver(
+    model: &str,
+    client_id: Option<&str>,
+) -> (
+    crate::session::SessionHandle,
+    tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
+) {
+    let (cmd_tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
@@ -553,8 +620,12 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
         hunk_tracker::TrackingMode::AllDirty,
         hunk_cancel,
     );
-    crate::session::SessionHandle {
-        cmd_tx,
+    let handle = crate::session::SessionHandle {
+        lifecycle_owner: std::sync::Arc::new(crate::session::handle::SessionLifecycleOwner::new(
+            &cmd_tx,
+        )),
+        cmd_tx: cmd_tx.clone(),
+        goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(cmd_tx, None),
         persistence_tx,
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
@@ -605,14 +676,19 @@ fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::Ses
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: workspace::permission::PermissionHandle::allow_all(),
         delegable_capability_ceiling: None,
-        agent_name: "grow-build".to_string(),
-        subagent_filter: Default::default(),
+        agent_profile: crate::session::handle::SessionAgentProfile::new(
+            "grow-build".to_string(),
+            Default::default(),
+        ),
+        workflow_run_id: None,
+        plugin_registry: std::sync::Arc::new(parking_lot::RwLock::new(None)),
         hook_registry: None,
         workspace_ops: workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
-    }
+    };
+    (handle, rx)
 }
 /// lookup_session_model returns the per-session model for each session.
 #[tokio::test]
@@ -931,6 +1007,124 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
     MvpAgent::new(gateway, &cfg).expect("valid test config")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_control_lookup_addresses_live_child_without_promoting_it_to_roster() {
+    let agent = build_minimal_agent_for_tests();
+    let root_id = acp::SessionId::new("live-root");
+    let mut root = make_test_handle("root-model", None);
+    root.info.id = root_id.clone();
+    agent.sessions.borrow_mut().insert(root_id.clone(), root);
+    let child_id = acp::SessionId::new("live-child");
+    let mut child = make_test_handle("child-model", None);
+    child.info.id = child_id.clone();
+    agent
+        .active_child_sessions
+        .borrow_mut()
+        .insert(child_id.clone(), child);
+    let workflow_child_id = acp::SessionId::new("workflow-child");
+    let mut workflow_child = make_test_handle("workflow-model", None);
+    workflow_child.info.id = workflow_child_id.clone();
+    workflow_child.workflow_run_id = Some("wf-pinned".to_owned());
+    agent
+        .active_child_sessions
+        .borrow_mut()
+        .insert(workflow_child_id.clone(), workflow_child);
+
+    assert!(
+        agent
+            .control_session_handle_waiting_for_load(&child_id)
+            .await
+            .is_some()
+    );
+    assert!(agent.sessions.borrow().get(&child_id).is_none());
+    assert!(
+        agent
+            .session_handle_waiting_for_load(&child_id)
+            .await
+            .is_none(),
+        "child control routing must not broaden primary prompt/load routing"
+    );
+    let reload_targets = agent.live_control_session_handles();
+    assert!(reload_targets.contains_key(&root_id));
+    assert!(reload_targets.contains_key(&child_id));
+    assert!(
+        !reload_targets.contains_key(&workflow_child_id),
+        "automatic catalog publication must not rewrite a Workflow Run's frozen child route"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_child_switch_uses_frozen_model_after_live_catalog_removal() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            let session_id = acp::SessionId::new("workflow-frozen-model-child");
+            let (mut child, mut commands) =
+                make_test_handle_with_receiver("catalog/original", None);
+            child.info.id = session_id.clone();
+
+            let mut entry = crate::agent::config::ModelEntry::baseline("frozen-wire-model");
+            entry.info.base_url = "https://workflow-frozen.test.invalid/v1".to_owned();
+            let frozen_manager = crate::agent::models::ModelsManager::new(
+                indexmap::IndexMap::from([("catalog/frozen".to_owned(), entry.clone())]),
+                acp::ModelId::new("catalog/frozen"),
+                crate::agent::config::Config::default(),
+            );
+            let sampler = crate::agent::config::sampling_config_for_model(
+                &entry,
+                crate::agent::config::resolve_credentials(&entry),
+                None,
+            );
+            let route = crate::session::workflow::tracker::WorkflowRuntimeRoute::capture(
+                "catalog/frozen",
+                sampler,
+                &frozen_manager,
+                None,
+                agent::config::SubagentFilter::default(),
+            )
+            .unwrap();
+            let mut tracker = crate::session::workflow::tracker::WorkflowTracker::default();
+            tracker.start_run(
+                "wf-frozen".to_owned(),
+                "frozen".to_owned(),
+                "verify frozen child control".to_owned(),
+                vec![],
+                Some(1),
+                None,
+                route,
+            );
+            child.workflow_run_id = Some("wf-frozen".to_owned());
+            child.workflow_tracker = std::sync::Arc::new(parking_lot::Mutex::new(tracker));
+            agent
+                .active_child_sessions
+                .borrow_mut()
+                .insert(session_id.clone(), child);
+
+            tokio::task::spawn_local(async move {
+                let crate::session::SessionCommand::SetSessionModel {
+                    route,
+                    catalog,
+                    responds_to,
+                } = commands.recv().await.expect("model control command")
+                else {
+                    panic!("unexpected child control command")
+                };
+                assert_eq!(route.model_id.0.as_ref(), "catalog/frozen");
+                assert_eq!(route.sampling_config.model, "frozen-wire-model");
+                assert!(catalog.is_none());
+                let _ = responds_to.send(Ok(route.model_id));
+            });
+
+            let response = acp::Agent::set_session_model(
+                &agent,
+                acp::SetSessionModelRequest::new(session_id, acp::ModelId::new("catalog/frozen")),
+            )
+            .await;
+            assert!(response.is_ok(), "frozen child switch failed: {response:?}");
+        })
+        .await;
 }
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(

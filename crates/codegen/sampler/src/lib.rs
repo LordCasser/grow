@@ -42,7 +42,7 @@ pub use config::{
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
-pub use handle::SamplerHandle;
+pub use handle::{AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,

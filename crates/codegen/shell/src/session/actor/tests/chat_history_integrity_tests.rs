@@ -194,6 +194,7 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                         "keep polling the same todo".to_string(),
                     ))];
+                    install_test_foreground(&actor, "chat-history-integrity").await;
                     let outcome = tokio::time::timeout(
                         Duration::from_secs(60),
                         actor.handle_prompt(

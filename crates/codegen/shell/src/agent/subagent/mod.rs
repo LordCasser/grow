@@ -96,6 +96,10 @@ impl AutoCompactThresholdTiers {
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
+    /// Live child-session control routes. Child sessions intentionally stay
+    /// out of the primary resident-session roster, but ACP model/Agent
+    /// selection still needs to address their actor by exact session id.
+    pub active_child_sessions: ActiveChildSessions,
     /// Parent's LSP runtime — inherited via ToolContext, same as fs/terminal.
     pub lsp: Option<std::sync::Arc<dyn tools::implementations::lsp::LspBackend>>,
     /// Root session's process scope, inherited so the subagent's own child
@@ -192,10 +196,13 @@ pub(crate) struct SubagentSpawnContext {
     /// inherited from the parent session (see `build_subagent_spawn_context`).
     pub ask_user_question_enabled: bool,
     /// Parent session command channel. Carries lifecycle notifications the
-    /// parent persists (`SubagentSpawned` / `SubagentFinished`) and — when
-    /// goal mode is on — transient `SubagentProgress` ticks the parent
-    /// consumes for token accounting without persisting.
+    /// parent persists (`SubagentSpawned` / `SubagentFinished`) and terminal
+    /// usage-ledger folds. Goal accounting uses `goal_usage_window` instead.
     pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    /// Root Goal activity/accounting route shared by the complete descendant
+    /// tree. Unlike delegation ownership, this charges every model call
+    /// settled during an Active Goal window.
+    pub goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow,
     /// Parent session info — used to locate parent session directory.
     pub parent_session_info: Option<SessionInfo>,
     /// Session info for the immediate delegation parent. Fork context and
@@ -221,6 +228,8 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_max_turns: Option<usize>,
     /// All available models for resolving model IDs from overrides.
     pub available_models: indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    /// Generation captured atomically with `available_models`.
+    pub catalog_revision: u64,
     /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
@@ -229,11 +238,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Active parent Agent's task-tool restriction, composed with the global
     /// toggle at validation and spawn time.
     pub subagent_filter: agent::config::SubagentFilter,
-    /// Whether the runtime turn-end TodoGate is force-enabled via
-    /// `--todo-gate`. Inherited from the parent session.
-    pub todo_gate: bool,
-    /// Remote settings snapshot from the parent session. Used to resolve
-    /// Session TodoGate setting (CLI > remote > default) for the subagent.
+    /// Remote settings snapshot from the parent session.
     pub remote_settings: Option<crate::util::config::RemoteSettings>,
     /// Inherited `--laziness-debug-log <path>` from the parent session.
     /// Subagent classifier fires append to the same log file. `None`
@@ -274,7 +279,24 @@ pub(crate) struct SubagentSpawnContext {
     /// only to preserve results displaced by steering; Timeline owns delivery.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
 }
+
+pub(crate) type ActiveChildSessions = std::rc::Rc<
+    std::cell::RefCell<std::collections::HashMap<agent_client_protocol::SessionId, SessionHandle>>,
+>;
 impl SubagentSpawnContext {
+    pub fn resolve_inference_idle_timeout_secs(&self, subagent_model_id: &str) -> u64 {
+        let per_model = crate::agent::config::find_model_by_catalog_id(
+            &self.available_models,
+            subagent_model_id,
+        )
+        .and_then(|entry| entry.info.inference_idle_timeout_secs);
+        let remote = self
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.inference_idle_timeout_secs);
+        per_model.or(remote).unwrap_or(600).max(10)
+    }
+
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual
     /// model id (the one selected by `resolve_subagent_sampling_config`,
     /// not the parent's). Walks the same precedence as the main session's
@@ -612,8 +634,12 @@ async fn admit_subagent_completion_receipt(
     body: String,
 ) -> bool {
     let owner = match owner {
-        SubagentOwner::Goal { goal_id } => chat_state::NotificationOwner::Goal {
+        SubagentOwner::Goal {
+            goal_id,
+            definition_revision,
+        } => chat_state::NotificationOwner::Goal {
             goal_id: goal_id.clone(),
+            definition_revision: *definition_revision,
         },
         SubagentOwner::Task | SubagentOwner::Workflow { .. } => {
             chat_state::NotificationOwner::Session
@@ -1400,32 +1426,18 @@ fn filter_pool_by_inheritance(
     mut pool: crate::session::mcp_servers::SharedMcpPool,
     inheritance: &agent::config::McpInheritance,
 ) -> Option<crate::session::mcp_servers::SharedMcpPool> {
-    match inheritance {
-        McpInheritance::All => Some(pool),
-        McpInheritance::None => None,
-        McpInheritance::Named(names) => {
-            let before = pool.server_names().count();
-            pool.restrict_to_servers(names.iter().cloned());
-            tracing::debug!(
-                before,
-                after = pool.server_names().count(),
-                ?names,
-                "MCP inheritance: Named filter applied"
-            );
-            Some(pool)
-        }
-        McpInheritance::Except(names) => {
-            let before = pool.server_names().count();
-            pool.exclude_servers(names.iter().cloned());
-            tracing::debug!(
-                before,
-                after = pool.server_names().count(),
-                ?names,
-                "MCP inheritance: Except filter applied"
-            );
-            Some(pool)
-        }
+    if matches!(inheritance, McpInheritance::None) {
+        return None;
     }
+    let before = pool.server_names().count();
+    pool.retain_clients(|server| inheritance.permits(server));
+    tracing::debug!(
+        before,
+        after = pool.server_names().count(),
+        ?inheritance,
+        "MCP inheritance filter applied"
+    );
+    Some(pool)
 }
 /// Resolve a subagent type name to its `AgentDefinition`, with the parent
 /// session's CLI tool/permission overrides already applied (so the spawn path
@@ -1902,19 +1914,6 @@ fn progress_tick_should_emit(
 ) -> bool {
     cur != prev || heartbeat_due
 }
-/// Parent-actor tick channel for [`spawn_progress_publisher`]: goal token
-/// accounting is the only consumer, so a goal-disabled session sends no
-/// per-tick commands at all.
-fn goal_tick_cmd_tx(
-    goal_enabled: bool,
-    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-) -> Option<mpsc::UnboundedSender<SessionCommand>> {
-    if goal_enabled {
-        parent_cmd_tx.cloned()
-    } else {
-        None
-    }
-}
 /// Spawn a background task that periodically emits `SubagentProgress`
 /// notifications on the parent session's notification channel.
 ///
@@ -1922,11 +1921,6 @@ fn goal_tick_cmd_tx(
 /// [`PROGRESS_PUBLISH_INTERVAL`] and emits a `SubagentProgress`
 /// notification if the subagent is still running. It stops automatically
 /// when `cancel_token` is cancelled (subagent completion/cancellation).
-///
-/// When `parent_cmd_tx` is `Some`, each tick is also delivered to the
-/// parent `SessionActor` so goal mode can advance its live subagent
-/// token accounting; the actor's `SubagentProgress` arm never persists
-/// these ticks.
 ///
 /// Notifications are **not** persisted to JSONL — they are transient UI
 /// hints, not authoritative lifecycle events. The TUI can resync via
@@ -1939,7 +1933,6 @@ fn spawn_progress_publisher(
     child_session_id: String,
     started_at: std::time::Instant,
     cancel_token: tokio_util::sync::CancellationToken,
-    parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
 ) {
     tokio::task::spawn_local(async move {
         let mut interval = tokio::time::interval(PROGRESS_PUBLISH_INTERVAL);
@@ -1991,9 +1984,6 @@ fn spawn_progress_publisher(
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
                 .ok();
-            if let Some(ref cmd_tx) = parent_cmd_tx {
-                let _ = cmd_tx.send(SessionCommand::GrowSessionNotification { notification });
-            }
             if let Some(params) = params {
                 let ext_notification =
                     acp::ExtNotification::new("grow/session_notification", params.into());
@@ -2316,12 +2306,24 @@ fn finish_from_durable_facts_in_directory(
 fn spawn_from_fact(
     parent_session_id: &str,
     spawn: &chat_state::SubagentSpawnEvent,
+    workflow_tracker: Option<
+        &std::sync::Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>>,
+    >,
 ) -> SessionUpdate {
     let context_source = match spawn.context_source {
         chat_state::SubagentContextSource::New => "new",
         chat_state::SubagentContextSource::Forked => "forked",
         chat_state::SubagentContextSource::Resumed => "resumed",
     };
+    let workflow_projection = spawn.workflow_run_id.as_deref().and_then(|run_id| {
+        let tracker = workflow_tracker?.lock();
+        let route = &tracker.get(run_id)?.runtime_route;
+        let model_state = route
+            .model_state_for(&spawn.effective_model_id, spawn.reasoning_effort)
+            .ok()?;
+        Some((model_state, route.frozen_agent_names()))
+    });
+    let (model_state, workflow_agent_names) = workflow_projection.unzip();
     SessionUpdate::SubagentSpawned {
         subagent_id: spawn.subagent_id.clone(),
         child_session_id: spawn.child_session_id.clone(),
@@ -2335,6 +2337,8 @@ fn spawn_from_fact(
         permission_mode: spawn.permission_mode.clone(),
         effective_permission_mode: spawn.effective_permission_mode.clone(),
         model: Some(spawn.effective_model_id.clone()),
+        model_state,
+        workflow_agent_names,
         resumed_from: spawn.resumed_from.clone(),
         workflow_run_id: spawn.workflow_run_id.clone(),
         goal_id: spawn.goal_id.clone(),
@@ -2599,13 +2603,16 @@ async fn ensure_recovered_child_result_with_opened(
 fn subagent_notification_owner(
     spawn: &chat_state::SubagentSpawnEvent,
 ) -> chat_state::NotificationOwner {
-    spawn
-        .goal_id
-        .as_ref()
-        .map(|goal_id| chat_state::NotificationOwner::Goal {
-            goal_id: goal_id.clone(),
-        })
-        .unwrap_or(chat_state::NotificationOwner::Session)
+    match (spawn.goal_id.as_ref(), spawn.goal_definition_revision) {
+        (None, None) => chat_state::NotificationOwner::Session,
+        (Some(goal_id), Some(definition_revision)) if definition_revision > 0 => {
+            chat_state::NotificationOwner::Goal {
+                goal_id: goal_id.clone(),
+                definition_revision,
+            }
+        }
+        _ => unreachable!("persisted Subagent spawn has an incomplete Goal owner"),
+    }
 }
 
 fn completion_receipt_body_from_durable_facts(
@@ -2696,6 +2703,9 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     backend: &tools::implementations::grow_build::task::backend::ChannelBackend,
     parent_session_id: &str,
     parent_chat_state: &chat_state::ChatStateHandle,
+    workflow_tracker: Option<
+        &std::sync::Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>>,
+    >,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
@@ -2733,7 +2743,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 emit_subagent_notification(
                     gateway,
                     parent_session_id,
-                    spawn_from_fact(parent_session_id, spawn),
+                    spawn_from_fact(parent_session_id, spawn, workflow_tracker),
                     parent_cmd_tx,
                 );
             }

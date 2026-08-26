@@ -275,8 +275,6 @@ pub struct RuntimeResolutionContext<'a> {
     pub cli_experimental_memory: bool,
     /// CLI `--no-memory` flag. Overrides all other memory settings.
     pub cli_no_memory: bool,
-    /// CLI `--todo-gate` flag. Session-scoped — not persisted.
-    pub todo_gate: bool,
     /// CLI `--laziness-debug-log <path>`. When `Some`, the Layer-3
     /// classifier fires after every turn (bypassing the idle wait /
     /// per-model gate / nudge cap) and writes a JSONL line per fire.
@@ -875,15 +873,6 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
-    /// Whether the runtime turn-end TodoGate is force-enabled via the
-    /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
-    /// true, flips the runtime policy's `enabled` bit on regardless of
-    /// remote settings or the built-in default (which is `false`).
-    /// The gate runs only while a `/goal` is active (goal reminders
-    /// inject `<task_completion_discipline>`); global built-in templates
-    /// do not activate it.
-    #[serde(skip)]
-    pub todo_gate: bool,
     /// Path for the Layer-3 LazinessDetector debug log
     /// (`--laziness-debug-log`). When `Some`, the classifier fires
     /// after every turn (bypassing the idle wait, the per-model
@@ -1162,7 +1151,6 @@ impl Default for Config {
             subagent_classifier_input: Default::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
-            todo_gate: false,
             laziness_debug_log: None,
             respect_gitignore: false,
             path_not_found_hints: false,
@@ -1495,7 +1483,6 @@ impl Config {
             ctx.remote_settings,
         );
         self.memory_config = if mem.enabled { Some(mem) } else { None };
-        self.todo_gate = ctx.todo_gate;
         self.laziness_debug_log = ctx.laziness_debug_log.map(std::path::Path::to_path_buf);
         if let Some(v) = ctx.remote_settings.and_then(|s| s.path_not_found_hints) {
             self.path_not_found_hints = v;
@@ -1517,7 +1504,6 @@ impl Config {
             cli_session_title_model: cli_session_title_model.as_deref(),
             cli_experimental_memory: self.cli_experimental_memory,
             cli_no_memory: self.cli_no_memory,
-            todo_gate: self.todo_gate,
             laziness_debug_log: laziness_debug_log.as_deref(),
         };
         self.resolve_runtime_fields(&ctx);
@@ -1539,7 +1525,7 @@ impl Config {
     /// Tunables have no env layer (TOML > remote > default) and are clamped
     /// to their documented ranges. Returns the composite runtime policy
     /// rather than `Resolved` because each knob resolves from its own
-    /// source (the `resolve_todo_gate_config` pattern).
+    /// source (the per-field resolution pattern).
     pub(crate) fn resolve_doom_loop_recovery(
         &self,
     ) -> Option<sampling_types::DoomLoopRecoveryPolicy> {
@@ -4867,7 +4853,6 @@ reasoning_effort = "low"
             cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         });
         assert!(cfg.subagents_enabled);
@@ -4885,7 +4870,6 @@ reasoning_effort = "low"
             cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         });
         assert!(cfg.subagents_enabled);
@@ -4904,7 +4888,6 @@ reasoning_effort = "low"
             cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         });
         assert!(!cfg.respect_gitignore);
@@ -4923,7 +4906,6 @@ reasoning_effort = "low"
             cli_session_title_model: Some("custom-ss"),
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         });
         assert_eq!(cfg.session_title_model, Some("custom-ss".to_owned()));
@@ -4945,7 +4927,6 @@ reasoning_effort = "low"
             cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         });
         assert!(cfg.path_not_found_hints);
@@ -4963,7 +4944,6 @@ reasoning_effort = "low"
             cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            todo_gate: false,
             laziness_debug_log: None,
         };
         cfg.resolve_runtime_fields(&ctx);

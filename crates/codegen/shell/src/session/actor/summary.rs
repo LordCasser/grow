@@ -56,7 +56,7 @@ impl SessionActor {
         user_text: String,
         input_ref: chat_state::TimelineRangeRef,
     ) {
-        use crate::session::actor::sideband::{sideband_finish, sideband_usage};
+        use crate::session::actor::sideband::sideband_finish;
         use crate::session::helpers::session_title;
 
         let request = session_title::build_session_title_request(
@@ -93,15 +93,14 @@ impl SessionActor {
             self.session_title_route.replace(Some(route));
             return;
         }
-
         let response = match tokio::time::timeout(
             session_title::SESSION_TITLE_TIMEOUT,
-            route.client.conversation_collect(request),
+            sideband.run_provider(route.client.conversation_collect(request)),
         )
         .await
         {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
                 let terminal_ref = match sideband
                     .fail(chat_state::SidebandOutcome::Failed, error.to_string())
                     .await
@@ -114,6 +113,11 @@ impl SessionActor {
                     }
                 };
                 self.persist_title_fallback(&user_text, terminal_ref).await;
+                return;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "session title: provider admission failed");
+                self.session_title_route.replace(Some(route));
                 return;
             }
             Err(_) => {
@@ -132,6 +136,17 @@ impl SessionActor {
                     }
                 };
                 self.persist_title_fallback(&user_text, terminal_ref).await;
+                return;
+            }
+        };
+        let usage = match self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(%error, "session title: failed to settle provider usage");
+                self.session_title_route.replace(Some(route));
                 return;
             }
         };
@@ -159,7 +174,7 @@ impl SessionActor {
             .complete(
                 raw_output,
                 Some(serde_json::json!({ "session_title": title.clone() })),
-                sideband_usage(&response),
+                usage,
                 sideband_finish(&response),
                 Vec::new(),
             )

@@ -45,10 +45,60 @@ pub struct JsonlStorageAdapter {
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 struct LedgerPrefix {
     len: u64,
     hash: blake3::Hash,
+    stamp: LedgerFileStamp,
+    /// Continuation state after hashing exactly `len` committed bytes. The
+    /// writer lease and file stamp make this cache authoritative for an
+    /// unchanged writer epoch, so normal append never rereads the historical
+    /// ledger. A foreign write changes the stamp and forces a full hash check.
+    hasher: blake3::Hasher,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LedgerFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
+}
+
+impl LedgerFileStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        #[cfg(windows)]
+        use std::os::windows::fs::MetadataExt as _;
+
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+            #[cfg(windows)]
+            creation_time: metadata.creation_time(),
+            #[cfg(windows)]
+            last_write_time: metadata.last_write_time(),
+        }
+    }
 }
 
 /// One identity-checked session entity pinned to a single directory handle.
@@ -977,8 +1027,9 @@ impl JsonlStorageAdapter {
     /// A retry after a lost durability acknowledgement re-syncs the identical
     /// tail instead of duplicating it. An incomplete final record is never a
     /// committed fact and is truncated before the retry. Only the tail record
-    /// is read, so append cost is independent of ledger length; strict loading
-    /// remains responsible for detecting interior corruption.
+    /// is read in the uncontended writer epoch, so normal append cost is
+    /// independent of ledger length. A file-stamp change forces full prefix
+    /// validation before the append can proceed.
     fn append_timeline_line_in_directory_sync(
         directory: &super::ContainedDirectory,
         prefix_state: &std::sync::Mutex<Option<LedgerPrefix>>,
@@ -1013,27 +1064,51 @@ impl JsonlStorageAdapter {
                 );
                 file.set_len(complete_len)?;
             }
+            let current_stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
 
             let mut expected = prefix_state
                 .lock()
                 .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
-            let (actual_prefix, mut prefix_hasher) =
-                Self::hash_timeline_prefix(&mut file, complete_len, expected.is_none())?;
-            if let Some(expected_prefix) = *expected
-                && expected_prefix != actual_prefix
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Timeline committed prefix changed: expected {} bytes/{}, found {} bytes/{}",
-                        expected_prefix.len,
-                        expected_prefix.hash.to_hex(),
-                        actual_prefix.len,
-                        actual_prefix.hash.to_hex(),
-                    ),
-                ));
-            }
-            *expected = Some(actual_prefix);
+            let mut prefix_hasher = match expected.as_ref() {
+                Some(prefix) if prefix.len == complete_len && prefix.stamp == current_stamp => {
+                    prefix.hasher.clone()
+                }
+                Some(prefix) if prefix.len == complete_len => {
+                    let actual = Self::load_timeline_prefix(&mut file, complete_len)?;
+                    if actual.hash != prefix.hash {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Timeline committed prefix changed: expected {} bytes/{}, found {} bytes/{}",
+                                prefix.len,
+                                prefix.hash.to_hex(),
+                                actual.len,
+                                actual.hash.to_hex(),
+                            ),
+                        ));
+                    }
+                    let hasher = actual.hasher.clone();
+                    *expected = Some(actual);
+                    hasher
+                }
+                Some(prefix) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Timeline committed prefix length changed: expected {} bytes/{}, found {} bytes",
+                            prefix.len,
+                            prefix.hash.to_hex(),
+                            complete_len,
+                        ),
+                    ));
+                }
+                None => {
+                    let prefix = Self::load_timeline_prefix(&mut file, complete_len)?;
+                    let hasher = prefix.hasher.clone();
+                    *expected = Some(prefix);
+                    hasher
+                }
+            };
 
             match last_line.as_deref() {
                 Some(last_line) => {
@@ -1078,9 +1153,12 @@ impl JsonlStorageAdapter {
             file.write_all(&line)?;
             file.flush()?;
             prefix_hasher.update(&line);
+            let hash = prefix_hasher.finalize();
             *expected = Some(LedgerPrefix {
                 len: complete_len.saturating_add(line.len() as u64),
-                hash: prefix_hasher.finalize(),
+                hash,
+                stamp: LedgerFileStamp::from_metadata(&file.metadata()?),
+                hasher: prefix_hasher,
             });
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
@@ -1096,11 +1174,10 @@ impl JsonlStorageAdapter {
         }
     }
 
-    fn hash_timeline_prefix(
+    fn load_timeline_prefix(
         file: &mut std::fs::File,
         complete_len: u64,
-        validate_structure: bool,
-    ) -> io::Result<(LedgerPrefix, blake3::Hasher)> {
+    ) -> io::Result<LedgerPrefix> {
         file.seek(io::SeekFrom::Start(0))?;
         let prefix_len = usize::try_from(complete_len).map_err(|_| {
             io::Error::new(
@@ -1116,32 +1193,29 @@ impl JsonlStorageAdapter {
                 "Timeline changed while its committed prefix was being validated",
             ));
         }
-        if validate_structure {
-            let mut events = Vec::new();
-            for record in bytes.split_inclusive(|byte| *byte == b'\n') {
-                let json = record.strip_suffix(b"\n").ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Timeline committed prefix contains an incomplete record",
-                    )
-                })?;
-                events.push(
-                    serde_json::from_slice::<chat_state::TimelineEvent>(json)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                );
-            }
-            chat_state::Timeline::from_events(events)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut events = Vec::new();
+        for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let json = record.strip_suffix(b"\n").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Timeline committed prefix contains an incomplete record",
+                )
+            })?;
+            events.push(
+                serde_json::from_slice::<chat_state::TimelineEvent>(json)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            );
         }
+        chat_state::Timeline::from_events(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(&bytes);
-        Ok((
-            LedgerPrefix {
-                len: complete_len,
-                hash: hasher.finalize(),
-            },
+        Ok(LedgerPrefix {
+            len: complete_len,
+            hash: hasher.finalize(),
+            stamp: LedgerFileStamp::from_metadata(&file.metadata()?),
             hasher,
-        ))
+        })
     }
 
     fn append_sideband_line_sync(
@@ -2108,6 +2182,10 @@ impl JsonlStorageAdapter {
         self.opened_sessions
             .lock()
             .map_err(|_| io::Error::other("session capability cache poisoned"))?
+            .remove(&key);
+        self.timeline_prefixes
+            .lock()
+            .map_err(|_| io::Error::other("Timeline prefix cache poisoned"))?
             .remove(&key);
         Ok(())
     }

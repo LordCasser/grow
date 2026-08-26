@@ -271,18 +271,20 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
             Some(sampling_types::ConversationItem::System(_))
         ));
         assert!(
-            timeline.events().iter().any(|event| matches!(
-                &event.kind,
-                chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
-                    revision: 1,
-                    model_context: Some(chat_state::ControlContext {
-                        layer: chat_state::ControlContextLayer::AgentRole,
-                        activation: chat_state::ControlContextActivation::Transition,
-                        ..
-                    }),
-                    ..
-                })
-            )),
+            timeline.events().iter().any(|event| {
+                let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                    return false;
+                };
+                control.revision == 1
+                    && matches!(
+                        control.model_contexts.as_slice(),
+                        [chat_state::ControlContext {
+                            layer: chat_state::ControlContextLayer::AgentRole,
+                            activation: chat_state::ControlContextActivation::Transition,
+                            ..
+                        }]
+                    )
+            }),
             "new_session must return only after the initial Agent role is durable"
         );
         prompt_turn(&client_conn, &warmup, "churn ping 0").await;

@@ -116,7 +116,7 @@ pub struct TrajectoryProjector {
     control_snapshot: Option<serde_json::Value>,
     active_turn: Option<String>,
     active_step: Option<u32>,
-    pending_control_row: Option<(SurfaceId, usize)>,
+    pending_control_rows: BTreeMap<ControlContextLayer, (SurfaceId, usize)>,
 }
 
 impl TrajectoryProjector {
@@ -201,18 +201,25 @@ impl TrajectoryProjector {
                 input: None, ..
             }) => 0,
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(_),
-                ..
-            }) if self.active_turn.is_none() => {
-                self.surface_rows.insert(
-                    SurfaceId {
-                        event: event.seq,
-                        item: 0,
-                    },
-                    row_index,
-                );
-                1
+            TimelineEventKind::Control(ControlEvent { model_contexts, .. }) => {
+                let mut current = 0;
+                for (item, context) in model_contexts.iter().enumerate() {
+                    if !crate::timeline::control_transition_waits_for_boundary(
+                        self.active_turn.is_some(),
+                        self.active_step.is_some(),
+                        context,
+                    ) {
+                        self.surface_rows.insert(
+                            SurfaceId {
+                                event: event.seq,
+                                item: item as u32,
+                            },
+                            row_index,
+                        );
+                        current += 1;
+                    }
+                }
+                current
             }
             _ => 0,
         };
@@ -240,29 +247,50 @@ impl TrajectoryProjector {
         self.rows.push(projected);
         self.dirty_rows.insert(row_index);
         match &event.kind {
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(_),
-                ..
-            }) if self.active_turn.is_some() => {
-                self.pending_control_row = Some((
-                    SurfaceId {
-                        event: event.seq,
-                        item: 0,
-                    },
-                    row_index,
-                ));
+            TimelineEventKind::Control(ControlEvent { model_contexts, .. }) => {
+                for (item, context) in model_contexts.iter().enumerate() {
+                    if crate::timeline::control_transition_waits_for_boundary(
+                        self.active_turn.is_some(),
+                        self.active_step.is_some(),
+                        context,
+                    ) {
+                        self.pending_control_rows.insert(
+                            context.layer,
+                            (
+                                SurfaceId {
+                                    event: event.seq,
+                                    item: item as u32,
+                                },
+                                row_index,
+                            ),
+                        );
+                    }
+                }
             }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
-                if let Some((id, pending_row)) = self.pending_control_row.take() {
+                for (_layer, (id, pending_row)) in std::mem::take(&mut self.pending_control_rows) {
                     self.surface_rows.insert(id, pending_row);
-                    self.current_items_per_row[pending_row] = 1;
+                    self.current_items_per_row[pending_row] += 1;
                     self.rows[pending_row].visibility = SurfaceVisibility::Current;
                     self.dirty_rows.insert(pending_row);
                 }
                 self.active_turn = None;
                 self.active_step = None;
             }
-            TimelineEventKind::Step(StepEvent::Ended { .. }) => self.active_step = None,
+            TimelineEventKind::Step(StepEvent::Ended { .. }) => {
+                for layer in [
+                    ControlContextLayer::AgentRole,
+                    ControlContextLayer::GoalDefinition,
+                ] {
+                    if let Some((id, pending_row)) = self.pending_control_rows.remove(&layer) {
+                        self.surface_rows.insert(id, pending_row);
+                        self.current_items_per_row[pending_row] += 1;
+                        self.rows[pending_row].visibility = SurfaceVisibility::Current;
+                        self.dirty_rows.insert(pending_row);
+                    }
+                }
+                self.active_step = None;
+            }
             _ => {}
         }
     }
@@ -393,13 +421,32 @@ fn dimensions(
                 format!("{}.{}", observation.scope, observation.name),
             )
         }
-        TimelineEventKind::Control(control) => match control.model_context.as_ref() {
+        TimelineEventKind::Control(control) if control.model_contexts.len() > 1 => {
+            coordinates(
+                "system.control",
+                "governance",
+                "core",
+                if control.model_contexts.iter().all(|context| {
+                    context.activation == crate::ControlContextActivation::Reprojection
+                }) {
+                    "prompt.control.reprojected"
+                } else {
+                    "prompt.control.updated"
+                },
+                state,
+            )
+        }
+        TimelineEventKind::Control(control) => match control.model_contexts.first() {
             Some(context) => {
                 let (layer, kind) = match (context.layer, context.activation) {
                     (
                         ControlContextLayer::AgentRole,
                         crate::ControlContextActivation::Transition,
                     ) => ("system.role", "prompt.agent_role.updated"),
+                    (
+                        ControlContextLayer::GoalDefinition,
+                        crate::ControlContextActivation::Transition,
+                    ) => ("system.goal", "prompt.goal_definition.updated"),
                     (
                         ControlContextLayer::Behavior,
                         crate::ControlContextActivation::Transition,
@@ -408,6 +455,10 @@ fn dimensions(
                         ControlContextLayer::AgentRole,
                         crate::ControlContextActivation::Reprojection,
                     ) => ("system.role", "prompt.agent_role.reprojected"),
+                    (
+                        ControlContextLayer::GoalDefinition,
+                        crate::ControlContextActivation::Reprojection,
+                    ) => ("system.goal", "prompt.goal_definition.reprojected"),
                     (
                         ControlContextLayer::Behavior,
                         crate::ControlContextActivation::Reprojection,
@@ -986,11 +1037,22 @@ fn describe_model_transition(data: Option<&serde_json::Value>) -> String {
 }
 
 fn describe_control_event(previous: Option<&serde_json::Value>, control: &ControlEvent) -> String {
-    if let Some(context) = control.model_context.as_ref()
+    if control.model_contexts.len() > 1
+        && control
+            .model_contexts
+            .iter()
+            .all(|context| context.activation == crate::ControlContextActivation::Reprojection)
+    {
+        return "Control prompt contexts reassembled".into();
+    }
+    if let Some(context) = control.model_contexts.first()
         && context.activation == crate::ControlContextActivation::Reprojection
     {
         return match context.layer {
             ControlContextLayer::AgentRole => "Agent role prompt context reassembled".into(),
+            ControlContextLayer::GoalDefinition => {
+                "Goal definition prompt context reassembled".into()
+            }
             ControlContextLayer::Behavior => "Behavior prompt context reassembled".into(),
         };
     }
@@ -1599,6 +1661,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1633,7 +1696,8 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 3,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
 
@@ -1654,11 +1718,12 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "agent_name": "reviewer" }),
-                model_context: Some(crate::ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
                     layer: crate::ControlContextLayer::AgentRole,
                     activation: crate::ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("role"),
-                }),
+                }],
             }))
             .unwrap();
 
@@ -1678,11 +1743,12 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(crate::ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
                     layer: crate::ControlContextLayer::Behavior,
                     activation: crate::ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("plan"),
-                }),
+                }],
             }))
             .unwrap();
         timeline
@@ -1695,11 +1761,12 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(crate::ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![crate::ControlContext {
                     layer: crate::ControlContextLayer::Behavior,
                     activation: crate::ControlContextActivation::Reprojection,
                     item: ConversationItem::system_reminder("plan"),
-                }),
+                }],
             }))
             .unwrap();
 
@@ -1725,6 +1792,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1740,11 +1808,12 @@ mod tests {
                 .record(TimelineEventKind::Control(crate::ControlEvent {
                     revision,
                     snapshot: serde_json::json!({ "behavior": behavior }),
-                    model_context: Some(crate::ControlContext {
+                    retired_context_layers: vec![],
+                    model_contexts: vec![crate::ControlContext {
                         layer: crate::ControlContextLayer::Behavior,
                         activation: crate::ControlContextActivation::Transition,
                         item: ConversationItem::system_reminder(behavior),
-                    }),
+                    }],
                 }))
                 .unwrap();
         }
@@ -1776,6 +1845,120 @@ mod tests {
             .unwrap();
         assert_eq!(first.visibility, SurfaceVisibility::LogOnly);
         assert_eq!(latest.visibility, SurfaceVisibility::Current);
+    }
+
+    #[test]
+    fn projection_activates_atomic_goal_context_at_step_boundary() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = crate::TurnId(8);
+        let step = crate::StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 2,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "control_boundary".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({
+                    "behavior": { "state": "Goal" },
+                    "goal": { "goal_id": "goal-1", "definition_revision": 2 }
+                }),
+                retired_context_layers: vec![],
+                model_contexts: vec![
+                    crate::ControlContext {
+                        layer: crate::ControlContextLayer::Behavior,
+                        activation: crate::ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder("goal behavior"),
+                    },
+                    crate::ControlContext {
+                        layer: crate::ControlContextLayer::GoalDefinition,
+                        activation: crate::ControlContextActivation::Transition,
+                        item: ConversationItem::goal_directive(
+                            "goal revision 2",
+                            sampling_types::SyntheticReason::SystemReminder,
+                            sampling_types::GoalDirectiveTag {
+                                goal_id: "goal-1".into(),
+                                definition_revision: 2,
+                            },
+                        ),
+                    },
+                ],
+            }))
+            .unwrap();
+
+        let snapshot = timeline.trajectory();
+        let control = snapshot
+            .rows
+            .iter()
+            .find(|row| row.correlation_id.as_deref() == Some("1"))
+            .unwrap();
+        assert_eq!(control.layer, "system.control");
+        assert_eq!(control.kind, "prompt.control.updated.committed");
+        assert_eq!(control.visibility, SurfaceVisibility::Current);
+        assert_eq!(snapshot.current_surface_items, timeline.surface().len());
+        assert!(
+            timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal revision 2")
+        );
+        assert!(
+            !timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal behavior")
+        );
+
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: crate::TurnTerminal {
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "control_boundary".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        let snapshot = timeline.trajectory();
+        assert_eq!(snapshot.current_surface_items, timeline.surface().len());
+        assert!(
+            timeline
+                .surface()
+                .iter()
+                .any(|item| item.text_content() == "goal behavior")
+        );
     }
 
     #[test]
@@ -1829,7 +2012,8 @@ mod tests {
                     "behavior": { "state": "Normal" },
                     "goal": null,
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
         timeline
@@ -1845,7 +2029,8 @@ mod tests {
                         "tokens_used": 0,
                     },
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
         timeline
@@ -1861,7 +2046,8 @@ mod tests {
                         "tokens_used": 380,
                     },
                 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
 
@@ -1886,6 +2072,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),
@@ -1980,6 +2167,7 @@ mod tests {
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "model".into(),

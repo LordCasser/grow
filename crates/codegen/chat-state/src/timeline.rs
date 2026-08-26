@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 20;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 21;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
@@ -172,6 +172,8 @@ pub struct TurnIdentity {
     pub turn_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_definition_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_id: Option<u64>,
 }
@@ -445,14 +447,16 @@ pub struct ObservationEvent {
 /// The payload stays shell-owned, while Timeline owns its identity, ordering,
 /// durability and revision monotonicity. A transition may also carry its one
 /// model-visible context item. Applying both from the same event prevents a
-/// crash from committing state without its context. If a turn is active, the
-/// fold activates the latest pending transition in each layer after that
-/// turn's durable end. A re-projection restores an already-effective item
-/// immediately after compaction shadows its former Surface anchor.
+/// crash from committing state without its context. Transition activation is
+/// layer-specific: AgentRole and GoalDefinition changes enter Surface after
+/// the active step ends, while Behavior changes remain turn-bound. A
+/// re-projection restores an already-effective item immediately after
+/// compaction shadows its former Surface anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlContextLayer {
     AgentRole,
+    GoalDefinition,
     Behavior,
 }
 
@@ -475,7 +479,7 @@ pub struct ControlContext {
 ///
 /// The anchor remains meaningful after compaction shadows it from Surface so
 /// the exact effective context can be projected again. A transition waiting
-/// for the active turn to end is deliberately not represented here.
+/// for its authority boundary to end is deliberately not represented here.
 #[derive(Debug, Clone)]
 pub struct ActiveControlContext {
     pub surface_id: SurfaceId,
@@ -487,8 +491,12 @@ pub struct ActiveControlContext {
 pub struct ControlEvent {
     pub revision: u64,
     pub snapshot: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_context: Option<ControlContext>,
+    /// Layers whose prior model context stops being authoritative in this
+    /// atomic transition. Historical Surface items remain evidence, but a
+    /// later compaction must not reproject them as current instructions.
+    pub retired_context_layers: Vec<ControlContextLayer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_contexts: Vec<ControlContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +557,8 @@ pub struct SubagentSpawnEvent {
     pub workflow_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_definition_revision: Option<u64>,
     /// Whether this child owns a model-facing completion receipt. Internal
     /// harness children set this to false, and crash recovery must preserve
     /// that decision instead of manufacturing a reminder.
@@ -765,6 +775,7 @@ pub enum NotificationOwner {
     Session,
     Goal {
         goal_id: String,
+        definition_revision: u64,
     },
 }
 
@@ -824,7 +835,10 @@ pub enum NotificationEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationDismissReason {
-    GoalOwnedAutostart { goal_id: String },
+    GoalOwnedAutostart {
+        goal_id: String,
+        definition_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,6 +1063,8 @@ pub enum TimelineError {
     TurnAlreadyActive { active: TurnId, actual: TurnId },
     #[error("turn {0:?} already has a start event")]
     TurnAlreadySeen(TurnId),
+    #[error("turn identity has an invalid Goal owner")]
+    InvalidTurnIdentity,
     #[error("turn boundary {actual:?} does not match active turn {active:?}")]
     TurnMismatch {
         active: Option<TurnId>,
@@ -1263,37 +1279,53 @@ impl Timeline {
     /// Effective model context for each Control layer, whether or not its
     /// anchor is still present on the current Surface.
     ///
-    /// This replays the same turn-boundary activation rule as Surface. A
-    /// transition recorded inside the active turn remains pending and does
-    /// not displace the context that still governs provider requests.
+    /// This replays the same layer-specific activation rule as Surface.
     pub fn active_control_contexts(
         &self,
     ) -> std::collections::BTreeMap<ControlContextLayer, ActiveControlContext> {
         let mut active = std::collections::BTreeMap::new();
         let mut active_turn = false;
+        let mut active_step = false;
         let mut pending = BTreeMap::new();
         for event in &self.events {
             match &event.kind {
                 TimelineEventKind::Turn(TurnEvent::Started { .. }) => active_turn = true,
-                TimelineEventKind::Control(ControlEvent {
-                    model_context: Some(context),
-                    ..
-                }) => {
-                    let projection = ActiveControlContext {
-                        surface_id: SurfaceId {
-                            event: event.seq,
-                            item: 0,
-                        },
-                        item: context.item.clone(),
-                    };
-                    if active_turn && context.activation == ControlContextActivation::Transition {
-                        pending.insert(context.layer, projection);
-                    } else {
-                        active.insert(context.layer, projection);
+                TimelineEventKind::Step(StepEvent::Started { .. }) => active_step = true,
+                TimelineEventKind::Control(control) => {
+                    for layer in &control.retired_context_layers {
+                        pending.remove(layer);
+                        active.remove(layer);
+                    }
+                    for (item, context) in control.model_contexts.iter().enumerate() {
+                        let projection = ActiveControlContext {
+                            surface_id: SurfaceId {
+                                event: event.seq,
+                                item: item as u32,
+                            },
+                            item: context.item.clone(),
+                        };
+                        if control_transition_waits_for_boundary(active_turn, active_step, context)
+                        {
+                            pending.insert(context.layer, projection);
+                        } else {
+                            active.insert(context.layer, projection);
+                        }
+                    }
+                }
+                TimelineEventKind::Step(StepEvent::Ended { .. }) => {
+                    active_step = false;
+                    for layer in [
+                        ControlContextLayer::AgentRole,
+                        ControlContextLayer::GoalDefinition,
+                    ] {
+                        if let Some(projection) = pending.remove(&layer) {
+                            active.insert(layer, projection);
+                        }
                     }
                 }
                 TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
                     active_turn = false;
+                    active_step = false;
                     for (layer, projection) in std::mem::take(&mut pending) {
                         active.insert(layer, projection);
                     }
@@ -1686,6 +1718,32 @@ impl Timeline {
 
     /// Append deterministic terminal facts for work left open by an interrupted
     /// process. Physical history is never truncated or rewritten.
+    pub fn settle_open_compaction(
+        &mut self,
+        reason: &str,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
+        let Some(open) = self.lifecycle.open_compaction.clone() else {
+            return Ok(None);
+        };
+        let duration_ms = duration_since(self.compaction_started_at(&open.id), wall_time_ms());
+        let terminal = if open.summaries == 1 && open.replacements == 1 {
+            CompactionEvent::Completed {
+                id: open.id,
+                source_items: open.source_items,
+                result_items: self.surface.len(),
+                duration_ms,
+            }
+        } else {
+            CompactionEvent::Failed {
+                id: open.id,
+                duration_ms,
+                error: reason.into(),
+            }
+        };
+        self.record(TimelineEventKind::Compaction(terminal))
+            .map(Some)
+    }
+
     pub fn recover_interrupted(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
         // Subagents are independently durable entities whose backend may
         // still be running after this process restarts. Only the backend-aware
@@ -2079,23 +2137,31 @@ impl Timeline {
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
             TimelineEventKind::ImageProjection(projection) => {
                 let branch = fold_branch_provenance(self);
+                // One completed compaction summary may own several raw image
+                // leaves. Projection mutates the summary's SurfaceId after the
+                // first leaf, so resolving every later leaf through the stale
+                // pre-projection id would silently skip it. Freeze ownership,
+                // not identity: all leaves owned by one current Surface entry
+                // keep targeting the same index while their replacements are
+                // composed in event order.
+                let surface_index_by_leaf = branch
+                    .surface
+                    .iter()
+                    .filter_map(|entry| {
+                        self.surface_ids
+                            .iter()
+                            .position(|source| source == &entry.id)
+                            .map(|index| (entry, index))
+                    })
+                    .flat_map(|(entry, index)| {
+                        entry.leaves.iter().copied().map(move |leaf| (leaf, index))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
                 for (item, shadow) in projection.shadows.iter().enumerate() {
                     let Some(source_leaf) = branch.leaf_values.get(&shadow.source) else {
                         continue;
                     };
-                    let Some(current_source) = branch
-                        .surface
-                        .iter()
-                        .find(|entry| entry.leaves.contains(&shadow.source))
-                        .map(|entry| entry.id)
-                    else {
-                        continue;
-                    };
-                    let Some(index) = self
-                        .surface_ids
-                        .iter()
-                        .position(|source| source == &current_source)
-                    else {
+                    let Some(index) = surface_index_by_leaf.get(&shadow.source).copied() else {
                         continue;
                     };
                     let projected = sampling_types::conversation::replace_item_images_with_text(
@@ -2123,21 +2189,16 @@ impl Timeline {
                     let Some(source_leaf) = branch.leaf_values.get(&tool_call.source) else {
                         continue;
                     };
-                    let Some(current_source) = branch
-                        .surface
-                        .iter()
-                        .find(|entry| entry.leaves.contains(&tool_call.source))
-                        .map(|entry| entry.id)
-                    else {
+                    let Some(index) = surface_index_by_leaf.get(&tool_call.source).copied() else {
                         continue;
                     };
-                    let Some(index) = self
-                        .surface_ids
-                        .iter()
-                        .position(|source| source == &current_source)
-                    else {
-                        continue;
-                    };
+                    for item in &mut self.surface {
+                        sampling_types::conversation::redact_projected_image_tool_result_references(
+                            item,
+                            source_leaf,
+                            &tool_call.tool_call_ids,
+                        );
+                    }
                     let redacted = tool_call
                         .tool_call_ids
                         .iter()
@@ -2166,24 +2227,21 @@ impl Timeline {
                     for carrier_source in &tool_call.carrier_sources {
                         let carrier_item = replacement_item;
                         replacement_item = replacement_item.saturating_add(1);
-                        let Some(current_source) = branch
-                            .surface
-                            .iter()
-                            .find(|entry| entry.leaves.contains(carrier_source))
-                            .map(|entry| entry.id)
-                        else {
+                        let Some(source_leaf) = branch.leaf_values.get(carrier_source) else {
                             continue;
                         };
-                        let Some(index) = self
-                            .surface_ids
-                            .iter()
-                            .position(|source| source == &current_source)
-                        else {
+                        let Some(index) = surface_index_by_leaf.get(carrier_source).copied() else {
                             continue;
                         };
-                        if sampling_types::conversation::redact_projected_image_response_carrier(
+                        let carrier_redacted =
+                            sampling_types::conversation::redact_projected_image_response_carrier(
+                                &mut self.surface[index],
+                            );
+                        let derived_redacted = sampling_types::conversation::redact_projected_image_response_carrier_compaction_references(
                             &mut self.surface[index],
-                        ) {
+                            source_leaf,
+                        );
+                        if carrier_redacted || derived_redacted {
                             self.surface_ids[index] = SurfaceId {
                                 event: event.seq,
                                 item: carrier_item,
@@ -2201,19 +2259,30 @@ impl Timeline {
                 input: None, ..
             }) => {}
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => {}
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(context),
-                ..
-            }) if self.lifecycle.active_turn.is_some()
-                && context.activation == ControlContextActivation::Transition =>
-            {
-                self.pending_control_contexts
-                    .insert(context.layer, (event.seq, context.item.clone()));
+            TimelineEventKind::Control(control) => {
+                for layer in &control.retired_context_layers {
+                    self.pending_control_contexts.remove(layer);
+                }
+                for context in &control.model_contexts {
+                    if control_transition_waits_for_boundary(
+                        self.lifecycle.active_turn.is_some(),
+                        self.lifecycle.active_step.is_some(),
+                        context,
+                    ) {
+                        self.pending_control_contexts
+                            .insert(context.layer, (event.seq, context.item.clone()));
+                    } else {
+                        self.append_surface_items(event.seq, std::slice::from_ref(&context.item));
+                    }
+                }
             }
-            TimelineEventKind::Control(ControlEvent {
-                model_context: Some(context),
-                ..
-            }) => self.append_surface_items(event.seq, std::slice::from_ref(&context.item)),
+            TimelineEventKind::Step(StepEvent::Ended { .. }) => {
+                for (source, item) in
+                    take_pending_step_control_contexts(&mut self.pending_control_contexts)
+                {
+                    self.append_surface_items(source, std::slice::from_ref(&item));
+                }
+            }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
                 for (source, item) in
                     take_pending_control_contexts(&mut self.pending_control_contexts)
@@ -2359,6 +2428,21 @@ impl Timeline {
         }
         if event.at_ms < 0 {
             return Err(TimelineError::InvalidTimestamp);
+        }
+        if let TimelineEventKind::Turn(TurnEvent::Started { identity, .. }) = &event.kind {
+            let goal_owner_is_valid = match (
+                identity.goal_id.as_deref(),
+                identity.goal_definition_revision,
+            ) {
+                (None, None) => identity.origin != "goal_continuation",
+                (Some(goal_id), Some(revision)) => {
+                    valid_notification_identifier(goal_id) && revision > 0
+                }
+                _ => false,
+            };
+            if !goal_owner_is_valid {
+                return Err(TimelineError::InvalidTurnIdentity);
+            }
         }
 
         let mut lifecycle = self.lifecycle.clone();
@@ -2531,31 +2615,37 @@ impl Timeline {
         if let TimelineEventKind::Notification(notification) = &event.kind {
             self.validate_notification(notification)?;
         }
-        if let TimelineEventKind::Control(ControlEvent {
-            model_context: Some(context),
-            ..
-        }) = &event.kind
-            && (!matches!(self.surface.first(), Some(ConversationItem::System(_)))
-                || !is_valid_control_context(&context.item))
-        {
-            return Err(TimelineError::InvalidControlContext);
-        }
-        if let TimelineEventKind::Control(ControlEvent {
-            model_context:
-                Some(ControlContext {
-                    layer,
-                    activation: ControlContextActivation::Reprojection,
-                    ..
-                }),
-            ..
-        }) = &event.kind
-        {
-            let active = self.active_control_contexts();
-            let active = active.get(layer);
-            if active.is_none()
-                || active.is_some_and(|context| self.surface_ids.contains(&context.surface_id))
+        if let TimelineEventKind::Control(control) = &event.kind {
+            let retired = control
+                .retired_context_layers
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if (!control.model_contexts.is_empty()
+                && !matches!(self.surface.first(), Some(ConversationItem::System(_))))
+                || retired.len() != control.retired_context_layers.len()
+                || control
+                    .model_contexts
+                    .iter()
+                    .any(|context| retired.contains(&context.layer))
+                || control
+                    .model_contexts
+                    .iter()
+                    .any(|context| !is_valid_control_context(context))
             {
-                return Err(TimelineError::InvalidControlReprojection);
+                return Err(TimelineError::InvalidControlContext);
+            }
+            let active = self.active_control_contexts();
+            for context in &control.model_contexts {
+                if context.activation == ControlContextActivation::Reprojection {
+                    let current = active.get(&context.layer);
+                    if current.is_none()
+                        || current
+                            .is_some_and(|current| self.surface_ids.contains(&current.surface_id))
+                    {
+                        return Err(TimelineError::InvalidControlReprojection);
+                    }
+                }
             }
         }
         if let TimelineEventKind::Sideband(sideband) = &event.kind {
@@ -2679,6 +2769,12 @@ impl Timeline {
                     .flatten()
                     .any(|value| value.trim().is_empty())
                     {
+                        return Err(TimelineError::InvalidSubagent);
+                    }
+                    if !matches!(
+                        (spawn.goal_id.as_deref(), spawn.goal_definition_revision),
+                        (None, None) | (Some(_), Some(1..))
+                    ) {
                         return Err(TimelineError::InvalidSubagent);
                     }
                     if let Some(run_id) = &spawn.workflow_run_id {
@@ -2830,6 +2926,7 @@ impl Timeline {
                     || payload_ref.bytes > MAX_NOTIFICATION_PAYLOAD_BYTES
                     || !valid_blake3(&payload_ref.blake3)
                     || !valid_notification_source_version(source, source_version)
+                    || !valid_notification_owner(&source.owner())
                     || notification_id(owner_session_id, source, source_version)
                         .ok()
                         .as_deref()
@@ -2876,14 +2973,17 @@ impl Timeline {
                     let Some(goal_id) = valid_goal_notification_input(input) else {
                         return Err(TimelineError::InvalidNotification);
                     };
-                    let goal_turn_matches = self.events.iter().rev().any(|event| {
-                        matches!(
-                            &event.kind,
-                            TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. })
-                                if id == turn
-                                    && identity.origin == "goal_continuation"
-                                    && identity.goal_id.as_deref() == Some(goal_id)
-                        )
+                    let goal_turn_revision = self.events.iter().rev().find_map(|event| {
+                        let TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. }) =
+                            &event.kind
+                        else {
+                            return None;
+                        };
+                        (id == turn
+                            && identity.origin == "goal_continuation"
+                            && identity.goal_id.as_deref() == Some(goal_id))
+                        .then_some(identity.goal_definition_revision)
+                        .flatten()
                     });
                     let receipts_match = notification_ids.iter().all(|id| {
                         self.pending_notifications
@@ -2891,12 +2991,15 @@ impl Timeline {
                             .is_some_and(|notification| {
                                 matches!(
                                     notification.source.owner(),
-                                    NotificationOwner::Goal { goal_id: owner_goal_id }
-                                        if owner_goal_id == goal_id
+                                    NotificationOwner::Goal {
+                                        goal_id: owner_goal_id,
+                                        definition_revision: owner_revision,
+                                    } if owner_goal_id == goal_id
+                                        && goal_turn_revision == Some(owner_revision)
                                 )
                             })
                     });
-                    if !goal_turn_matches || !receipts_match {
+                    if goal_turn_revision.is_none() || !receipts_match {
                         return Err(TimelineError::InvalidNotification);
                     }
                 }
@@ -2908,12 +3011,11 @@ impl Timeline {
                 if notification_ids.is_empty() || notification_ids.len() > u32::MAX as usize {
                     return Err(TimelineError::InvalidNotification);
                 }
-                let goal_id = match reason {
-                    NotificationDismissReason::GoalOwnedAutostart { goal_id }
-                        if valid_notification_identifier(goal_id) =>
-                    {
-                        goal_id
-                    }
+                let (goal_id, definition_revision) = match reason {
+                    NotificationDismissReason::GoalOwnedAutostart {
+                        goal_id,
+                        definition_revision,
+                    } if valid_notification_identifier(goal_id) => (goal_id, definition_revision),
                     _ => return Err(TimelineError::InvalidNotification),
                 };
                 let mut unique = BTreeSet::new();
@@ -2927,8 +3029,10 @@ impl Timeline {
                                 matches!(
                                     notification.source.owner(),
                                     NotificationOwner::Goal {
-                                        goal_id: owner_goal_id
+                                        goal_id: owner_goal_id,
+                                        definition_revision: owner_revision,
                                     } if owner_goal_id.as_str() == goal_id.as_str()
+                                        && owner_revision == *definition_revision
                                 )
                             })
                     {
@@ -3707,6 +3811,16 @@ fn valid_notification_source_version(
     }
 }
 
+fn valid_notification_owner(owner: &NotificationOwner) -> bool {
+    match owner {
+        NotificationOwner::Session => true,
+        NotificationOwner::Goal {
+            goal_id,
+            definition_revision,
+        } => valid_notification_identifier(goal_id) && *definition_revision > 0,
+    }
+}
+
 fn valid_notification_input(item: &ConversationItem) -> bool {
     let ConversationItem::User(user) = item else {
         return false;
@@ -3752,13 +3866,21 @@ fn valid_goal_notification_input(item: &ConversationItem) -> Option<&str> {
     .then_some(tag.goal_id.as_str())
 }
 
-fn is_valid_control_context(item: &ConversationItem) -> bool {
-    let ConversationItem::User(user) = item else {
+fn is_valid_control_context(context: &ControlContext) -> bool {
+    let ConversationItem::User(user) = &context.item else {
         return false;
+    };
+    let goal_tag_is_valid = match context.layer {
+        ControlContextLayer::GoalDefinition => user.goal_directive.as_ref().is_some_and(|tag| {
+            tag.definition_revision > 0 && valid_notification_identifier(&tag.goal_id)
+        }),
+        ControlContextLayer::AgentRole | ControlContextLayer::Behavior => {
+            user.goal_directive.is_none()
+        }
     };
     user.synthetic_reason == Some(SyntheticReason::SystemReminder)
         && user.permission_evidence.is_none()
-        && user.goal_directive.is_none()
+        && goal_tag_is_valid
         && user.cwd_generation.is_none()
         && user.prior_turn_interrupt.is_none()
         && user.prompt_index.is_none()
@@ -3767,20 +3889,20 @@ fn is_valid_control_context(item: &ConversationItem) -> bool {
             .content
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
-        && !item.text_content().trim().is_empty()
+        && !context.item.text_content().trim().is_empty()
 }
 
 /// Fold the effective boundary of Control-owned model context.
 ///
-/// A transition recorded during a turn is durable immediately but cannot
-/// enter Surface until that turn closes: doing so would place a synthetic user
-/// item between an assistant tool call and its result, or before late output
-/// conditioned by the previous protocol. Intermediate transitions are facts
-/// in the ledger, but only the latest pending context in each typed layer
-/// becomes model-visible. The retained per-layer transitions enter Surface in
-/// causal event order, so Surface identities never move backwards.
+/// A transition is durable immediately but cannot enter Surface until its
+/// authority boundary closes. AgentRole and GoalDefinition wait for the active
+/// step so neither can split an assistant tool call from its result; Behavior
+/// waits for the whole turn because it owns turn admission. Intermediate
+/// transitions remain ledger facts, while only the latest pending context per
+/// layer becomes model-visible.
 fn fold_control_context_activation(
     active_turn: &mut bool,
+    active_step: &mut bool,
     pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     event: &TimelineEvent,
 ) -> Vec<(EventSeq, ConversationItem)> {
@@ -3789,23 +3911,63 @@ fn fold_control_context_activation(
             *active_turn = true;
             Vec::new()
         }
-        TimelineEventKind::Control(ControlEvent {
-            model_context: Some(context),
-            ..
-        }) if *active_turn && context.activation == ControlContextActivation::Transition => {
-            pending.insert(context.layer, (event.seq, context.item.clone()));
+        TimelineEventKind::Step(StepEvent::Started { .. }) => {
+            *active_step = true;
             Vec::new()
         }
-        TimelineEventKind::Control(ControlEvent {
-            model_context: Some(context),
-            ..
-        }) => vec![(event.seq, context.item.clone())],
+        TimelineEventKind::Control(control) => {
+            for layer in &control.retired_context_layers {
+                pending.remove(layer);
+            }
+            let mut projected = Vec::new();
+            for context in &control.model_contexts {
+                if control_transition_waits_for_boundary(*active_turn, *active_step, context) {
+                    pending.insert(context.layer, (event.seq, context.item.clone()));
+                } else {
+                    projected.push((event.seq, context.item.clone()));
+                }
+            }
+            projected
+        }
+        TimelineEventKind::Step(StepEvent::Ended { .. }) => {
+            *active_step = false;
+            take_pending_step_control_contexts(pending)
+        }
         TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
             *active_turn = false;
+            *active_step = false;
             take_pending_control_contexts(pending)
         }
         _ => Vec::new(),
     }
+}
+
+pub(crate) fn control_transition_waits_for_boundary(
+    active_turn: bool,
+    active_step: bool,
+    context: &ControlContext,
+) -> bool {
+    if context.activation != ControlContextActivation::Transition {
+        return false;
+    }
+    match context.layer {
+        ControlContextLayer::AgentRole | ControlContextLayer::GoalDefinition => active_step,
+        ControlContextLayer::Behavior => active_turn,
+    }
+}
+
+fn take_pending_step_control_contexts(
+    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
+) -> Vec<(EventSeq, ConversationItem)> {
+    let mut contexts = [
+        ControlContextLayer::AgentRole,
+        ControlContextLayer::GoalDefinition,
+    ]
+    .into_iter()
+    .filter_map(|layer| pending.remove(&layer))
+    .collect::<Vec<_>>();
+    contexts.sort_by_key(|(source, _)| *source);
+    contexts
 }
 
 fn take_pending_control_contexts(
@@ -3846,6 +4008,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
         .collect::<BTreeSet<_>>();
     let mut fold = BranchFold::default();
     let mut active_turn = false;
+    let mut active_step = false;
     let mut pending_control_contexts = BTreeMap::new();
 
     for event in &timeline.events {
@@ -3853,8 +4016,12 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
             append_branch_leaves(&mut fold, event.seq, items, true);
             continue;
         }
-        let activated =
-            fold_control_context_activation(&mut active_turn, &mut pending_control_contexts, event);
+        let activated = fold_control_context_activation(
+            &mut active_turn,
+            &mut active_step,
+            &mut pending_control_contexts,
+            event,
+        );
         for (source, value) in activated {
             append_branch_leaves(&mut fold, source, std::slice::from_ref(&value), false);
         }
@@ -3965,6 +4132,20 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                     let Some(source_leaf) = fold.leaf_values.get(&tool_call.source).cloned() else {
                         continue;
                     };
+                    for value in fold.leaf_values.values_mut() {
+                        sampling_types::conversation::redact_projected_image_tool_result_references(
+                            value,
+                            &source_leaf,
+                            &tool_call.tool_call_ids,
+                        );
+                    }
+                    for entry in &mut fold.surface {
+                        sampling_types::conversation::redact_projected_image_tool_result_references(
+                            &mut entry.value,
+                            &source_leaf,
+                            &tool_call.tool_call_ids,
+                        );
+                    }
                     let mut projected_leaf = source_leaf.clone();
                     let redacted = tool_call
                         .tool_call_ids
@@ -4028,11 +4209,11 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                             item: replacement_item,
                         };
                         replacement_item = replacement_item.saturating_add(1);
-                        let Some(mut projected_leaf) =
-                            fold.leaf_values.get(carrier_source).cloned()
+                        let Some(source_leaf) = fold.leaf_values.get(carrier_source).cloned()
                         else {
                             continue;
                         };
+                        let mut projected_leaf = source_leaf.clone();
                         let redacted =
                             sampling_types::conversation::redact_projected_image_response_carrier(
                                 &mut projected_leaf,
@@ -4056,9 +4237,14 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                                     *leaf = replacement_id;
                                 }
                             }
-                            if sampling_types::conversation::redact_projected_image_response_carrier(
+                            let carrier_redacted = sampling_types::conversation::redact_projected_image_response_carrier(
                                 &mut entry.value,
-                            ) {
+                            );
+                            let derived_redacted = sampling_types::conversation::redact_projected_image_response_carrier_compaction_references(
+                                &mut entry.value,
+                                &source_leaf,
+                            );
+                            if carrier_redacted || derived_redacted {
                                 entry.id = replacement_id;
                             }
                         }
@@ -4411,6 +4597,7 @@ mod tests {
             origin: "user".into(),
             turn_kind: "user".into(),
             goal_id: None,
+            goal_definition_revision: None,
             stage_id: None,
         }
     }
@@ -4427,6 +4614,7 @@ mod tests {
             origin: "goal_continuation".into(),
             turn_kind: "internal".into(),
             goal_id: Some(goal_id.into()),
+            goal_definition_revision: Some(1),
             stage_id: None,
         }
     }
@@ -4486,14 +4674,16 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 7,
                 snapshot: serde_json::json!({ "control_revision": 7 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             }))
             .unwrap();
         assert!(matches!(
             timeline.record(TimelineEventKind::Control(ControlEvent {
                 revision: 7,
                 snapshot: serde_json::json!({ "control_revision": 7 }),
-                model_context: None,
+                retired_context_layers: vec![],
+                model_contexts: vec![],
             })),
             Err(TimelineError::NonMonotonicControlRevision {
                 previous: 7,
@@ -4513,13 +4703,14 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::Behavior,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder(
                         "<behavior-context>plan</behavior-context>",
                     ),
-                }),
+                }],
             }))
             .unwrap();
         let first_request = serde_json::to_value(timeline.surface()).unwrap();
@@ -4539,13 +4730,14 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "behavior": "normal" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::Behavior,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder(
                         "<behavior-context>normal; earlier modes retired</behavior-context>",
                     ),
-                }),
+                }],
             }))
             .unwrap();
         assert_eq!(
@@ -4571,11 +4763,12 @@ mod tests {
             timeline.record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::Behavior,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("plan"),
-                }),
+                }],
             })),
             Err(TimelineError::InvalidControlContext)
         ));
@@ -4605,22 +4798,24 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::Behavior,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("plan"),
-                }),
+                }],
             }))
             .unwrap();
         timeline
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "behavior": "normal" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::Behavior,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("normal"),
-                }),
+                }],
             }))
             .unwrap();
         assert_eq!(timeline.surface().len(), 2);
@@ -4685,11 +4880,12 @@ mod tests {
                 .record(TimelineEventKind::Control(ControlEvent {
                     revision,
                     snapshot: serde_json::json!({ "revision": revision }),
-                    model_context: Some(ControlContext {
+                    retired_context_layers: vec![],
+                    model_contexts: vec![ControlContext {
                         layer,
                         activation: ControlContextActivation::Transition,
                         item: ConversationItem::system_reminder(text),
-                    }),
+                    }],
                 }))
                 .unwrap();
         }
@@ -4706,6 +4902,10 @@ mod tests {
                 redirect_kind: None,
             }))
             .unwrap();
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
         for (revision, layer, text) in [
             (3, ControlContextLayer::Behavior, "behavior-plan"),
             (4, ControlContextLayer::Behavior, "behavior-goal"),
@@ -4715,11 +4915,12 @@ mod tests {
                 .record(TimelineEventKind::Control(ControlEvent {
                     revision,
                     snapshot: serde_json::json!({ "revision": revision }),
-                    model_context: Some(ControlContext {
+                    retired_context_layers: vec![],
+                    model_contexts: vec![ControlContext {
                         layer,
                         activation: ControlContextActivation::Transition,
                         item: ConversationItem::system_reminder(text),
-                    }),
+                    }],
                 }))
                 .unwrap();
         }
@@ -4728,6 +4929,13 @@ mod tests {
                 ConversationItem::assistant("output under the old layers"),
                 MessageCause::Assistant,
             )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "continued".into(),
+                duration_ms: 1,
+            }))
             .unwrap();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Ended {
@@ -4753,8 +4961,8 @@ mod tests {
                 "role-v1",
                 "behavior-normal",
                 "output under the old layers",
-                "behavior-goal",
                 "role-v2",
+                "behavior-goal",
             ]
         );
         let active = timeline.active_control_contexts();
@@ -4782,17 +4990,108 @@ mod tests {
     }
 
     #[test]
+    fn edited_goal_definition_activates_after_step_not_after_turn() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = TurnId(44);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: timeline.surface().len(),
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "goal_revision": 2 }),
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::GoalDefinition,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::goal_directive(
+                        "edited objective",
+                        SyntheticReason::SystemReminder,
+                        sampling_types::GoalDirectiveTag {
+                            goal_id: "goal-1".into(),
+                            definition_revision: 2,
+                        },
+                    ),
+                }],
+            }))
+            .unwrap();
+
+        assert_eq!(timeline.surface().len(), 2);
+        assert!(
+            !timeline
+                .active_control_contexts()
+                .contains_key(&ControlContextLayer::GoalDefinition),
+            "the current sample and tool batch must retain the old Goal epoch"
+        );
+
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "continued".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let active = timeline.active_control_contexts();
+        let item = &active[&ControlContextLayer::GoalDefinition].item;
+        assert_eq!(item.text_content(), "edited objective");
+        assert!(matches!(
+            item,
+            ConversationItem::User(user)
+                if user.goal_directive.as_ref().is_some_and(|tag| {
+                    tag.goal_id == "goal-1" && tag.definition_revision == 2
+                })
+        ));
+        assert_eq!(
+            timeline.surface().last().unwrap().text_content(),
+            "edited objective"
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                Timeline::from_events(timeline.events().to_vec())
+                    .unwrap()
+                    .surface()
+            )
+            .unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+    }
+
+    #[test]
     fn shadow_reprojection_activates_immediately_at_an_in_turn_compaction_boundary() {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
         timeline
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "agent_name": "reviewer" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::AgentRole,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("role-v1"),
-                }),
+                }],
             }))
             .unwrap();
         timeline
@@ -4816,15 +5115,23 @@ mod tests {
                 redirect_kind: None,
             }))
             .unwrap();
+        let step = StepId {
+            turn: TurnId(77),
+            index: 0,
+        };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
         timeline
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "agent_name": "writer" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::AgentRole,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("role-v2"),
-                }),
+                }],
             }))
             .unwrap();
         let active = timeline.active_control_contexts();
@@ -4842,15 +5149,24 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 3,
                 snapshot: serde_json::json!({ "agent_name": "writer" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::AgentRole,
                     activation: ControlContextActivation::Reprojection,
                     item: ConversationItem::system_reminder("role-v1"),
-                }),
+                }],
             }))
             .unwrap();
 
         assert_eq!(timeline.surface().last().unwrap().text_content(), "role-v1");
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "continued".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+        assert_eq!(timeline.surface().last().unwrap().text_content(), "role-v2");
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Ended {
                 id: TurnId(77),
@@ -4872,11 +5188,12 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "agent_name": "reviewer" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::AgentRole,
                     activation: ControlContextActivation::Transition,
                     item: ConversationItem::system_reminder("role"),
-                }),
+                }],
             }))
             .unwrap();
 
@@ -4884,11 +5201,85 @@ mod tests {
             timeline.record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "agent_name": "reviewer" }),
-                model_context: Some(ControlContext {
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
                     layer: ControlContextLayer::AgentRole,
                     activation: ControlContextActivation::Reprojection,
                     item: ConversationItem::system_reminder("duplicate"),
-                }),
+                }],
+            })),
+            Err(TimelineError::InvalidControlReprojection)
+        ));
+    }
+
+    #[test]
+    fn retired_control_context_cannot_be_resurrected_by_reprojection() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "goal" }),
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::GoalDefinition,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::goal_directive(
+                        "goal-v1",
+                        SyntheticReason::SystemReminder,
+                        sampling_types::GoalDirectiveTag {
+                            goal_id: "goal-1".into(),
+                            definition_revision: 1,
+                        },
+                    ),
+                }],
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "behavior": "normal" }),
+                retired_context_layers: vec![ControlContextLayer::GoalDefinition],
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("normal"),
+                }],
+            }))
+            .unwrap();
+
+        let active = timeline.active_control_contexts();
+        assert!(!active.contains_key(&ControlContextLayer::GoalDefinition));
+        assert_eq!(
+            active[&ControlContextLayer::Behavior].item.text_content(),
+            "normal"
+        );
+
+        timeline
+            .replace_all(
+                vec![
+                    ConversationItem::system("system"),
+                    ConversationItem::user("retained turn"),
+                ],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Control(ControlEvent {
+                revision: 3,
+                snapshot: serde_json::json!({ "behavior": "normal" }),
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::GoalDefinition,
+                    activation: ControlContextActivation::Reprojection,
+                    item: ConversationItem::goal_directive(
+                        "goal-v1",
+                        SyntheticReason::SystemReminder,
+                        sampling_types::GoalDirectiveTag {
+                            goal_id: "goal-1".into(),
+                            definition_revision: 1,
+                        },
+                    ),
+                }],
             })),
             Err(TimelineError::InvalidControlReprojection)
         ));
@@ -6229,6 +6620,203 @@ mod tests {
     }
 
     #[test]
+    fn image_projection_composes_multiple_leaves_owned_by_one_compaction_summary() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let assets = ["/secret/first.png", "/secret/second.png"];
+        let seed = assets
+            .iter()
+            .map(|asset| {
+                ConversationItem::User(UserItem {
+                    content: vec![
+                        ContentPart::Text {
+                            text: format!("<image_files>\n1. {asset}\n</image_files>\ninspect")
+                                .into(),
+                        },
+                        ContentPart::Image {
+                            url: format!("data:image/png;base64,{asset}").into(),
+                        },
+                    ],
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let sources = timeline.surface_ids().to_vec();
+
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact-two-images".into(),
+                source_items: 2,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-two-images");
+        timeline
+            .replace_compaction_range(
+                target,
+                vec![ConversationItem::user_meta(format!(
+                    "Both diagrams remain at {} and {}.",
+                    assets[0], assets[1]
+                ))],
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-two-images".into(),
+                source_items: 2,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let groups = conversation_image_groups(&timeline.branch_transcript());
+        assert_eq!(groups.len(), 2);
+        let shadows = groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| ImageShadow {
+                source: sources[index],
+                fingerprint: group.fingerprint.clone(),
+                image_count: group.image_count(),
+                replacement: format!("durable description {index}"),
+                provenance: ImageShadowSource::Description {
+                    result_ref: record_image_description(&mut timeline, sources[index]),
+                },
+            })
+            .collect();
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows,
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        let surface = timeline.surface()[0].text_content();
+        for (index, asset) in assets.iter().enumerate() {
+            assert!(!surface.contains(asset));
+            assert!(surface.contains(&format!("durable description {index}")));
+        }
+        let branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        assert!(assets.iter().all(|asset| !branch.contains(asset)));
+        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(replayed.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.branch_transcript()).unwrap()
+        );
+    }
+
+    #[test]
+    fn image_projection_scrubs_response_carrier_paths_from_compaction_summary() {
+        use sampling_types::conversation::{ContentPart, ToolCall, conversation_image_groups};
+
+        let carrier_path = "/secret/carrier-only.png";
+        let tool_path = "/secret/tool-only.png";
+        let seed = vec![
+            ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
+                format!("Inspecting {carrier_path}"),
+            )),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_image".into(),
+                name: "read_file".into(),
+                arguments: format!(r#"{{"target_file":"{tool_path}"}}"#).into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call_image",
+                "image loaded",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,tool".into(),
+                }],
+            ),
+        ];
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let carrier_source = timeline.surface_ids()[0];
+        let assistant_source = timeline.surface_ids()[1];
+        let result_source = timeline.surface_ids()[2];
+
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact-carrier".into(),
+                source_items: 3,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-carrier");
+        timeline
+            .replace_compaction_range(
+                target,
+                vec![ConversationItem::user_meta(format!(
+                    "Reasoning referenced {carrier_path}; the tool used {tool_path}."
+                ))],
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-carrier".into(),
+                source_items: 3,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let group = conversation_image_groups(&timeline.branch_transcript()).remove(0);
+        let image_count = group.image_count();
+        let result_ref = record_image_description(&mut timeline, result_source);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "text-model",
+                    "messages",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: result_source,
+                    fingerprint: group.fingerprint,
+                    image_count,
+                    replacement: "durable tool image description".into(),
+                    provenance: ImageShadowSource::Description { result_ref },
+                }],
+                tool_calls: vec![ImageToolCallShadow {
+                    source: assistant_source,
+                    tool_call_ids: vec!["call_image".into()],
+                    carrier_sources: vec![carrier_source],
+                }],
+            }))
+            .unwrap();
+
+        let surface = timeline.surface()[0].text_content();
+        assert!(!surface.contains(carrier_path));
+        assert!(!surface.contains(tool_path));
+        assert!(surface.contains("response carrier projected to durable text"));
+        let branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        assert!(!branch.contains(carrier_path));
+        assert!(!branch.contains(tool_path));
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(replayed.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.branch_transcript()).unwrap()
+        );
+    }
+
+    #[test]
     fn image_projection_survives_intermediate_surface_identity_replacement_and_rewind() {
         use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
@@ -6649,6 +7237,84 @@ mod tests {
         )));
     }
 
+    fn record_started_turn_and_step(timeline: &mut Timeline, turn_id: u64, step_index: u32) {
+        let turn = TurnId(turn_id);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: timeline.surface().len(),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started {
+                id: StepId {
+                    turn,
+                    index: step_index,
+                },
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn in_process_stop_fails_an_uncommitted_compaction_without_closing_the_turn() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        record_started_turn_and_step(&mut timeline, 1, 0);
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+
+        let terminal = timeline
+            .settle_open_compaction("cancelled_by_stop")
+            .unwrap()
+            .expect("open compaction terminal");
+        assert!(matches!(
+            terminal.kind,
+            TimelineEventKind::Compaction(CompactionEvent::Failed { ref error, .. })
+                if error == "cancelled_by_stop"
+        ));
+        assert!(timeline.lifecycle.active_turn.is_some());
+        assert!(timeline.lifecycle.active_step.is_some());
+        assert!(timeline.lifecycle.open_compaction.is_none());
+    }
+
+    #[test]
+    fn in_process_stop_completes_a_compaction_after_replacement_commit() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        record_started_turn_and_step(&mut timeline, 1, 0);
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+
+        assert!(matches!(
+            timeline
+                .settle_open_compaction("cancelled_by_stop")
+                .unwrap(),
+            Some(TimelineEvent {
+                kind: TimelineEventKind::Compaction(CompactionEvent::Completed { .. }),
+                ..
+            })
+        ));
+        assert!(timeline.lifecycle.open_compaction.is_none());
+    }
+
     #[test]
     fn user_title_supersedes_generated_title_in_one_timeline() {
         let mut timeline = Timeline::default();
@@ -6810,6 +7476,7 @@ mod tests {
             effective_permission_mode: None,
             workflow_run_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             surface_completion: true,
             child_cwd: "/workspace".into(),
             worktree_path: None,
@@ -7146,6 +7813,7 @@ mod tests {
                     origin: "notification_drain".into(),
                     turn_kind: "internal".into(),
                     goal_id: None,
+                    goal_definition_revision: None,
                     stage_id: None,
                 },
                 model_id: "test-model".into(),
@@ -7236,6 +7904,7 @@ mod tests {
             task_kind: NotificationTaskKind::Task,
             owner: NotificationOwner::Goal {
                 goal_id: "goal-1".into(),
+                definition_revision: 1,
             },
         };
         let version = NotificationSourceVersion::Ordinal { value: 1 };
@@ -7247,6 +7916,7 @@ mod tests {
                     notification_ids: vec![id.clone()],
                     reason: NotificationDismissReason::GoalOwnedAutostart {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     },
                 },
             ))
@@ -7283,6 +7953,7 @@ mod tests {
                     notification_ids: vec![session_id],
                     reason: NotificationDismissReason::GoalOwnedAutostart {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     },
                 },
             )),
@@ -7294,6 +7965,7 @@ mod tests {
             task_kind: NotificationTaskKind::Task,
             owner: NotificationOwner::Goal {
                 goal_id: "goal-2".into(),
+                definition_revision: 1,
             },
         };
         let goal_id = receive_notification(
@@ -7308,6 +7980,7 @@ mod tests {
                     notification_ids: vec![goal_id],
                     reason: NotificationDismissReason::GoalOwnedAutostart {
                         goal_id: "goal-1".into(),
+                        definition_revision: 1,
                     },
                 },
             )),
@@ -7318,7 +7991,12 @@ mod tests {
 
     #[test]
     fn goal_notification_input_requires_matching_goal_turn_and_receipt_owner() {
-        fn start_goal_turn(timeline: &mut Timeline, id: TurnId, goal_id: &str) {
+        fn start_goal_turn(
+            timeline: &mut Timeline,
+            id: TurnId,
+            goal_id: &str,
+            definition_revision: u64,
+        ) {
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
                     id,
@@ -7326,6 +8004,7 @@ mod tests {
                         origin: "goal_continuation".into(),
                         turn_kind: "internal".into(),
                         goal_id: Some(goal_id.into()),
+                        goal_definition_revision: Some(definition_revision),
                         stage_id: None,
                     },
                     model_id: "test-model".into(),
@@ -7338,13 +8017,13 @@ mod tests {
                 .unwrap();
         }
 
-        fn goal_input(goal_id: &str) -> ConversationItem {
+        fn goal_input(goal_id: &str, definition_revision: u64) -> ConversationItem {
             let mut input = ConversationItem::goal_directive(
                 "continue with durable evidence",
                 SyntheticReason::SystemReminder,
                 sampling_types::GoalDirectiveTag {
                     goal_id: goal_id.into(),
-                    definition_revision: 1,
+                    definition_revision,
                 },
             );
             let ConversationItem::User(user) = &mut input else {
@@ -7359,6 +8038,7 @@ mod tests {
             task_kind: NotificationTaskKind::Task,
             owner: NotificationOwner::Goal {
                 goal_id: "goal-1".into(),
+                definition_revision: 1,
             },
         };
         let mut accepted = Timeline::default();
@@ -7369,13 +8049,13 @@ mod tests {
             "done",
         );
         let accepted_turn = TurnId(17);
-        start_goal_turn(&mut accepted, accepted_turn, "goal-1");
+        start_goal_turn(&mut accepted, accepted_turn, "goal-1", 1);
         accepted
             .record(TimelineEventKind::Notification(
                 NotificationEvent::Consumed {
                     notification_ids: vec![accepted_id],
                     turn: accepted_turn,
-                    input: Some(goal_input("goal-1")),
+                    input: Some(goal_input("goal-1", 1)),
                 },
             ))
             .unwrap();
@@ -7388,13 +8068,41 @@ mod tests {
             "done",
         );
         let rejected_turn = TurnId(18);
-        start_goal_turn(&mut rejected, rejected_turn, "goal-2");
+        start_goal_turn(&mut rejected, rejected_turn, "goal-2", 1);
         assert!(matches!(
             rejected.record(TimelineEventKind::Notification(
                 NotificationEvent::Consumed {
                     notification_ids: vec![rejected_id],
                     turn: rejected_turn,
-                    input: Some(goal_input("goal-2")),
+                    input: Some(goal_input("goal-2", 1)),
+                },
+            )),
+            Err(TimelineError::InvalidNotification)
+        ));
+
+        let source = NotificationSource::TaskCompleted {
+            task_id: "goal-task".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Goal {
+                goal_id: "goal-1".into(),
+                definition_revision: 1,
+            },
+        };
+        let mut revised = Timeline::default();
+        let revised_id = receive_notification(
+            &mut revised,
+            source,
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "done",
+        );
+        let revised_turn = TurnId(19);
+        start_goal_turn(&mut revised, revised_turn, "goal-1", 2);
+        assert!(matches!(
+            revised.record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![revised_id],
+                    turn: revised_turn,
+                    input: Some(goal_input("goal-1", 2)),
                 },
             )),
             Err(TimelineError::InvalidNotification)
@@ -7516,6 +8224,7 @@ mod tests {
                 task_kind: NotificationTaskKind::Task,
                 owner: NotificationOwner::Goal {
                     goal_id: "goal-1".into(),
+                    definition_revision: 1,
                 },
             },
             NotificationSourceVersion::Opaque {
@@ -7530,6 +8239,7 @@ mod tests {
                 task_kind: NotificationTaskKind::Task,
                 owner: NotificationOwner::Goal {
                     goal_id: "goal-1".into(),
+                    definition_revision: 1,
                 },
             },
             NotificationSourceVersion::Ordinal { value: 1 },

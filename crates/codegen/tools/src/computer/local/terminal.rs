@@ -304,6 +304,7 @@ struct ProcessState {
     /// subagent teardown only kills the subagent's own tasks.
     owner_session_id: Option<String>,
     goal_id: Option<String>,
+    goal_definition_revision: Option<u64>,
     description: Option<String>,
 }
 
@@ -445,6 +446,7 @@ impl ProcessState {
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
             goal_id: self.goal_id.clone(),
+            goal_definition_revision: self.goal_definition_revision,
             description: self.description.clone(),
             is_backgrounded: self.bg_status.is_backgrounded(),
         }
@@ -1110,6 +1112,7 @@ impl LocalTerminalActor {
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
             goal_id: request.goal_id.clone(),
+            goal_definition_revision: request.goal_definition_revision,
             description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
@@ -1255,6 +1258,7 @@ impl LocalTerminalActor {
             },
             owner_session_id: request.owner_session_id.clone(),
             goal_id: request.goal_id.clone(),
+            goal_definition_revision: request.goal_definition_revision,
             description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
@@ -1652,6 +1656,7 @@ impl LocalTerminalActor {
                     explicitly_killed: p.explicitly_killed,
                     owner_session_id: p.owner_session_id.clone(),
                     goal_id: p.goal_id.clone(),
+                    goal_definition_revision: p.goal_definition_revision,
                     description: p.description.clone(),
                     is_backgrounded: true,
                 };
@@ -1944,16 +1949,21 @@ impl LocalTerminalActor {
             .map(|(id, _)| id.clone())
             .collect();
 
+        // Signal the whole set first. Reaping then shares one deadline, so N
+        // wedged children cannot serialize into N×5 seconds of actor delay.
         for id in &fg_ids {
             if let Some(process) = self.processes.get_mut(id) {
                 send_sigkill_to_group(process);
+            }
+        }
+        let reap_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
+        for id in &fg_ids {
+            if let Some(process) = self.processes.get_mut(id) {
                 // Wait for the child to actually exit so the kernel reclaims
-                // its memory.  Bounded to 5 s — SIGKILL is unconditional so
-                // this should resolve almost instantly in practice.
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), process.child.wait())
-                        .await;
+                // its memory. SIGKILL is unconditional; one shared deadline
+                // protects the terminal actor from uninterruptible children.
+                let _ = tokio::time::timeout_at(reap_deadline, process.child.wait()).await;
 
                 // Abort the state dump reader task so its `spawn_blocking`
                 // thread doesn't leak. Without this, a grandchild that
@@ -2000,9 +2010,13 @@ impl LocalTerminalActor {
         for id in &fg_ids {
             if let Some(process) = self.processes.get_mut(id) {
                 send_sigkill_to_group(process);
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), process.child.wait())
-                        .await;
+            }
+        }
+        let reap_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        for id in &fg_ids {
+            if let Some(process) = self.processes.get_mut(id) {
+                let _ = tokio::time::timeout_at(reap_deadline, process.child.wait()).await;
                 if let Some(handle) = process.state_dump_handle.take() {
                     handle.abort();
                 }
@@ -2119,6 +2133,7 @@ impl LocalTerminalActor {
                     output_file: process.output_file.clone(),
                     task_id: task_id.clone(),
                     goal_id: process.goal_id.clone(),
+                    goal_definition_revision: process.goal_definition_revision,
                     monitor_description: recovered_monitor_description,
                     description: effective_description.clone(),
                 });
@@ -3285,6 +3300,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         }
     }
@@ -3470,6 +3486,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3503,6 +3520,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3568,6 +3586,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3641,6 +3660,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3689,6 +3709,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3742,6 +3763,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3795,6 +3817,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3855,6 +3878,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3893,6 +3917,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3935,6 +3960,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -3977,6 +4003,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4054,6 +4081,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4122,6 +4150,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4159,6 +4188,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4195,6 +4225,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4227,6 +4258,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4268,6 +4300,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4318,6 +4351,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4353,6 +4387,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4399,6 +4434,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 
@@ -4433,6 +4469,7 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
         };
 

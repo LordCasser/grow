@@ -183,7 +183,6 @@ pub struct UiConfig {
     /// (append to the FIFO; default) or `steer` (auto-promote into the
     /// running regular turn). Read by the shell session admission
     /// (`queue_input`); no pager settings row yet (deferred — see the
-    /// TodoGate precedent in `pager/src/settings/defs.rs`).
     #[serde(
         default,
         skip_serializing_if = "FollowUpBehavior::is_default",

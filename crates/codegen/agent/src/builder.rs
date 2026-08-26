@@ -98,6 +98,11 @@ pub struct AgentBuilder {
     /// When set, `build()` uses these directly instead of running
     /// `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
+    /// Run-frozen child Agent names. When present, Task availability is
+    /// resolved from this catalog rather than live filesystem/plugin
+    /// discovery. Child prompts use a stable generic Task description, so
+    /// names are sufficient here.
+    preloaded_subagent_names: Option<Vec<String>>,
 }
 /// Ensure the Plan control plane and clarification tool are available.
 fn ensure_plan_tools(tool_config: &mut tools::registry::types::ToolServerConfig) {
@@ -193,6 +198,7 @@ impl AgentBuilder {
             mcp_max_output_bytes: None,
             persisted_announced_skill_names: None,
             preloaded_skills: None,
+            preloaded_subagent_names: None,
         }
     }
     /// Set persisted announced skill names for session resume.
@@ -216,6 +222,10 @@ impl AgentBuilder {
         skills: Vec<tools::implementations::skills::types::SkillInfo>,
     ) -> Self {
         self.preloaded_skills = Some(skills);
+        self
+    }
+    pub fn with_preloaded_subagent_names(mut self, names: Vec<String>) -> Self {
+        self.preloaded_subagent_names = Some(names);
         self
     }
     /// Load from a pre-parsed AgentDefinition.
@@ -584,13 +594,21 @@ impl AgentBuilder {
             task_stripped = true;
         } else {
             let filter = definition.subagent_filter();
-            let mut subagents = crate::discovery::all_subagents_with_plugins(
-                &self.working_directory,
-                &self.subagent_toggle,
-                self.plugin_registry.as_deref(),
-            );
-            subagents.retain(|entry| filter.allows(&entry.name));
-            if subagents.is_empty() {
+            let mut live_subagents = None;
+            let has_subagents = if let Some(names) = &self.preloaded_subagent_names {
+                names.iter().any(|name| filter.allows(name))
+            } else {
+                let mut discovered = crate::discovery::all_subagents_with_plugins(
+                    &self.working_directory,
+                    &self.subagent_toggle,
+                    self.plugin_registry.as_deref(),
+                );
+                discovered.retain(|entry| filter.allows(&entry.name));
+                let present = !discovered.is_empty();
+                live_subagents = Some(discovered);
+                present
+            };
+            if !has_subagents {
                 tool_config.tools.retain(|tc| tc.id != task_tool_id);
                 task_stripped = true;
             } else if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
@@ -606,8 +624,12 @@ impl AgentBuilder {
                 .iter_mut()
                 .find(|tc| tc.id == task_tool_id)
             {
-                task_tc.description_override =
-                    Some(build_task_description(&subagents, &self.task_model_slugs));
+                task_tc.description_override = Some(build_task_description(
+                    live_subagents
+                        .as_deref()
+                        .expect("primary Agent requires full discovered child descriptors"),
+                    &self.task_model_slugs,
+                ));
             }
         }
         if task_stripped {

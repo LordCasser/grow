@@ -16,6 +16,12 @@ use serde_json::json;
 use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use tokio::sync::mpsc;
 
+fn prompt(text: impl Into<String>, index: usize) -> ConversationItem {
+    let mut item = ConversationItem::user(text);
+    item.set_prompt_index(index);
+    item
+}
+
 /// Wire `stop_reason` values for the Messages API (see
 /// `sampler/src/stream/messages.rs` mapping).
 const MAX_TOKENS: &str = "max_tokens";
@@ -320,6 +326,7 @@ async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<PromptTurnOk, acp::Error> {
+    install_test_foreground(actor, prompt_id).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
@@ -352,13 +359,13 @@ async fn seed_closed_compaction_range(actor: &SessionActor) {
     .await;
     actor
         .chat_state_handle
-        .push_user_message(ConversationItem::user("old closed turn"));
+        .push_user_message(prompt("old closed turn", 0));
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant("x".repeat(24_000)));
     actor
         .chat_state_handle
-        .push_user_message(ConversationItem::user("recent retained turn"));
+        .push_user_message(prompt("recent retained turn", 1));
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant("y".repeat(210_000)));

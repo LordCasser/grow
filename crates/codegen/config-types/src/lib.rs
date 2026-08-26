@@ -540,18 +540,6 @@ pub struct RemoteSettings {
     /// age-expiry policy is client-hardcoded and not remote-overridable.
     #[serde(default, deserialize_with = "deserialize_tolerant_worktree_auto_gc")]
     pub worktree_auto_gc: Option<WorktreeAutoGcSettings>,
-    /// Enable/disable the runtime turn-end TodoGate remotely.
-    /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
-    /// The gate ships disabled; set this to `Some(true)` (via the
-    /// `grow_build_settings` remote settings key) to enable it. See
-    /// `session::actor::resolve_todo_gate_config`.
-    #[serde(default)]
-    pub todo_gate_enabled: Option<bool>,
-    /// Hard cap on TodoGate fires per user prompt.
-    /// Precedence: this field > built-in default (`DEFAULT_TODO_GATE_MAX_FIRES`).
-    /// No CLI override. See `session::actor::resolve_todo_gate_config`.
-    #[serde(default)]
-    pub todo_gate_max_fires_per_prompt: Option<u32>,
     /// When `Some(true)`, enable goal mode remotely.
     /// When `Some(false)`, force-disable it (kill-switch).
     /// Absent ⇒ client default (enabled).

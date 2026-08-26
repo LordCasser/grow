@@ -502,9 +502,11 @@ pub(super) fn dispatch_open_config_agents_modal(
     }
     agent.agents_modal = Some(modal);
     if let Some(session_id) = session_id {
+        let revision = agent.session.begin_agent_metadata_read();
         return vec![Effect::FetchSessionAgentName {
             agent_id: id,
             session_id,
+            revision,
         }];
     }
     vec![]

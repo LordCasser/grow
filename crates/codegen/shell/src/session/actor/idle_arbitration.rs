@@ -63,7 +63,7 @@ pub(super) async fn arbitrate_idle_wake(
     session: std::sync::Arc<SessionActor>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
-    session.apply_pending_model_reload_if_idle().await;
+    session.apply_pending_step_controls_if_idle().await;
     if !maybe_start_pending_manual_compaction(session.clone(), completion_tx.clone()).await {
         SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
     }
@@ -199,7 +199,7 @@ mod idle_admission_tests {
                             let state = actor.state.lock().await;
                             matches!(
                                 state.foreground.regular().map(|task| &task.origin),
-                                Some(crate::session::PromptOrigin::GoalContinuation { goal_id })
+                            Some(crate::session::PromptOrigin::GoalContinuation { goal_id, .. })
                                     if goal_id == "goal-1"
                             )
                         };

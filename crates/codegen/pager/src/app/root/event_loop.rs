@@ -13,7 +13,6 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
 
 use crate::appearance::ConfigWatcher;
-use crate::client_identity::{PAGER_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use crate::theme::system_appearance::{self, SystemAppearanceWatcher};
 use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
@@ -84,16 +83,25 @@ struct ReconnectReinit {
 
 /// Result of a reconnect re-initialization task.
 struct ReinitOutcome {
-    /// Whether initialize/authenticate succeeded; when false no load was
-    /// attempted and `loads` is empty (every window finalizes as failed).
-    init_ok: bool,
+    /// Authoritative process-scoped state from the replacement leader.
+    /// `None` means initialize/authenticate failed and no load was attempted.
+    init: Option<ReconnectInitializeState>,
     loads: Vec<AgentLoadOutcome>,
+}
+
+struct ReconnectInitializeState {
+    models: crate::acp::ModelState,
+    available_commands: Vec<acp::AvailableCommand>,
+    cancel_rewind_enabled: bool,
+    session_recap_available: bool,
 }
 
 /// Per-agent `session/load` outcome from the re-init task.
 struct AgentLoadOutcome {
     agent_id: crate::app::session::AgentId,
     success: bool,
+    models: Option<acp::SessionModelState>,
+    agent_name: Option<String>,
     /// Structured regular foreground owner from the reload response.
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
 }
@@ -165,20 +173,18 @@ fn plan_reconnect_load(
 ///   on a healthy active tab — the drain (`dispatch_drain_queue`) only ever
 ///   touches the active agent, so a background failure has no bearing on it.
 ///
-/// `loads` maps each reloaded agent to `(success, foreground)`; an agent
+/// `loads` maps each reloaded agent to its complete load outcome; an agent
 /// in `pending_agent_ids` but absent from `loads` is treated as failed
 /// (mirrors the `unwrap_or((false, _))` at the finalize site).
 fn reconnect_restore_outcome(
     init_ok: bool,
     pending_agent_ids: &[crate::app::session::AgentId],
-    loads: &std::collections::HashMap<
-        crate::app::session::AgentId,
-        (bool, Option<crate::app::prompt_queue::ForegroundSnapshot>),
-    >,
+    loads: &std::collections::HashMap<crate::app::session::AgentId, AgentLoadOutcome>,
     active_agent_id: Option<crate::app::session::AgentId>,
 ) -> (bool, bool) {
-    let load_ok =
-        |id: &crate::app::session::AgentId| -> bool { loads.get(id).is_some_and(|(ok, ..)| *ok) };
+    let load_ok = |id: &crate::app::session::AgentId| -> bool {
+        loads.get(id).is_some_and(|outcome| outcome.success)
+    };
     let all_restored = init_ok && pending_agent_ids.iter().all(load_ok);
     let active_restored = init_ok
         && active_agent_id.is_some_and(|aid| pending_agent_ids.contains(&aid) && load_ok(&aid));
@@ -744,6 +750,7 @@ pub(crate) async fn run(
 
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
+    let reconnect_connect_flags = connection.connect_flags.clone();
     let mut app = AppView::new(
         connection.tx,
         connection.models,
@@ -2126,6 +2133,7 @@ pub(crate) async fn run(
                         });
 
                         let acp_tx = app.acp_tx.clone();
+                        let reconnect_flags = reconnect_connect_flags.clone();
                         let join_handle = tokio::spawn(async move {
                             // 30 s for initialize/authenticate plus a budget per
                             // session/load (each load replays history and may
@@ -2139,19 +2147,41 @@ pub(crate) async fn run(
                             // load outcomes with the optional mid-turn running
                             // prompt id from each reload response.
                             let ok = tokio::time::timeout(timeout, async {
-                                let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(acp::ClientCapabilities::new().fs(acp::FileSystemCapabilities::new()).terminal(false)).meta(serde_json::json!({
-                                        "clientType": PAGER_CLIENT_TYPE,
-                                        "clientVersion": PAGER_CLIENT_VERSION,
-                                    }).as_object().cloned());
-                                if let Err(e) = acp_send(init_req, &acp_tx).await {
-                                    tracing::error!(error = %e, "reconnect: re-initialize failed");
+                                let (
+                                    models,
+                                    is_shell,
+                                    auth_methods,
+                                    default_auth_method_id,
+                                    available_commands,
+                                    cancel_rewind_enabled,
+                                    session_recap_available,
+                                ) = match crate::acp::initialize(&acp_tx, &reconnect_flags).await {
+                                    Ok(initialized) => initialized,
+                                    Err(error) => {
+                                        tracing::error!(%error, "reconnect: re-initialize failed");
+                                        return None;
+                                    }
+                                };
+                                if !is_shell {
+                                    tracing::error!("reconnect: replacement endpoint is not Grow Shell");
                                     return None;
                                 }
-
-                                let auth_req = acp::AuthenticateRequest::new(acp::AuthMethodId::new(shell::agent::auth_method::PROVIDER_API_KEY_METHOD_ID));
-                                if let Err(e) = acp_send(auth_req, &acp_tx).await {
-                                    tracing::warn!(error = %e, "reconnect: BYOK method selection failed");
+                                if let Err(error) = crate::acp::authenticate(
+                                    &acp_tx,
+                                    &auth_methods,
+                                    default_auth_method_id.as_ref(),
+                                )
+                                .await
+                                {
+                                    tracing::error!(%error, "reconnect: authenticate failed");
+                                    return None;
                                 }
+                                let initialize = ReconnectInitializeState {
+                                    models,
+                                    available_commands,
+                                    cancel_rewind_enabled,
+                                    session_recap_available,
+                                };
 
                                 let mut loads = Vec::with_capacity(load_plans.len());
                                 for (agent_id, plan) in load_plans {
@@ -2160,9 +2190,17 @@ pub(crate) async fn run(
                                     let load_req = acp::LoadSessionRequest::new(plan.session_id, plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
                                     match acp_send(load_req, &acp_tx).await {
                                         Ok(resp) => {
+                                            let agent_name = resp
+                                                .meta
+                                                .as_ref()
+                                                .and_then(|meta| meta.get("grow/agentName"))
+                                                .and_then(serde_json::Value::as_str)
+                                                .map(str::to_owned);
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
                                                 success: true,
+                                                models: resp.models,
+                                                agent_name,
                                                 foreground:
                                                     effects::parse_session_load_foreground(
                                                         resp.meta.as_ref(),
@@ -2176,28 +2214,30 @@ pub(crate) async fn run(
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
                                                 success: false,
+                                                models: None,
+                                                agent_name: None,
                                                 foreground: None,
                                             });
                                         }
                                     }
                                 }
-                                Some(loads)
+                                Some((initialize, loads))
                             })
                             .await;
 
                             let outcome = match ok {
-                                Ok(Some(loads)) => ReinitOutcome {
-                                    init_ok: true,
+                                Ok(Some((init, loads))) => ReinitOutcome {
+                                    init: Some(init),
                                     loads,
                                 },
                                 Ok(None) => ReinitOutcome {
-                                    init_ok: false,
+                                    init: None,
                                     loads: Vec::new(),
                                 },
                                 Err(_) => {
                                     tracing::error!("reconnect re-initialization timed out");
                                     ReinitOutcome {
-                                        init_ok: false,
+                                        init: None,
                                         loads: Vec::new(),
                                     }
                                 }
@@ -2238,9 +2278,34 @@ pub(crate) async fn run(
                     Ok(outcome) => outcome,
                     Err(_) => {
                         tracing::error!("reconnect re-init task failed (sender dropped)");
-                        ReinitOutcome { init_ok: false, loads: Vec::new() }
+                        ReinitOutcome { init: None, loads: Vec::new() }
                     }
                 };
+                let init_ok = outcome.init.is_some();
+                if let Some(initialized) = outcome.init {
+                    if let Some(current) = initialized.models.current.clone() {
+                        let state = acp::SessionModelState::new(
+                            current,
+                            initialized.models.available.values().cloned().collect(),
+                        );
+                        crate::app::acp_handler::apply_models_state_update(state, &mut app);
+                    } else {
+                        app.models = initialized.models;
+                    }
+                    app.bootstrap_acp_commands = initialized.available_commands.clone();
+                    for agent in app.agents.values_mut() {
+                        agent.session.available_commands = initialized.available_commands.clone();
+                        agent.session.available_commands_generation = agent
+                            .session
+                            .available_commands_generation
+                            .saturating_add(1);
+                    }
+                    app.cancel_rewind_enabled = initialized.cancel_rewind_enabled;
+                    apply_session_recap_available(
+                        &mut app,
+                        initialized.session_recap_available,
+                    );
+                }
 
                 // Finalize the reload windows on the agents the re-init was
                 // started for — NOT whatever view is active now (see
@@ -2252,12 +2317,7 @@ pub(crate) async fn run(
                 let mut loads: std::collections::HashMap<_, _> = outcome
                     .loads
                     .into_iter()
-                    .map(|l| {
-                        (
-                            l.agent_id,
-                            (l.success, l.foreground),
-                        )
-                    })
+                    .map(|load| (load.agent_id, load))
                     .collect();
                 // Resolved BEFORE the finalize loop drains `loads` via `remove`
                 // (see `reconnect_restore_outcome`).
@@ -2265,22 +2325,76 @@ pub(crate) async fn run(
                     ActiveView::Agent(id) => Some(id),
                     _ => None,
                 };
-                let (restored, active_restored) = reconnect_restore_outcome(
-                    outcome.init_ok,
+                let (restored, _active_restored) = reconnect_restore_outcome(
+                    init_ok,
                     &pending.agent_ids,
                     &loads,
                     active_agent_id,
                 );
                 restore_dashboard_peek_before_reload(&mut app.dashboard, &mut app.agents);
+                let mut reconnect_effects = Vec::new();
+                let cli_effort_token = app.cli_effort_token.clone();
                 for id in &pending.agent_ids {
-                    let (ok, foreground) = loads.remove(id).unwrap_or((false, None));
-                    if let Some(agent) = app.agents.get_mut(id) {
-                        agent.finalize_reload_and_maybe_adopt(
+                    let load = loads.remove(id);
+                    let ok = load.as_ref().is_some_and(|load| load.success);
+                    let foreground = load
+                        .as_ref()
+                        .and_then(|load| load.foreground.as_ref())
+                        .map(|snapshot| snapshot.prompt_id.clone());
+                    let finalized = if let Some(agent) = app.agents.get_mut(id) {
+                        let finalized = agent.finalize_reload_and_maybe_adopt(
                             pending.generation,
                             ok,
-                            foreground.map(|snapshot| snapshot.prompt_id),
+                            foreground,
                         );
+                        if finalized && ok {
+                            if let Some(models) = load.as_ref().and_then(|load| load.models.clone()) {
+                                agent.session.models = Some(models).into();
+                            }
+                            if let Some(agent_name) = load
+                                .as_ref()
+                                .and_then(|load| load.agent_name.as_ref())
+                            {
+                                agent.session.apply_agent_name(Some(agent_name.clone()));
+                            }
+                        }
+                        finalized && ok
+                    } else {
+                        false
+                    };
+                    if finalized {
+                        // Root replay only contains direct-child birth facts;
+                        // restore every descendant's later model/effort/Agent
+                        // controls before reconciling local pending controls.
+                        crate::app::subagent::restore_descendant_state(&mut app, *id);
+                        if let Some(agent) = app.agents.get_mut(id) {
+                            reconnect_effects.extend(
+                                dispatch::reconcile_controls_after_reconnect(
+                                    *id,
+                                    agent,
+                                    cli_effort_token.as_deref(),
+                                ),
+                            );
+                            let drain = dispatch::maybe_drain_queue(agent);
+                            reconnect_effects.extend(drain.effects);
+                            if let Some(session_id) = agent.session.session_id.clone() {
+                                let revision = agent.session.begin_agent_metadata_read();
+                                reconnect_effects.push(Effect::FetchSessionAgentName {
+                                    agent_id: *id,
+                                    session_id: session_id.clone(),
+                                    revision,
+                                });
+                                reconnect_effects.push(Effect::RefreshAvailableCommands {
+                                    agent_id: *id,
+                                    session_id,
+                                });
+                            }
+                        }
                     }
+                }
+
+                if process_effects(reconnect_effects, &mut tasks, &mut app) {
+                    return Ok(make_run_result(&app));
                 }
 
                 if pending.agent_ids.is_empty() {
@@ -2299,12 +2413,6 @@ pub(crate) async fn run(
                 // on the active tab's own restore (see `reconnect_restore_outcome`):
                 // a failed active restore suppresses the drain, since sending into
                 // an unrestored session would be wrong.
-                if active_restored {
-                    let drain_effects = dispatch::dispatch(Action::DrainQueue, &mut app);
-                    if process_effects(drain_effects, &mut tasks, &mut app) {
-                        return Ok(make_run_result(&app));
-                    }
-                }
 
                 presenter.request(false);
             }
@@ -3303,8 +3411,26 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None));
-        loads.insert(background, (false, None));
+        loads.insert(
+            active,
+            AgentLoadOutcome {
+                agent_id: active,
+                success: true,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
+        loads.insert(
+            background,
+            AgentLoadOutcome {
+                agent_id: background,
+                success: false,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3327,8 +3453,26 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (false, None));
-        loads.insert(background, (true, None));
+        loads.insert(
+            active,
+            AgentLoadOutcome {
+                agent_id: active,
+                success: false,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
+        loads.insert(
+            background,
+            AgentLoadOutcome {
+                agent_id: background,
+                success: true,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3347,7 +3491,16 @@ mod tests {
         use crate::app::session::AgentId;
         let active = AgentId(0);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None));
+        loads.insert(
+            active,
+            AgentLoadOutcome {
+                agent_id: active,
+                success: true,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
         let pending = vec![active];
 
         let (all_restored, active_restored) =
@@ -3377,7 +3530,16 @@ mod tests {
         use crate::app::session::AgentId;
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(background, (true, None));
+        loads.insert(
+            background,
+            AgentLoadOutcome {
+                agent_id: background,
+                success: true,
+                models: None,
+                agent_name: None,
+                foreground: None,
+            },
+        );
         let pending = vec![background];
 
         let (all_restored, active_restored) =

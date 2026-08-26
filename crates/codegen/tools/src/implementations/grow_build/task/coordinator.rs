@@ -329,10 +329,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let outcome = self.cancel_parent_session(request.parent_session_id.as_deref());
                     let _ = request.respond_to.send(outcome);
                 }
-                SubagentCancelTarget::GoalId(goal_id) => {
-                    let remaining_ids =
-                        self.goal_child_ids(&goal_id, request.parent_session_id.as_deref());
-                    self.cancel_goal_children(&goal_id, request.parent_session_id.as_deref());
+                SubagentCancelTarget::Goal {
+                    goal_id,
+                    definition_revision,
+                } => {
+                    let remaining_ids = self.goal_child_ids(
+                        &goal_id,
+                        definition_revision,
+                        request.parent_session_id.as_deref(),
+                    );
+                    self.cancel_goal_children(
+                        &goal_id,
+                        definition_revision,
+                        request.parent_session_id.as_deref(),
+                    );
                     if remaining_ids.is_empty() {
                         let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
                     } else {
@@ -901,9 +911,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
-    fn cancel_goal_children(&mut self, goal_id: &str, parent_session_id: Option<&str>) {
+    fn cancel_goal_children(
+        &mut self,
+        goal_id: &str,
+        definition_revision: u64,
+        parent_session_id: Option<&str>,
+    ) {
         for child in self.active.values() {
             if child.request.owner.goal_id() == Some(goal_id)
+                && child.request.owner.goal_definition_revision() == Some(definition_revision)
                 && belongs_to_session(
                     &child.request,
                     &child.immediate_parent_session_id,
@@ -916,6 +932,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.pending.values() {
             if child.request.owner.goal_id() == Some(goal_id)
+                && child.request.owner.goal_definition_revision() == Some(definition_revision)
                 && belongs_to_session(
                     &child.request,
                     &child.immediate_parent_session_id,
@@ -940,11 +957,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.goal_cancel_waiters = pending;
     }
 
-    fn goal_child_ids(&self, goal_id: &str, parent_session_id: Option<&str>) -> HashSet<String> {
+    fn goal_child_ids(
+        &self,
+        goal_id: &str,
+        definition_revision: u64,
+        parent_session_id: Option<&str>,
+    ) -> HashSet<String> {
         self.pending
             .values()
             .filter(|child| {
                 child.request.owner.goal_id() == Some(goal_id)
+                    && child.request.owner.goal_definition_revision() == Some(definition_revision)
                     && belongs_to_session(
                         &child.request,
                         &child.immediate_parent_session_id,
@@ -957,6 +980,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .values()
                     .filter(|child| {
                         child.request.owner.goal_id() == Some(goal_id)
+                            && child.request.owner.goal_definition_revision()
+                                == Some(definition_revision)
                             && belongs_to_session(
                                 &child.request,
                                 &child.immediate_parent_session_id,

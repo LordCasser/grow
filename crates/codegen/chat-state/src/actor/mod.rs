@@ -95,15 +95,7 @@ impl ChatStateActor {
             match result {
                 Ok(()) => return Ok(()),
                 Err(crate::commands::TimelineWriteError::Persistence(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::InvalidData
-                            | std::io::ErrorKind::InvalidInput
-                            | std::io::ErrorKind::PermissionDenied
-                            | std::io::ErrorKind::NotFound
-                            | std::io::ErrorKind::Unsupported
-                            | std::io::ErrorKind::BrokenPipe
-                    ) =>
+                    if crate::persistence::persistence_error_is_permanent(&error) =>
                 {
                     tracing::error!(
                         %error,
@@ -380,6 +372,17 @@ impl ChatStateActor {
                         }
                         error.map_or(Ok(committed), Err)
                     }
+                };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SettleOpenCompactionDurably { reason, reply } => {
+                let result = match (|| {
+                    let mut candidate = self.state.timeline.clone();
+                    candidate.settle_open_compaction(&reason)
+                })() {
+                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                    Ok(None) => Ok(None),
+                    Ok(Some(event)) => self.commit_timeline_event(event).await.map(Some),
                 };
                 let _ = reply.send(result);
             }

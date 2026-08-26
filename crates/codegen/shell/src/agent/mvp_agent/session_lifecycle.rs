@@ -13,6 +13,10 @@ impl MvpAgent {
     /// model catalog. Its on-disk Timeline remains resumable; only the
     /// divergent in-memory actor is retired.
     pub(crate) fn evict_catalog_diverged_session(&self, id: &acp::SessionId) {
+        if let Some(handle) = self.active_child_sessions.borrow_mut().remove(id) {
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+            return;
+        }
         self.request_session_shutdown(id);
         self.remove_session_terminal(id, SessionLiveState::DeadFailed);
     }

@@ -1552,11 +1552,6 @@ pub(super) fn apply_pending_dispatch_config(
     }
     agent.session.deferred_session_mode =
         (pending_behavior != tools::types::BehaviorId::Normal).then_some(pending_behavior);
-    if pending_behavior == tools::types::BehaviorId::Plan {
-        // Optimistic so the Agent view reflects Plan immediately when opened,
-        // before the ACP round-trip confirms it.
-        agent.session.plan_mode_pending = Some(true);
-    }
 
     agent.session.permission_mode = match pending_permission {
         crate::app::actions::PermissionModeKind::Auto => shell::util::config::PermissionMode::Auto,

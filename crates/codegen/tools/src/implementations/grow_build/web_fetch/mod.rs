@@ -44,6 +44,18 @@ impl WebFetchConfig {
     pub fn is_enabled(&self) -> bool {
         matches!(self, Self::Enabled { .. })
     }
+
+    /// Bind model-relative output limits to the session's current route.
+    ///
+    /// The rest of the web-fetch policy remains session-owned. Only the
+    /// context window follows model switches, including Agent rebuilds that
+    /// happen after such a switch.
+    pub fn with_context_window_tokens(mut self, tokens: u64) -> Self {
+        if let Self::Enabled { params } = &mut self {
+            params.context_window_tokens = Some(tokens);
+        }
+        self
+    }
 }
 
 use crate::types::output::WebFetchOutput;

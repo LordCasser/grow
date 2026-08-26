@@ -146,7 +146,8 @@ pub struct CompactionConfig {
     /// Locks the context window when `GROW_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
     pub count: AtomicU64,
-    /// Set at turn end; consumed at next turn start for model-switch compaction.
+    /// Refreshed at turn start and after each applied step-boundary route
+    /// change; consumed before the next sample for model-switch compaction.
     /// `Cell` because `SessionActor` is `!Send`.
     pub previous_model: Cell<Option<PreviousModelInfo>>,
     /// When `true`, feed the summarizer the verbatim conversation instead of the lossy rewrite (the retry loop may still fall back).

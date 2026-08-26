@@ -120,6 +120,7 @@ async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<
             origin: "user".into(),
             turn_kind: "user".into(),
             goal_id: None,
+            goal_definition_revision: None,
             stage_id: None,
         },
         model_id: "test-model".into(),
@@ -1141,9 +1142,12 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
         panic!("expected tool result");
     };
     assert_eq!(result.tool_call_id, "call_7");
+    assert!(matches!(
+        result.images.as_slice(),
+        [ContentPart::Text { text }] if text.as_ref() == "keep-me"
+    ));
     assert!(result.content.contains("converted tool images"));
-    assert!(!result.content.contains("Read image file"));
-    assert!(result.images.is_empty());
+    assert!(result.content.contains("Read image file"));
     let capture = h.handle.take_turn_messages().await.unwrap();
     assert_eq!(capture.messages.len(), conversation.len());
     assert!(conversation_image_groups(&capture.messages).is_empty());
@@ -1460,6 +1464,111 @@ async fn permanent_persistence_failure_poison_closes_the_actor_mailbox() {
 }
 
 #[tokio::test]
+async fn storage_full_failure_poison_closes_the_actor_without_retrying_forever() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let write = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "disk_full".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .await
+        })
+    };
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("pending storage acknowledgement")
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "simulated full disk",
+        )))
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), write)
+        .await
+        .expect("storage-full write must return promptly")
+        .expect("write task")
+        .expect_err("storage-full write must fail");
+    assert!(matches!(
+        error,
+        crate::TimelineWriteError::Persistence(error)
+            if error.kind() == std::io::ErrorKind::StorageFull
+    ));
+    let closed = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("poisoned actor must close its event channel");
+    assert!(closed.is_none());
+    let retry = tokio::time::timeout(
+        Duration::from_millis(100),
+        persistence_rx.next_timeline_ack(),
+    )
+    .await;
+    assert!(!matches!(retry, Ok(Some(_))), "storage full must not retry");
+}
+
+#[tokio::test]
+async fn transient_persistence_retry_is_cancelled_by_actor_shutdown() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        cancellation.clone(),
+    );
+    let write = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "transient_retry".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .await
+        })
+    };
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("pending acknowledgement")
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "simulated transient failure",
+        )))
+        .unwrap();
+
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), write)
+        .await
+        .expect("cancellation must interrupt retry backoff")
+        .expect("write task");
+    assert!(matches!(result, Err(crate::TimelineWriteError::Cancelled)));
+}
+
+#[tokio::test]
 async fn buffered_append_recovers_from_io_failure_without_breaking_sequence() {
     let mut h = TestHarness::with_manual_timeline_ack(vec![]);
     h.handle
@@ -1473,7 +1582,10 @@ async fn buffered_append_recovers_from_io_failure_without_breaking_sequence() {
             .next_timeline_ack()
             .await
             .expect("first buffered attempt")
-            .send(Err(std::io::Error::other("simulated ENOSPC")))
+            .send(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated transient storage timeout",
+            )))
             .unwrap();
         h.persistence_rx
             .next_timeline_ack()
@@ -5408,6 +5520,7 @@ async fn durable_notification_receive_is_idempotent_and_rejects_payload_conflict
         task_kind: crate::NotificationTaskKind::Task,
         owner: crate::NotificationOwner::Goal {
             goal_id: "goal-1".into(),
+            definition_revision: 1,
         },
     };
     let version = crate::NotificationSourceVersion::Ordinal { value: 1 };

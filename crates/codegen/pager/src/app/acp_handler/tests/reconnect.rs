@@ -615,6 +615,18 @@
             Some("sess-ig-8")
         );
         assert_eq!(app.agents[&id].session.last_applied_grow_event_seq, Some(8));
+
+        // Publishing the catalog for the older held value must not resurrect
+        // it after a newer authoritative event was already applied.
+        let catalog = make_models_update_notif(
+            "grow-4",
+            &["grow-3", "grow-4", "grow-99-unknown"],
+        );
+        assert!(handle_models_update(&catalog, &mut app));
+        assert_eq!(
+            app.agents[&id].session.models.current.as_ref().unwrap().0.as_ref(),
+            "grow-4"
+        );
     }
 
     /// Split-highwater regression: a fresh direct-emitted Grow id must NOT
@@ -987,13 +999,12 @@
         assert!(agent.session.state.is_idle());
     }
 
-    /// Apply-only cursor rule (Grow path): a `ModelChanged` the catalog can't
-    /// resolve is ignored, so it must NOT advance the reconnect cursor or the
-    /// dedup highwater — a later reconnect (catalog now has the model) must
-    /// still replay it. An applied follower switch advances both. Mirrors the
-    /// ACP path's `advance_reconnect_cursor`.
+    /// Ingest-only cursor rule (Grow path): a `ModelChanged` the catalog can't
+    /// resolve is durably held, so ingesting it advances the reconnect cursor
+    /// and dedup highwater even before it can be projected. A later catalog
+    /// publication retries the cached authoritative value.
     #[test]
-    fn ignored_model_changed_does_not_advance_cursor_applied_one_does() {
+    fn held_model_changed_advances_cursor_and_is_not_replayed() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
         {
@@ -1001,18 +1012,20 @@
             seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
         }
 
-        // Unknown model → ignored → both markers untouched.
+        // Unknown model → held → both markers advance at ingestion.
         assert!(!handle_ext_notification(
             &model_changed_ext_with_event("sess-1", "grow-99-unknown", "sess-1-7"),
             &mut app
         ));
         assert_eq!(
-            app.agents[&id].session.last_seen_event_id, None,
-            "an ignored ModelChanged must not advance the reconnect cursor"
+            app.agents[&id].session.last_seen_event_id.as_deref(),
+            Some("sess-1-7"),
+            "a held ModelChanged is already ingested and advances the cursor"
         );
         assert_eq!(
-            app.agents[&id].session.last_applied_grow_event_seq, None,
-            "an ignored ModelChanged must not advance the dedup highwater"
+            app.agents[&id].session.last_applied_grow_event_seq,
+            Some(7),
+            "a held ModelChanged advances the dedup highwater"
         );
 
         // Known model → applied → both markers advance.

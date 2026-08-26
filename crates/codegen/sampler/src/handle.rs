@@ -1,13 +1,33 @@
 //! Public handle for talking to the sampler actor.
 
+use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
-use sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
+use sampling_types::{ConversationRequest, ConversationResponse, SamplingError, TokenUsage};
 
 use crate::commands::SamplerCommand;
 use crate::config::SamplerConfig;
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+
+/// Captures the logical accounting scope at the moment a provider attempt is
+/// admitted. The sampler remains unaware of Goal/session semantics.
+pub type AttemptScopeCapture =
+    std::sync::Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub enum AttemptUsage {
+    Known {
+        scope: Option<String>,
+        usage: TokenUsage,
+    },
+    Incomplete {
+        scope: Option<String>,
+    },
+}
+
+pub type AttemptUsageSink =
+    std::sync::Arc<dyn Fn(AttemptUsage) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// Cheaply-cloneable handle to the sampler actor.
 ///
@@ -48,6 +68,8 @@ impl SamplerHandle {
             request: Box::new(request),
             config: None,
             completion_tx: None,
+            scope_capture: None,
+            usage_sink: None,
         });
     }
 
@@ -64,6 +86,8 @@ impl SamplerHandle {
             request: Box::new(request),
             config: Some(Box::new(config)),
             completion_tx: None,
+            scope_capture: None,
+            usage_sink: None,
         });
     }
 
@@ -142,6 +166,53 @@ impl SamplerHandle {
                 request: Box::new(request),
                 config: None,
                 completion_tx: Some(completion_tx),
+                scope_capture: None,
+                usage_sink: None,
+            })
+            .ok()
+            .map(|_| CancelOnDrop {
+                cmd_tx: self.cmd_tx.clone(),
+                request_id: cancel_id,
+            });
+        completion_rx.await.unwrap_or_else(|_| {
+            Err(SamplingError::auth_unknown(
+                "sampler actor dropped before completion",
+            ))
+        })
+    }
+
+    /// Accounted variant of [`submit_and_collect`]. Every real provider
+    /// attempt is scoped at admission and settled through `usage_sink` before
+    /// retry or terminal completion, independently of the caller's receiver.
+    pub async fn submit_and_collect_accounted(
+        &self,
+        request_id: RequestId,
+        request: ConversationRequest,
+        scope_capture: Option<AttemptScopeCapture>,
+        usage_sink: Option<AttemptUsageSink>,
+    ) -> Result<(sampling_types::ConversationResponse, InferenceLatencyStats), SamplingError> {
+        struct CancelOnDrop {
+            cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
+            request_id: RequestId,
+        }
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                let _ = self.cmd_tx.send(SamplerCommand::Cancel {
+                    request_id: self.request_id.clone(),
+                });
+            }
+        }
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let cancel_id = request_id.clone();
+        let _guard = self
+            .cmd_tx
+            .send(SamplerCommand::Submit {
+                request_id,
+                request: Box::new(request),
+                config: None,
+                completion_tx: Some(completion_tx),
+                scope_capture,
+                usage_sink,
             })
             .ok()
             .map(|_| CancelOnDrop {

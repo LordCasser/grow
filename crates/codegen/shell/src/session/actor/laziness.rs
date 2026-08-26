@@ -680,7 +680,6 @@ impl SessionActor {
             self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
             return;
         }
-
         // Sampler call wrapped in a generation-poll loop AND a
         // wall-clock timeout. Dropping the `conversation_collect`
         // future on abort cancels the in-flight HTTP request via
@@ -689,87 +688,110 @@ impl SessionActor {
             LAZINESS_CLASSIFIER_TIMEOUT_MS,
         ));
         tokio::pin!(timeout);
-        let sampler_future = sampling_client.conversation_collect(request);
-        tokio::pin!(sampler_future);
-        let response = loop {
-            tokio::select! {
-                biased;
-                out = &mut sampler_future => match out {
-                    Ok(response) => break response,
-                    Err(err) => {
-                        let detail = err.to_string();
-                        if let Err(record_error) = sideband
-                            .fail(chat_state::SidebandOutcome::Failed, detail.clone())
-                            .await
-                        {
-                            tracing::warn!(%record_error, "laziness classifier: failed to commit Sideband failure");
+        let provider_outcome = {
+            let sampler_future =
+                sideband.run_provider(sampling_client.conversation_collect(request));
+            tokio::pin!(sampler_future);
+            loop {
+                tokio::select! {
+                    biased;
+                    out = &mut sampler_future => break Ok(out),
+                    _ = &mut timeout => break Err(LazinessAbortReason::Timeout),
+                    _ = tokio::time::sleep(poll_interval) => {
+                        if let Some(reason) = self.laziness_abort_check(abort_snapshot) {
+                            break Err(reason);
                         }
-                        tracing::debug!(error = %detail, "laziness classifier sampler call failed");
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        self.maybe_write_laziness_debug_log(
-                            meta.take(),
-                            &model_id,
-                            items_count_after_trim,
-                            elapsed_ms,
-                            LazinessFireOutcome::Aborted {
-                                reason: LazinessAbortReason::ClassifierError,
-                                error_detail: Some(detail),
-                            },
-                        )
-                        .await;
-                        self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
-                        return;
-                    }
-                },
-                _ = &mut timeout => {
-                    if let Err(record_error) = sideband
-                        .fail(chat_state::SidebandOutcome::Cancelled, "laziness classifier timed out")
-                        .await
-                    {
-                        tracing::warn!(%record_error, "laziness classifier: failed to commit timeout");
-                    }
-                    let elapsed_ms = started.elapsed().as_millis() as u64;
-                    self.maybe_write_laziness_debug_log(
-                        meta.take(),
-                        &model_id,
-                        items_count_after_trim,
-                        elapsed_ms,
-                        LazinessFireOutcome::Aborted {
-                            reason: LazinessAbortReason::Timeout,
-                            error_detail: None,
-                        },
-                    )
-                    .await;
-                    self.emit_laziness_abort(LazinessAbortReason::Timeout);
-                    return;
-                }
-                _ = tokio::time::sleep(poll_interval) => {
-                    if let Some(reason) = self.laziness_abort_check(abort_snapshot) {
-                        if let Err(record_error) = sideband
-                            .fail(chat_state::SidebandOutcome::Cancelled, reason.as_const_str())
-                            .await
-                        {
-                            tracing::warn!(%record_error, "laziness classifier: failed to commit cancellation");
-                        }
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        self.maybe_write_laziness_debug_log(
-                            meta.take(),
-                            &model_id,
-                            items_count_after_trim,
-                            elapsed_ms,
-                            LazinessFireOutcome::Aborted {
-                                reason,
-                                error_detail: None,
-                            },
-                        )
-                        .await;
-                        self.emit_laziness_abort(reason);
-                        return;
                     }
                 }
             }
         };
+        let response = match provider_outcome {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
+                let error = error.to_string();
+                if let Err(record_error) = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, error.clone())
+                    .await
+                {
+                    tracing::warn!(%record_error, "laziness classifier: failed to commit Sideband failure");
+                }
+                tracing::debug!(%error, "laziness classifier sampler call failed");
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                self.maybe_write_laziness_debug_log(
+                    meta.take(),
+                    &model_id,
+                    items_count_after_trim,
+                    elapsed_ms,
+                    LazinessFireOutcome::Aborted {
+                        reason: LazinessAbortReason::ClassifierError,
+                        error_detail: Some(error),
+                    },
+                )
+                .await;
+                self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+                return;
+            }
+            Ok(Err(error)) => {
+                let detail = error.to_string();
+                if let Err(record_error) = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, detail.clone())
+                    .await
+                {
+                    tracing::warn!(%record_error, "laziness classifier: failed to commit Sideband failure");
+                }
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                self.maybe_write_laziness_debug_log(
+                    meta.take(),
+                    &model_id,
+                    items_count_after_trim,
+                    elapsed_ms,
+                    LazinessFireOutcome::Aborted {
+                        reason: LazinessAbortReason::ClassifierError,
+                        error_detail: Some(detail),
+                    },
+                )
+                .await;
+                self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+                return;
+            }
+            Err(reason) => {
+                if let Err(record_error) = sideband
+                    .fail(
+                        chat_state::SidebandOutcome::Cancelled,
+                        reason.as_const_str(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%record_error, "laziness classifier: failed to commit cancellation");
+                }
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                self.maybe_write_laziness_debug_log(
+                    meta.take(),
+                    &model_id,
+                    items_count_after_trim,
+                    elapsed_ms,
+                    LazinessFireOutcome::Aborted {
+                        reason,
+                        error_detail: None,
+                    },
+                )
+                .await;
+                self.emit_laziness_abort(reason);
+                return;
+            }
+        };
 
+        let usage = match self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+        {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(%error, "laziness classifier: failed to settle provider usage");
+                self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+                return;
+            }
+        };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let raw_text = response.assistant_text();
         let parsed = match parse_classifier_output(&raw_text) {
@@ -810,7 +832,6 @@ impl SessionActor {
 
         let category = parsed.category;
         let confidence = parsed.confidence;
-        let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         if let Err(error) = sideband
             .complete(

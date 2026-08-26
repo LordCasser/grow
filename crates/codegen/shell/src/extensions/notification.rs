@@ -610,6 +610,15 @@ pub enum SessionUpdate {
         /// Effective model ID used by the subagent (may differ from the parent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Exact session-scoped model/effort catalog owned by this child. A
+        /// Workflow child receives the immutable Run projection, not the
+        /// process catalog that happened to be live when the UI saw the spawn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_state: Option<agent_client_protocol::SessionModelState>,
+        /// Run-frozen Agent names for a Workflow child. `None` means the child
+        /// follows ordinary live Agent discovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_agent_names: Option<Vec<String>>,
         /// ID of the source subagent this session was resumed from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resumed_from: Option<String>,
@@ -865,6 +874,8 @@ pub enum SessionUpdate {
         token_budget: Option<i64>,
         #[serde(default)]
         tokens_used: i64,
+        #[serde(default)]
+        usage_incomplete: bool,
         elapsed_ms: u64,
         created_at: String,
         updated_at: String,
@@ -1140,6 +1151,8 @@ mod tests {
             permission_mode: None,
             effective_permission_mode: None,
             model: None,
+            model_state: None,
+            workflow_agent_names: None,
             resumed_from: None,
             workflow_run_id: None,
             goal_id: None,
@@ -1415,6 +1428,7 @@ mod tests {
             status: "active".into(),
             token_budget: Some(100_000),
             tokens_used: 25_000,
+            usage_incomplete: false,
             elapsed_ms: 5_000,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:05:00Z".into(),
@@ -1537,6 +1551,7 @@ mod tests {
         let update = SessionUpdate::TurnCompleted {
             prompt_id: "p-1".into(),
             identity: Some(TurnIdentity {
+                goal_definition_revision: None,
                 origin: "goal_continuation".into(),
                 turn_kind: "internal".into(),
                 goal_id: Some("g-1".into()),
@@ -1574,6 +1589,7 @@ mod tests {
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-rt".into(),
                 identity: Some(TurnIdentity {
+                    goal_definition_revision: None,
                     origin: "user".into(),
                     turn_kind: "user".into(),
                     goal_id: None,

@@ -228,9 +228,10 @@ pub(crate) fn replay_inherited_updates(
 /// Rebuild the flat descendant index after a root session load. Root replay
 /// contains direct-child lifecycle records, while each nested spawn is durable
 /// in its immediate parent's session. Walk those child logs breadth-first and
-/// feed only lifecycle records through the normal notification projection so
-/// pending grandchild interactions can route immediately after load.
-pub(crate) fn restore_descendant_lifecycle(
+/// feed lifecycle and per-child control records through the normal notification
+/// projection so nested routing plus model/Agent identity are authoritative
+/// immediately after load.
+pub(crate) fn restore_descendant_state(
     app: &mut crate::app::root::AppView,
     root_agent_id: crate::app::session::AgentId,
 ) {
@@ -279,6 +280,8 @@ pub(crate) fn restore_descendant_lifecycle(
                     SessionUpdate::SubagentSpawned { .. }
                         | SessionUpdate::SubagentProgress { .. }
                         | SessionUpdate::SubagentFinished { .. }
+                        | SessionUpdate::ModelChanged { .. }
+                        | SessionUpdate::AgentChanged { .. }
                 ) {
                     lifecycle.push(notification);
                 }
@@ -315,7 +318,7 @@ pub(crate) fn restore_descendant_lifecycle(
                 "grow/session_notification",
                 std::sync::Arc::from(raw),
             );
-            crate::app::acp_handler::handle_descendant_lifecycle_replay(&ext, app, root_agent_id);
+            crate::app::acp_handler::handle_descendant_state_replay(&ext, app, root_agent_id);
             if let Some(child) = discovered_child
                 && durable_children.remove(&child)
             {
@@ -908,6 +911,7 @@ mod tests {
                     effective_permission_mode: None,
                     workflow_run_id: None,
                     goal_id: None,
+                    goal_definition_revision: None,
                     surface_completion: true,
                     child_cwd: child_cwd.into(),
                     worktree_path: worktree_path.map(str::to_owned),

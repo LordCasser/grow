@@ -345,12 +345,12 @@ impl SessionActor {
             })?;
         let response = match tokio::time::timeout(
             std::time::Duration::from_secs(30 * 60),
-            sampling_client.conversation_collect(request),
+            sideband.run_provider(sampling_client.conversation_collect(request)),
         )
         .await
         {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
                 let detail = format!("dream model call failed: {error}");
                 sideband
                     .fail(chat_state::SidebandOutcome::Failed, detail.clone())
@@ -361,6 +361,10 @@ impl SessionActor {
                         ))
                     })?;
                 return Err(acp::Error::internal_error().data(detail));
+            }
+            Ok(Err(error)) => {
+                return Err(acp::Error::internal_error()
+                    .data(format!("dream provider admission failed: {error}")));
             }
             Err(_) => {
                 let detail = "dream model call timed out after 30 minutes";
@@ -375,6 +379,13 @@ impl SessionActor {
                 return Err(acp::Error::internal_error().data(detail));
             }
         };
+        let usage = self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("dream provider usage could not settle: {error}"))
+            })?;
         let text = response.assistant_text();
         if text.trim().is_empty() {
             let detail = "dream model returned an empty response";
@@ -388,7 +399,6 @@ impl SessionActor {
                 })?;
             return Err(acp::Error::internal_error().data(detail));
         }
-        let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         sideband
             .complete(text.clone(), None, usage, finish, Vec::new())
@@ -525,9 +535,22 @@ impl SessionActor {
                         "memory flush Sideband attempt could not commit: {error}"
                     ))
                 })?;
-            match sampling_client.conversation_collect(request).await {
-                Ok(response) => Ok((response, sideband)),
-                Err(error) => {
+            match sideband
+                .run_provider(sampling_client.conversation_collect(request))
+                .await
+            {
+                Ok(Ok(response)) => {
+                    let usage = self
+                        .settle_sideband_response_usage(&mut sideband, &response)
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "memory flush provider usage could not settle: {error}"
+                            ))
+                        })?;
+                    Ok((response, sideband, usage))
+                }
+                Ok(Err(error)) => {
                     let detail = format!("flush model call failed: {error}");
                     sideband
                         .fail(chat_state::SidebandOutcome::Failed, detail.clone())
@@ -539,17 +562,18 @@ impl SessionActor {
                         })?;
                     Err(acp::Error::internal_error().data(detail))
                 }
+                Err(error) => Err(acp::Error::internal_error()
+                    .data(format!("memory flush provider admission failed: {error}"))),
             }
         }
         .await;
 
         // (outcome_string, response_length, accepted_length, was_truncated, written_path)
         let (outcome, response_len, accepted_len, was_truncated, flush_path) = match result {
-            Ok((response, mut sideband)) => {
+            Ok((response, mut sideband, usage)) => {
                 let response_text = response.assistant_text();
                 let resp_len = response_text.len();
                 let processed = process_flush_response(&response_text, &self.memory.flush_config);
-                let usage = sideband_usage(&response);
                 let finish = sideband_finish(&response);
                 let recorded = match &processed {
                     FlushResult::NothingToStore => {
@@ -852,12 +876,12 @@ impl SessionActor {
             .map_err(|error| format!("rewrite Sideband attempt could not commit: {error}"))?;
         let response = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            sampling_client.conversation_collect(request),
+            sideband.run_provider(sampling_client.conversation_collect(request)),
         )
         .await
         {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
                 let detail = format!("rewrite inference failed: {error}");
                 sideband
                     .fail(chat_state::SidebandOutcome::Failed, detail.clone())
@@ -866,6 +890,9 @@ impl SessionActor {
                         format!("{detail}; Sideband failure could not commit: {record_error}")
                     })?;
                 return Err(detail);
+            }
+            Ok(Err(error)) => {
+                return Err(format!("rewrite provider admission failed: {error}"));
             }
             Err(_) => {
                 let detail = "rewrite inference timed out after 15 seconds";
@@ -878,6 +905,10 @@ impl SessionActor {
                 return Err(detail.into());
             }
         };
+        let usage = self
+            .settle_sideband_response_usage(&mut sideband, &response)
+            .await
+            .map_err(|error| format!("rewrite provider usage could not settle: {error}"))?;
         let text = response.assistant_text();
         if text.trim().is_empty() {
             let detail = "memory rewrite returned an empty response";
@@ -889,7 +920,6 @@ impl SessionActor {
                 })?;
             return Err(detail.into());
         }
-        let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         sideband
             .complete(text.clone(), None, usage, finish, Vec::new())

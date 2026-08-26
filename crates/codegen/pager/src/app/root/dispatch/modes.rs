@@ -1,7 +1,7 @@
 //! Behavior, permission, and plan-view transitions.
 
 use super::ctx::with_active_agent;
-use super::queue::{maybe_drain_queue, note_peek_page_flip};
+use super::queue::enqueue_behavior_control;
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
@@ -24,9 +24,9 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Select a Behavior and optionally send its first prompt after the shell
-/// confirms the transition. `SetModeThenPrompt` prevents prompts from being
-/// delivered to the old Behavior while confirmation or rejection is pending.
+/// Select a Behavior and optionally stage its first prompt. Behavior shares
+/// the exact-session FIFO with model and Agent controls; only an authoritative
+/// `CurrentModeUpdate` permits the queued prompt to drain.
 pub(super) fn dispatch_set_behavior_then_prompt(
     app: &mut AppView,
     mode: tools::types::BehaviorId,
@@ -35,6 +35,19 @@ pub(super) fn dispatch_set_behavior_then_prompt(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if let Some(parent) = app.agents.get_mut(&id)
+        && parent.active_subagent.is_some()
+    {
+        if let Some(child) = parent
+            .active_subagent
+            .clone()
+            .and_then(|session_id| parent.subagent_views.get_mut(&session_id))
+        {
+            child.show_toast("Behavior is owned by the parent session");
+        }
+        return vec![];
+    }
+    let reconnecting = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -47,10 +60,8 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         agent.show_toast("No active session");
         return vec![];
     };
-    agent.session.behavior_mode_pending = Some(mode);
-    agent.session.plan_mode_pending = Some(mode.is_plan());
-    let mode_id = acp::SessionModeId::new(mode.as_id());
     if let Some(prompt) = prompt {
+        let queued_behavior = agent.session.behavior_control_target();
         let skill_token_ranges = agent
             .prompt
             .slash_controller
@@ -58,42 +69,25 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(prompt, skill_token_ranges);
-        let drain = maybe_drain_queue(agent);
-        note_peek_page_flip(app, id, drain.page_flip_entry);
-        let mut effects = Vec::with_capacity(1);
-        for eff in drain.effects {
-            match eff {
-                Effect::SendPrompt {
-                    agent_id,
-                    text,
-                    prompt_id,
-                    skill_token_ranges,
-                    ..
-                } => {
-                    effects.push(Effect::SetModeThenPrompt {
-                        session_id: session_id.clone(),
-                        mode_id: mode_id.clone(),
-                        agent_id,
-                        text,
-                        prompt_id,
-                        skill_token_ranges,
-                    });
-                }
-                other => effects.push(other),
-            }
+        // Even when the Shell already owns this Behavior, send the explicit
+        // selection through the control FIFO before admitting the prompt.
+        // Reselecting the authoritative source is the Shell's cancellation
+        // protocol for a pending interrupt-confirmation latch; treating it as
+        // a local no-op leaves a later target selection able to confirm stale
+        // intent.
+        agent.session.deferred_session_mode = Some(mode);
+        if queued_behavior == Some(mode) {
+            return vec![];
         }
-        if effects.is_empty() {
-            effects.push(Effect::SetSessionMode {
-                session_id,
-                mode_id,
-            });
-        }
-        effects
+        let effects = enqueue_behavior_control(id, session_id, &mut agent.session, mode);
+        if reconnecting { vec![] } else { effects }
     } else {
-        vec![Effect::SetSessionMode {
-            session_id,
-            mode_id,
-        }]
+        if agent.session.behavior_control_target() == Some(mode) {
+            agent.show_toast("Behavior selection is pending");
+            return vec![];
+        }
+        let effects = enqueue_behavior_control(id, session_id, &mut agent.session, mode);
+        if reconnecting { vec![] } else { effects }
     }
 }
 
@@ -107,34 +101,40 @@ pub(super) fn dispatch_set_behavior_mode(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if let Some(parent) = app.agents.get_mut(&id)
+        && parent.active_subagent.is_some()
+    {
+        if let Some(child) = parent
+            .active_subagent
+            .clone()
+            .and_then(|session_id| parent.subagent_views.get_mut(&session_id))
+        {
+            child.show_toast("Behavior is owned by the parent session");
+        }
+        return vec![];
+    }
+    let reconnecting = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    if agent.session.deferred_session_mode.is_some() && mode == agent.session.behavior_mode {
-        // A failed deferred admission left the first prompt parked. Picking
-        // the already-current Behavior is an explicit fallback decision,
-        // not an idempotent no-op: consume the admission token and send the
-        // queue under the identity the Shell already owns. Compare against
-        // the authoritative mode, never the optimistic pending target.
-        agent.session.deferred_session_mode = None;
+    let canceling_deferred_admission =
+        agent.session.deferred_session_mode.is_some() && mode == agent.session.behavior_mode;
+    if canceling_deferred_admission {
+        // Keep the prompt parked until the Shell acknowledges the source-mode
+        // selection. That acknowledgement both clears its confirmation latch
+        // and proves the exact Behavior under which the prompt may run.
+        agent.session.deferred_session_mode = Some(mode);
         agent.show_toast(&format!(
-            "Queued prompt will use {} Behavior",
+            "Queued prompt will use {} Behavior after confirmation is cleared",
             mode.display_label()
         ));
-        let drain = maybe_drain_queue(agent);
-        note_peek_page_flip(app, id, drain.page_flip_entry);
-        return drain.effects;
     }
     if let Some(reason) = agent.behavior_unavailable_reason(mode) {
         agent.show_toast(&reason);
         return vec![];
     }
-    let effective = agent
-        .session
-        .behavior_mode_pending
-        .unwrap_or(agent.session.behavior_mode);
-    if effective == mode {
-        agent.show_toast("Behavior is already selected");
+    if agent.session.behavior_control_target() == Some(mode) {
+        agent.show_toast("Behavior selection is pending");
         return vec![];
     }
     if mode == tools::types::BehaviorId::Plan
@@ -148,13 +148,11 @@ pub(super) fn dispatch_set_behavior_mode(
             .ephemeral_tip
             .clear(crate::tips::plan_nudge::PLAN_NUDGE_KEY);
     }
-    agent.session.behavior_mode_pending = Some(mode);
-    if agent.session.deferred_session_mode.is_some() {
+    if agent.session.deferred_session_mode.is_some() && !canceling_deferred_admission {
         // Retrying or replacing a failed first-prompt admission keeps one
         // authoritative target instead of creating a second queue mechanism.
         agent.session.deferred_session_mode = Some(mode);
     }
-    agent.session.plan_mode_pending = Some(mode.is_plan());
     agent.show_mode_switch_banner(mode.display_label());
 
     let session_id = agent.session.session_id.clone();
@@ -162,14 +160,14 @@ pub(super) fn dispatch_set_behavior_mode(
         agent.session.deferred_session_mode =
             (mode != tools::types::BehaviorId::Normal).then_some(mode);
     }
+    let effects = session_id
+        .map(|session_id| enqueue_behavior_control(id, session_id, &mut agent.session, mode));
     refresh_open_settings_modals(app);
-    let Some(session_id) = session_id else {
-        return skip_picker_and_create_session(app, id);
-    };
-    vec![Effect::SetSessionMode {
-        session_id,
-        mode_id: acp::SessionModeId::new(mode.as_id()),
-    }]
+    match effects {
+        Some(_) if reconnecting => vec![],
+        Some(effects) => effects,
+        None => skip_picker_and_create_session(app, id),
+    }
 }
 
 /// The single gate for client paths that ENABLE always-approve: `Some(reason)`
@@ -342,9 +340,7 @@ pub(super) fn set_permission_mode(
         .map(|a| {
             (
                 a.session.session_id.clone(),
-                a.session
-                    .plan_mode_pending
-                    .unwrap_or(a.session.plan_mode_active),
+                a.session.effective_plan_mode(),
             )
         })
         .unwrap_or((None, false));

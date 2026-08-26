@@ -74,6 +74,102 @@ struct CatalogState {
     cfg: config::Config,
 }
 
+/// Immutable provider/catalog generation sent to resident session actors.
+/// A busy actor resolves its then-current selected model only when this
+/// generation reaches the head of its step-boundary control queue. This avoids
+/// baking a stale committed route into a reload command that follows an
+/// already-accepted user selection.
+#[derive(Clone)]
+pub struct PublishedModelCatalog {
+    pub(crate) revision: u64,
+    models: IndexMap<String, ModelEntry>,
+    current_model_id: acp::ModelId,
+    cfg: config::Config,
+}
+
+#[derive(Clone)]
+pub struct PublishedSessionRoute {
+    pub(crate) model_id: acp::ModelId,
+    pub(crate) sampling_config: SamplingConfig,
+    pub(crate) image_description_model: Option<String>,
+    pub(crate) inference_idle_timeout: std::time::Duration,
+    pub(crate) max_retries: u32,
+    pub(crate) auto_compact_threshold_percent: u8,
+}
+
+impl PublishedModelCatalog {
+    pub(crate) fn models(&self) -> &IndexMap<String, ModelEntry> {
+        &self.models
+    }
+
+    pub(crate) fn task_selectable_models(&self) -> IndexMap<String, ModelEntry> {
+        task_selectable_catalog(&self.models)
+    }
+
+    pub(crate) fn model_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
+        self.models
+            .get(model_id)
+            .map(|entry| entry.info().reasoning_efforts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve one actor's route against this exact catalog generation. The
+    /// preferred id and effort are read at apply time, after every older
+    /// control in that actor's mailbox has committed.
+    pub(crate) fn resolve_session_route(
+        &self,
+        preferred_model_id: &acp::ModelId,
+        preferred_effort: Option<ReasoningEffort>,
+    ) -> Option<PublishedSessionRoute> {
+        let model_id = if self.models.contains_key(preferred_model_id.0.as_ref()) {
+            preferred_model_id.clone()
+        } else {
+            self.current_model_id.clone()
+        };
+        let entry = config::find_model_by_catalog_id(&self.models, model_id.0.as_ref())?;
+        let mut sampling_config = sampling_config_for_model(
+            entry,
+            resolve_credentials(entry),
+            self.cfg.endpoints.alpha_test_key.clone(),
+        );
+        if preferred_effort.is_some_and(|effort| {
+            entry
+                .info()
+                .reasoning_efforts
+                .iter()
+                .any(|option| option.value == effort)
+        }) {
+            sampling_config.reasoning_effort = preferred_effort;
+        } else if preferred_effort.is_none() {
+            sampling_config.reasoning_effort = None;
+        }
+        let per_model_timeout = entry.info.inference_idle_timeout_secs;
+        let remote_timeout = self
+            .cfg
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.inference_idle_timeout_secs);
+        let inference_idle_timeout = std::time::Duration::from_secs(
+            per_model_timeout.or(remote_timeout).unwrap_or(600).max(10),
+        );
+        let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
+        let auto_compact_threshold_percent =
+            crate::util::config::resolve_auto_compact_threshold_percent(
+                &self.cfg,
+                model_id.0.as_ref(),
+                Some(&entry.info),
+            );
+        Some(PublishedSessionRoute {
+            model_id,
+            sampling_config,
+            image_description_model: self.cfg.image_description_model.clone(),
+            inference_idle_timeout,
+            max_retries,
+            auto_compact_threshold_percent,
+        })
+    }
+}
+
 struct Inner {
     catalog: RwLock<CatalogState>,
     gateway: RwLock<Option<acp_transport::AcpAgentGatewaySender>>,
@@ -220,6 +316,13 @@ impl ModelsManager {
         self.inner.catalog.read().models.clone()
     }
 
+    /// Atomically pair the rows used by child resolution with their catalog
+    /// generation. Separate reads could otherwise construct a hybrid epoch.
+    pub(crate) fn catalog_models_snapshot(&self) -> (u64, IndexMap<String, ModelEntry>) {
+        let state = self.inner.catalog.read();
+        (state.revision, state.models.clone())
+    }
+
     pub(crate) fn task_selectable_models(&self) -> IndexMap<String, ModelEntry> {
         task_selectable_catalog(&self.inner.catalog.read().models)
     }
@@ -228,6 +331,16 @@ impl ModelsManager {
     /// current-model watch used by per-session sampling interruption.
     pub(crate) fn catalog_revision(&self) -> u64 {
         self.inner.catalog.read().revision
+    }
+
+    pub(crate) fn published_catalog(&self) -> PublishedModelCatalog {
+        let state = self.inner.catalog.read();
+        PublishedModelCatalog {
+            revision: state.revision,
+            models: state.models.clone(),
+            current_model_id: state.current_model_id.clone(),
+            cfg: state.cfg.clone(),
+        }
     }
 
     pub fn endpoints(&self) -> config::EndpointsConfig {

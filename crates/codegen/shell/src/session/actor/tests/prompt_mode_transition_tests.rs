@@ -21,7 +21,7 @@ async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal(
 
             assert!(matches!(
                 outcome,
-                crate::session::behavior::BehaviorChangeOutcome::Rejected { .. }
+                Ok(crate::session::behavior::BehaviorChangeOutcome::Rejected { .. })
             ));
             assert_eq!(
                 actor.behavior.lock().behavior(),
@@ -47,7 +47,7 @@ async fn host_command_turn_can_apply_its_own_behavior_transition() {
             assert!(
                 matches!(
                     outcome,
-                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
                 ),
                 "unexpected HostCommand transition outcome: {outcome:?}"
             );

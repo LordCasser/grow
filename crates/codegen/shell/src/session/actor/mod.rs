@@ -48,6 +48,7 @@ use agent::AgentDefinition;
 use agent::prompt::skills::SkillsConfig;
 use agent_client_protocol as acp;
 use agent_client_protocol::ContentBlock;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use sampler::SamplerConfig as SamplingConfig;
 use sampling_types::truncate_bytes;
@@ -74,7 +75,6 @@ mod compaction;
 pub(crate) mod context_recall;
 mod types;
 pub(crate) use types::*;
-pub use types::{TodoGateDecision, TodoGateReason};
 mod auth_retry;
 use auth_retry::{AuthRetryDecision, AuthRetrySchedule};
 mod completion_delivery;
@@ -114,7 +114,6 @@ mod tasks_cancel;
 use tasks_cancel::*;
 mod reminders;
 use reminders::*;
-pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
 mod laziness_classifier;
 pub(crate) use laziness_classifier::*;
 mod notification_drain;
@@ -123,7 +122,7 @@ mod extensions;
 use extensions::*;
 mod memory_dream;
 use memory_dream::*;
-mod goal_support;
+pub(crate) mod goal_support;
 pub(crate) use goal_support::*;
 mod hook_dispatch;
 use hook_dispatch::*;
@@ -186,11 +185,16 @@ struct AdmissionState {
     pub(crate) foreground: ForegroundState,
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
-    /// Latest validated catalog snapshot waiting behind the immutable route of
-    /// an admitted foreground. Multiple watcher notifications coalesce to the
-    /// newest snapshot, while every caller remains attached to its eventual
-    /// application result.
-    pending_model_reload: Option<PendingModelReload>,
+    /// Controls accepted while a step owns its immutable model-facing state.
+    /// The turn drains this single FIFO after StepEnded and before the next
+    /// sample; an idle session drains it before admitting any new foreground.
+    /// Model, Agent and Goal-definition changes must never form independent
+    /// queues because their relative admission order is observable.
+    pending_step_controls: VecDeque<PendingStepControl>,
+    /// A durable lifecycle/Behavior preemption committed while the current
+    /// foreground producer still owns the turn. No subsequent Step may start
+    /// until that exact turn reaches its terminal.
+    terminal_preemption_pending: bool,
     pub(crate) pending_inputs: VecDeque<InputItem>,
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
     pub(crate) combine_edit_holds: std::collections::HashSet<String>,
@@ -212,17 +216,141 @@ struct AdmissionState {
 }
 
 struct PendingModelReload {
-    model_id: acp::ModelId,
-    sampling_config: sampler::SamplerConfig,
-    image_description_model: Option<String>,
-    inference_idle_timeout: std::time::Duration,
-    max_retries: u32,
-    auto_compact_threshold_percent: u8,
+    catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
     responders: Vec<tokio::sync::oneshot::Sender<Result<(), acp::Error>>>,
+}
+
+struct PendingModelSelection {
+    route: crate::agent::models::PublishedSessionRoute,
+    catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
+    responds_to: tokio::sync::oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+}
+
+struct PendingAgentSelection {
+    preparation: std::rc::Rc<AgentPreparation>,
+    responds_to: tokio::sync::oneshot::Sender<Result<(), acp::Error>>,
+}
+
+enum PendingGoalDefinitionMutation {
+    Edit {
+        objective: String,
+        /// `None` preserves the budget already attached to the Goal.
+        token_budget: Option<i64>,
+    },
+    Budget {
+        /// `None` explicitly removes the limit.
+        token_budget: Option<i64>,
+    },
+}
+
+struct PendingGoalDefinitionControl {
+    /// Stable lifecycle identity captured at command admission. Definition
+    /// revisions are intentionally not captured: multiple edits admitted in
+    /// one step compose in FIFO order against this same long-lived Goal.
+    goal_id: String,
+    mutation: PendingGoalDefinitionMutation,
+    /// Present only for an idle admission, where the caller may safely wait
+    /// for the immediately drained durable result. Active-turn commands return
+    /// as scheduled instead of blocking the actor mailbox until StepEnded.
+    responds_to: Option<tokio::sync::oneshot::Sender<Result<bool, String>>>,
+}
+
+struct AgentPreparation {
+    result: std::cell::RefCell<Option<Result<agent::Agent, acp::Error>>>,
+    ready: tokio::sync::Notify,
+}
+
+impl AgentPreparation {
+    fn ready(result: Result<agent::Agent, acp::Error>) -> std::rc::Rc<Self> {
+        std::rc::Rc::new(Self {
+            result: std::cell::RefCell::new(Some(result)),
+            ready: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn start(
+        rebuild_spec: std::sync::Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
+        definition: agent::AgentDefinition,
+        session_id: String,
+    ) -> std::rc::Rc<Self> {
+        let new_agent_name = definition.selector_identity();
+        let preparation = std::rc::Rc::new(Self {
+            result: std::cell::RefCell::new(None),
+            ready: tokio::sync::Notify::new(),
+        });
+        let output = std::rc::Rc::clone(&preparation);
+        tokio::task::spawn_local(async move {
+            let result = std::panic::AssertUnwindSafe(rebuild_spec.build_agent(definition))
+                .catch_unwind()
+                .await
+                .map_err(|_| {
+                    tracing::error!(
+                        %session_id,
+                        new_agent_type = %new_agent_name,
+                        "Agent preparation panicked"
+                    );
+                    acp::Error::internal_error().data(format!(
+                        "rebuild_agent: preparation panicked for agent_type={new_agent_name}"
+                    ))
+                })
+                .and_then(|result| {
+                    result.map_err(|error| {
+                        tracing::error!(
+                            %session_id,
+                            new_agent_type = %new_agent_name,
+                            %error,
+                            "Agent preparation failed"
+                        );
+                        acp::Error::internal_error().data(format!(
+                            "rebuild_agent: build failed for agent_type={new_agent_name}: {error}"
+                        ))
+                    })
+                });
+            *output.result.borrow_mut() = Some(result);
+            output.ready.notify_waiters();
+        });
+        preparation
+    }
+
+    async fn wait_ready(&self) {
+        loop {
+            let ready = self.ready.notified();
+            if self.result.borrow().is_some() {
+                return;
+            }
+            ready.await;
+        }
+    }
+
+    fn has_agent(&self) -> bool {
+        matches!(&*self.result.borrow(), Some(Ok(_)))
+    }
+
+    fn take(&self) -> Result<agent::Agent, acp::Error> {
+        self.result
+            .borrow_mut()
+            .take()
+            .expect("Agent preparation must be ready and consumed exactly once")
+    }
+}
+
+/// Ordered next-step control mutations. Catalog reloads only coalesce when
+/// they are adjacent; every different control is an ordering barrier and must
+/// remain observable.
+enum PendingStepControl {
+    ModelReload(PendingModelReload),
+    ModelSelection(PendingModelSelection),
+    AgentSelection(PendingAgentSelection),
+    GoalDefinition(PendingGoalDefinitionControl),
 }
 
 pub(crate) enum ForegroundState {
     Idle,
+    /// An idle model/effort/Agent control is being durably applied. This
+    /// fences every idle consumer while allowing the control implementation
+    /// to release admission locks before calling back into capability/runtime
+    /// refresh paths.
+    ApplyingControl,
     RegularTurn(AgentTask),
     /// The runner has returned, but its canonical Timeline terminal has not
     /// completed the durable barrier yet.  This is still foreground
@@ -230,6 +358,8 @@ pub(crate) enum ForegroundState {
     /// `TurnStarted` overtake its predecessor's `TurnEnded`.
     Settling {
         prompt_id: String,
+        origin: crate::session::PromptOrigin,
+        turn_kind: crate::session::TurnKind,
     },
     Compaction,
 }
@@ -242,7 +372,14 @@ impl ForegroundState {
     pub(crate) fn regular(&self) -> Option<&AgentTask> {
         match self {
             Self::RegularTurn(task) => Some(task),
-            Self::Idle | Self::Settling { .. } | Self::Compaction => None,
+            Self::Idle | Self::ApplyingControl | Self::Settling { .. } | Self::Compaction => None,
+        }
+    }
+
+    pub(crate) fn regular_mut(&mut self) -> Option<&mut AgentTask> {
+        match self {
+            Self::RegularTurn(task) => Some(task),
+            Self::Idle | Self::ApplyingControl | Self::Settling { .. } | Self::Compaction => None,
         }
     }
 
@@ -272,7 +409,11 @@ impl ForegroundState {
         match std::mem::replace(self, Self::Idle) {
             Self::RegularTurn(task) => {
                 let prompt_id = task.prompt_id.clone();
-                *self = Self::Settling { prompt_id };
+                *self = Self::Settling {
+                    prompt_id,
+                    origin: task.origin.clone(),
+                    turn_kind: task.turn_kind,
+                };
                 Some(task)
             }
             other => {
@@ -282,8 +423,27 @@ impl ForegroundState {
         }
     }
 
+    pub(crate) fn begin_terminalization(&mut self, prompt_id: &str) -> bool {
+        matches!(self.regular(), Some(task) if task.prompt_id == prompt_id)
+            && self.begin_settling().is_some()
+    }
+
+    pub(crate) fn settling_identity(
+        &self,
+        prompt_id: &str,
+    ) -> Option<(crate::session::PromptOrigin, crate::session::TurnKind)> {
+        match self {
+            Self::Settling {
+                prompt_id: active,
+                origin,
+                turn_kind,
+            } if active == prompt_id => Some((origin.clone(), *turn_kind)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn finish_settling(&mut self, prompt_id: &str) -> bool {
-        if matches!(self, Self::Settling { prompt_id: active } if active == prompt_id) {
+        if matches!(self, Self::Settling { prompt_id: active, .. } if active == prompt_id) {
             *self = Self::Idle;
             true
         } else {
@@ -299,8 +459,10 @@ impl AdmissionState {
     pub(crate) fn running_prompt_id(&self) -> Option<&str> {
         match &self.foreground {
             ForegroundState::RegularTurn(task) => Some(task.prompt_id.as_str()),
-            ForegroundState::Settling { prompt_id } => Some(prompt_id.as_str()),
-            ForegroundState::Idle | ForegroundState::Compaction => None,
+            ForegroundState::Settling { prompt_id, .. } => Some(prompt_id.as_str()),
+            ForegroundState::Idle
+            | ForegroundState::ApplyingControl
+            | ForegroundState::Compaction => None,
         }
     }
 
@@ -515,6 +677,10 @@ pub(crate) struct SessionActor {
     /// chokepoint must clear this memo (`replace(None)`).
     pub(crate) model_auth_memo: std::cell::RefCell<Option<ModelAuthMemo>>,
     state: TokioMutex<AdmissionState>,
+    /// Prevents turn cancellation from dropping a step-boundary route
+    /// transition halfway through its durable commit and live-state swap.
+    /// The turn remains abortable everywhere else.
+    step_control_gate: TokioMutex<()>,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
@@ -562,9 +728,10 @@ pub(crate) struct SessionActor {
         Option<crate::session::subagent_capability::SubagentCapabilityState>,
     /// Compaction configuration and runtime state.
     pub(crate) compaction: super::compaction_config::CompactionConfig,
-    /// Session-owned turn-end continuation gate. Agent switches cannot alter
-    /// this runtime policy.
-    pub(crate) todo_gate: reminders::TodoGateConfig,
+    /// Session-scoped cancellation authority for auxiliary model ledgers.
+    /// Sideband durability retries are exact and may otherwise wait forever
+    /// after the session has entered teardown.
+    pub(crate) sideband_cancel: tokio_util::sync::CancellationToken,
     /// Memory subsystem: storage, flush config, injection state, diagnostics.
     pub(crate) memory: super::memory_state::SessionMemory,
     /// Diagnostic counters for session summary.
@@ -618,6 +785,8 @@ pub(crate) struct SessionActor {
     /// Wrapped in `RefCell` for mid-session mutation (skill refresh, prompt regen).
     /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
     pub(crate) agent: std::cell::RefCell<agent::Agent>,
+    /// Actor-committed Agent identity shared with every `SessionHandle` clone.
+    pub(crate) agent_profile: crate::session::handle::SessionAgentProfile,
     /// Dedup slot for `grow/git_head_changed`, shared with the fs-watch
     /// `GitHead` consumer (see `git_head_dedup_key`).
     pub(crate) last_reported_branch: Arc<parking_lot::Mutex<Option<String>>>,
@@ -670,6 +839,10 @@ pub(crate) struct SessionActor {
     /// Durable long-lived Goal state. Idle continuation authority is runtime
     /// state and is deliberately not persisted in this value.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
+    /// Root-owned activity window and accounting ingress shared with all
+    /// descendant model runtimes. This is separate from delegation ownership:
+    /// every model call settled while the Goal is Active is chargeable.
+    pub(crate) goal_usage_window: goal_support::GoalUsageWindow,
     /// Background tasks (and monitors) that originated during
     /// a Goal turn, including surviving tasks reparented from delegated
     /// children. Their late
@@ -678,7 +851,8 @@ pub(crate) struct SessionActor {
     /// server that completes after the run ended (Blocked / paused / cleared)
     /// cannot wake the idle parent. Reset only when a new Goal starts; clearing
     /// the old Goal must not erase ownership of work that is still running.
-    pub(crate) goal_turn_task_ids: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+    pub(crate) goal_turn_task_ids:
+        parking_lot::Mutex<std::collections::HashMap<String, (String, u64)>>,
     pub(crate) goal_command_rx: std::cell::RefCell<
         Option<
             tokio::sync::mpsc::UnboundedReceiver<
@@ -709,10 +883,10 @@ pub(crate) struct SessionActor {
     /// Used to detect session resume after idle and proactively refresh model metadata.
     pub(crate) last_api_request_at: std::sync::atomic::AtomicI64,
     hooks: HookSessionState,
-    /// Plugin registry snapshot for this session. Updated on `/plugins reload`.
-    /// `RefCell` for mid-session reload from `&self` methods.
-    pub(crate) plugin_registry:
-        std::cell::RefCell<Option<std::sync::Arc<agent::plugins::PluginRegistry>>>,
+    /// Plugin registry snapshot for this session. Updated on `/plugins reload`
+    /// and shared with new-Workflow admission so one live registry authority
+    /// feeds both Agent rebuilds and Run-scoped catalog freezing.
+    pub(crate) plugin_registry: crate::session::workflow::tracker::SharedWorkflowPluginRegistry,
     /// Shared handle to the agent-level plugin registry.
     /// Used by `/plugins reload` to trigger a rebuild that new sessions see.
     pub(crate) plugin_registry_handle: Option<agent::plugins::SharedPluginRegistryHandle>,
@@ -765,12 +939,12 @@ pub(crate) struct SessionActor {
     pub(crate) sampler_handle: sampler::SamplerHandle,
     /// Cached recipe for constructing this session's [`agent::Agent`].
     ///
-    /// Populated once at session spawn and then reused by
-    /// `handle_rebuild_agent_for_definition` to build a fresh `Agent`
+    /// Populated once at session spawn and then reused by the next-step Agent
+    /// selection path to build a fresh `Agent`
     /// (system prompt, [`tools::bridge::ToolBridge`], tool
     /// registry, and tool name aliases) when the user selects another Agent.
     /// Session lifecycle policy is deliberately absent: an Agent switch must
-    /// not alter TodoGate, compaction, permission, or provider state.
+    /// not alter compaction, permission, or provider state.
     ///
     /// See [`crate::session::agent_rebuild`] for the canonical-construction
     /// invariant.
@@ -784,9 +958,6 @@ pub(crate) struct SessionActor {
         std::cell::RefCell<Option<crate::session::actor::summary::SessionTitleRoute>>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
-    /// Per-subagent exactly-once marker keyed by `subagent_id`; Goal usage is
-    /// charged from the acknowledged child usage-ledger fold, never progress.
-    pub(crate) subagent_token_records: parking_lot::Mutex<HashMap<String, SubagentTokenRecord>>,
     pub(crate) workspace_ops: workspace::WorkspaceOps,
     /// Layer-3 LazinessDetector: monotonic counter bumped whenever a
     /// fresh (non-synthetic) user prompt arrives at the actor.
@@ -908,7 +1079,7 @@ impl SessionActor {
                 .iter()
                 .any(|n| n == tools::implementations::grow_build::SCHEDULER_CREATE_TOOL_NAME),
             hooks: self.hooks.registry.borrow().is_some(),
-            plugins: self.plugin_registry.borrow().is_some(),
+            plugins: self.plugin_registry.read().is_some(),
             goal,
             workflows: tool_names
                 .iter()
@@ -919,14 +1090,17 @@ impl SessionActor {
     }
     /// Names of every tool registered with the session's tool bridge.
     ///
-    /// Async wrapper that fetches `tool_definitions()` and projects to
-    /// the `function.name` field. Allocates one `Vec<String>` per call;
+    /// Async wrapper that fetches `tool_definitions_builtins_only()` and
+    /// projects to the `function.name` field. Allocates one `Vec<String>` per call;
     /// callers that need both gating and the wire payload should call
     /// once and pass the slice to `build_command_availability`.
+    /// Capability projection for Shell-owned runtimes and slash commands.
+    /// Remote MCP tools are callable data-plane extensions, not authority to
+    /// impersonate Goal, Workflow, Scheduler, or memory runtimes by name.
     async fn registered_tool_names(&self) -> Vec<String> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge
-            .tool_definitions()
+            .tool_definitions_builtins_only()
             .await
             .into_iter()
             .map(|td| td.function.name)
