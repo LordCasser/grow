@@ -146,7 +146,7 @@ fi
 HARMONYBREW_CORE_COMMIT=e3a9ec87f881ce05d563912f5f0cbd6f1693b4f3
 HARMONYBREW_CORE_REMOTE=https://atomgit.com/Harmonybrew/homebrew-core.git
 EXPECTED_OHOS_RUST_VERSION=1.98.0
-CORE_REPO="$(brew --repo homebrew/core)"
+CORE_REPO="$(brew --repo harmonybrew/core)"
 log "Pinning Harmonybrew core ($HARMONYBREW_CORE_COMMIT)"
 git -C "$CORE_REPO" fetch --depth=1 "$HARMONYBREW_CORE_REMOTE" "$HARMONYBREW_CORE_COMMIT"
 git -C "$CORE_REPO" -c advice.detachedHead=false checkout --detach "$HARMONYBREW_CORE_COMMIT"
