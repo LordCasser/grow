@@ -232,9 +232,21 @@ struct TrajectoryQuery {
     class: Option<String>,
     producer: Option<String>,
     visibility: Option<String>,
+    issue: Option<TrajectoryIssueFilter>,
+    correlation: Option<String>,
+    turn: Option<String>,
+    step: Option<u32>,
     search: Option<String>,
     overview_by: Option<TrajectoryOverviewDimension>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TrajectoryIssueFilter {
+    Any,
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -309,6 +321,10 @@ struct TrajectoryRowSummary {
     correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue_severity: Option<chat_state::TrajectoryIssueSeverity>,
     summary: String,
 }
 
@@ -332,6 +348,8 @@ impl From<&chat_state::TrajectoryRow> for TrajectoryRowSummary {
             step_index: row.step_index,
             correlation_id: row.correlation_id.as_deref().map(trajectory_wire_text),
             duration_ms: row.duration_ms,
+            outcome: row.outcome.as_deref().map(trajectory_wire_text),
+            issue_severity: row.issue_severity,
             summary: crate::util::truncate(&row.summary, TRAJECTORY_SUMMARY_CHARS).to_owned(),
         }
     }
@@ -360,6 +378,8 @@ impl TrajectoryRowSummary {
             step_index: self.step_index,
             correlation_id: self.correlation_id,
             duration_ms: self.duration_ms,
+            outcome: self.outcome,
+            issue_severity: self.issue_severity,
             summary: self.summary,
             details,
         }
@@ -373,7 +393,9 @@ struct TrajectoryOverviewBin {
     start_ms: i64,
     end_ms: i64,
     counts: BTreeMap<String, usize>,
-    failures: usize,
+    warnings: usize,
+    errors: usize,
+    prompt_updates: usize,
     turns: usize,
     steps: usize,
     max_duration_ms: u64,
@@ -401,6 +423,7 @@ struct TrajectoryResponse {
     open_tool_count: usize,
     open_workflow_count: usize,
     matching_count: usize,
+    issue_count: usize,
     first_cursor: Option<String>,
     last_cursor: Option<String>,
     has_earlier: bool,
@@ -576,6 +599,11 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .visibility
         .as_deref()
         .filter(|value| !value.is_empty());
+    let correlation = query
+        .correlation
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let turn = query.turn.as_deref().filter(|value| !value.is_empty());
     let limit = query
         .limit
         .unwrap_or(DEFAULT_TRAJECTORY_PAGE_ROWS)
@@ -586,9 +614,21 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
             && class.is_none_or(|value| row.class == value)
             && producer.is_none_or(|value| dimension_matches(&row.producer, value))
             && visibility.is_none_or(|value| visibility_name(row.visibility) == value)
+            && query.issue.is_none_or(|filter| match filter {
+                TrajectoryIssueFilter::Any => row.issue_severity.is_some(),
+                TrajectoryIssueFilter::Warning => {
+                    row.issue_severity == Some(chat_state::TrajectoryIssueSeverity::Warning)
+                }
+                TrajectoryIssueFilter::Error => {
+                    row.issue_severity == Some(chat_state::TrajectoryIssueSeverity::Error)
+                }
+            })
+            && correlation.is_none_or(|value| row.correlation_id.as_deref() == Some(value))
+            && turn.is_none_or(|value| row.turn_id.as_deref() == Some(value))
+            && query.step.is_none_or(|value| row.step_index == Some(value))
             && search.as_ref().is_none_or(|needle| {
                 format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                     row.seq,
                     row.entry_id,
                     row.parent_entry_id.as_deref().unwrap_or_default(),
@@ -602,6 +642,12 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
                     row.summary,
                     row.turn_id.as_deref().unwrap_or_default(),
                     row.correlation_id.as_deref().unwrap_or_default(),
+                    row.outcome.as_deref().unwrap_or_default(),
+                    match row.issue_severity {
+                        Some(chat_state::TrajectoryIssueSeverity::Warning) => "warning",
+                        Some(chat_state::TrajectoryIssueSeverity::Error) => "error",
+                        None => "",
+                    },
                 )
                 .to_lowercase()
                 .contains(needle)
@@ -618,6 +664,10 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
             .unwrap_or(TrajectoryOverviewDimension::Interaction),
     );
     let matching_count = matching.len();
+    let issue_count = matching
+        .iter()
+        .filter(|row| row.issue_severity.is_some())
+        .count();
     let cursor_index = |entry_id: &str| {
         matching
             .iter()
@@ -665,6 +715,7 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         open_tool_count: cache.timeline.open_tool_call_ids().count(),
         open_workflow_count: cache.timeline.open_workflow_run_ids().count(),
         matching_count,
+        issue_count,
         first_cursor,
         last_cursor,
         has_earlier: start > 0,
@@ -961,6 +1012,10 @@ fn trajectory_row_needs_wire_truncation(row: &chat_state::TrajectoryRow) -> bool
             .correlation_id
             .as_deref()
             .is_some_and(|value| wire_text_exceeds(value, TRAJECTORY_WIRE_FIELD_CHARS))
+        || row
+            .outcome
+            .as_deref()
+            .is_some_and(|value| wire_text_exceeds(value, TRAJECTORY_WIRE_FIELD_CHARS))
 }
 
 fn wire_text_exceeds(value: &str, limit: usize) -> bool {
@@ -1094,7 +1149,12 @@ fn trajectory_overview(
         }
         bin.last_entry_id = Some(row.entry_id.clone());
         bin.max_duration_ms = bin.max_duration_ms.max(row.duration_ms.unwrap_or_default());
-        bin.failures += usize::from(matches!(row.state.as_str(), "failed" | "cancelled"));
+        match row.issue_severity {
+            Some(chat_state::TrajectoryIssueSeverity::Warning) => bin.warnings += 1,
+            Some(chat_state::TrajectoryIssueSeverity::Error) => bin.errors += 1,
+            None => {}
+        }
+        bin.prompt_updates += usize::from(row.kind.starts_with("prompt."));
         bin.turns += usize::from(row.kind == "turn.started");
         bin.steps += usize::from(row.kind == "step.started");
         let lane = trajectory_overview_lane(row, dimension);
@@ -2443,6 +2503,14 @@ fn workflow_row(
         .get(workflow::journal::HOST_ERROR_KEY)
         .and_then(serde_json::Value::as_str);
     let result_preview = workflow_result_preview(&entry.result);
+    let state = if pending {
+        "running"
+    } else if failed.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    let outcome = (!pending).then(|| state.to_owned());
     chat_state::TrajectoryRow {
         entry_id,
         seq: entry.seq,
@@ -2454,18 +2522,14 @@ fn workflow_row(
         class: "message".into(),
         producer: format!("workflow-host:{}", entry.kind),
         kind: format!("workflow.host_call.{}", entry.kind),
-        state: if pending {
-            "running".into()
-        } else if failed.is_some() {
-            "failed".into()
-        } else {
-            "completed".into()
-        },
+        state: state.into(),
         visibility: chat_state::SurfaceVisibility::LogOnly,
         turn_id: None,
         step_index: None,
         correlation_id: Some(entry.req_hash.clone()),
         duration_ms: None,
+        issue_severity: chat_state::trajectory_issue_severity(state, outcome.as_deref()),
+        outcome,
         summary: if pending {
             format!("{} · pending", entry.kind)
         } else {
@@ -2863,60 +2927,67 @@ fn sideband_row(
     attempt_times: &BTreeMap<u64, i64>,
 ) -> chat_state::TrajectoryRow {
     let entry_id = format!("t:{}/{}", event.sideband_id, event.seq);
-    let (kind, state, producer, summary, duration_ms) = match &event.kind {
-        chat_state::SidebandEventKind::Request(request) => (
-            "sideband.request",
-            "created".into(),
-            "core",
-            format!("{} · {}", request.purpose.as_str(), request.route.model),
-            None,
-        ),
-        chat_state::SidebandEventKind::Attempt(attempt) => (
-            "sideband.attempt",
-            "started".into(),
-            "model",
-            attempt.feedback.as_deref().map_or_else(
-                || format!("attempt {}", attempt.attempt_no),
-                |feedback| {
-                    format!(
-                        "attempt {} · {}",
-                        attempt.attempt_no,
-                        crate::util::truncate(feedback, 180)
-                    )
-                },
+    let (kind, state, producer, summary, duration_ms): (&str, String, &str, String, Option<u64>) =
+        match &event.kind {
+            chat_state::SidebandEventKind::Request(request) => (
+                "sideband.request",
+                "created".into(),
+                "core",
+                format!("{} · {}", request.purpose.as_str(), request.route.model),
+                None,
             ),
-            None,
-        ),
-        chat_state::SidebandEventKind::Result(result) => {
-            let attempt = result.source_event_seqs[1];
-            let duration = attempt_times
-                .get(&attempt)
-                .and_then(|started| event.at_ms.checked_sub(*started))
-                .and_then(|duration| u64::try_from(duration).ok());
-            (
-                "sideband.result",
-                "completed".into(),
+            chat_state::SidebandEventKind::Attempt(attempt) => (
+                "sideband.attempt",
+                "started".into(),
                 "model",
-                crate::util::truncate(&result.raw_output, 240).to_string(),
-                duration,
-            )
-        }
-        chat_state::SidebandEventKind::End(end) => (
-            "sideband.end",
-            match end.outcome {
-                chat_state::SidebandOutcome::Completed => "completed",
-                chat_state::SidebandOutcome::Failed => "failed",
-                chat_state::SidebandOutcome::Cancelled => "cancelled",
+                attempt.feedback.as_deref().map_or_else(
+                    || format!("attempt {}", attempt.attempt_no),
+                    |feedback| {
+                        format!(
+                            "attempt {} · {}",
+                            attempt.attempt_no,
+                            crate::util::truncate(feedback, 180)
+                        )
+                    },
+                ),
+                None,
+            ),
+            chat_state::SidebandEventKind::Result(result) => {
+                let attempt = result.source_event_seqs[1];
+                let duration = attempt_times
+                    .get(&attempt)
+                    .and_then(|started| event.at_ms.checked_sub(*started))
+                    .and_then(|duration| u64::try_from(duration).ok());
+                (
+                    "sideband.result",
+                    "completed".into(),
+                    "model",
+                    crate::util::truncate(&result.raw_output, 240).to_string(),
+                    duration,
+                )
             }
-            .into(),
-            "core",
-            end.error
-                .as_deref()
-                .map(|error| crate::util::truncate(error, 240).to_string())
-                .unwrap_or_else(|| "completed".into()),
-            None,
-        ),
-    };
+            chat_state::SidebandEventKind::End(end) => (
+                "sideband.end",
+                match end.outcome {
+                    chat_state::SidebandOutcome::Completed => "completed",
+                    chat_state::SidebandOutcome::Failed => "failed",
+                    chat_state::SidebandOutcome::Cancelled => "cancelled",
+                }
+                .into(),
+                "core",
+                end.error
+                    .as_deref()
+                    .map(|error| crate::util::truncate(error, 240).to_string())
+                    .unwrap_or_else(|| "completed".into()),
+                None,
+            ),
+        };
+    let outcome = matches!(
+        &event.kind,
+        chat_state::SidebandEventKind::End(_) | chat_state::SidebandEventKind::Result(_)
+    )
+    .then(|| state.clone());
+    let issue_severity = chat_state::trajectory_issue_severity(&state, outcome.as_deref());
     chat_state::TrajectoryRow {
         entry_id,
         seq: event.seq,
@@ -2938,6 +3009,8 @@ fn sideband_row(
         step_index: None,
         correlation_id: Some(event.sideband_id.clone()),
         duration_ms,
+        issue_severity,
+        outcome,
         summary,
         details: serde_json::Value::Null,
     }
@@ -4525,7 +4598,7 @@ mod tests {
     }
 
     #[test]
-    fn page_separates_timeline_views_from_four_dimension_filters() {
+    fn page_separates_timeline_views_from_diagnostic_filters() {
         assert!(PAGE.contains("id=\"track\""));
         assert!(PAGE.contains("id=\"overviewBy\""));
         assert!(PAGE.contains("<option value=\"interaction\">Interaction flow</option>"));
@@ -4538,6 +4611,7 @@ mod tests {
         assert!(PAGE.contains("id=\"actor\""));
         assert!(PAGE.contains("id=\"class\""));
         assert!(PAGE.contains("id=\"producer\""));
+        assert!(PAGE.contains("id=\"issue\""));
         assert!(PAGE.contains("<option value=\"governance\">Governance</option>"));
         assert!(PAGE.contains("OVERSCAN=20"));
         assert!(PAGE.contains("parent_entry_id"));
@@ -4551,12 +4625,20 @@ mod tests {
         assert!(!PAGE.contains("id=\"later\""));
         assert!(!PAGE.contains("Following live"));
         assert!(!PAGE.contains("Resume tail"));
+        assert!(!PAGE.contains("id=\"refresh\""));
         assert!(PAGE.contains("id=\"liveStatus\" role=\"status\""));
+        assert!(PAGE.contains("Live tail"));
         assert!(PAGE.contains("id=\"follow\"") && PAGE.contains("hidden><span class=\"live-dot\""));
         assert!(PAGE.contains("Jump to live"));
         assert!(PAGE.contains("event.deltaY<0"));
         assert!(PAGE.contains("boundary-label"));
         assert!(PAGE.contains("paired-event"));
+        assert!(PAGE.contains("prompt-context"));
+        assert!(PAGE.contains("prompt-mark"));
+        assert!(PAGE.contains("id=\"relations\""));
+        assert!(PAGE.contains("scopeRelated"));
+        assert!(PAGE.contains("urlStateParams"));
+        assert!(PAGE.contains("actorLabel"));
         assert!(PAGE.contains("summaryCaption"));
         assert!(PAGE.contains("active · step"));
     }
@@ -4632,6 +4714,195 @@ mod tests {
                 .keys()
                 .all(|key| matches!(key.as_str(), "user" | "assistant"))
         }));
+    }
+
+    #[test]
+    fn issue_and_exact_relation_filters_share_one_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let turn = chat_state::TurnId(11);
+        let step = chat_state::StepId { turn, index: 2 };
+        let mut timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system(
+                "system",
+            )])
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Started {
+                    id: turn,
+                    identity: chat_state::TurnIdentity {
+                        origin: "user".into(),
+                        turn_kind: "user".into(),
+                        goal_id: None,
+                        stage_id: None,
+                    },
+                    model_id: "model".into(),
+                    input_message_count: 1,
+                    prompt_index: 0,
+                    prompt_text: "inspect".into(),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Step(
+                chat_state::StepEvent::Started { id: step },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Tool(
+                chat_state::ToolEvent::Started {
+                    call_id: "call-1".into(),
+                    turn,
+                    step,
+                    name: "read_file".into(),
+                    input: Some(serde_json::json!({ "path": "/tmp/input" })),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Tool(
+                chat_state::ToolEvent::Completed {
+                    call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    outcome: "not_dispatched".into(),
+                    duration_ms: 3,
+                    details: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Request(
+                chat_state::RequestEvent::Started {
+                    id: "request-1".into(),
+                    turn,
+                    step,
+                    model_id: "model".into(),
+                    input_message_count: 1,
+                    tool_count: 1,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Request(
+                chat_state::RequestEvent::Retrying {
+                    id: "request-1".into(),
+                    attempt: 1,
+                    max_retries: 2,
+                    reason: "rate limited".into(),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Control(
+                chat_state::ControlEvent {
+                    revision: 1,
+                    snapshot: serde_json::json!({ "behavior": "plan" }),
+                    model_context: Some(chat_state::ControlContext {
+                        layer: chat_state::ControlContextLayer::Behavior,
+                        activation: chat_state::ControlContextActivation::Transition,
+                        item: sampling_types::ConversationItem::system_reminder("plan"),
+                    }),
+                },
+            ))
+            .unwrap();
+        write_timeline(&path, &timeline);
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+
+        let issues = query_cached(
+            &state,
+            TrajectoryQuery {
+                issue: Some(TrajectoryIssueFilter::Any),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(issues.matching_count, 2);
+        assert_eq!(issues.issue_count, 2);
+
+        let errors = query_cached(
+            &state,
+            TrajectoryQuery {
+                issue: Some(TrajectoryIssueFilter::Error),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(errors.rows.len(), 1);
+        assert_eq!(errors.rows[0].correlation_id.as_deref(), Some("call-1"));
+        assert_eq!(errors.rows[0].producer, "tool:read_file");
+
+        let warning = query_cached(
+            &state,
+            TrajectoryQuery {
+                issue: Some(TrajectoryIssueFilter::Warning),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(warning.rows.len(), 1);
+        assert_eq!(warning.rows[0].correlation_id.as_deref(), Some("request-1"));
+
+        let pair = query_cached(
+            &state,
+            TrajectoryQuery {
+                correlation: Some("call-1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(pair.rows.len(), 2);
+
+        let exact_step = query_cached(
+            &state,
+            TrajectoryQuery {
+                turn: Some("11".into()),
+                step: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(exact_step.rows.len(), 6);
+        assert!(
+            exact_step
+                .rows
+                .iter()
+                .all(|row| row.turn_id.as_deref() == Some("11") && row.step_index == Some(2))
+        );
+
+        let all = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(
+            all.overview
+                .bins
+                .iter()
+                .map(|bin| bin.errors)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            all.overview
+                .bins
+                .iter()
+                .map(|bin| bin.warnings)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            all.overview
+                .bins
+                .iter()
+                .map(|bin| bin.prompt_updates)
+                .sum::<usize>(),
+            1
+        );
     }
 
     #[test]

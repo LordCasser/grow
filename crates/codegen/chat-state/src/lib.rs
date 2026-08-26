@@ -75,8 +75,8 @@ pub use timeline::{
     WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle, notification_id,
 };
 pub use trajectory::{
-    SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryProjector, TrajectoryRow,
-    TrajectorySnapshot,
+    SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,
+    TrajectoryRow, TrajectorySnapshot, trajectory_issue_severity,
 };
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};
