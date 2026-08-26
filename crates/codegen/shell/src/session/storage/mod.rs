@@ -359,35 +359,39 @@ impl ContainedDirectory {
         source: &std::ffi::OsStr,
         target: &std::ffi::OsStr,
     ) -> io::Result<()> {
-        Self::component(source)?;
-        Self::component(target)?;
+        let target_display = self.path.join(target);
+        let source = Self::component(source)?;
+        let target = Self::component(target)?;
         #[cfg(target_os = "linux")]
         {
-            use nix::fcntl::{RenameFlags, renameat2};
-            renameat2(
-                &self.handle,
-                Path::new(source),
-                &self.handle,
-                Path::new(target),
-                RenameFlags::RENAME_NOREPLACE,
-            )
-            .map_err(|error| match error {
-                nix::errno::Errno::EEXIST => io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    self.path.join(target).display().to_string(),
-                ),
-                other => io::Error::from(other),
-            })?;
+            // nix exposes renameat2 only for the GNU environment even though
+            // the syscall and RENAME_NOREPLACE are Linux ABI on both GNU and
+            // musl. Use the kernel ABI directly so every supported Linux
+            // target retains the same atomic no-replace publication rule.
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    self.handle.as_raw_fd(),
+                    source.as_ptr(),
+                    self.handle.as_raw_fd(),
+                    target.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } == -1
+            {
+                let error = io::Error::last_os_error();
+                return Err(if error.raw_os_error() == Some(libc::EEXIST) {
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        target_display.display().to_string(),
+                    )
+                } else {
+                    error
+                });
+            }
         }
         #[cfg(target_os = "macos")]
         {
-            use std::os::unix::ffi::OsStrExt as _;
-            let source = std::ffi::CString::new(source.as_bytes()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL")
-            })?;
-            let target = std::ffi::CString::new(target.as_bytes()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL")
-            })?;
             if unsafe {
                 libc::renameatx_np(
                     self.handle.as_raw_fd(),
@@ -402,10 +406,7 @@ impl ContainedDirectory {
                 return Err(if error.raw_os_error() == Some(libc::EEXIST) {
                     io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        self.path
-                            .join(target.to_string_lossy().as_ref())
-                            .display()
-                            .to_string(),
+                        target_display.display().to_string(),
                     )
                 } else {
                     error
