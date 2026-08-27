@@ -20,6 +20,9 @@
 
 - Stop 删除 actor 对自身 `FlushReplay` mailbox 的超时等待；Timeline terminal 仍是 durability barrier，
   terminal 失败会显式终止 actor，避免 Goal 或后续 turn 被因果上未闭合的 turn 锁死。
+- Windows session staging 的最终 durability barrier 以读写权限重开已有 regular file，满足
+  `FlushFileBuffers` 的平台契约；immutable file 与 session directory 发布不再依赖 hard link，
+  修复创建 session 时稳定出现的 `Access denied (OS error 5)`。
 - Workflow Run 现在冻结 Agent `subagentFilter`，后续模型/Agent 切换只影响新 Run。缺少该事实的
   2.0.0 Run manifest 不再兼容，需要重新启动 Run。
 - Behavior 切换和 session controls 都是 prompt drain 屏障；Workflow 活动 Run 可在用户确认后离开或
