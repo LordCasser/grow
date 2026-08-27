@@ -1663,8 +1663,8 @@ impl JsonlStorageAdapter {
             Ok(result)
         });
         let result = match built {
-            Ok(result) => match parent.rename_child_no_replace(&staging_name, target_name) {
-                Ok(()) => {
+            Ok(result) => match staging.publish_child_no_replace(parent, target_name) {
+                Ok(published) => {
                     // The namespace commit is already observable. A directory
                     // fsync failure is therefore committed-unknown, not a safe
                     // error to return and retry as a second entity.
@@ -1675,16 +1675,17 @@ impl JsonlStorageAdapter {
                             "session published but parent directory sync failed"
                         );
                     }
-                    // Keep using the already-open staging capability. Reopening
-                    // the target after the namespace commit would introduce a
-                    // committed-unknown failure window (for example EMFILE) and
-                    // could observe a concurrently substituted directory.
-                    let published = staging.rebind_child_display_path(parent, target_name);
                     return Ok((result, published));
                 }
                 Err(error) => Err(error),
             },
-            Err(error) => Err(error),
+            Err(error) => {
+                // Windows pins directory identity by denying
+                // FILE_SHARE_DELETE; close the staging capability before
+                // removing an unpublished tree.
+                drop(staging);
+                Err(error)
+            }
         };
         if let Err(cleanup_error) = parent.remove_tree_child(&staging_name)
             && cleanup_error.kind() != io::ErrorKind::NotFound

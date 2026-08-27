@@ -156,17 +156,29 @@ impl ContainedDirectory {
         Ok(left.dev() == right.dev() && left.ino() == right.ino())
     }
 
-    /// Re-label an already pinned directory after its parent has atomically
-    /// renamed the directory entry. The capability itself is unchanged; the
-    /// path is display-only and must never be reopened as authority.
-    pub(crate) fn rebind_child_display_path(
+    /// Atomically publish this exact pinned child under a sibling name.
+    /// Consuming the capability prevents callers from accidentally continuing
+    /// to use the pre-publication display path after the namespace commit.
+    pub(crate) fn publish_child_no_replace(
         mut self,
         parent: &Self,
-        child_name: &std::ffi::OsStr,
-    ) -> Self {
-        debug_assert_eq!(Path::new(child_name).file_name(), Some(child_name));
-        self.path = parent.path.join(child_name);
-        self
+        target: &std::ffi::OsStr,
+    ) -> io::Result<Self> {
+        if self.path.parent() != Some(parent.path.as_path()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "published directory must be a direct child of its parent capability",
+            ));
+        }
+        let source = self.path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "published directory has no child name",
+            )
+        })?;
+        parent.rename_child_no_replace(source, target)?;
+        self.path = parent.path.join(target);
+        Ok(self)
     }
 
     pub(crate) fn open(
@@ -782,17 +794,35 @@ impl ContainedDirectory {
         Ok(left_identity == right_identity)
     }
 
-    /// Re-label an already pinned directory after its parent has atomically
-    /// renamed the directory entry. The capability itself is unchanged; the
-    /// path is display-only and must never be reopened as authority.
-    pub(crate) fn rebind_child_display_path(
+    /// Atomically publish this exact pinned child under a sibling name.
+    /// Windows directory capabilities intentionally deny FILE_SHARE_DELETE,
+    /// so reopening the child with DELETE access would conflict with this
+    /// handle. The handle is created with DELETE access and renames itself.
+    pub(crate) fn publish_child_no_replace(
         mut self,
         parent: &Self,
-        child_name: &std::ffi::OsStr,
-    ) -> Self {
-        debug_assert_eq!(Path::new(child_name).file_name(), Some(child_name));
-        self.path = parent.path.join(child_name);
-        self
+        target: &std::ffi::OsStr,
+    ) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+
+        if self.path.parent() != Some(parent.path.as_path()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "published directory must be a direct child of its parent capability",
+            ));
+        }
+        Self::component(target)?;
+        let target_display = parent.path.join(target);
+        Self::rename_open_entity_no_replace(
+            HANDLE(self.handle.as_raw_handle()),
+            HANDLE(parent.handle.as_raw_handle()),
+            target,
+            &target_display,
+        )?;
+        self.path = target_display;
+        self.release_publish_access();
+        Ok(self)
     }
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -804,6 +834,7 @@ impl ContainedDirectory {
         create_missing: bool,
     ) -> io::Result<Self> {
         use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
         // Open the authority itself without traversing a reparse point. The
         // capability therefore names the directory we validated, even if the
@@ -812,6 +843,7 @@ impl ContainedDirectory {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         let root_handle = std::fs::OpenOptions::new()
             .read(true)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(root)?;
         let metadata = root_handle.metadata()?;
@@ -884,7 +916,7 @@ impl ContainedDirectory {
         Self::component(name)?;
         self.handle.create_dir(name)?;
         self.sync()?;
-        let handle = Self::open_regular_child_directory(&self.handle, name, description)?;
+        let handle = Self::open_publishable_child_directory(&self.handle, name, description)?;
         Ok(Self {
             path: self.path.join(name),
             handle,
@@ -908,6 +940,8 @@ impl ContainedDirectory {
         match self.open_relative(Path::new(name), "contained child directory", false) {
             Ok(directory) => {
                 directory.remove_all_contents()?;
+                // The pinned child intentionally denies FILE_SHARE_DELETE.
+                drop(directory);
                 self.remove_empty_child(name, true)
             }
             Err(_) => {
@@ -948,23 +982,42 @@ impl ContainedDirectory {
     ) -> io::Result<()> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
         use cap_std::fs::OpenOptionsExt as _;
-        use std::os::windows::ffi::OsStrExt as _;
         use std::os::windows::io::AsRawHandle as _;
-        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
+        use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
-            FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
 
         Self::component(source)?;
         Self::component(target)?;
         let mut options = cap_std::fs::OpenOptions::new();
         options.access_mode(DELETE.0);
+        options.share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0);
         options.follow(FollowSymlinks::No);
         let source_file = self.handle.open_with(source, &options)?.into_std();
-        let parent_file = self.handle.try_clone()?.into_std_file();
         let target_display = self.path.join(target);
+        Self::rename_open_entity_no_replace(
+            HANDLE(source_file.as_raw_handle()),
+            HANDLE(self.handle.as_raw_handle()),
+            target,
+            &target_display,
+        )
+    }
+
+    fn rename_open_entity_no_replace(
+        source_handle: windows::Win32::Foundation::HANDLE,
+        parent_handle: windows::Win32::Foundation::HANDLE,
+        target: &std::ffi::OsStr,
+        target_display: &Path,
+    ) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+        use windows::Win32::Storage::FileSystem::{
+            FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
+        };
+
         let target = target.encode_wide().collect::<Vec<_>>();
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
@@ -979,7 +1032,7 @@ impl ContainedDirectory {
             (*info).Anonymous = FILE_RENAME_INFO_0 {
                 ReplaceIfExists: false,
             };
-            (*info).RootDirectory = HANDLE(parent_file.as_raw_handle());
+            (*info).RootDirectory = parent_handle;
             (*info).FileNameLength =
                 u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
@@ -990,7 +1043,7 @@ impl ContainedDirectory {
                 target.len(),
             );
             SetFileInformationByHandle(
-                HANDLE(source_file.as_raw_handle()),
+                source_handle,
                 FileRenameInfo,
                 info.cast(),
                 u32::try_from(byte_len).map_err(|_| {
@@ -1013,6 +1066,111 @@ impl ContainedDirectory {
         Ok(())
     }
 
+    fn open_publishable_child_directory(
+        parent: &cap_std::fs::Dir,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<cap_std::fs::Dir> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+        use cap_std::fs::OpenOptionsExt as _;
+        use std::os::windows::fs::MetadataExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.access_mode(FILE_GENERIC_READ.0 | DELETE.0);
+        options.share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0);
+        options.follow(FollowSymlinks::No);
+        let file = parent.open_with(name, &options)?.into_std();
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a contained regular directory"),
+            ));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(file))
+    }
+
+    fn release_publish_access(&mut self) {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        // ReOpenFile applies Windows sharing checks in both directions. First
+        // create a read-only bridge that shares DELETE with the publishing
+        // handle, then close the DELETE-capable handle before creating the
+        // ordinary pinned capability. Both reopens retain the exact file
+        // object; no ambient target path is resolved after publication.
+        let bridge = match Self::reopen_directory(
+            &self.handle,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        ) {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "session published but DELETE access could not be released"
+                );
+                return;
+            }
+        };
+        let publishing = std::mem::replace(&mut self.handle, bridge);
+        drop(publishing);
+        match Self::reopen_directory(&self.handle, FILE_SHARE_READ | FILE_SHARE_WRITE) {
+            Ok(pinned) => self.handle = pinned,
+            Err(error) => {
+                // Publication is already committed, so this cannot be exposed
+                // as a retryable creation failure. The bridge remains bound to
+                // the exact entity and keeps the live writer usable.
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "session published but capability could not restore exclusive namespace pin"
+                );
+            }
+        }
+    }
+
+    fn reopen_directory(
+        directory: &cap_std::fs::Dir,
+        share_mode: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
+    ) -> io::Result<cap_std::fs::Dir> {
+        use std::os::windows::fs::MetadataExt as _;
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, ReOpenFile,
+        };
+
+        let reopened = unsafe {
+            ReOpenFile(
+                HANDLE(directory.as_raw_handle()),
+                FILE_GENERIC_READ.0,
+                share_mode,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+            .map_err(io::Error::other)?
+        };
+        let file = unsafe { std::fs::File::from_raw_handle(reopened.0) };
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "reopened session capability is not a regular directory",
+            ));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(file))
+    }
+
     fn open_child_directory(
         parent: &cap_std::fs::Dir,
         name: &std::ffi::OsStr,
@@ -1024,7 +1182,7 @@ impl ContainedDirectory {
             Ok(directory) => Ok(directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
                 match parent.create_dir(name) {
-                    Ok(()) => parent.try_clone()?.into_std_file().sync_all()?,
+                    Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => return Err(error),
                 }
@@ -1152,7 +1310,10 @@ impl ContainedDirectory {
     }
 
     pub(crate) fn sync(&self) -> io::Result<()> {
-        self.handle.try_clone()?.into_std_file().sync_all()
+        // FlushFileBuffers requires a writable file handle and does not offer
+        // Unix fsync-style directory-entry durability for these capability
+        // handles. Files are flushed individually before namespace commit.
+        Ok(())
     }
 
     pub(crate) fn remove_file(&self, name: &std::ffi::OsStr, durable: bool) -> io::Result<()> {
@@ -3619,6 +3780,44 @@ mod tests {
             std::fs::read(root.path().join("target/target-marker")).unwrap(),
             b"target"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn pinned_child_capability_publishes_without_reopening_source() {
+        let root = tempfile::tempdir().unwrap();
+        let parent =
+            ContainedDirectory::open(root.path(), Path::new(""), "publish fixture", false).unwrap();
+        let staging = parent
+            .create_child(
+                std::ffi::OsStr::new("session.staging"),
+                "publish staging fixture",
+            )
+            .unwrap();
+        staging
+            .write_atomic(std::ffi::OsStr::new("marker"), b"published", true, false)
+            .unwrap();
+
+        let published = staging
+            .publish_child_no_replace(&parent, std::ffi::OsStr::new("session"))
+            .unwrap();
+
+        assert!(!root.path().join("session.staging").exists());
+        assert_eq!(published.display_path(), root.path().join("session"));
+        assert_eq!(
+            published
+                .read_bounded(std::ffi::OsStr::new("marker"), "published marker", 32)
+                .unwrap(),
+            b"published"
+        );
+        let reopened = parent
+            .open_relative(
+                Path::new("session"),
+                "independently reopened session",
+                false,
+            )
+            .unwrap();
+        assert!(published.is_same_entity(&reopened).unwrap());
     }
 
     #[cfg(unix)]
