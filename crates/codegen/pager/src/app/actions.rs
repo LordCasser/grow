@@ -1561,7 +1561,6 @@ pub enum Effect {
     FetchMcpsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        cache: bool,
     },
     McpSetupSubmit {
         agent_id: AgentId,

@@ -1822,20 +1822,11 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchMcpsList { agent_id, session_id, cache } => {
+        Effect::FetchMcpsList { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "cache": cache,
-                });
-                    let req = acp::ExtRequest::new(
-                        "grow/mcp/list",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize mcp/list params")
-                            .into(),
-                    );
+                    let req = mcp_list_request(&session_id);
                     let result = match acp_send(req, &tx).await {
                         Ok(resp) => {
                             let wrapper: serde_json::Value = serde_json::from_str(

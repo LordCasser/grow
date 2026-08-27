@@ -144,7 +144,6 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
         app.pending_effects.push(Effect::FetchMcpsList {
             agent_id: id,
             session_id,
-            cache: true,
         });
         redraw = is_active;
     }

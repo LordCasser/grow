@@ -12,6 +12,21 @@ fn trajectory_ready_line_yields_the_exact_url() {
     assert_eq!(trajectory_ready_url("startup failed: session missing"), None);
 }
 
+#[test]
+fn mcp_list_request_matches_the_strict_shell_contract() {
+    let request = mcp_list_request(&acp::SessionId::new("session-1"));
+    assert_eq!(
+        request.method.as_ref(),
+        shell::extensions::mcp::mcp_methods::LIST
+    );
+    let params: serde_json::Value =
+        serde_json::from_str(request.params.get()).expect("valid mcp/list params");
+    assert_eq!(params, serde_json::json!({ "sessionId": "session-1" }));
+    let decoded: shell::extensions::mcp::McpListRequest =
+        serde_json::from_value(params).expect("params accepted by the shell contract");
+    assert_eq!(decoded.session_id.as_deref(), Some("session-1"));
+}
+
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]

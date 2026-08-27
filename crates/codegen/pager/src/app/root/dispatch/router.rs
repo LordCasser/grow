@@ -588,7 +588,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![Effect::FetchMcpsList {
                 agent_id: id,
                 session_id,
-                cache: false,
             }]
         }
         Action::ExecuteHooksAction(action) => {
@@ -1326,7 +1325,6 @@ pub(super) fn dispatch_action_result(
                         effects.push(Effect::FetchMcpsList {
                             agent_id,
                             session_id,
-                            cache: false,
                         });
                     }
                 }

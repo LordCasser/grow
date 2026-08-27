@@ -554,11 +554,9 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
         &mut app,
     );
     assert_eq!(count_extension_fetches(&effects), 5);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::FetchMcpsList { cache: true, .. }))
-    );
+    assert!(effects.iter().any(
+        |e| matches!(e, Effect::FetchMcpsList { session_id, .. } if session_id.0.as_ref() == "s")
+    ));
     assert!(!app.agents[&id].session.pending_extensions_fetch());
 }
 #[test]

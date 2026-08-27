@@ -37,7 +37,19 @@ pub(super) const CLIPBOARD_PROBE_TIMEOUT_SECS: u64 = 10;
 /// Picker search debounce ([`Effect::DebounceSessionSearch`]):
 /// long enough to coalesce a typing burst, short enough to feel live.
 pub(super) const SESSION_SEARCH_DEBOUNCE_MS: u64 = 250;
-/// Run the post-CTA-install uncached `grow/mcp/list` read and map it into a
+pub(super) fn mcp_list_request(session_id: &acp::SessionId) -> acp::ExtRequest {
+    let params = shell::extensions::mcp::McpListRequest {
+        session_id: Some(session_id.0.to_string()),
+    };
+    acp::ExtRequest::new(
+        shell::extensions::mcp::mcp_methods::LIST,
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize mcp/list params")
+            .into(),
+    )
+}
+
+/// Run the post-CTA-install `grow/mcp/list` read and map it into a
 /// `TaskResult::PluginCtaMcpsLoaded`. Shared by the immediate fetch and the
 /// delayed re-probe.
 pub(super) async fn fetch_plugin_cta_mcps(
@@ -46,16 +58,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
     plugin_name: String,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let params = serde_json::json!({
-        "sessionId": session_id.0.to_string(),
-        "cache": false,
-    });
-    let req = acp::ExtRequest::new(
-        "grow/mcp/list",
-        serde_json::value::to_raw_value(&params)
-            .expect("serialize mcp/list params")
-            .into(),
-    );
+    let req = mcp_list_request(&session_id);
     let result = match acp_send(req, &tx).await {
         Ok(resp) => {
             let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())

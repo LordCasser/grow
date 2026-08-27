@@ -49,7 +49,7 @@ use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
 // ── Wire types: mcp/list ────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpListRequest {
     #[serde(default)]

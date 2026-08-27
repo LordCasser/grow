@@ -92,7 +92,6 @@ fn handle_mcp_setup_submit_done(
     vec![Effect::FetchMcpsList {
         agent_id,
         session_id,
-        cache: false,
     }]
 }
 pub(super) const X11_PRIMARY_PASTE_HINT: &str = "Try Shift+Insert to paste selected text";

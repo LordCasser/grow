@@ -400,7 +400,6 @@ pub(super) fn extensions_modal_tab_fetches(
         Effect::FetchMcpsList {
             agent_id,
             session_id: session_id.clone(),
-            cache: true,
         },
         Effect::FetchSkillsList {
             agent_id,
@@ -676,7 +675,6 @@ pub(super) fn handle_mcp_toggle_done(
     vec![Effect::FetchMcpsList {
         agent_id,
         session_id,
-        cache: false,
     }]
 }
 
