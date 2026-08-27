@@ -1128,6 +1128,15 @@ fn rendered_option_label(option: &QuestionOption, max_label_w: usize) -> String 
     }
 }
 
+fn padded_option_label(option: &QuestionOption, max_label_w: usize) -> String {
+    let mut label = rendered_option_label(option, max_label_w);
+    // Rust's format width counts characters, while terminal columns use
+    // Unicode display width. Pad explicitly so CJK/emoji labels do not push
+    // the description beyond the row's measured right edge.
+    label.push_str(&" ".repeat(max_label_w.saturating_sub(label.width())));
+    label
+}
+
 fn rendered_option_description_lines(option: &QuestionOption, width: usize) -> Vec<Line<'static>> {
     if option.description.trim().is_empty() {
         return Vec::new();
@@ -1424,8 +1433,7 @@ fn build_single_option_lines(
 
     if !focused {
         let mut spans = prefix_spans;
-        let label = rendered_option_label(option, max_label_w);
-        let padded_label = format!("{label:<width$}", width = max_label_w);
+        let padded_label = padded_option_label(option, max_label_w);
         spans.push(Span::styled(padded_label, label_style));
         let desc_spans = collapsed_description_spans(option, desc_w, row_bg, fg(theme.gray));
         if !desc_spans.is_empty() {
@@ -1457,8 +1465,7 @@ fn build_single_option_lines(
             out.push(build_indented_desc_line(prefix_w, &line, row_bg));
         }
     } else {
-        let label = rendered_option_label(option, max_label_w);
-        let padded_label = format!("{label:<width$}", width = max_label_w);
+        let padded_label = padded_option_label(option, max_label_w);
         let mut label_spans = prefix_spans;
         label_spans.push(Span::styled(padded_label, label_style));
         let desc_lines = styled_description_lines(option, desc_w, row_bg, fg(theme.gray));
@@ -3266,6 +3273,44 @@ mod tests {
             "focused option should show all lines, got {}",
             lines.len(),
         );
+    }
+
+    #[test]
+    fn cjk_label_padding_respects_terminal_display_width() {
+        let q = Question {
+            question: "Pick".into(),
+            options: vec![QuestionOption {
+                label: "情报源插件机制".into(),
+                description: "边界字符完整显示".into(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: Some(false),
+            id: None,
+        };
+        let content_w = 40;
+        let max_label_w = compute_max_label_w(&q.options, content_w);
+        let expected_w = option_prefix_w(&q) + max_label_w + 2 + q.options[0].description.width();
+        let theme = Theme::default();
+        let sel = QuestionSelection::Single(None);
+
+        for cursor in [0, 1] {
+            let lines = build_flat_option_lines(
+                &q, content_w, cursor, None, &sel, &theme, false, "", false, true,
+            );
+            let line = &lines[0];
+            let actual_w: usize = line.spans.iter().map(|span| span.content.width()).sum();
+            assert_eq!(actual_w, expected_w);
+            assert!(
+                actual_w <= content_w,
+                "CJK label padding overflowed the row: {actual_w} > {content_w}",
+            );
+            assert!(
+                line_text(line).contains("边界字符完整显示"),
+                "the description tail must remain visible: {:?}",
+                line_text(line),
+            );
+        }
     }
 
     #[test]
