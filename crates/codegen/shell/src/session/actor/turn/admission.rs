@@ -245,7 +245,7 @@ impl SessionActor {
         // including slash commands, Goal/Workflow launches, and direct Bash.
         // No route may perform an external effect before this fact is durable.
         self.events.begin_turn();
-        let model_id = self.current_model_id().await;
+        let model_id = self.current_catalog_model_id();
         let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
         self.current_turn_number.set(turn_number);
         let permission_mode = self.permissions.mode();
@@ -612,12 +612,7 @@ impl SessionActor {
                 self.maybe_truncate_large_prompt_with_skills(context, query, skill_info)
                     .await
             };
-            let model_id = self
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|c| c.model)
-                .unwrap_or_default();
+            let model_id = self.current_catalog_model_id();
             {
                 let effective_client_identifier =
                     prompt_client_identifier.or_else(|| self.client_identifier.clone());
@@ -784,7 +779,7 @@ impl SessionActor {
                 prompt_id.to_string(),
             ));
             self.open_subagent_spawn_admission();
-            turn_model_id = Some(self.current_model_id().await);
+            turn_model_id = Some(self.current_catalog_model_id());
             turn_timer = Some(std::time::Instant::now());
             let result = {
                 let mut stop_continuations_this_turn: u32 = 0;

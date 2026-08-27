@@ -852,7 +852,7 @@ pub(crate) async fn spawn_session_actor(
         } else {
             (0, Vec::new(), Vec::new())
         };
-    let primary_model_id = sampling_config.model.clone();
+    let primary_model_id = session_model_id.0.to_string();
     let embed_base_url = sampling_config.base_url.clone();
     let embed_api_key = sampling_config.api_key.clone();
     let context_window_override = std::env::var("GROW_DEBUG_CONTEXT_WINDOW")

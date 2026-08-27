@@ -345,8 +345,7 @@ impl SessionActor {
     /// in both modes — debug mode adds logging, it does not bypass
     /// the production decision logic.
     pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
-        let model_id_acp = self.models_manager.current_model_id();
-        let model_id = model_id_acp.0.to_string();
+        let model_id = self.current_catalog_model_id();
         let cfg = self.models_manager.laziness_detector_for(&model_id);
         let debug_mode = self.laziness_debug_log.is_some();
 

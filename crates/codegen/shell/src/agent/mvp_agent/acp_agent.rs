@@ -1434,7 +1434,7 @@ impl acp::Agent for MvpAgent {
             });
         let model = model_rx
             .await
-            .unwrap_or_else(|_| self.sampling_config.borrow().model.clone());
+            .unwrap_or_else(|_| self.models_manager.current_model_id().0.to_string());
         let verbatim = arguments
             .meta
             .as_ref()

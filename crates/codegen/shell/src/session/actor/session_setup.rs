@@ -358,7 +358,8 @@ impl SessionActor {
     /// Shared by `/session-info`, `/context`, and `GetSessionInfo`.
     pub(super) async fn build_session_info(&self) -> SessionInfoData {
         let config = self.chat_state_handle.get_sampling_config().await;
-        let model = config.as_ref().map(|c| c.model.clone());
+        let model = Some(self.current_catalog_model_id());
+        let wire_model = config.as_ref().map(|c| c.model.as_str());
         let context_window = config.as_ref().map(|c| c.context_window.get()).unwrap_or(0);
         let model_metadata = self.chat_state_handle.get_last_model_metadata().await;
         let total_tokens = self.chat_state_handle.get_projected_tokens().await;
@@ -367,11 +368,9 @@ impl SessionActor {
         let turn_index = self.chat_state_handle.get_prompt_index().await as u64;
         tracing::info!(turn_index, turns, resolved_model_id = ?model_metadata.resolved_model_id, model_fingerprint = ?model_metadata.model_fingerprint, "build_session_info");
         let model_fingerprint = model_metadata.model_fingerprint;
-        let resolved_model_id = model_metadata.resolved_model_id.filter(|resolved| {
-            model
-                .as_deref()
-                .is_some_and(|m| should_show_resolved_model(m, resolved))
-        });
+        let resolved_model_id = model_metadata
+            .resolved_model_id
+            .filter(|resolved| wire_model.is_some_and(|m| should_show_resolved_model(m, resolved)));
         let signals = self.signals_handle().snapshot().await;
         let compaction_count = signals.as_ref().map(|s| s.compaction_count).unwrap_or(0);
         let turn_count = signals.as_ref().map(|s| s.turn_count).unwrap_or(0);

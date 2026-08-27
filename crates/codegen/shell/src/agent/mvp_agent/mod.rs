@@ -699,12 +699,11 @@ fn inject_proxy_headers(
 }
 fn resolve_inference_idle_timeout_secs(
     models: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
-    model: &str,
+    catalog_model_id: &str,
     remote_settings: Option<&crate::util::config::RemoteSettings>,
 ) -> u64 {
     let per_model = models
-        .get(model)
-        .or_else(|| models.values().find(|entry| entry.info.model == model))
+        .get(catalog_model_id)
         .and_then(|entry| entry.info.inference_idle_timeout_secs);
     let remote = remote_settings.and_then(|s| s.inference_idle_timeout_secs);
     per_model.or(remote).unwrap_or(600).max(10)

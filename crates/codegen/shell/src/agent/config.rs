@@ -2557,7 +2557,8 @@ pub fn resolve_credentials(model: &ModelEntry) -> ResolvedCredentials {
 pub fn deployment_id_from_key(key: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string()
 }
-/// Try to resolve credentials for a model by loading the effective config.
+/// Try to resolve credentials for an exact `provider/model` catalog identity
+/// by loading the effective config. Provider-facing wire names are rejected.
 /// Returns `None` (with a warning) if config loading, parsing, or model
 /// lookup fails.
 pub fn try_resolve_model_credentials(model_id: &str) -> Option<ResolvedCredentials> {
@@ -3014,6 +3015,35 @@ reasoning_effort = "low"
         assert_eq!(resolved.model, "v9m-rl-learnability-tp8");
         assert_eq!(resolved.base_url, "https://vendor.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
+    }
+    #[test]
+    fn resolve_aux_model_uses_provider_qualified_identity() {
+        let mut volcengine = test_model_entry(
+            "glm-5.3",
+            "https://ark.example/v1",
+            Some("test-key-volcengine"),
+            None,
+        );
+        volcengine.info.name = Some("Volcengine GLM".to_owned());
+        let mut bigmodel = test_model_entry(
+            "glm-5.3",
+            "https://bigmodel.example/v1",
+            Some("test-key-bigmodel"),
+            None,
+        );
+        bigmodel.info.name = Some("BigModel GLM".to_owned());
+        let catalog = IndexMap::from([
+            ("volcengine/glm-5.3".to_owned(), volcengine),
+            ("bigmodel/glm-5.3".to_owned(), bigmodel),
+        ]);
+
+        let resolved =
+            resolve_aux_model_sampling_config("bigmodel/glm-5.3", &catalog, None).unwrap();
+
+        assert_eq!(resolved.model, "glm-5.3");
+        assert_eq!(resolved.base_url, "https://bigmodel.example/v1");
+        assert_eq!(resolved.api_key.as_deref(), Some("test-key-bigmodel"));
+        assert!(resolve_aux_model_sampling_config("glm-5.3", &catalog, None).is_none());
     }
     /// Cold cache falls back to the session model, never the configured service proxy;
     /// warm cache serves the provider token at the provider endpoint.

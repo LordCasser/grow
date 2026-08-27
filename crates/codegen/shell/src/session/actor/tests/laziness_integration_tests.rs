@@ -42,8 +42,9 @@ fn detector_entry(
     }
 }
 
-/// Construct a test actor with `current_model_id` pointing at a per-model config
-/// supplied by the caller. The actor's sampling config uses a
+/// Construct a test actor whose session route points at a per-model config
+/// supplied by the caller while the process-global default remains different.
+/// The actor's sampling config uses a
 /// `http://localhost` base URL with nothing listening, so
 /// `prepare_chat_completion().conversation_collect()` fails with
 /// a connect error — sufficient to exercise every abort/idle path.
@@ -58,17 +59,18 @@ async fn make_laziness_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    // Install the test model into the catalog and point the
-    // current id at it. `insert_test_entry` is gated on
+    // Install the test model into the catalog and point only this session's
+    // route at it. `insert_test_entry` is gated on
     // `#[cfg(test)]` so it does NOT leak into release builds.
     let mut entry = detector_entry(false, 0, None);
     entry.info.laziness_detector = detector;
     actor
         .models_manager
         .insert_test_entry("test-laziness-model", entry);
+    let route = actor.model_route.snapshot().sampling_config;
     actor
-        .models_manager
-        .set_current_model_id(acp::ModelId::new("test-laziness-model"));
+        .model_route
+        .replace(acp::ModelId::new("test-laziness-model"), route);
     (Arc::new(actor), tmp)
 }
 
@@ -553,9 +555,10 @@ async fn make_debug_actor(
     actor
         .models_manager
         .insert_test_entry("test-laziness-model", entry);
+    let route = actor.model_route.snapshot().sampling_config;
     actor
-        .models_manager
-        .set_current_model_id(acp::ModelId::new("test-laziness-model"));
+        .model_route
+        .replace(acp::ModelId::new("test-laziness-model"), route);
     let log_path = tmp.path().join("debug.jsonl");
     arm_debug_log(&mut actor, log_path.clone());
     (Arc::new(actor), tmp, log_path)

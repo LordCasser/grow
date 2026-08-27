@@ -607,11 +607,11 @@ impl PreparedToolCall {
             .unwrap_or(&self.tool_name)
     }
 }
-/// One memoized model's auth state, keyed by model id; see
+/// One memoized model's auth state, keyed by canonical `provider/model` id; see
 /// [`SessionActor::model_auth_memo`] for the invalidation contract.
 #[derive(Clone)]
 pub(crate) struct ModelAuthMemo {
-    pub(crate) model_id: String,
+    pub(crate) catalog_model_id: String,
     pub(crate) facts: crate::agent::config::ModelAuthFacts,
     pub(crate) provider: Option<crate::auth::AuthProviderRef>,
 }
@@ -1014,16 +1014,11 @@ impl SessionActor {
             .emit_turn_ended(outcome, terminal, category, context)
             .await
     }
-    /// Current model ID for structured tracing span attributes. Reads from chat_state_handle
-    /// so it always reflects the latest model override — no stale cached field.
-    /// Returns "unknown" if no sampling config is set.
-    async fn current_model_id(&self) -> String {
-        self.chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
+    /// Current canonical `provider/model` identity. The provider-facing wire
+    /// model lives only in `SessionModelRoute::sampling_config`; catalog and
+    /// credential lookups must never use it as an identity.
+    fn current_catalog_model_id(&self) -> String {
+        self.model_route.snapshot().model_id.0.to_string()
     }
     /// Build a hook run context for dispatching hook events.
     fn session_id_string(&self) -> String {

@@ -1188,6 +1188,31 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
         assert_eq!(model_id.0.as_ref(), "pinned-model");
     }
 }
+#[tokio::test]
+async fn subagent_override_uses_provider_qualified_identity() {
+    let mut volcengine = test_model_entry("glm-5.3");
+    volcengine.info.base_url = "https://ark.example/v1".to_owned();
+    volcengine.api_key = Some("test-key-volcengine".to_owned());
+    let mut bigmodel = test_model_entry("glm-5.3");
+    bigmodel.info.base_url = "https://bigmodel.example/v1".to_owned();
+    bigmodel.api_key = Some("test-key-bigmodel".to_owned());
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.available_models = indexmap::IndexMap::from([
+        ("volcengine/glm-5.3".to_owned(), volcengine),
+        ("bigmodel/glm-5.3".to_owned(), bigmodel),
+    ]);
+    ctx.subagent_model_overrides
+        .insert("explore".to_owned(), "bigmodel/glm-5.3".to_owned());
+
+    let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(model_id.0.as_ref(), "bigmodel/glm-5.3");
+    assert_eq!(config.model, "glm-5.3");
+    assert_eq!(config.base_url, "https://bigmodel.example/v1");
+    assert_eq!(config.api_key.as_deref(), Some("test-key-bigmodel"));
+}
 /// An unresolvable `[subagents.models]` pin must fail closed instead of
 /// silently changing the child to the parent's current model.
 #[tokio::test]

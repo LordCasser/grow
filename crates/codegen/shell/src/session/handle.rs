@@ -12,7 +12,9 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug, Clone)]
 pub(crate) struct SessionModelRouteSnapshot {
     pub(crate) revision: u64,
+    /// Canonical catalog identity (`provider/model`).
     pub(crate) model_id: acp::ModelId,
+    /// Provider transport configuration; `model` is the wire model only.
     pub(crate) sampling_config: sampler::SamplerConfig,
 }
 

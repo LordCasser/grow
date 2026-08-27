@@ -227,7 +227,8 @@ impl ModelsManager {
         let (current_model_key, current_model, model_source) = resolve_default_model(cfg, &catalog);
 
         tracing::info!(
-            model_id = %current_model.model,
+            model_id = %current_model_key,
+            wire_model = %current_model.model,
             source = %model_source,
             "default model resolved"
         );

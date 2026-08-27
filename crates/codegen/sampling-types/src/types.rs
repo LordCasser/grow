@@ -853,6 +853,8 @@ impl ApiBackend {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
+    /// Provider-facing wire model. This is not the catalog identity; callers
+    /// must retain the canonical `provider/model` ID separately.
     pub model: String,
     pub output_limit: Option<u32>,
     pub temperature: Option<f32>,

@@ -346,7 +346,7 @@ impl SessionActor {
         deferred_followups: &mut Vec<ConversationItem>,
     ) -> Result<Result<PreparedToolCall, ToolLoop>, acp::Error> {
         let tool_call_id = acp::ToolCallId::new(Arc::from(call.id.clone()));
-        let model_id_str = self.current_model_id().await;
+        let model_id_str = self.current_catalog_model_id();
         tracing::info!(
             target: SESSION_LOG,
             "Model requesting tool: name='{}', call_id='{}'",

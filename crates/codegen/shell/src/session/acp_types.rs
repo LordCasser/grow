@@ -270,6 +270,7 @@ pub struct SessionInfoData {
     /// Agent definition name for this session (e.g. `grow-build`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Canonical catalog identity (`provider/model`), never the provider wire model.
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_display_name: Option<String>,

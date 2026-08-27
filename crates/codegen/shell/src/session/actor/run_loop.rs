@@ -524,7 +524,7 @@ pub(super) async fn run_session(
                         session.emit_buffered(notification).await;
                     }
                     {
-                        let model_id = session.current_model_id().await;
+                        let model_id = session.current_catalog_model_id();
                         if let Some(signals) = session.signals_handle().snapshot().await {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::SessionEnded {
@@ -875,9 +875,7 @@ pub(super) async fn run_session(
                         session.admit_agent_selection(definition, responds_to).await;
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {
-                        let model = session.chat_state_handle.get_sampling_config().await
-                            .map(|c| c.model)
-                            .unwrap_or_default();
+                        let model = session.current_catalog_model_id();
                         let _ = responds_to.send(model);
                     }
                     SessionCommand::GetCurrentBehavior { responds_to } => {

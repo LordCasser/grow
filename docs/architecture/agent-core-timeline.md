@@ -140,7 +140,7 @@ Rewind 不读取 compaction checkpoint。Timeline fold 直接展开被压缩的�
 - 覆盖前缀指纹只哈希实际发送给 provider 的 wire 字段；
 - cache warm/cold/unknown 只用于观测，不能触发历史改写。
 
-模型选择是独立控制轴。SessionActor 持有稳定 catalog model id，ChatState 的 SamplingConfig 持有 provider wire model 与 reasoning effort；外部 SessionHandle 只是 UI 镜像，不能提供持久事件的 `from` 值。用户切换与 catalog 热加载造成的 fallback、wire route 或 effort 变化都必须先 durable append `observation(model.changed)`，完整记录 catalog/provider/effort 的 from/to 与 `reason=user_selection|catalog_reload`，之后才能修改运行配置。模型变化从不选择 concise prompt 或重写 system head。热加载调用必须等待每个 actor 的 acknowledgement，只有成功后才更新 handle 镜像。`summary.current_model_id/reasoning_effort` 是该事件链的可修复投影：加载时严格校验所有匹配事件及其连续性，落后时从最新 `to` 自动修复，畸形或断链时 fail closed。
+模型选择是独立控制轴。SessionActor 持有稳定的完整 `provider/model` catalog id，ChatState 的 SamplingConfig 持有 provider wire model 与 reasoning effort；认证刷新、auth-provider、模型级超时和重试策略只能以 catalog id 解析，绝不允许用 wire model 反查 provider。外部 SessionHandle 只是 UI 镜像，不能提供持久事件的 `from` 值。用户切换与 catalog 热加载造成的 fallback、wire route 或 effort 变化都必须先 durable append `observation(model.changed)`，完整记录 catalog/provider/effort 的 from/to 与 `reason=user_selection|catalog_reload`，之后才能修改运行配置。模型变化从不选择 concise prompt 或重写 system head。热加载调用必须等待每个 actor 的 acknowledgement，只有成功后才更新 handle 镜像。`summary.current_model_id/reasoning_effort` 是该事件链的可修复投影：加载时严格校验所有匹配事件及其连续性，落后时从最新 `to` 自动修复，畸形或断链时 fail closed。
 
 ## 标题与 Sideband
 

@@ -408,7 +408,7 @@ impl SessionActor {
         *self.image_description_model.write() = image_description_model;
         self.invalidate_model_auth_memo();
         self.signals_handle()
-            .record_model_usage(&sampling_config.model);
+            .record_model_usage(model_id.0.as_ref());
         let agent_name = self.agent.borrow().definition().selector_identity();
         let _ = self
             .notifications
@@ -1059,6 +1059,115 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_credential_refresh_cannot_cross_route_revision() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let actor = super::super::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let old_route = actor.model_route.snapshot();
+                let previous_key = actor.chat_state_handle.get_credentials().await.api_key;
+                actor.model_route.replace(
+                    acp::ModelId::new("provider/new-model"),
+                    old_route.sampling_config,
+                );
+
+                assert!(
+                    !actor
+                        .set_chat_api_key(
+                            "fixture-credential".to_owned(),
+                            Some(old_route.revision),
+                        )
+                        .await
+                );
+                assert_eq!(
+                    actor.chat_state_handle.get_credentials().await.api_key,
+                    previous_key
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sampler_rebuild_keeps_frozen_route_auth_axes() {
+        #[derive(Debug)]
+        struct EmptyBearerResolver;
+        impl sampler::BearerResolver for EmptyBearerResolver {
+            fn current_bearer(&self) -> Option<String> {
+                None
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let actor = super::super::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let mut route = actor.model_route.snapshot().sampling_config;
+                route.auth_scheme = sampler::AuthScheme::XApiKey;
+                route.bearer_resolver = Some(std::sync::Arc::new(EmptyBearerResolver));
+                actor
+                    .model_route
+                    .replace(acp::ModelId::new("removed-provider/frozen-model"), route);
+
+                let rebuilt = actor.reconstruct_full_config().await;
+
+                assert_eq!(rebuilt.auth_scheme, sampler::AuthScheme::XApiKey);
+                assert!(rebuilt.bearer_resolver.is_some());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn current_model_surfaces_use_provider_qualified_identity() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let actor = super::super::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let mut route = actor.model_route.snapshot().sampling_config;
+                route.model = "glm-5.3".into();
+                actor
+                    .model_route
+                    .replace(acp::ModelId::new("bigmodel/glm-5.3"), route);
+
+                assert_eq!(actor.current_catalog_model_id(), "bigmodel/glm-5.3");
+                assert_eq!(
+                    actor.build_session_info().await.model.as_deref(),
+                    Some("bigmodel/glm-5.3")
+                );
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn consecutive_busy_catalog_reloads_coalesce_to_latest_and_ack_all() {

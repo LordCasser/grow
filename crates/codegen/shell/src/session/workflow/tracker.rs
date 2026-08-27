@@ -712,18 +712,11 @@ impl WorkflowRuntimeRoute {
             image_description_model.as_deref()
         {
             let models = published_catalog.models();
-            let (catalog_id, entry) = models
-                .iter()
-                .find(|(catalog_id, entry)| {
-                    catalog_id.as_str() == auxiliary_id || entry.info.model == auxiliary_id
-                })
+            let entry = crate::agent::config::find_model_by_catalog_id(models, auxiliary_id)
                 .ok_or("Workflow image-description model could not be resolved")?;
             let published_route = published_catalog
-                .resolve_session_route(
-                    &agent_client_protocol::ModelId::new(catalog_id.as_str()),
-                    None,
-                )
-                .filter(|route| route.model_id.0.as_ref() == catalog_id)
+                .resolve_session_route(&agent_client_protocol::ModelId::new(auxiliary_id), None)
+                .filter(|route| route.model_id.0.as_ref() == auxiliary_id)
                 .ok_or("Workflow image-description route could not be resolved")?;
             let credentials = crate::agent::config::resolve_credentials(entry);
             let mut config =
@@ -2001,6 +1994,50 @@ mod tests {
                 .temperature,
             Some(0.2)
         );
+    }
+
+    #[test]
+    fn workflow_route_keeps_duplicate_wire_credentials_provider_scoped() {
+        let mut volcengine = workflow_model_entry("glm-5.3", 0.2);
+        volcengine.info.base_url = "https://ark.example/v1".to_owned();
+        volcengine.api_key = Some("test-key-volcengine".to_owned());
+        let mut bigmodel = workflow_model_entry("glm-5.3", 0.2);
+        bigmodel.info.base_url = "https://bigmodel.example/v1".to_owned();
+        bigmodel.api_key = Some("test-key-bigmodel".to_owned());
+        let manager = crate::agent::models::ModelsManager::new(
+            indexmap::IndexMap::from([
+                ("volcengine/glm-5.3".to_owned(), volcengine),
+                ("bigmodel/glm-5.3".to_owned(), bigmodel.clone()),
+            ]),
+            agent_client_protocol::ModelId::new("bigmodel/glm-5.3"),
+            crate::agent::config::Config::default(),
+        );
+        let sampler = crate::agent::config::sampling_config_for_model(
+            &bigmodel,
+            crate::agent::config::resolve_credentials(&bigmodel),
+            None,
+        );
+        let route = WorkflowRuntimeRoute::capture(
+            "bigmodel/glm-5.3",
+            sampler,
+            &manager,
+            None,
+            agent::config::SubagentFilter::default(),
+        )
+        .unwrap();
+
+        let bigmodel = route
+            .sampler_for("bigmodel/glm-5.3", &manager, None)
+            .unwrap();
+        let volcengine = route
+            .sampler_for("volcengine/glm-5.3", &manager, None)
+            .unwrap();
+
+        assert_eq!(bigmodel.model, "glm-5.3");
+        assert_eq!(bigmodel.api_key.as_deref(), Some("test-key-bigmodel"));
+        assert_eq!(volcengine.model, "glm-5.3");
+        assert_eq!(volcengine.api_key.as_deref(), Some("test-key-volcengine"));
+        assert!(route.sampler_for("glm-5.3", &manager, None).is_err());
     }
 
     #[test]

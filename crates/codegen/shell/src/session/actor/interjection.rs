@@ -230,7 +230,7 @@ impl SessionActor {
         notify_pager: bool,
         images: &[acp::ImageContent],
     ) {
-        let model_id = self.current_model_id().await;
+        let model_id = self.current_catalog_model_id();
         let permission_evidence = match &item {
             ConversationItem::User(user) => user.permission_evidence.clone(),
             _ => None,

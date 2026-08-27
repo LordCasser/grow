@@ -796,7 +796,7 @@ impl SessionActor {
         }
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             let span = tracing::Span::current();
-            span.record("model_id", cfg.model.as_str());
+            span.record("model_id", self.current_catalog_model_id());
             span.record(
                 "effort",
                 cfg.reasoning_effort
@@ -915,7 +915,7 @@ impl SessionActor {
                         let span = tracing::Span::current();
                         span.record("agent.name", self.agent.borrow().name());
                         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
-                            span.record("model_id", cfg.model.as_str());
+                            span.record("model_id", self.current_catalog_model_id());
                             span.record(
                                 "effort",
                                 cfg.reasoning_effort
@@ -1338,7 +1338,7 @@ impl SessionActor {
             self.clear_auth_compact_suppression();
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
-                let model_id = self.current_model_id().await;
+                let model_id = self.current_catalog_model_id();
                 ::diagnostics::session_ctx::log_event(
                     ::diagnostics::events::ModelResponseReceived {
                         model_id,
@@ -1380,7 +1380,7 @@ impl SessionActor {
                     mcp_count,
                     mcp_tools,
                     self.mcp.strategy,
-                    self.current_model_id().await,
+                    self.current_catalog_model_id(),
                 );
             }
             let mut tool_calls = response.tool_calls().to_vec();

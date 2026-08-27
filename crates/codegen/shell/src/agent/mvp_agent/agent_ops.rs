@@ -1717,15 +1717,14 @@ impl MvpAgent {
             let cfg = self.cfg.borrow();
             resolve_inference_idle_timeout_secs(
                 &models,
-                &sampling_config.model,
+                session_model_id.0.as_ref(),
                 cfg.remote_settings.as_ref(),
             )
         };
         let model_max_retries = self
             .models_manager
             .models()
-            .values()
-            .find(|entry| entry.info.model == sampling_config.model)
+            .get(session_model_id.0.as_ref())
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();

@@ -343,7 +343,7 @@ impl SessionActor {
         tracing::info!("Handling direct bash command");
 
         // Send user message chunks to scrollback (so user sees their command)
-        let model_id = self.current_model_id().await;
+        let model_id = self.current_catalog_model_id();
         let user_chunk_meta = serde_json::json!({ "modelId": model_id })
             .as_object()
             .cloned();

@@ -676,14 +676,17 @@ impl SessionActor {
         }
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
-    pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
-        self.model_auth_state(model_id).0
+    pub(super) fn model_auth_facts(
+        &self,
+        catalog_model_id: &str,
+    ) -> crate::agent::config::ModelAuthFacts {
+        self.model_auth_state(catalog_model_id).0
     }
     pub(in crate::session::actor) fn model_auth_provider(
         &self,
-        model_id: &str,
+        catalog_model_id: &str,
     ) -> Option<crate::auth::AuthProviderRef> {
-        self.model_auth_state(model_id).1
+        self.model_auth_state(catalog_model_id).1
     }
     /// Drop the memoized per-model auth state; see [`Self::model_auth_memo`]
     /// for why each model/credential chokepoint must call this.
@@ -694,7 +697,7 @@ impl SessionActor {
     /// falls back to the last definite entry (see the field's contract).
     fn model_auth_state(
         &self,
-        model_id: &str,
+        catalog_model_id: &str,
     ) -> (
         crate::agent::config::ModelAuthFacts,
         Option<crate::auth::AuthProviderRef>,
@@ -702,33 +705,46 @@ impl SessionActor {
         use crate::agent::auth_method::ModelByok;
         use crate::session::actor::ModelAuthMemo;
         if let Some(memo) = self.model_auth_memo.borrow().as_ref()
-            && memo.model_id == model_id
+            && memo.catalog_model_id == catalog_model_id
             && memo.facts.byok != ModelByok::Unknown
         {
             return (memo.facts, memo.provider.clone());
         }
         let (fresh, provider) =
-            crate::agent::config::resolve_model_auth_facts_and_provider(model_id);
+            crate::agent::config::resolve_model_auth_facts_and_provider(catalog_model_id);
         if fresh.byok == ModelByok::Unknown {
             if let Some(memo) = self.model_auth_memo.borrow().as_ref()
-                && memo.model_id == model_id
+                && memo.catalog_model_id == catalog_model_id
             {
                 return (memo.facts, memo.provider.clone());
             }
             return (fresh, provider);
         }
         *self.model_auth_memo.borrow_mut() = Some(ModelAuthMemo {
-            model_id: model_id.to_string(),
+            catalog_model_id: catalog_model_id.to_string(),
             facts: fresh,
             provider: provider.clone(),
         });
         (fresh, provider)
     }
     /// The single writer of a provider mint/rotation into chat-state credentials.
-    async fn set_chat_api_key(&self, new_key: String) {
+    /// A pre-turn refresh is discarded if a model route committed while its
+    /// credential source was being consulted.
+    pub(in crate::session::actor) async fn set_chat_api_key(
+        &self,
+        new_key: String,
+        expected_route_revision: Option<u64>,
+    ) -> bool {
         let mut creds = self.chat_state_handle.get_credentials().await;
+        if expected_route_revision
+            .is_some_and(|revision| self.model_route.snapshot().revision != revision)
+        {
+            tracing::debug!("discarding credential refresh for a superseded model route");
+            return false;
+        }
         creds.api_key = Some(new_key);
         self.chat_state_handle.update_credentials(creds);
+        true
     }
     /// Pre-turn arm for a provider-backed model: mint on a cold cache,
     /// re-mint near expiry, and adopt a rotation chat-state missed. No-op
@@ -738,7 +754,8 @@ impl SessionActor {
         provider: &crate::auth::AuthProviderRef,
         current_key: Option<&str>,
         model_id: &str,
-    ) {
+        route_revision: u64,
+    ) -> bool {
         match provider.ensure_fresh_token(current_key).await {
             crate::auth::ProviderRefreshOutcome::Rotated(new_key) => {
                 tracing::info!(
@@ -747,9 +764,9 @@ impl SessionActor {
                     cold = current_key.is_none(),
                     "auth provider token rotated pre-turn"
                 );
-                self.set_chat_api_key(new_key).await;
+                self.set_chat_api_key(new_key, Some(route_revision)).await
             }
-            crate::auth::ProviderRefreshOutcome::Unchanged => {}
+            crate::auth::ProviderRefreshOutcome::Unchanged => false,
             crate::auth::ProviderRefreshOutcome::MintFailed => {
                 tracing::warn!(
                     session_id = %self.session_info.id.0,
@@ -766,8 +783,9 @@ impl SessionActor {
                         "cold": current_key.is_none(),
                     })),
                 );
+                false
             }
-            crate::auth::ProviderRefreshOutcome::Unusable => {}
+            crate::auth::ProviderRefreshOutcome::Unusable => false,
         }
     }
     /// 401 arm for a provider-backed model: re-run the helper once and
@@ -804,37 +822,46 @@ impl SessionActor {
             Some(self.session_info.id.0.as_ref()),
             None,
         );
-        self.set_chat_api_key(new_key).await;
-        true
+        self.set_chat_api_key(new_key, None).await
     }
     /// Reconstruct a full `SamplerConfig` (with credentials) by combining
     /// the actor's `SamplingConfig` and `Credentials`. Folds in the
     /// URL-derived headers (cli-chat-proxy auth, the staging auth header)
     /// so the sampler crate stays URL-agnostic.
     pub(in crate::session::actor) async fn reconstruct_full_config(&self) -> SamplingConfig {
-        let cfg = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .unwrap_or_else(|| sampling_types::SamplingConfig {
-                base_url: String::new(),
-                model: String::new(),
-                output_limit: None,
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                extra_headers: Default::default(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
-                context_window: std::num::NonZeroU64::new(256_000).unwrap(),
-                reasoning_effort: None,
-                stream_tool_calls: None,
-            });
-        let creds = self.chat_state_handle.get_credentials().await;
-        let model_facts = self.model_auth_facts(cfg.model.as_str());
-        let provider = self.model_auth_provider(cfg.model.as_str());
+        // ChatState owns mutable usage-window metadata and credentials while
+        // SessionModelRoute owns catalog/transport identity. Retry if a route
+        // commit crosses those async reads instead of assembling two epochs.
+        let (route, cfg, creds) = loop {
+            let route = self.model_route.snapshot();
+            let cfg = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .unwrap_or_else(|| sampling_types::SamplingConfig {
+                    base_url: String::new(),
+                    model: String::new(),
+                    output_limit: None,
+                    temperature: None,
+                    top_p: None,
+                    api_backend: Default::default(),
+                    extra_headers: Default::default(),
+                    query_params: Default::default(),
+                    env_http_headers: Default::default(),
+                    context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+                    reasoning_effort: None,
+                    stream_tool_calls: None,
+                });
+            let creds = self.chat_state_handle.get_credentials().await;
+            if self.model_route.snapshot().revision == route.revision {
+                break (route, cfg, creds);
+            }
+        };
+        let catalog_model_id = route.model_id.0.to_string();
+        let provider = self.model_auth_provider(&catalog_model_id);
         let api_key = creds.api_key;
-        let auth_scheme = model_facts.auth_scheme;
+        let auth_scheme = route.sampling_config.auth_scheme;
+        let route_bearer_resolver = route.sampling_config.bearer_resolver;
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -885,9 +912,11 @@ impl SessionActor {
             idle_timeout_secs: None,
             origin_client: self.origin_client.clone(),
             attribution_callback: None,
-            bearer_resolver: provider
-                .as_ref()
-                .map(crate::auth::AuthProviderRef::bearer_resolver),
+            bearer_resolver: route_bearer_resolver.or_else(|| {
+                provider
+                    .as_ref()
+                    .map(crate::auth::AuthProviderRef::bearer_resolver)
+            }),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
@@ -1644,12 +1673,7 @@ impl SessionActor {
             .data(detailed_message);
             return Err(acp_err);
         }
-        let failed_model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let failed_model_id = self.current_catalog_model_id();
         let is_auth_401 =
             error.status_code == Some(401) || matches!(error.kind, SamplingErrorKind::Auth);
         let auth_provider = is_auth_401
@@ -1712,18 +1736,8 @@ impl SessionActor {
         let is_model_404 =
             error.status_code == Some(404) && detailed_message.contains("does not exist");
         let detailed_message = if is_model_404 || is_auth_401 {
-            let current_model = self
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|c| c.model)
-                .unwrap_or_else(|| "unknown".to_string());
-            let available: Vec<String> = self
-                .models_manager
-                .models()
-                .values()
-                .map(|m| m.model.clone())
-                .collect();
+            let current_model = self.current_catalog_model_id();
+            let available: Vec<String> = self.models_manager.models().keys().cloned().collect();
             let mut msg = format!("{detailed_message}\n");
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
@@ -2001,64 +2015,61 @@ impl SessionActor {
     /// keys are re-resolved from effective config so rotation remains external
     /// to Grow. Returns true only when chat-state received a different key.
     pub(crate) async fn refresh_byok_credential(&self) -> bool {
-        let current_model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
-        let current_key = self.chat_state_handle.get_credentials().await.api_key;
+        let route = self.model_route.snapshot();
+        let current_model_id = route.model_id.0.to_string();
+        let current_creds = self.chat_state_handle.get_credentials().await;
+        if self.model_route.snapshot().revision != route.revision {
+            return false;
+        }
+        let current_key = current_creds.api_key;
 
         if let Some(provider) = self.model_auth_provider(&current_model_id) {
-            self.refresh_provider_token_pre_turn(
-                &provider,
-                current_key.as_deref(),
-                &current_model_id,
-            )
-            .await;
-            return self.chat_state_handle.get_credentials().await.api_key != current_key;
+            return self
+                .refresh_provider_token_pre_turn(
+                    &provider,
+                    current_key.as_deref(),
+                    &current_model_id,
+                    route.revision,
+                )
+                .await;
         }
 
-        let Some(new_key) = self.reload_api_key_from_config(&current_model_id) else {
+        let Some(new_key) = self.reload_api_key_from_config(&route) else {
             return false;
         };
         if current_key.as_deref() == Some(new_key.as_str()) {
             return false;
         }
-        let mut creds = self.chat_state_handle.get_credentials().await;
-        creds.api_key = Some(new_key);
-        self.chat_state_handle.update_credentials(creds);
-        true
+        self.set_chat_api_key(new_key, Some(route.revision)).await
     }
-    fn reload_api_key_from_config(&self, current_model_id: &str) -> Option<String> {
-        let raw_config = crate::config::load_effective_config()
-            .map_err(|e| tracing::warn!(error = %e, "Failed to reload config"))
-            .ok()?;
-        let config = crate::agent::config::Config::new_from_toml_cfg(&raw_config)
-            .map_err(|e| tracing::warn!(error = %e, "Failed to parse reloaded config.toml"))
-            .ok()?;
-        let config_model = config
-            .config_models
-            .iter()
-            .find(|(k, v)| v.model.as_deref().unwrap_or(k.as_str()) == current_model_id)
-            .map(|(_, v)| v);
-        let Some(model) = config_model else {
+    fn reload_api_key_from_config(
+        &self,
+        route: &crate::session::handle::SessionModelRouteSnapshot,
+    ) -> Option<String> {
+        let current_model_id = route.model_id.0.as_ref();
+        let Some(credentials) =
+            crate::agent::config::try_resolve_model_credentials(current_model_id)
+        else {
             tracing::warn!(
                 model = %current_model_id,
-                available = ?config.config_models.keys().collect::<Vec<_>>(),
-                "Model not found in config.toml [provider.*.models.*]"
+                "Canonical provider/model ID is unavailable during credential refresh"
             );
             return None;
         };
-        let key = crate::agent::config::first_own_credential(
-            model.api_key.as_deref(),
-            model.env_key.as_ref(),
-        );
+        if credentials.base_url != route.sampling_config.base_url
+            || credentials.auth_scheme != route.sampling_config.auth_scheme
+        {
+            tracing::warn!(
+                model = %current_model_id,
+                "Credential refresh deferred until the complete provider route is applied"
+            );
+            return None;
+        }
+        let key = credentials.api_key;
         if key.is_none() {
             tracing::warn!(
                 model = %current_model_id,
-                env_key = ?model.env_key,
-                "No api_key or env_key resolved for model"
+                "No static or environment API key resolved for provider/model"
             );
         }
         key

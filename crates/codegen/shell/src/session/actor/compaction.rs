@@ -492,12 +492,7 @@ impl SessionActor {
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         let detailed = Self::acp_error_message(&err);
-        let model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|config| config.model)
-            .unwrap_or_default();
+        let model_id = self.current_catalog_model_id();
         let auth_provider = self.model_auth_provider(&model_id);
         let message = if let Some(provider) = auth_provider.as_ref() {
             format!(
@@ -727,7 +722,7 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.api_backend == ApiBackend::Messages)
             .unwrap_or(false);
-        let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
+        let model_id = self.current_catalog_model_id();
         let compaction = ::diagnostics::events::CompactionScope::begin(
             trigger,
             tokens_before,

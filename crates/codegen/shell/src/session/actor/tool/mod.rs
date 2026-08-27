@@ -38,9 +38,7 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
-        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
-            tracing::Span::current().record("model_id", cfg.model.as_str());
-        }
+        tracing::Span::current().record("model_id", self.current_catalog_model_id());
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {

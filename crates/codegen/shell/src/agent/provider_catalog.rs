@@ -317,6 +317,48 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_wire_model_names_keep_provider_scoped_credentials() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [models]
+            default = "bigmodel/glm-5.3"
+
+            [provider.volcengine.options]
+            base_url = "https://ark.example/v1"
+            api_key = "test-key-volcengine"
+
+            [provider.volcengine.models."glm-5.3"]
+
+            [provider.bigmodel.options]
+            base_url = "https://bigmodel.example/v1"
+            api_key = "test-key-bigmodel"
+
+            [provider.bigmodel.models."glm-5.3"]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw).expect("provider config should parse");
+        let models = resolve_model_list(&cfg);
+        let volcengine =
+            crate::agent::config::find_model_by_catalog_id(&models, "volcengine/glm-5.3").unwrap();
+        let bigmodel =
+            crate::agent::config::find_model_by_catalog_id(&models, "bigmodel/glm-5.3").unwrap();
+
+        assert_eq!(volcengine.info.model, "glm-5.3");
+        assert_eq!(bigmodel.info.model, "glm-5.3");
+        assert_eq!(
+            resolve_credentials(volcengine).api_key.as_deref(),
+            Some("test-key-volcengine")
+        );
+        assert_eq!(
+            resolve_credentials(bigmodel).api_key.as_deref(),
+            Some("test-key-bigmodel")
+        );
+        assert!(crate::agent::config::find_model_by_catalog_id(&models, "glm-5.3").is_none());
+    }
+
+    #[test]
     fn product_credentials_never_become_inference_credentials() {
         let raw: toml::Value = toml::from_str(
             r#"
