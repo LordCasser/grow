@@ -1333,6 +1333,13 @@ impl ContainedDirectory {
         replace: bool,
     ) -> io::Result<()> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+        use cap_std::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
 
         Self::component(name)?;
         let tmp_name = format!(
@@ -1344,6 +1351,13 @@ impl ContainedDirectory {
         options
             .write(true)
             .create_new(true)
+            // Keep both read and write access: Windows redirectors may reject
+            // write-only opens even when the caller can create the file. The
+            // DELETE right lets this exact handle publish itself, avoiding a
+            // path-based hard link that is not uniformly supported by synced
+            // or redirected profile storage.
+            .access_mode(FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
             .follow(FollowSymlinks::No);
         let mut file = Self::into_regular_file(
             self.handle.open_with(&tmp_name, &options)?,
@@ -1354,18 +1368,22 @@ impl ContainedDirectory {
             if durable {
                 file.sync_all()?;
             }
-            drop(file);
             if replace {
+                drop(file);
                 self.handle.rename(&tmp_name, &self.handle, name)?;
             } else {
-                self.handle.hard_link(&tmp_name, &self.handle, name)?;
-                if let Err(error) = self.handle.remove_file(&tmp_name) {
-                    tracing::warn!(
-                        path = %self.path.join(&tmp_name).display(),
-                        %error,
-                        "atomic create committed but temporary link cleanup failed"
-                    );
-                }
+                // `SetFileInformationByHandle` commits the no-replace rename
+                // from the already validated file object. Unlike the former
+                // hard-link publication, this works on Windows filesystems
+                // that permit ordinary atomic rename but do not expose hard
+                // links through a redirected or synchronized user profile.
+                Self::rename_open_entity_no_replace(
+                    HANDLE(file.as_raw_handle()),
+                    HANDLE(self.handle.as_raw_handle()),
+                    name,
+                    &self.path.join(name),
+                )?;
+                drop(file);
             }
             if durable {
                 // The target name is already committed. Returning an ordinary

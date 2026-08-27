@@ -92,10 +92,41 @@ async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
         .init_session(&info, default_model_id())
         .await
         .expect("publish the prepared session and acquire its writer lease");
+
+    let mut timeline = chat_state::Timeline::from_seed(vec![ConversationItem::system(
+        "stable system context",
+    )])
+    .expect("construct the fresh-session context");
+    for event in timeline.events() {
+        writer
+            .append_timeline_event_durable(&info, event)
+            .await
+            .expect("commit the fresh-session context");
+    }
+    let role_context = crate::session::control::agent_role_transition_context(
+        "software-engineering",
+        Some("Act as a software engineer."),
+        None,
+    );
+    let control = crate::session::control::SessionControlSnapshot::new(
+        1,
+        "software-engineering",
+        crate::session::behavior::BehaviorSnapshot::normal(),
+        None,
+    )
+    .timeline_kind_with_model_context(
+        chat_state::ControlContextLayer::AgentRole,
+        chat_state::ControlContextActivation::Transition,
+        role_context,
+    )
+    .expect("construct the initial Agent role transition");
+    let control = timeline
+        .prepare(control)
+        .expect("prepare the initial Agent role transition");
     writer
-        .append_session_title_durable(&info, "durable creation probe".into())
+        .append_timeline_event_durable(&info, &control)
         .await
-        .expect("commit the first durable Timeline event");
+        .expect("commit the initial Agent role transition");
     drop(writer);
 
     let resumed = JsonlStorageAdapter::with_root(root);
@@ -103,11 +134,11 @@ async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
         .load_session_for_write_without_updates(&info)
         .await
         .expect("reopen the published session as its next writer");
-    assert_eq!(restored.timeline_events.len(), 1);
+    assert_eq!(restored.timeline_events.len(), timeline.events().len() + 1);
     assert!(matches!(
-        &restored.timeline_events[0].kind,
-        chat_state::TimelineEventKind::SessionTitle(title)
-            if title.title == "durable creation probe"
+        &restored.timeline_events.last().unwrap().kind,
+        chat_state::TimelineEventKind::Control(control)
+            if control.revision == 1
     ));
 }
 
