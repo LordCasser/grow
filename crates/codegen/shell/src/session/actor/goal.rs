@@ -1007,6 +1007,12 @@ impl SessionActor {
                             .to_string(),
                     );
                 }
+                if previous.usage_incomplete && token_budget.is_some() {
+                    return Err(
+                        "Goal usage is a lower bound, so an exact token budget cannot be installed. Keep it unlimited or clear and recreate the Goal."
+                            .to_string(),
+                    );
+                }
                 next_tracker.set_token_budget(*token_budget)
             }
         };
@@ -1148,11 +1154,13 @@ impl SessionActor {
     pub(super) async fn restart_goal(self: &std::sync::Arc<Self>) -> String {
         let boundary = self.step_control_gate.lock().await;
         let previous = self.goal_tracker.lock().snapshot().cloned();
-        let changed = {
+        {
             let mut tracker = self.goal_tracker.lock();
             match tracker.status() {
                 None => return "No Goal is currently set.".into(),
-                Some(crate::session::goal_tracker::GoalStatus::Active) => false,
+                Some(crate::session::goal_tracker::GoalStatus::Active) => {
+                    return "Goal is already active.".into();
+                }
                 Some(crate::session::goal_tracker::GoalStatus::BudgetLimited) => {
                     return "Goal is budget-limited. Increase or remove its budget before restarting."
                         .into();
@@ -1160,26 +1168,47 @@ impl SessionActor {
                 Some(crate::session::goal_tracker::GoalStatus::Complete) => {
                     return "Goal is complete. Edit it to reactivate it or clear it.".into();
                 }
-                Some(_) => tracker.restart(),
+                Some(crate::session::goal_tracker::GoalStatus::Paused)
+                    if tracker.snapshot().is_some_and(|goal| {
+                        goal.usage_incomplete && goal.token_budget.is_some()
+                    }) =>
+                {
+                    return "Goal token usage is incomplete, so its configured budget can no longer be enforced exactly. Remove the budget or clear and recreate the Goal before restarting."
+                        .into();
+                }
+                Some(
+                    crate::session::goal_tracker::GoalStatus::Paused
+                    | crate::session::goal_tracker::GoalStatus::Blocked,
+                ) => {
+                    if !tracker.restart() {
+                        return "Goal restart transition was rejected.".into();
+                    }
+                }
             }
-        };
-        if changed {
-            if let Err(error) = self
-                .commit_goal_activation_or_restore_at_step_boundary(previous)
-                .await
-            {
-                return format!("Goal was not restarted: {error}");
-            }
-            self.arm_terminal_preemption_if_running().await;
-            drop(boundary);
-            let used = self.goal_tokens_used();
-            self.goal_notify_sender()
-                .emit_goal_updated(&self.goal_tracker.lock(), used);
-            self.idle_arbiter.notify_one();
-            "Goal restarted. Automatic continuation is armed.".into()
+        }
+        let usage_is_lower_bound = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .filter(|goal| goal.usage_incomplete)
+            .map(|goal| goal.goal_id.clone());
+        if let Err(error) = self
+            .commit_goal_activation_or_restore_at_step_boundary(previous)
+            .await
+        {
+            return format!("Goal was not restarted: {error}");
+        }
+        self.arm_terminal_preemption_if_running().await;
+        drop(boundary);
+        let used = self.goal_tokens_used();
+        self.goal_notify_sender()
+            .emit_goal_updated(&self.goal_tracker.lock(), used);
+        self.idle_arbiter.notify_one();
+        if usage_is_lower_bound.is_some() {
+            "Goal restarted. Automatic continuation is armed. Token usage remains a durable lower bound."
+                .into()
         } else {
-            drop(boundary);
-            "Goal is already active.".into()
+            "Goal restarted. Automatic continuation is armed.".into()
         }
     }
 
@@ -1239,7 +1268,11 @@ impl SessionActor {
     ) -> bool {
         let used = self.goal_tokens_used();
         let current = self.goal_tracker.lock().snapshot().cloned();
-        if let Some(current) = current.as_ref().filter(|goal| goal.usage_incomplete) {
+        let incomplete_goal_id = self.goal_usage_window.usage_incomplete_goal_id();
+        if let Some(current) = current
+            .as_ref()
+            .filter(|goal| incomplete_goal_id.as_deref() == Some(goal.goal_id.as_str()))
+        {
             if current.status != crate::session::goal_tracker::GoalStatus::Paused {
                 let previous = current.clone();
                 if self

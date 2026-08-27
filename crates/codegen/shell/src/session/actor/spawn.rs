@@ -2306,6 +2306,11 @@ pub(crate) async fn spawn_session_actor(
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_runtime_availability().await;
+    // Reconstruct provider admission from the complete durable Goal snapshot,
+    // including whether incomplete usage has been explicitly acknowledged.
+    // The initial window constructor only carries ownership across parent /
+    // child wiring and cannot infer this lifecycle distinction by id alone.
+    session.sync_goal_usage_window();
     session
         .reconcile_restored_public_workflow_notifications()
         .await

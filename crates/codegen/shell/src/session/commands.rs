@@ -223,7 +223,7 @@ pub enum SessionCommand {
     },
     /// Fail closed when a provider attempt admitted inside a Goal window did
     /// not return usage. The Goal ledger becomes a lower bound and autonomous
-    /// continuation is paused durably.
+    /// continuation is paused durably until an eligible explicit user restart.
     RecordGoalUsageIncomplete {
         goal_id: String,
         respond_to: oneshot::Sender<Result<bool, String>>,

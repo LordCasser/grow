@@ -576,10 +576,21 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, respond_to, persist_ack } => {
                         if let Err(error) = session.ensure_prefix_ready().await {
-                            let _ = respond_to.send(Err(acp::Error::internal_error().data(
-                                format!("session context was not durably published: {error}"),
-                            )));
-                            continue;
+                            let boundary_error =
+                                crate::session::commands::fatal_turn_boundary_error(
+                                    "bootstrap",
+                                    format!(
+                                        "session context was not durably published: {error}"
+                                    ),
+                                );
+                            let _ = respond_to.send(Err(boundary_error));
+                            drop(persist_ack);
+                            tracing::error!(
+                                %error,
+                                "closing session after deferred bootstrap persistence failure"
+                            );
+                            terminate_failed_timeline_writer(&session).await;
+                            return;
                         }
                         // Clear suppression -- user is re-engaging
                         // (skip for synthetic auto-wake prompts; the user hasn't

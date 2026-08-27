@@ -60,6 +60,8 @@ Plan 与 Goal 各自保留必要的专用状态。Workflow Definition/Run 统一
 | Workflow | 主 Agent正常对话与整合 | 普通权限与 Workflow tool | Behavior 是公共 Definition/Run 管理的唯一入口，但不拥有已启动 Run 的生命周期 |
 | Goal | Active 时正常对话并在 idle 后继续；stopped Goal 只是持久目标记录 | 主 Agent 获得 Goal scoped tools | 只有 Active Goal 选择 Goal Behavior；pause/block/budget limit 释放为 Normal，restart 再激活 |
 
+Goal 的 provider usage 一旦缺失，持久计数只能作为下界，自动 continuation 必须暂停。用户可显式 restart 无 token budget 的 Goal，并保留 `usage_incomplete` 事实及其独立的 durable acknowledgement；带 token budget 的 Goal 不允许在无法精确执法时 restart 或重新安装预算，必须先移除预算或重建 Goal。restart 是对当前不确定性的显式确认，不得伪造或清除历史 usage；后续再次出现未知 usage 会撤销该确认并重新暂停。
+
 Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 属于统一公共 runtime。`deep-research` 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后作为普通 User workflow 由 Registry 扫描，不拥有额外 scope、Behavior 或运行机制。
 
 Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definition revision 与 active status 为边界。全局 Control revision 仍保护尚无 Goal owner 的创建操作，但 Goal 已激活后，usage、reminder、context reprojection 或 compaction checkpoint 不属于定义变更，不能撤销同一 turn 的 `update_goal` 权限。
@@ -111,6 +113,8 @@ Timeline 的 `control` 事件包含单调 control revision，以及 Behavior sna
 
 - 控制命令收到持久化 ack 后才返回 Applied/成功。
 - 成功的 PlanControl 或 Goal lifecycle 工具结果形成强制 turn control boundary：同批未开始的工具先以未执行结果闭合，当前 Step 结束并应用已排队的 step controls，然后直接写入 TurnEnded。completion requirement、Stop hook 与任何 recovery 都不得在旧 admission 下再次采样。
+- 新 session 的 deferred stable prefix 是所有 prompt origin 共用的 admission barrier。User、Goal continuation、Workflow/task/subagent completion、notification 与 host command 在写入首个 `TurnStarted` 前都必须先 durable commit 该 prefix；不存在 synthetic turn 绕过 bootstrap 后再补 `ContextRebuild` 的合法路径。
+- 显式 Stop/Cancel 与进程内 owner panic 都按 Request/Tool → Step → Turn 的顺序只追加终态。若 panic 发生在 durable `TurnEnded` 之后，不再投影第二个 completion，而是关闭 writer epoch；进程重启则由 Timeline interrupted recovery 追加缺失终态。
 - 先持久化将要到达的控制状态，再取消 exact foreground/owned run并发布 UI projection。
 - Goal finalization 的 Timeline turn identity 携带结构化 origin/turn kind/goal id/stage id，turn terminal携带 stop reason/completion kind；terminal与 Control事件共享同一有序 Timeline actor，确保 terminal先落盘，再写 Complete/Normal。若进程恰在两次写入之间退出，恢复器从 durable Timeline terminal对账并补写 Complete receipt，不读取 `updates.jsonl`，也不重复 final report。
 - Plan 的 submit/approve/reject/abandon 都等待 control ack；持久化失败时恢复内存中的前一 Behavior snapshot，不向模型或 Pager 发布不可恢复的相位。

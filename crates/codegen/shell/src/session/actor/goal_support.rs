@@ -95,6 +95,15 @@ impl GoalUsageWindow {
         )
     }
 
+    pub(crate) fn usage_incomplete_goal_id(&self) -> Option<String> {
+        match &self.state.lock().provider_window {
+            GoalProviderWindow::UsageIncomplete(goal_id) => Some(goal_id.clone()),
+            GoalProviderWindow::Inactive
+            | GoalProviderWindow::Active(_)
+            | GoalProviderWindow::Exhausted(_) => None,
+        }
+    }
+
     /// Stop admitting new provider work for an exhausted Goal without changing
     /// its durable lifecycle inside the current step. Attempts that already
     /// captured the Goal remain in `pending_attempts` and still settle exactly
@@ -407,14 +416,14 @@ impl SessionActor {
             let goal = tracker.snapshot();
             let active =
                 goal.filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active);
-            let incomplete_step =
-                goal.filter(|goal| goal.usage_incomplete && self.events.has_active_step());
             (
-                active.or(incomplete_step).map(|goal| goal.goal_id.clone()),
+                active.map(|goal| goal.goal_id.clone()),
                 active
                     .and_then(|goal| goal.token_budget)
                     .is_some_and(|budget| tracker.tokens_used() >= budget),
-                incomplete_step.is_some(),
+                active.is_some_and(|goal| {
+                    goal.usage_incomplete && !goal.usage_incomplete_acknowledged
+                }),
             )
         };
         self.goal_usage_window
@@ -472,7 +481,7 @@ impl SessionActor {
         if previous.goal_id != goal_id {
             return Ok(false);
         }
-        if previous.usage_incomplete {
+        if previous.usage_incomplete && !previous.usage_incomplete_acknowledged {
             return Ok(true);
         }
         let definition_revision = previous.definition_revision;
@@ -541,6 +550,27 @@ impl SessionActor {
             .close_and_claim_pending_for_shutdown();
         for attempt_id in attempt_ids {
             self.settle_claimed_goal_usage_attempt(&attempt_id).await?;
+        }
+        Ok(())
+    }
+
+    /// A foreground owner that unwinds cannot report any provider attempts it
+    /// still owns. Claim only that session's attempts as usage-incomplete and
+    /// settle them before closing its Step/Turn, so the next owner epoch never
+    /// waits forever on work whose future no longer exists.
+    pub(super) async fn settle_goal_usage_for_owner_failure(&self) -> Result<(), String> {
+        let owner_id = self.session_id_string();
+        let attempt_ids = self
+            .goal_usage_window
+            .claim_pending_for_owner_shutdown(&owner_id);
+        for attempt_id in attempt_ids {
+            if self.startup_hints.is_subagent {
+                self.goal_usage_window
+                    .settle_attempt_via_root(attempt_id, None)
+                    .await?;
+            } else {
+                self.settle_claimed_goal_usage_attempt(&attempt_id).await?;
+            }
         }
         Ok(())
     }

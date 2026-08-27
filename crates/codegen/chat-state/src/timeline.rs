@@ -5754,6 +5754,19 @@ mod tests {
         let original = timeline.events().len();
         let repairs = timeline.recover_interrupted().unwrap();
         assert_eq!(repairs.len(), 4);
+        assert!(matches!(repairs[0].kind, TimelineEventKind::Recovery(_)));
+        assert!(matches!(
+            repairs[1].kind,
+            TimelineEventKind::Request(RequestEvent::Cancelled { .. })
+        ));
+        assert!(matches!(
+            repairs[2].kind,
+            TimelineEventKind::Step(StepEvent::Ended { .. })
+        ));
+        assert!(matches!(
+            repairs[3].kind,
+            TimelineEventKind::Turn(TurnEvent::Ended { .. })
+        ));
         assert_eq!(timeline.events().len(), original + 4);
         assert!(timeline.active_turn().is_none());
         assert!(timeline.open_request_ids().next().is_none());

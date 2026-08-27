@@ -167,6 +167,24 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
+        // `QueuePrompt` performs the same check before external input is
+        // admitted, but autonomous producers (most notably the first Goal
+        // continuation in a fresh session) construct `AgentTask` directly.
+        // Keep this final barrier at the common runner boundary: no prompt
+        // may make `ContextRebuild` historical before the deferred stable
+        // prefix has been committed.
+        // Box the bootstrap future so this already-large turn runner does not
+        // copy its context-building state into every `handle_prompt` future.
+        if let Err(error) = Box::pin(self.ensure_prefix_ready()).await {
+            super::super::tasks_cancel::signal_durable_turn_start(false);
+            if let Some(extension) = &self.idle_prompt_extension {
+                extension.on_turn_failed();
+            }
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "bootstrap",
+                format!("session context was not durably published: {error}"),
+            ));
+        }
         let admitted_notification_task_ids = if notification_ids.is_empty() {
             Vec::new()
         } else {

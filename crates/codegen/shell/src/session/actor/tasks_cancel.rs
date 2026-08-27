@@ -2,6 +2,7 @@
 //! `run_task`, turn guards) and the cancel paths.
 
 use super::*;
+use futures_util::FutureExt as _;
 
 tokio::task_local! {
     /// Immutable provider-admission generation captured when a foreground
@@ -227,25 +228,166 @@ async fn run_task(
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     persist_ack: Option<oneshot::Sender<()>>,
 ) {
-    let result = session
-        .handle_prompt(
-            &prompt_id,
-            origin,
-            notification_ids,
-            turn_kind,
-            input,
-            admitted_behavior,
-            client_identifier,
-            screen_mode,
-            verbatim,
-            json_schema,
-            persist_ack,
-        )
-        .await;
+    let result = std::panic::AssertUnwindSafe(session.handle_prompt(
+        &prompt_id,
+        origin,
+        notification_ids,
+        turn_kind,
+        input,
+        admitted_behavior,
+        client_identifier,
+        screen_mode,
+        verbatim,
+        json_schema,
+        persist_ack,
+    ))
+    .catch_unwind()
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic payload");
+            tracing::error!(
+                prompt_id,
+                panic = panic_message,
+                "foreground turn owner panicked"
+            );
+            let panic_message = panic_message.chars().take(1_024).collect::<String>();
+            let recovery = std::panic::AssertUnwindSafe(
+                session.recover_panicked_turn(&prompt_id, &panic_message),
+            )
+            .catch_unwind()
+            .await;
+            match recovery {
+                Ok(Ok(())) => Err(acp::Error::internal_error()
+                    .data(format!("foreground turn task panicked: {panic_message}"))),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(crate::session::commands::fatal_turn_boundary_error(
+                    "panic recovery",
+                    format!("turn {prompt_id} panicked again while closing its causal scopes"),
+                )),
+            }
+        }
+    };
     let _ = completion_tx.send((prompt_id, result));
 }
 
 impl SessionActor {
+    /// Convert an unexpected foreground-owner panic into the same durable
+    /// child/Step/Turn terminal chain used by ordinary errors. Explicit Stop
+    /// aborts the whole wrapper and remains owned by `cancel_running_task`;
+    /// this recovery is only reached when `handle_prompt` unwinds by itself.
+    pub(in crate::session::actor) async fn recover_panicked_turn(
+        &self,
+        prompt_id: &str,
+        panic_message: &str,
+    ) -> Result<(), acp::Error> {
+        let _step_control_guard = self.step_control_gate.lock().await;
+        let (owns_terminalization, was_settling) = {
+            let mut state = self.state.lock().await;
+            if state.foreground.settling_identity(prompt_id).is_some() {
+                (true, true)
+            } else {
+                (state.foreground.begin_terminalization(prompt_id), false)
+            }
+        };
+        if !owns_terminalization {
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "panic recovery ownership",
+                format!("turn {prompt_id} lost foreground ownership after its owner panicked"),
+            ));
+        }
+
+        // Never project a second completion after the canonical terminal was
+        // already committed. The original `PromptTurnResult` was lost to the
+        // unwind, so ending the session is safer than inventing a conflicting
+        // UI outcome for a turn whose durable outcome is already authoritative.
+        if self.events.current_turn().is_none() {
+            return if was_settling {
+                Err(crate::session::commands::fatal_turn_boundary_error(
+                    "post-terminal panic",
+                    format!("turn {prompt_id} panicked after its durable terminal was committed"),
+                ))
+            } else {
+                Err(crate::session::commands::fatal_turn_boundary_error(
+                    "panic recovery start",
+                    format!("turn {prompt_id} panicked before durable turn admission"),
+                ))
+            };
+        }
+
+        self.goal_usage_window
+            .advance_owner_epoch(&self.session_id_string());
+        self.settle_goal_usage_for_owner_failure()
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error("panic usage settlement", error)
+            })?;
+        self.compaction.cancel.request_cancel();
+        self.chat_state_handle
+            .settle_open_compaction_durably("foreground_owner_panicked")
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "panic compaction terminal",
+                    error.to_string(),
+                )
+            })?;
+        self.cancel_running_turn_subagents(prompt_id);
+        if self.startup_hints.is_subagent {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_foreground_commands_by_owner(&self.session_info.id.0)
+                .await;
+        } else {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .kill_foreground_commands()
+                .await;
+        }
+        self.emit_turn_ended(
+            crate::session::events::TurnOutcomeLabel::Error,
+            chat_state::TurnTerminal {
+                stop_reason: "error".into(),
+                completion_kind: "foreground_owner_panicked".into(),
+            },
+            None,
+            Some(serde_json::json!({
+                "reason": "foreground_owner_panicked",
+                "panic": panic_message,
+            })),
+        )
+        .await
+        .map_err(|error| {
+            crate::session::commands::fatal_turn_boundary_error("panic terminal", error.to_string())
+        })?;
+        if let Some(extension) = &self.idle_prompt_extension {
+            extension.on_turn_failed();
+        }
+        self.flush_to_disk().await;
+        let current_prompt_index = self.current_turn_number.get() as usize;
+        self.file_state_tracker
+            .end_prompt(&self.tool_context.fs, current_prompt_index)
+            .await;
+        if let Some(rewind_point) = self
+            .file_state_tracker
+            .get_rewind_point(current_prompt_index)
+            .await
+        {
+            let _ = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::RewindPoint(rewind_point));
+        }
+        Ok(())
+    }
+
     /// Arm a turn-terminal fence after a lifecycle or Behavior transition has
     /// become durable while a producer still owns the foreground. Callers hold
     /// `step_control_gate`, so StepStarted observes either the old state or the
