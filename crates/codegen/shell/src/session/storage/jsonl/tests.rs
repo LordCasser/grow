@@ -77,6 +77,72 @@ async fn session_init_creates_a_missing_storage_root() {
 }
 
 #[tokio::test]
+async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
+    let sandbox = TempDir::new().unwrap();
+    let root = sandbox.path().join("grow-home");
+    let workspace = sandbox.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let info = Info {
+        id: acp::SessionId::new("session-creation-round-trip"),
+        cwd: workspace.to_string_lossy().into_owned(),
+    };
+
+    let writer = JsonlStorageAdapter::with_root(root.clone());
+    writer
+        .init_session(&info, default_model_id())
+        .await
+        .expect("publish the prepared session and acquire its writer lease");
+
+    let mut timeline = chat_state::Timeline::from_seed(vec![ConversationItem::system(
+        "stable system context",
+    )])
+    .expect("construct the fresh-session context");
+    for event in timeline.events() {
+        writer
+            .append_timeline_event_durable(&info, event)
+            .await
+            .expect("commit the fresh-session context");
+    }
+    let role_context = crate::session::control::agent_role_transition_context(
+        "software-engineering",
+        Some("Act as a software engineer."),
+        None,
+    );
+    let control = crate::session::control::SessionControlSnapshot::new(
+        1,
+        "software-engineering",
+        crate::session::behavior::BehaviorSnapshot::normal(),
+        None,
+    )
+    .timeline_kind_with_model_context(
+        chat_state::ControlContextLayer::AgentRole,
+        chat_state::ControlContextActivation::Transition,
+        role_context,
+    )
+    .expect("construct the initial Agent role transition");
+    let control = timeline
+        .prepare(control)
+        .expect("prepare the initial Agent role transition");
+    writer
+        .append_timeline_event_durable(&info, &control)
+        .await
+        .expect("commit the initial Agent role transition");
+    drop(writer);
+
+    let resumed = JsonlStorageAdapter::with_root(root);
+    let restored = resumed
+        .load_session_for_write_without_updates(&info)
+        .await
+        .expect("reopen the published session as its next writer");
+    assert_eq!(restored.timeline_events.len(), timeline.events().len() + 1);
+    assert!(matches!(
+        &restored.timeline_events.last().unwrap().kind,
+        chat_state::TimelineEventKind::Control(control)
+            if control.revision == 1
+    ));
+}
+
+#[tokio::test]
 async fn session_trace_uses_canonical_identity_and_bounded_capability_reads() {
     let root = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());

@@ -1,0 +1,44 @@
+name: Windows session storage
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-session-storage.yml"
+      - "crates/codegen/shell/src/session/storage/**"
+      - "crates/codegen/shell/src/session/persistence.rs"
+      - "crates/codegen/chat-state/**"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-session-storage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  session-creation:
+    name: Create and reopen a session
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-session-storage
+          cache-on-failure: true
+
+      - name: Exercise the complete session creation boundary
+        shell: pwsh
+        run: >-
+          cargo test --locked -p shell --lib
+          session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline
+          -- --exact --nocapture

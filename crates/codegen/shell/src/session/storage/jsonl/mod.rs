@@ -1623,7 +1623,7 @@ impl JsonlStorageAdapter {
         super::sync_file_durable(file)
     }
     /// Build a session beneath one pinned parent and publish that exact staged
-    /// directory with a single handle-relative no-replace rename. Creation,
+    /// directory with a single capability-confined no-replace rename. Creation,
     /// fork, and import all use this transaction.
     pub(crate) fn build_and_publish_session<T>(
         parent: &super::ContainedDirectory,

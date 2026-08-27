@@ -814,12 +814,7 @@ impl ContainedDirectory {
         }
         Self::component(target)?;
         let target_display = parent.path.join(target);
-        Self::rename_open_entity_no_replace(
-            HANDLE(self.handle.as_raw_handle()),
-            HANDLE(parent.handle.as_raw_handle()),
-            target,
-            &target_display,
-        )?;
+        Self::rename_open_entity_no_replace(HANDLE(self.handle.as_raw_handle()), &target_display)?;
         self.path = target_display;
         self.release_publish_access();
         Ok(self)
@@ -927,10 +922,12 @@ impl ContainedDirectory {
         for name in self.list_names()? {
             match self.open_relative(Path::new(&name), "contained child directory", false) {
                 Ok(directory) => directory.sync_tree()?,
-                Err(directory_error) => match self.open_regular(&name, "contained child file") {
-                    Ok(file) => sync_file_durable(&file)?,
-                    Err(_) => return Err(directory_error),
-                },
+                Err(directory_error) => {
+                    match self.open_regular_for_sync(&name, "contained child file") {
+                        Ok(file) => sync_file_durable(&file)?,
+                        Err(_) => return Err(directory_error),
+                    }
+                }
             }
         }
         self.sync()
@@ -998,27 +995,27 @@ impl ContainedDirectory {
         options.follow(FollowSymlinks::No);
         let source_file = self.handle.open_with(source, &options)?.into_std();
         let target_display = self.path.join(target);
-        Self::rename_open_entity_no_replace(
-            HANDLE(source_file.as_raw_handle()),
-            HANDLE(self.handle.as_raw_handle()),
-            target,
-            &target_display,
-        )
+        Self::rename_open_entity_no_replace(HANDLE(source_file.as_raw_handle()), &target_display)
     }
 
     fn rename_open_entity_no_replace(
         source_handle: windows::Win32::Foundation::HANDLE,
-        parent_handle: windows::Win32::Foundation::HANDLE,
-        target: &std::ffi::OsStr,
         target_display: &Path,
     ) -> io::Result<()> {
         use std::os::windows::ffi::OsStrExt as _;
-        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
         use windows::Win32::Storage::FileSystem::{
             FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
         };
 
-        let target = target.encode_wide().collect::<Vec<_>>();
+        // FILE_RENAME_INFO accepts a full target path with a null
+        // RootDirectory. This remains portable across local, redirected and
+        // SMB-backed profile storage; network redirectors are allowed to
+        // reject a non-null RootDirectory with ERROR_INVALID_PARAMETER. The
+        // source is still the exact validated handle, and `target_display`'s
+        // parent cannot be renamed while its pinned capability denies
+        // FILE_SHARE_DELETE.
+        let target = target_display.as_os_str().encode_wide().collect::<Vec<_>>();
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
             .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
@@ -1032,7 +1029,7 @@ impl ContainedDirectory {
             (*info).Anonymous = FILE_RENAME_INFO_0 {
                 ReplaceIfExists: false,
             };
-            (*info).RootDirectory = parent_handle;
+            (*info).RootDirectory = HANDLE::default();
             (*info).FileNameLength =
                 u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
@@ -1293,6 +1290,25 @@ impl ContainedDirectory {
         Self::into_regular_file(file, description)
     }
 
+    fn open_regular_for_sync(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<std::fs::File> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
+        Self::component(name)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        // std::fs::File::sync_all maps to FlushFileBuffers on Windows, whose
+        // contract requires GENERIC_WRITE even when no bytes are changed.
+        // Staged files are owned by this transaction, so reopen the existing
+        // file read/write without create or truncate before the publication
+        // barrier. A read-only reopen deterministically fails with error 5.
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        let file = self.handle.open_with(name, &options)?;
+        Self::into_regular_file(file, description)
+    }
+
     fn into_regular_file(file: cap_std::fs::File, description: &str) -> io::Result<std::fs::File> {
         use std::os::windows::fs::MetadataExt as _;
 
@@ -1333,6 +1349,13 @@ impl ContainedDirectory {
         replace: bool,
     ) -> io::Result<()> {
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+        use cap_std::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
 
         Self::component(name)?;
         let tmp_name = format!(
@@ -1344,6 +1367,13 @@ impl ContainedDirectory {
         options
             .write(true)
             .create_new(true)
+            // Keep both read and write access: Windows redirectors may reject
+            // write-only opens even when the caller can create the file. The
+            // DELETE right lets this exact handle publish itself, avoiding a
+            // path-based hard link that is not uniformly supported by synced
+            // or redirected profile storage.
+            .access_mode(FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
             .follow(FollowSymlinks::No);
         let mut file = Self::into_regular_file(
             self.handle.open_with(&tmp_name, &options)?,
@@ -1354,18 +1384,20 @@ impl ContainedDirectory {
             if durable {
                 file.sync_all()?;
             }
-            drop(file);
             if replace {
+                drop(file);
                 self.handle.rename(&tmp_name, &self.handle, name)?;
             } else {
-                self.handle.hard_link(&tmp_name, &self.handle, name)?;
-                if let Err(error) = self.handle.remove_file(&tmp_name) {
-                    tracing::warn!(
-                        path = %self.path.join(&tmp_name).display(),
-                        %error,
-                        "atomic create committed but temporary link cleanup failed"
-                    );
-                }
+                // `SetFileInformationByHandle` commits the no-replace rename
+                // from the already validated file object. Unlike the former
+                // hard-link publication, this works on Windows filesystems
+                // that permit ordinary atomic rename but do not expose hard
+                // links through a redirected or synchronized user profile.
+                Self::rename_open_entity_no_replace(
+                    HANDLE(file.as_raw_handle()),
+                    &self.path.join(name),
+                )?;
+                drop(file);
             }
             if durable {
                 // The target name is already committed. Returning an ordinary
