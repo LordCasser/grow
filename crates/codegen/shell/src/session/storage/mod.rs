@@ -922,10 +922,12 @@ impl ContainedDirectory {
         for name in self.list_names()? {
             match self.open_relative(Path::new(&name), "contained child directory", false) {
                 Ok(directory) => directory.sync_tree()?,
-                Err(directory_error) => match self.open_regular(&name, "contained child file") {
-                    Ok(file) => sync_file_durable(&file)?,
-                    Err(_) => return Err(directory_error),
-                },
+                Err(directory_error) => {
+                    match self.open_regular_for_sync(&name, "contained child file") {
+                        Ok(file) => sync_file_durable(&file)?,
+                        Err(_) => return Err(directory_error),
+                    }
+                }
             }
         }
         self.sync()
@@ -1284,6 +1286,25 @@ impl ContainedDirectory {
         Self::component(name)?;
         let mut options = cap_std::fs::OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        let file = self.handle.open_with(name, &options)?;
+        Self::into_regular_file(file, description)
+    }
+
+    fn open_regular_for_sync(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<std::fs::File> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+
+        Self::component(name)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        // std::fs::File::sync_all maps to FlushFileBuffers on Windows, whose
+        // contract requires GENERIC_WRITE even when no bytes are changed.
+        // Staged files are owned by this transaction, so reopen the existing
+        // file read/write without create or truncate before the publication
+        // barrier. A read-only reopen deterministically fails with error 5.
+        options.read(true).write(true).follow(FollowSymlinks::No);
         let file = self.handle.open_with(name, &options)?;
         Self::into_regular_file(file, description)
     }
