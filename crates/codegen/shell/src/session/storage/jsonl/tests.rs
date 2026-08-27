@@ -77,6 +77,41 @@ async fn session_init_creates_a_missing_storage_root() {
 }
 
 #[tokio::test]
+async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
+    let sandbox = TempDir::new().unwrap();
+    let root = sandbox.path().join("grow-home");
+    let workspace = sandbox.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let info = Info {
+        id: acp::SessionId::new("session-creation-round-trip"),
+        cwd: workspace.to_string_lossy().into_owned(),
+    };
+
+    let writer = JsonlStorageAdapter::with_root(root.clone());
+    writer
+        .init_session(&info, default_model_id())
+        .await
+        .expect("publish the prepared session and acquire its writer lease");
+    writer
+        .append_session_title_durable(&info, "durable creation probe".into())
+        .await
+        .expect("commit the first durable Timeline event");
+    drop(writer);
+
+    let resumed = JsonlStorageAdapter::with_root(root);
+    let restored = resumed
+        .load_session_for_write_without_updates(&info)
+        .await
+        .expect("reopen the published session as its next writer");
+    assert_eq!(restored.timeline_events.len(), 1);
+    assert!(matches!(
+        &restored.timeline_events[0].kind,
+        chat_state::TimelineEventKind::SessionTitle(title)
+            if title.title == "durable creation probe"
+    ));
+}
+
+#[tokio::test]
 async fn session_trace_uses_canonical_identity_and_bounded_capability_reads() {
     let root = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
