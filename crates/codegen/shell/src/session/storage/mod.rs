@@ -814,12 +814,7 @@ impl ContainedDirectory {
         }
         Self::component(target)?;
         let target_display = parent.path.join(target);
-        Self::rename_open_entity_no_replace(
-            HANDLE(self.handle.as_raw_handle()),
-            HANDLE(parent.handle.as_raw_handle()),
-            target,
-            &target_display,
-        )?;
+        Self::rename_open_entity_no_replace(HANDLE(self.handle.as_raw_handle()), &target_display)?;
         self.path = target_display;
         self.release_publish_access();
         Ok(self)
@@ -998,27 +993,27 @@ impl ContainedDirectory {
         options.follow(FollowSymlinks::No);
         let source_file = self.handle.open_with(source, &options)?.into_std();
         let target_display = self.path.join(target);
-        Self::rename_open_entity_no_replace(
-            HANDLE(source_file.as_raw_handle()),
-            HANDLE(self.handle.as_raw_handle()),
-            target,
-            &target_display,
-        )
+        Self::rename_open_entity_no_replace(HANDLE(source_file.as_raw_handle()), &target_display)
     }
 
     fn rename_open_entity_no_replace(
         source_handle: windows::Win32::Foundation::HANDLE,
-        parent_handle: windows::Win32::Foundation::HANDLE,
-        target: &std::ffi::OsStr,
         target_display: &Path,
     ) -> io::Result<()> {
         use std::os::windows::ffi::OsStrExt as _;
-        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
         use windows::Win32::Storage::FileSystem::{
             FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
         };
 
-        let target = target.encode_wide().collect::<Vec<_>>();
+        // FILE_RENAME_INFO accepts a full target path with a null
+        // RootDirectory. This remains portable across local, redirected and
+        // SMB-backed profile storage; network redirectors are allowed to
+        // reject a non-null RootDirectory with ERROR_INVALID_PARAMETER. The
+        // source is still the exact validated handle, and `target_display`'s
+        // parent cannot be renamed while its pinned capability denies
+        // FILE_SHARE_DELETE.
+        let target = target_display.as_os_str().encode_wide().collect::<Vec<_>>();
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
             .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
@@ -1032,7 +1027,7 @@ impl ContainedDirectory {
             (*info).Anonymous = FILE_RENAME_INFO_0 {
                 ReplaceIfExists: false,
             };
-            (*info).RootDirectory = parent_handle;
+            (*info).RootDirectory = HANDLE::default();
             (*info).FileNameLength =
                 u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
@@ -1379,8 +1374,6 @@ impl ContainedDirectory {
                 // links through a redirected or synchronized user profile.
                 Self::rename_open_entity_no_replace(
                     HANDLE(file.as_raw_handle()),
-                    HANDLE(self.handle.as_raw_handle()),
-                    name,
                     &self.path.join(name),
                 )?;
                 drop(file);

@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-session-storage-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   session-creation:
     name: Create and reopen a session
@@ -30,6 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-session-storage
+          cache-on-failure: true
 
       - name: Exercise the complete session creation boundary
         shell: pwsh
