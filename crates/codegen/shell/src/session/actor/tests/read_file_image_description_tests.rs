@@ -48,10 +48,10 @@ async fn mark_current_model_as_text_only(actor: &SessionActor) {
         .unwrap();
 }
 
-async fn test_actor() -> SessionActor {
+async fn test_actor() -> std::sync::Arc<SessionActor> {
     let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await
+    std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
 }
 
 #[tokio::test(flavor = "current_thread")]

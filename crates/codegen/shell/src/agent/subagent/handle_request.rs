@@ -1370,6 +1370,7 @@ pub(crate) async fn run_shell_child(
         ctx.parent_terminal_backend.clone(),
         None,
         subagent_max_turns,
+        None,
     )
     .await;
     let (mut child_handle, child_thread) = match spawn_result {

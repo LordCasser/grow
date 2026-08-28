@@ -527,7 +527,7 @@ fn set_permission_mode_ask_emits_brand_consistent_toast() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(
         toast, "\u{2713} Permission mode: Ask",

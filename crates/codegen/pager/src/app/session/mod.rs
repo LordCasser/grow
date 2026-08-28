@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use tools::implementations::grow_build::workflow::WORKFLOW_TOOL_NAME;
+use unicode_width::UnicodeWidthStr;
 
 /// MCP server initialization progress, received from the shell.
 #[derive(Debug, Clone)]
@@ -650,8 +651,25 @@ impl WorkflowRunSnapshot {
 /// the tracker directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionControlToken {
+    pub(crate) client_id: uuid::Uuid,
+    /// Stable user-intent generation. This is deliberately not changed by a
+    /// transport reconnect: replaying a request must not become a fresh user
+    /// confirmation at the Shell boundary.
     pub(crate) generation: u64,
     pub(crate) sequence: u64,
+    /// Local dispatch epoch. This is not sent to the Shell; it only prevents a
+    /// completion from the replaced ACP transport from clearing the retry.
+    pub(crate) dispatch_generation: u64,
+}
+
+impl SessionControlToken {
+    pub(crate) fn shell_intent(self) -> shell::session::ControlIntent {
+        shell::session::ControlIntent {
+            client_id: self.client_id.to_string(),
+            generation: self.generation,
+            sequence: self.sequence,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -659,6 +677,9 @@ pub(crate) enum PendingSessionControl {
     Model {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
+        /// True when the model id is only a local display hint and Shell must
+        /// compose the effort with its newest desired Sampling target.
+        effort_patch: bool,
     },
     Agent {
         agent_name: String,
@@ -668,17 +689,62 @@ pub(crate) enum PendingSessionControl {
     },
 }
 
+/// Private process-relaunch handoff for one Session's newest desired controls.
+///
+/// `/minimal` and `/fullscreen` replace the pager process. Embedded Shell
+/// actors therefore disappear with it, while a leader-owned actor may remain.
+/// Preserving the original Shell intent token lets the resumed pager safely
+/// cover both cases: a fresh actor admits it, and a resident actor recognizes
+/// the exact in-flight/terminal receipt without treating a renderer change as
+/// a second user decision.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionControlHandoff {
+    pub(crate) session_id: String,
+    pub(crate) client_id: uuid::Uuid,
+    pub(crate) generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sampling: Option<SamplingControlHandoff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<NamedControlHandoff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) behavior: Option<BehaviorControlHandoff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SamplingControlHandoff {
+    pub(crate) sequence: u64,
+    pub(crate) model_id: String,
+    pub(crate) effort: Option<ReasoningEffort>,
+    pub(crate) effort_patch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NamedControlHandoff {
+    pub(crate) sequence: u64,
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BehaviorControlHandoff {
+    pub(crate) sequence: u64,
+    pub(crate) behavior: tools::types::BehaviorId,
+}
+
 #[derive(Debug, Clone)]
-struct QueuedSessionControl {
+struct InFlightSessionControl {
     token: SessionControlToken,
     control: PendingSessionControl,
+    needs_dispatch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionControlCompletion {
     Stale,
     Drained,
-    Next,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,16 +754,137 @@ pub(crate) enum BehaviorControlResolution {
     ConfirmationRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionControlDomain {
+    Sampling,
+    Agent,
+    Behavior,
+}
+
+impl PendingSessionControl {
+    fn domain(&self) -> SessionControlDomain {
+        match self {
+            Self::Model { .. } => SessionControlDomain::Sampling,
+            Self::Agent { .. } => SessionControlDomain::Agent,
+            Self::Behavior { .. } => SessionControlDomain::Behavior,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-struct SessionControlQueue {
-    generation: u64,
-    next_sequence: u64,
-    in_flight: Option<QueuedSessionControl>,
-    queued: VecDeque<QueuedSessionControl>,
-    /// Rearmed token corresponding to the sole RPC that may have reached the
-    /// previous transport. Locally queued followers were never sent and must
-    /// never be folded from restored state equality.
+struct SessionControlSlot {
+    in_flight: Option<InFlightSessionControl>,
     reconnect_applied_candidate: Option<SessionControlToken>,
+}
+
+#[derive(Debug)]
+struct SessionControlState {
+    client_id: uuid::Uuid,
+    generation: u64,
+    dispatch_generation: u64,
+    next_sequence: u64,
+    sampling: SessionControlSlot,
+    agent: SessionControlSlot,
+    behavior: SessionControlSlot,
+}
+
+impl Default for SessionControlState {
+    fn default() -> Self {
+        Self {
+            client_id: uuid::Uuid::new_v4(),
+            generation: 0,
+            dispatch_generation: 0,
+            next_sequence: 0,
+            sampling: SessionControlSlot::default(),
+            agent: SessionControlSlot::default(),
+            behavior: SessionControlSlot::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ShellControlSlot {
+    revision: u64,
+    intent: Option<shell::session::ControlIntent>,
+    phase: shell::extensions::notification::ControlPhase,
+    current: shell::extensions::notification::ControlTarget,
+    desired: Option<shell::extensions::notification::ControlTarget>,
+    /// Present only on the immutable durable terminal event. A reconnect
+    /// snapshot may legitimately publish `Applied` with no message before
+    /// replay reaches that event, so phase alone cannot seal a revision.
+    terminal_message: Option<String>,
+    phase_since: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellControlApplyOutcome {
+    Rejected,
+    Accepted { changed: bool },
+}
+
+impl ShellControlApplyOutcome {
+    pub(crate) const fn accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    pub(crate) const fn changed(self) -> bool {
+        matches!(self, Self::Accepted { changed: true })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ShellControlState {
+    active_epoch: Option<String>,
+    retired_epochs: HashSet<String>,
+    sampling: Option<ShellControlSlot>,
+    agent: Option<ShellControlSlot>,
+    behavior: Option<ShellControlSlot>,
+}
+
+impl ShellControlState {
+    fn slot(
+        &self,
+        domain: shell::extensions::notification::ControlDomain,
+    ) -> Option<&ShellControlSlot> {
+        match domain {
+            shell::extensions::notification::ControlDomain::Sampling => self.sampling.as_ref(),
+            shell::extensions::notification::ControlDomain::Agent => self.agent.as_ref(),
+            shell::extensions::notification::ControlDomain::Behavior => self.behavior.as_ref(),
+        }
+    }
+
+    fn slot_mut(
+        &mut self,
+        domain: shell::extensions::notification::ControlDomain,
+    ) -> &mut Option<ShellControlSlot> {
+        match domain {
+            shell::extensions::notification::ControlDomain::Sampling => &mut self.sampling,
+            shell::extensions::notification::ControlDomain::Agent => &mut self.agent,
+            shell::extensions::notification::ControlDomain::Behavior => &mut self.behavior,
+        }
+    }
+}
+
+impl SessionControlState {
+    fn slot(&self, domain: SessionControlDomain) -> &SessionControlSlot {
+        match domain {
+            SessionControlDomain::Sampling => &self.sampling,
+            SessionControlDomain::Agent => &self.agent,
+            SessionControlDomain::Behavior => &self.behavior,
+        }
+    }
+
+    fn slot_mut(&mut self, domain: SessionControlDomain) -> &mut SessionControlSlot {
+        match domain {
+            SessionControlDomain::Sampling => &mut self.sampling,
+            SessionControlDomain::Agent => &mut self.agent,
+            SessionControlDomain::Behavior => &mut self.behavior,
+        }
+    }
+
+    fn slots(&self) -> [&SessionControlSlot; 3] {
+        [&self.sampling, &self.agent, &self.behavior]
+    }
 }
 
 pub struct AgentSession {
@@ -771,20 +958,26 @@ pub struct AgentSession {
     self_interjection_ids: HashSet<String>,
     /// Running agent definition reported for this ACP session.
     session_agent_name: Option<String>,
-    /// Serialized next-step model/effort/Agent controls. Exactly one RPC is in
-    /// flight per session; queued controls and reconnect generations make the
-    /// prompt barrier safe under rapid repeated selection and stale task
-    /// completion.
-    controls: SessionControlQueue,
+    /// Local request correlation only. The Shell owns desired state and
+    /// publishes the presentation projection below.
+    controls: SessionControlState,
+    /// Latest typed Shell-authoritative UI projection. It never enters prompt
+    /// construction and is cleared on reconnect until the Shell re-sends a
+    /// fresh snapshot.
+    shell_controls: ShellControlState,
+    /// One keyed, replaceable progress fact for the live status row. It is
+    /// presentation-only, never persisted, and never projected into model
+    /// context. Clearing is key-checked so completion of an older operation
+    /// cannot erase a newer status that replaced it.
+    live_feedback: Option<(&'static str, crate::scrollback::blocks::UiFeedback)>,
     /// Latest server-authoritative model state observed while a local route
     /// control is outstanding. Applying it immediately would make the local
     /// completion appear unchanged; dropping it would let a second client leave
-    /// this view permanently stale. It is applied only once the serialized
-    /// control queue drains.
+    /// this view permanently stale. It is applied once the matching Sampling
+    /// revision settles.
     pending_authoritative_model_change: Option<(String, Option<String>)>,
-    /// Equivalent parked server-authoritative Agent state. Model and Agent
-    /// controls share one FIFO, but their authoritative state is independent,
-    /// so retain the latest value of each kind.
+    /// Equivalent parked server-authoritative Agent state. Sampling and Agent
+    /// revisions are independent, so retain the latest value of each kind.
     pending_authoritative_agent_change: Option<String>,
     /// Monotonic token for asynchronous session metadata reads.
     agent_metadata_revision: u64,
@@ -985,6 +1178,11 @@ pub struct AgentSession {
     /// tail. Why the full string: see
     /// [`crate::acp::meta::NotificationMeta::event_id`].
     pub(crate) last_seen_event_id: Option<String>,
+    /// During a replay window, records whether a live update has already
+    /// advanced the cursor. Event IDs are opaque across resume generations;
+    /// this prevents a later historical replay from overwriting that live
+    /// frontier without comparing unrelated IDs.
+    pub(crate) replay_live_cursor_seen: bool,
     /// Unexpected-replay drops since the last reload window opened. Gates the
     /// drop log to one `warn!` per incident (a late replay is one line per
     /// event — thousands for a large transcript).
@@ -1087,7 +1285,9 @@ impl AgentSession {
             mcp_init_progress: None,
             self_interjection_ids: HashSet::new(),
             session_agent_name: None,
-            controls: SessionControlQueue::default(),
+            controls: SessionControlState::default(),
+            shell_controls: ShellControlState::default(),
+            live_feedback: None,
             pending_authoritative_model_change: None,
             pending_authoritative_agent_change: None,
             agent_metadata_revision: 0,
@@ -1133,6 +1333,7 @@ impl AgentSession {
             last_applied_event_seq: None,
             last_applied_grow_event_seq: None,
             last_seen_event_id: None,
+            replay_live_cursor_seen: false,
             unexpected_replay_drops: 0,
             replayed_terminal_prompts: HashSet::new(),
             finalized_prompt: None,
@@ -1152,6 +1353,7 @@ impl AgentSession {
     pub(crate) fn begin_replay(&mut self) {
         self.prompt_history_loading = true;
         self.loading_replay = true;
+        self.replay_live_cursor_seen = false;
     }
 
     pub(crate) fn mark_created_via_new(&mut self) {
@@ -1191,101 +1393,277 @@ impl AgentSession {
         changed
     }
 
-    /// Queue a control in user-observed order. The first control becomes the
-    /// sole in-flight RPC; later controls remain local until its matching
-    /// completion advances the queue.
+    /// Publish a desired control target. Sampling and Agent requests are sent
+    /// immediately so the Shell can replace an older not-yet-applied revision;
+    /// Every domain replaces its local correlation token immediately. The
+    /// Shell is the sole desired-state authority and rejects stale revisions.
     pub(crate) fn enqueue_control(
         &mut self,
         control: PendingSessionControl,
     ) -> Option<(SessionControlToken, PendingSessionControl)> {
+        Some(self.publish_control(control, false))
+    }
+
+    /// Retain the newest desired target while the ACP transport is unavailable.
+    /// Reconnect reconciliation will claim it exactly once after the replacement
+    /// transport has restored the session.
+    pub(crate) fn defer_control(&mut self, control: PendingSessionControl) {
+        let _ = self.publish_control(control, true);
+    }
+
+    fn publish_control(
+        &mut self,
+        control: PendingSessionControl,
+        needs_dispatch: bool,
+    ) -> (SessionControlToken, PendingSessionControl) {
         let token = SessionControlToken {
+            client_id: self.controls.client_id,
             generation: self.controls.generation,
             sequence: self.controls.next_sequence,
+            dispatch_generation: self.controls.dispatch_generation,
         };
         self.controls.next_sequence = self.controls.next_sequence.saturating_add(1);
-        let queued = QueuedSessionControl { token, control };
-        if self.controls.in_flight.is_none() {
-            self.controls.in_flight = Some(queued.clone());
-            Some((token, queued.control))
-        } else {
-            self.controls.queued.push_back(queued);
-            None
+        let domain = control.domain();
+        let queued = InFlightSessionControl {
+            token,
+            control,
+            needs_dispatch,
+        };
+        let slot = self.controls.slot_mut(domain);
+        slot.in_flight = Some(queued.clone());
+        (token, queued.control)
+    }
+
+    pub(crate) fn screen_mode_control_handoff(&self) -> Option<SessionControlHandoff> {
+        let session_id = self.session_id.as_ref()?.0.to_string();
+        let sampling = self
+            .controls
+            .sampling
+            .in_flight
+            .as_ref()
+            .and_then(|pending| {
+                let PendingSessionControl::Model {
+                    model_id,
+                    effort,
+                    effort_patch,
+                } = &pending.control
+                else {
+                    return None;
+                };
+                Some(SamplingControlHandoff {
+                    sequence: pending.token.sequence,
+                    model_id: model_id.0.to_string(),
+                    effort: *effort,
+                    effort_patch: *effort_patch,
+                })
+            });
+        let agent = self.controls.agent.in_flight.as_ref().and_then(|pending| {
+            let PendingSessionControl::Agent { agent_name } = &pending.control else {
+                return None;
+            };
+            Some(NamedControlHandoff {
+                sequence: pending.token.sequence,
+                name: agent_name.clone(),
+            })
+        });
+        let behavior = self
+            .controls
+            .behavior
+            .in_flight
+            .as_ref()
+            .and_then(|pending| {
+                let PendingSessionControl::Behavior { mode } = pending.control else {
+                    return None;
+                };
+                Some(BehaviorControlHandoff {
+                    sequence: pending.token.sequence,
+                    behavior: mode,
+                })
+            });
+        if sampling.is_none() && agent.is_none() && behavior.is_none() {
+            return None;
         }
+        Some(SessionControlHandoff {
+            session_id,
+            client_id: self.controls.client_id,
+            generation: self.controls.generation,
+            sampling,
+            agent,
+            behavior,
+        })
+    }
+
+    /// Restore desired controls before replay starts. Every restored slot is
+    /// dispatchable and marked as a reconnect candidate so the authoritative
+    /// load projection may resolve an already-applied Sampling/Agent target.
+    pub(crate) fn restore_screen_mode_control_handoff(&mut self, handoff: SessionControlHandoff) {
+        debug_assert_eq!(
+            self.session_id.as_ref().map(|id| id.0.as_ref()),
+            Some(handoff.session_id.as_str())
+        );
+        self.controls.client_id = handoff.client_id;
+        self.controls.generation = handoff.generation;
+        let dispatch_generation = self.controls.dispatch_generation;
+        let mut max_sequence = self.controls.next_sequence;
+
+        let mut install =
+            |domain: SessionControlDomain, sequence: u64, control: PendingSessionControl| {
+                let token = SessionControlToken {
+                    client_id: handoff.client_id,
+                    generation: handoff.generation,
+                    sequence,
+                    dispatch_generation,
+                };
+                let slot = self.controls.slot_mut(domain);
+                slot.in_flight = Some(InFlightSessionControl {
+                    token,
+                    control,
+                    needs_dispatch: true,
+                });
+                slot.reconnect_applied_candidate = Some(token);
+                max_sequence = max_sequence.max(sequence.saturating_add(1));
+            };
+        if let Some(sampling) = handoff.sampling {
+            install(
+                SessionControlDomain::Sampling,
+                sampling.sequence,
+                PendingSessionControl::Model {
+                    model_id: acp::ModelId::new(sampling.model_id),
+                    effort: sampling.effort,
+                    effort_patch: sampling.effort_patch,
+                },
+            );
+        }
+        if let Some(agent) = handoff.agent {
+            install(
+                SessionControlDomain::Agent,
+                agent.sequence,
+                PendingSessionControl::Agent {
+                    agent_name: agent.name,
+                },
+            );
+        }
+        if let Some(behavior) = handoff.behavior {
+            install(
+                SessionControlDomain::Behavior,
+                behavior.sequence,
+                PendingSessionControl::Behavior {
+                    mode: behavior.behavior,
+                },
+            );
+        }
+        drop(install);
+        self.controls.next_sequence = max_sequence;
     }
 
     pub(crate) fn complete_control(
         &mut self,
         token: SessionControlToken,
     ) -> SessionControlCompletion {
-        if self
-            .controls
-            .in_flight
-            .as_ref()
-            .is_none_or(|pending| pending.token != token)
-        {
+        let domain = [
+            SessionControlDomain::Sampling,
+            SessionControlDomain::Agent,
+            SessionControlDomain::Behavior,
+        ]
+        .into_iter()
+        .find(|domain| {
+            self.controls
+                .slot(*domain)
+                .in_flight
+                .as_ref()
+                .is_some_and(|pending| pending.token == token)
+        });
+        let Some(domain) = domain else {
             return SessionControlCompletion::Stale;
+        };
+        let slot = self.controls.slot_mut(domain);
+        if slot.reconnect_applied_candidate == Some(token) {
+            slot.reconnect_applied_candidate = None;
         }
-        if self.controls.reconnect_applied_candidate == Some(token) {
-            self.controls.reconnect_applied_candidate = None;
-        }
-        self.controls.in_flight = None;
-        if let Some(next) = self.controls.queued.pop_front() {
-            self.controls.in_flight = Some(next);
-            SessionControlCompletion::Next
-        } else {
-            SessionControlCompletion::Drained
-        }
+        slot.in_flight = None;
+        SessionControlCompletion::Drained
     }
 
-    pub(crate) fn in_flight_control(&self) -> Option<(SessionControlToken, PendingSessionControl)> {
-        self.controls
+    pub(crate) fn claim_control_for_dispatch(
+        &mut self,
+    ) -> Option<(SessionControlToken, PendingSessionControl)> {
+        let domain = [
+            SessionControlDomain::Sampling,
+            SessionControlDomain::Agent,
+            SessionControlDomain::Behavior,
+        ]
+        .into_iter()
+        .filter_map(|domain| {
+            self.controls
+                .slot(domain)
+                .in_flight
+                .as_ref()
+                .filter(|pending| pending.needs_dispatch)
+                .map(|pending| (domain, pending.token.sequence))
+        })
+        .min_by_key(|(_, sequence)| *sequence)
+        .map(|(domain, _)| domain)?;
+        let pending = self
+            .controls
+            .slot_mut(domain)
             .in_flight
-            .as_ref()
-            .map(|pending| (pending.token, pending.control.clone()))
+            .as_mut()
+            .expect("selected dispatchable control");
+        pending.needs_dispatch = false;
+        Some((pending.token, pending.control.clone()))
     }
 
     #[cfg(test)]
     pub(crate) fn invalidate_controls(&mut self) {
         self.controls.generation = self.controls.generation.saturating_add(1);
-        self.controls.in_flight = None;
-        self.controls.queued.clear();
-        self.controls.reconnect_applied_candidate = None;
+        self.controls.dispatch_generation = self.controls.dispatch_generation.saturating_add(1);
+        self.controls.sampling = SessionControlSlot::default();
+        self.controls.agent = SessionControlSlot::default();
+        self.controls.behavior = SessionControlSlot::default();
         self.pending_authoritative_model_change = None;
         self.pending_authoritative_agent_change = None;
     }
 
     /// Reissue user controls after the ACP transport has been replaced. Old
-    /// task results become stale through the generation bump, while the
-    /// original model/effort/Agent/Behavior order remains intact.
+    /// task results become stale through the local dispatch-epoch bump while
+    /// the semantic user intent remains stable. Each domain keeps only its
+    /// newest desired target and can reconnect independently.
     pub(crate) fn rearm_controls_for_reconnect(&mut self) {
-        self.controls.generation = self.controls.generation.saturating_add(1);
-        let had_in_flight = self.controls.in_flight.is_some();
-        let controls = self
-            .controls
-            .in_flight
-            .take()
-            .into_iter()
-            .chain(self.controls.queued.drain(..))
-            .map(|pending| pending.control)
-            .collect::<Vec<_>>();
-        for control in controls {
+        self.shell_controls = ShellControlState::default();
+        self.controls.dispatch_generation = self.controls.dispatch_generation.saturating_add(1);
+        let controls = [
+            SessionControlDomain::Sampling,
+            SessionControlDomain::Agent,
+            SessionControlDomain::Behavior,
+        ]
+        .into_iter()
+        .filter_map(|domain| {
+            let slot = self.controls.slot_mut(domain);
+            let had_in_flight = slot.in_flight.is_some();
+            let pending = slot.in_flight.take()?;
+            slot.reconnect_applied_candidate = None;
+            Some((domain, had_in_flight, pending))
+        })
+        .collect::<Vec<_>>();
+        for (domain, had_in_flight, pending) in controls {
             let token = SessionControlToken {
-                generation: self.controls.generation,
-                sequence: self.controls.next_sequence,
+                client_id: pending.token.client_id,
+                generation: pending.token.generation,
+                sequence: pending.token.sequence,
+                dispatch_generation: self.controls.dispatch_generation,
             };
-            self.controls.next_sequence = self.controls.next_sequence.saturating_add(1);
-            let pending = QueuedSessionControl { token, control };
-            if self.controls.in_flight.is_none() {
-                if had_in_flight {
-                    self.controls.reconnect_applied_candidate = Some(token);
-                }
-                self.controls.in_flight = Some(pending);
-            } else {
-                self.controls.queued.push_back(pending);
+            let slot = self.controls.slot_mut(domain);
+            if had_in_flight {
+                slot.reconnect_applied_candidate = Some(token);
             }
+            slot.in_flight = Some(InFlightSessionControl {
+                token,
+                control: pending.control,
+                needs_dispatch: true,
+            });
         }
-        // Replay reconstructs the authoritative server projection. Values
-        // parked behind the old transport's queue must not overwrite it.
+        // Replay reconstructs the authoritative server projection. Parked
+        // notifications from the old transport must not overwrite it.
         self.pending_authoritative_model_change = None;
         self.pending_authoritative_agent_change = None;
     }
@@ -1295,77 +1673,108 @@ impl AgentSession {
         model_id: &acp::ModelId,
         effort: Option<ReasoningEffort>,
     ) -> bool {
-        self.controls
-            .in_flight
-            .iter()
-            .chain(self.controls.queued.iter())
-            .any(|pending| {
-                matches!(
-                    &pending.control,
-                    PendingSessionControl::Model {
-                        model_id: pending_model,
-                        effort: pending_effort,
-                    } if pending_model == model_id && *pending_effort == effort
-                )
-            })
+        let slot = &self.controls.sampling;
+        slot.in_flight.iter().any(|pending| {
+            matches!(
+                &pending.control,
+                PendingSessionControl::Model {
+                    model_id: pending_model,
+                    effort: pending_effort,
+                    ..
+                } if pending_model == model_id && *pending_effort == effort
+            )
+        })
     }
 
     pub(crate) fn has_pending_behavior_control(&self, mode: tools::types::BehaviorId) -> bool {
-        self.controls
-            .in_flight
-            .iter()
-            .chain(self.controls.queued.iter())
-            .any(|pending| {
-                matches!(
-                    &pending.control,
-                    PendingSessionControl::Behavior { mode: pending_mode }
-                        if *pending_mode == mode
-                )
-            })
+        let slot = &self.controls.behavior;
+        slot.in_flight.iter().any(|pending| {
+            matches!(
+                &pending.control,
+                PendingSessionControl::Behavior { mode: pending_mode }
+                    if *pending_mode == mode
+            )
+        })
     }
 
-    /// Drop the applied prefix reconstructed by `session/load` before the
-    /// rearmed queue is sent to the replacement transport. A mismatch stops
-    /// the fold: later controls must never overtake it.
-    pub(crate) fn reconcile_rearmed_control_prefix(&mut self, _agent_name: Option<&str>) {
-        let Some(candidate) = self.controls.reconnect_applied_candidate.take() else {
-            return;
-        };
-        let Some(pending) = self
-            .controls
-            .in_flight
-            .as_ref()
-            .filter(|pending| pending.token == candidate)
-        else {
-            return;
-        };
-        let applied = match &pending.control {
-            PendingSessionControl::Model { model_id, effort } => {
-                let expected_effort = (*effort).or_else(|| {
-                    self.models.available.get(model_id).and_then(|info| {
-                        shell::sampling::types::parse_reasoning_effort_meta(info.meta.as_ref())
-                    })
-                });
-                self.models.current.as_ref() == Some(model_id)
-                    && self.models.reasoning_effort == expected_effort
+    /// Resolve an exact local intent from a Shell-authoritative terminal
+    /// receipt. Domain-specific committed projections still update the visible
+    /// current value, but correlation never guesses from target equality.
+    pub(crate) fn resolve_reconnect_control_projection(
+        &mut self,
+        domain: shell::extensions::notification::ControlDomain,
+        phase: shell::extensions::notification::ControlPhase,
+        current: &shell::extensions::notification::ControlTarget,
+        desired: Option<&shell::extensions::notification::ControlTarget>,
+        intent: Option<&shell::session::ControlIntent>,
+    ) -> bool {
+        use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+
+        fn target_matches(control: &PendingSessionControl, target: &ControlTarget) -> bool {
+            match (control, target) {
+                (
+                    PendingSessionControl::Model {
+                        model_id,
+                        effort,
+                        effort_patch,
+                    },
+                    ControlTarget::Sampling {
+                        model_id: actual,
+                        reasoning_effort,
+                    },
+                ) => {
+                    (*effort_patch || model_id.0.as_ref() == actual)
+                        && effort.is_none_or(|expected| {
+                            reasoning_effort.as_deref() == Some(expected.to_string().as_str())
+                        })
+                }
+                (
+                    PendingSessionControl::Agent { agent_name },
+                    ControlTarget::Agent { agent_name: actual },
+                ) => agent_name == actual,
+                (
+                    PendingSessionControl::Behavior { mode },
+                    ControlTarget::Behavior {
+                        behavior_id: actual,
+                    },
+                ) => mode.as_id() == actual,
+                _ => false,
             }
-            // Re-selecting the same Agent intentionally rebuilds it from the
-            // newly published definition, so name equality is not proof that
-            // the old RPC committed.
-            PendingSessionControl::Agent { .. } => false,
-            // Mode equality cannot prove that a same-source selection reached
-            // the Shell, and that selection is the protocol for clearing an
-            // interrupt-confirmation latch. Reissue Behavior controls; the
-            // Shell handles same-mode selection idempotently.
-            PendingSessionControl::Behavior { .. } => false,
-        };
-        if applied {
-            let _ = self.complete_control(candidate);
         }
+
+        let local_domain = match domain {
+            ControlDomain::Sampling => SessionControlDomain::Sampling,
+            ControlDomain::Agent => SessionControlDomain::Agent,
+            ControlDomain::Behavior => SessionControlDomain::Behavior,
+        };
+        let slot = self.controls.slot(local_domain);
+        let Some(pending) = slot.in_flight.as_ref() else {
+            return false;
+        };
+        let Some(intent) = intent else {
+            return false;
+        };
+        let pending_intent = pending.token.shell_intent();
+        if &pending_intent != intent {
+            return false;
+        }
+        let terminal_matches = match phase {
+            // A durable terminal receipt carries the target that this exact
+            // intent applied. `current` may already reflect a later client
+            // revision by the time a reconnecting client replays the receipt.
+            ControlPhase::Applied => target_matches(&pending.control, desired.unwrap_or(current)),
+            ControlPhase::Rejected => {
+                desired.is_some_and(|target| target_matches(&pending.control, target))
+            }
+            ControlPhase::Superseded => true,
+            ControlPhase::Pending | ControlPhase::Applying => false,
+        };
+        terminal_matches
+            && self.complete_control(pending.token) == SessionControlCompletion::Drained
     }
 
-    /// Preserve the newest live model notification until the local serialized
-    /// control queue reaches its terminal state. The server is authoritative;
+    /// Preserve the newest live model notification until the matching local
+    /// Sampling revision reaches its terminal state. The server is authoritative;
     /// this only defers its projection to avoid racing our own RPC completion.
     pub(crate) fn defer_authoritative_model_change(
         &mut self,
@@ -1388,38 +1797,401 @@ impl AgentSession {
         self.pending_authoritative_agent_change = Some(agent_name);
     }
 
-    /// Take the authoritative values that were held behind a local control
-    /// queue. Callers must invoke this only after `complete_control` returns
-    /// `Drained`, so a following local control can never be overwritten.
+    /// Take authoritative values only for domains whose desired target has
+    /// drained. One slow domain must not delay another domain's projection.
     pub(crate) fn take_deferred_authoritative_controls(
         &mut self,
     ) -> (Option<(String, Option<String>)>, Option<String>) {
         (
-            self.pending_authoritative_model_change.take(),
-            self.pending_authoritative_agent_change.take(),
+            (!self.sampling_control_pending())
+                .then(|| self.pending_authoritative_model_change.take())
+                .flatten(),
+            (!self.agent_control_pending())
+                .then(|| self.pending_authoritative_agent_change.take())
+                .flatten(),
         )
     }
 
     pub(crate) fn controls_pending(&self) -> bool {
-        self.controls.in_flight.is_some()
+        self.controls
+            .slots()
+            .into_iter()
+            .any(|slot| slot.in_flight.is_some())
+    }
+
+    pub(crate) fn sampling_control_pending(&self) -> bool {
+        let slot = &self.controls.sampling;
+        slot.in_flight.is_some()
+    }
+
+    /// Resolve a local Sampling intent only from the authoritative model
+    /// projection that matches its complete desired target. Transport RPC
+    /// success is intentionally insufficient: clearing there lets a
+    /// following `/effort` compose against the old model.
+    pub(crate) fn resolve_sampling_control(
+        &mut self,
+        model_id: &acp::ModelId,
+        effort: Option<ReasoningEffort>,
+    ) -> bool {
+        let Some((token, matches)) = self.controls.sampling.in_flight.as_ref().map(|pending| {
+            let matches = match &pending.control {
+                PendingSessionControl::Model {
+                    model_id: desired_model,
+                    effort: desired_effort,
+                    effort_patch,
+                } => {
+                    let expected_effort = (*desired_effort).or_else(|| {
+                        self.models.available.get(desired_model).and_then(|info| {
+                            shell::sampling::types::parse_reasoning_effort_meta(info.meta.as_ref())
+                        })
+                    });
+                    !*effort_patch && desired_model == model_id && expected_effort == effort
+                }
+                PendingSessionControl::Agent { .. } | PendingSessionControl::Behavior { .. } => {
+                    false
+                }
+            };
+            (pending.token, matches)
+        }) else {
+            return false;
+        };
+        matches && self.complete_control(token) == SessionControlCompletion::Drained
+    }
+
+    /// Resolve an Agent intent only once the matching AgentChanged projection
+    /// arrives. The RPC completion is merely transport correlation.
+    pub(crate) fn resolve_agent_control(&mut self, agent_name: &str) -> bool {
+        let Some((token, matches)) = self.controls.agent.in_flight.as_ref().map(|pending| {
+            let matches = matches!(
+                &pending.control,
+                PendingSessionControl::Agent { agent_name: desired } if desired == agent_name
+            );
+            (pending.token, matches)
+        }) else {
+            return false;
+        };
+        matches && self.complete_control(token) == SessionControlCompletion::Drained
+    }
+
+    pub(crate) fn apply_shell_control_state_outcome(
+        &mut self,
+        update: shell::extensions::notification::ControlStateUpdate,
+        allow_snapshot_reset: bool,
+    ) -> ShellControlApplyOutcome {
+        use shell::extensions::notification::ControlPhase;
+        fn phase_rank(phase: ControlPhase) -> u8 {
+            match phase {
+                ControlPhase::Pending => 0,
+                ControlPhase::Applying => 1,
+                ControlPhase::Applied | ControlPhase::Rejected | ControlPhase::Superseded => 2,
+            }
+        }
+
+        if update.current.domain() != update.domain
+            || update
+                .desired
+                .as_ref()
+                .is_some_and(|target| target.domain() != update.domain)
+        {
+            tracing::warn!(?update.domain, "ignoring mismatched control-state target");
+            return ShellControlApplyOutcome::Rejected;
+        }
+        if self.shell_controls.active_epoch.as_deref() != Some(update.epoch.as_str()) {
+            // Receipt-only projections are historical acknowledgements, not a
+            // live state stream. They must never establish or rotate the
+            // epoch (the ACP handler handles their immutable notice path).
+            if update.receipt_only {
+                return ShellControlApplyOutcome::Rejected;
+            }
+            // A live update from an unknown actor can otherwise erase the
+            // current projection and let a delayed packet from a restarted
+            // actor become authoritative. Epoch creation is reserved for an
+            // explicit load snapshot or the bounded replay window.
+            if !allow_snapshot_reset && !update.snapshot {
+                tracing::debug!(
+                    update_epoch = %update.epoch,
+                    active_epoch = ?self.shell_controls.active_epoch,
+                    "ignoring live control update from unknown epoch"
+                );
+                return ShellControlApplyOutcome::Rejected;
+            }
+            if self.shell_controls.retired_epochs.contains(&update.epoch) {
+                return ShellControlApplyOutcome::Rejected;
+            }
+            if let Some(previous) = self
+                .shell_controls
+                .active_epoch
+                .replace(update.epoch.clone())
+            {
+                self.shell_controls.retired_epochs.insert(previous);
+            }
+            self.shell_controls.sampling = None;
+            self.shell_controls.agent = None;
+            self.shell_controls.behavior = None;
+        }
+        let slot = self.shell_controls.slot_mut(update.domain);
+        if allow_snapshot_reset
+            && update.snapshot
+            && slot
+                .as_ref()
+                .is_some_and(|current| current.revision > update.revision)
+        {
+            // Durable terminal projections replay before the live actor is
+            // asked for its state. A replacement actor starts a fresh local
+            // revision sequence; only its explicit load snapshot may reset
+            // the replayed high-water mark. Ordinary live updates and delayed
+            // snapshots outside a replay window remain monotonic.
+            *slot = None;
+        }
+        if update.snapshot
+            && !allow_snapshot_reset
+            && slot.as_ref().is_some_and(|current| {
+                current.revision == update.revision
+                    && (current.phase != update.phase
+                        || current.intent != update.intent
+                        || current.current != update.current
+                        || current.desired != update.desired)
+            })
+        {
+            return ShellControlApplyOutcome::Rejected;
+        }
+        if slot.as_ref().is_some_and(|current| {
+            current.revision > update.revision
+                || (current.revision == update.revision
+                    && (current.terminal_message.is_some()
+                        || phase_rank(current.phase) > phase_rank(update.phase)))
+        }) {
+            return ShellControlApplyOutcome::Rejected;
+        }
+        let phase_since = slot
+            .as_ref()
+            .filter(|current| {
+                current.revision == update.revision
+                    && current.intent == update.intent
+                    && current.phase == update.phase
+            })
+            .map_or_else(Instant::now, |current| current.phase_since);
+        let changed = slot.as_ref().is_none_or(|current| {
+            current.revision != update.revision
+                || current.intent != update.intent
+                || current.phase != update.phase
+                || current.current != update.current
+                || current.desired != update.desired
+                || current.terminal_message != update.message
+        });
+        *slot = Some(ShellControlSlot {
+            revision: update.revision,
+            intent: update.intent,
+            phase: update.phase,
+            current: update.current,
+            desired: update.desired,
+            terminal_message: update.message,
+            phase_since,
+        });
+        ShellControlApplyOutcome::Accepted { changed }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_shell_control_state(
+        &mut self,
+        update: shell::extensions::notification::ControlStateUpdate,
+        allow_snapshot_reset: bool,
+    ) -> bool {
+        self.apply_shell_control_state_outcome(update, allow_snapshot_reset)
+            .changed()
+    }
+
+    /// Newest complete Sampling target, including a switch staged before the
+    /// ACP session exists.  User intents such as `/effort` must compose with
+    /// this target instead of the last committed model; otherwise changing
+    /// effort while a model switch is pending silently resurrects the old
+    /// model.
+    pub(crate) fn sampling_control_target(
+        &self,
+    ) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+        let pending = self.controls.sampling.in_flight.as_ref();
+        pending
+            .and_then(|pending| match &pending.control {
+                PendingSessionControl::Model {
+                    model_id, effort, ..
+                } => Some((model_id.clone(), *effort)),
+                PendingSessionControl::Agent { .. } | PendingSessionControl::Behavior { .. } => {
+                    None
+                }
+            })
+            .or_else(|| self.deferred_model_switch.clone())
+    }
+
+    /// Model projection used only while interpreting a new UI control intent.
+    /// It is deliberately separate from `self.models`: committed footer and
+    /// prompt metadata must continue to show the authoritative current model
+    /// until the Shell publishes the applied transition.
+    pub(crate) fn models_for_control_intent(&self) -> ModelState {
+        let mut models = self.models.clone();
+        if let Some((model_id, effort)) = self.sampling_control_target() {
+            models.set_current(model_id, effort);
+        }
+        models
+    }
+
+    pub(crate) fn agent_control_pending(&self) -> bool {
+        let slot = &self.controls.agent;
+        slot.in_flight.is_some()
+    }
+
+    /// Whether a Shell-authoritative control projection contains time-based
+    /// presentation state. Pending controls animate their spinner; Applying
+    /// controls also cross the 300ms feedback threshold without requiring an
+    /// unrelated session event to trigger a redraw.
+    pub(crate) fn control_feedback_active(&self) -> bool {
+        use shell::extensions::notification::ControlPhase;
+        self.live_feedback.is_some()
+            || [
+                self.shell_controls.sampling.as_ref(),
+                self.shell_controls.agent.as_ref(),
+                self.shell_controls.behavior.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|slot| matches!(slot.phase, ControlPhase::Pending | ControlPhase::Applying))
+    }
+
+    pub(crate) fn set_live_feedback(
+        &mut self,
+        key: &'static str,
+        tone: crate::scrollback::blocks::NoticeTone,
+        message: impl Into<String>,
+    ) {
+        self.live_feedback = Some((
+            key,
+            crate::scrollback::blocks::UiFeedback::new(tone, message),
+        ));
+    }
+
+    pub(crate) fn clear_live_feedback(&mut self, key: &'static str) {
+        if self
+            .live_feedback
+            .as_ref()
+            .is_some_and(|(active, _)| *active == key)
+        {
+            self.live_feedback = None;
+        }
+    }
+
+    pub(crate) fn live_status(&self, width: usize) -> Option<String> {
+        let control = self.control_status(width);
+        let progress = self
+            .live_feedback
+            .as_ref()
+            .map(|(_, feedback)| feedback.as_str());
+        match (progress, control) {
+            (None, None) => None,
+            (Some(progress), None) => Some(progress.to_owned()),
+            (None, Some(control)) => Some(control),
+            (Some(progress), Some(control)) => {
+                let combined = format!("{progress} · {control}");
+                if UnicodeWidthStr::width(combined.as_str()) <= width {
+                    Some(combined)
+                } else {
+                    Some(format!(
+                        "{progress} · {} changes pending",
+                        self.pending_control_count()
+                    ))
+                }
+            }
+        }
+    }
+
+    fn pending_control_count(&self) -> usize {
+        use shell::extensions::notification::ControlPhase;
+        [
+            self.shell_controls.sampling.as_ref(),
+            self.shell_controls.agent.as_ref(),
+            self.shell_controls.behavior.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|slot| matches!(slot.phase, ControlPhase::Pending | ControlPhase::Applying))
+        .count()
+    }
+
+    /// Compact projection of the newest target in each pending control domain.
+    /// This is presentation-only state: it is never copied into ChatState or
+    /// an ACP prompt. Both retained and minimal renderers consume this method.
+    pub(crate) fn control_status(&self, width: usize) -> Option<String> {
+        use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+        let label = |domain| {
+            let slot = self.shell_controls.slot(domain)?;
+            if !matches!(slot.phase, ControlPhase::Pending | ControlPhase::Applying) {
+                return None;
+            }
+            let target = slot.desired.as_ref()?;
+            let text = match target {
+                ControlTarget::Sampling {
+                    model_id,
+                    reasoning_effort,
+                } => {
+                    let display = model_id
+                        .rsplit_once('/')
+                        .map_or(model_id.as_str(), |(_, model)| model);
+                    match reasoning_effort {
+                        Some(effort) => format!("model→{display} ({effort})"),
+                        None => format!("model→{display}"),
+                    }
+                }
+                ControlTarget::Agent { agent_name } => format!("agent→{agent_name}"),
+                ControlTarget::Behavior { behavior_id } => {
+                    let display = tools::types::BehaviorId::try_from_id(behavior_id)
+                        .map_or(behavior_id.as_str(), |mode| mode.display_label());
+                    format!("behavior→{display}")
+                }
+            };
+            Some(
+                if slot.phase == ControlPhase::Applying
+                    && slot.phase_since.elapsed() >= Duration::from_millis(300)
+                {
+                    format!("applying {text}")
+                } else {
+                    text
+                },
+            )
+        };
+        let parts = [
+            label(ControlDomain::Sampling),
+            label(ControlDomain::Agent),
+            label(ControlDomain::Behavior),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        match parts.as_slice() {
+            [] => None,
+            _ => {
+                let verbose = parts.join(" · ");
+                if UnicodeWidthStr::width(verbose.as_str()) <= width {
+                    Some(verbose)
+                } else {
+                    Some(format!("{} changes pending", parts.len()))
+                }
+            }
+        }
     }
 
     pub(crate) fn agent_switch_in_flight(&self) -> bool {
         self.controls
+            .agent
             .in_flight
             .as_ref()
             .is_some_and(|pending| matches!(pending.control, PendingSessionControl::Agent { .. }))
     }
 
-    /// The newest requested Behavior in this session's serialized control
-    /// queue. This is the sole optimistic Behavior projection; authoritative
+    /// The newest locally correlated Behavior request. This is the sole
+    /// optimistic Behavior projection; authoritative
     /// `CurrentModeUpdate` remains the only committed state transition.
     pub(crate) fn behavior_control_target(&self) -> Option<tools::types::BehaviorId> {
-        self.controls
-            .queued
+        let slot = &self.controls.behavior;
+        slot.in_flight
             .iter()
-            .rev()
-            .chain(self.controls.in_flight.iter())
             .find_map(|pending| match &pending.control {
                 PendingSessionControl::Behavior { mode } => Some(*mode),
                 PendingSessionControl::Model { .. } | PendingSessionControl::Agent { .. } => None,
@@ -1438,17 +2210,18 @@ impl AgentSession {
 
     /// Consume the in-flight Behavior control only when the authoritative
     /// session update resolves it. A plain unrelated CurrentModeUpdate never
-    /// advances the FIFO.
+    /// advances the desired-state domain.
     pub(crate) fn resolve_in_flight_behavior(
         &mut self,
         observed: tools::types::BehaviorId,
         resolution: BehaviorControlResolution,
         outcome_target: Option<tools::types::BehaviorId>,
     ) -> Option<SessionControlCompletion> {
-        let (token, target) = match self.controls.in_flight.as_ref()? {
-            QueuedSessionControl {
+        let (token, target) = match self.controls.behavior.in_flight.as_ref()? {
+            InFlightSessionControl {
                 token,
                 control: PendingSessionControl::Behavior { mode },
+                ..
             } => (*token, *mode),
             _ => return None,
         };
@@ -1462,20 +2235,14 @@ impl AgentSession {
 
     #[cfg(test)]
     pub(crate) fn model_switch_pending(&self) -> bool {
-        self.controls
-            .in_flight
-            .iter()
-            .chain(self.controls.queued.iter())
-            .any(|pending| matches!(pending.control, PendingSessionControl::Model { .. }))
+        self.sampling_control_pending()
     }
 
     #[cfg(test)]
     pub(crate) fn agent_switch_target(&self) -> Option<&str> {
-        self.controls
-            .queued
+        let slot = &self.controls.agent;
+        slot.in_flight
             .iter()
-            .rev()
-            .chain(self.controls.in_flight.iter())
             .find_map(|pending| match &pending.control {
                 PendingSessionControl::Agent { agent_name } => Some(agent_name.as_str()),
                 PendingSessionControl::Model { .. } | PendingSessionControl::Behavior { .. } => {
@@ -1489,12 +2256,13 @@ impl AgentSession {
         let _ = self.enqueue_control(PendingSessionControl::Model {
             model_id: acp::ModelId::new("test-model-control"),
             effort: None,
+            effort_patch: false,
         });
         self.controls
-            .queued
-            .back()
-            .or(self.controls.in_flight.as_ref())
-            .expect("test model control was queued")
+            .sampling
+            .in_flight
+            .as_ref()
+            .expect("test model control was admitted")
             .token
     }
 
@@ -1504,10 +2272,10 @@ impl AgentSession {
             agent_name: name.into(),
         });
         self.controls
-            .queued
-            .back()
-            .or(self.controls.in_flight.as_ref())
-            .expect("test Agent control was queued")
+            .agent
+            .in_flight
+            .as_ref()
+            .expect("test Agent control was admitted")
             .token
     }
 
@@ -1517,17 +2285,16 @@ impl AgentSession {
         mode: tools::types::BehaviorId,
     ) -> SessionControlToken {
         let _ = self.enqueue_control(PendingSessionControl::Behavior { mode });
-        self.controls
-            .queued
-            .back()
-            .or(self.controls.in_flight.as_ref())
-            .expect("test Behavior control was queued")
+        let slot = &self.controls.behavior;
+        slot.in_flight
+            .as_ref()
+            .expect("test Behavior control was admitted")
             .token
     }
 
     #[cfg(test)]
     pub(crate) fn complete_agent_switch(&mut self) -> bool {
-        let Some(token) = self.controls.in_flight.as_ref().and_then(|pending| {
+        let Some(token) = self.controls.agent.in_flight.as_ref().and_then(|pending| {
             matches!(pending.control, PendingSessionControl::Agent { .. }).then_some(pending.token)
         }) else {
             return false;
@@ -1538,8 +2305,10 @@ impl AgentSession {
     #[cfg(test)]
     pub(crate) fn current_control_token_for_test(&self) -> SessionControlToken {
         self.controls
-            .in_flight
-            .as_ref()
+            .slots()
+            .into_iter()
+            .filter_map(|slot| slot.in_flight.as_ref())
+            .min_by_key(|pending| pending.token.sequence)
             .expect("test requires an in-flight session control")
             .token
     }
@@ -2602,19 +3371,18 @@ mod tests {
     }
 
     #[test]
-    fn behavior_controls_are_fifo_and_rejects_are_target_correlated() {
+    fn behavior_controls_replace_local_correlation_with_the_latest_target() {
         let mut s = test_session();
         let first = s
             .enqueue_control(PendingSessionControl::Behavior {
                 mode: tools::types::BehaviorId::Plan,
             })
             .expect("first Behavior is in flight");
-        assert!(
-            s.enqueue_control(PendingSessionControl::Behavior {
+        let latest = s
+            .enqueue_control(PendingSessionControl::Behavior {
                 mode: tools::types::BehaviorId::Goal,
             })
-            .is_none()
-        );
+            .expect("latest Behavior is dispatched immediately");
         assert_eq!(s.effective_behavior(), tools::types::BehaviorId::Goal);
 
         assert_eq!(
@@ -2623,7 +3391,8 @@ mod tests {
                 BehaviorControlResolution::Applied,
                 None,
             ),
-            Some(SessionControlCompletion::Next)
+            None,
+            "the superseded Plan response cannot consume Goal correlation"
         );
         assert_eq!(s.effective_behavior(), tools::types::BehaviorId::Goal);
 
@@ -2652,10 +3421,16 @@ mod tests {
                 mode: tools::types::BehaviorId::Plan
             }
         ));
+        assert!(matches!(
+            latest.1,
+            PendingSessionControl::Behavior {
+                mode: tools::types::BehaviorId::Goal
+            }
+        ));
     }
 
     #[test]
-    fn reconnect_rearms_fifo_and_reconciles_only_the_old_in_flight_control() {
+    fn reconnect_rearms_only_the_latest_sampling_target() {
         let mut s = test_session();
         let model_id = acp::ModelId::new("grow-test");
         s.models.available.insert(
@@ -2667,16 +3442,19 @@ mod tests {
             .enqueue_control(PendingSessionControl::Model {
                 model_id: model_id.clone(),
                 effort: None,
+                effort_patch: false,
             })
             .expect("first control is in flight")
             .0;
-        assert!(
-            s.enqueue_control(PendingSessionControl::Model {
+        let latest = s
+            .enqueue_control(PendingSessionControl::Model {
                 model_id: model_id.clone(),
                 effort: None,
+                effort_patch: false,
             })
-            .is_none()
-        );
+            .expect("latest Sampling target is dispatched immediately")
+            .0;
+        assert_ne!(old, latest);
 
         s.rearm_controls_for_reconnect();
         assert_eq!(
@@ -2684,42 +3462,61 @@ mod tests {
             SessionControlCompletion::Stale,
             "old-transport terminal must not mutate the rearmed queue"
         );
-        s.reconcile_rearmed_control_prefix(None);
-
-        let (_, remaining) = s.in_flight_control().expect("queued follower remains");
-        assert!(matches!(
-            remaining,
-            PendingSessionControl::Model {
-                model_id: remaining_id,
-                effort: None,
-            } if remaining_id == model_id
-        ));
+        let retry = s
+            .claim_control_for_dispatch()
+            .map(|(token, _)| token)
+            .expect("latest intent is reissued on the replacement transport");
+        assert_eq!(retry.client_id, latest.client_id);
+        assert_eq!(retry.generation, latest.generation);
+        assert_eq!(retry.sequence, latest.sequence);
+        assert_ne!(
+            retry.dispatch_generation, latest.dispatch_generation,
+            "the semantic intent stays stable while the transport epoch advances"
+        );
     }
 
     #[test]
-    fn reconnect_effort_none_compares_against_catalog_default() {
+    fn effort_intent_projects_the_latest_pending_model_without_committing_it() {
         let mut s = test_session();
-        let model_id = acp::ModelId::new("grow-reasoning");
+        let old = acp::ModelId::new("provider/old");
+        let pending = acp::ModelId::new("provider/pending");
         s.models.available.insert(
-            model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow Reasoning".to_owned()).meta(
-                serde_json::json!({ "reasoningEffort": "high" })
-                    .as_object()
-                    .cloned(),
+            old.clone(),
+            acp::ModelInfo::new(old.clone(), "Old".to_owned()),
+        );
+        s.models.available.insert(
+            pending.clone(),
+            acp::ModelInfo::new(pending.clone(), "Pending".to_owned()).meta(
+                serde_json::json!({
+                    "reasoningEfforts": ["low", "high"],
+                    "reasoningEffort": "high"
+                })
+                .as_object()
+                .cloned(),
             ),
         );
-        s.models
-            .set_current(model_id.clone(), Some(ReasoningEffort::High));
+        s.models.set_current(old.clone(), None);
         s.enqueue_control(PendingSessionControl::Model {
-            model_id,
+            model_id: pending.clone(),
             effort: None,
+            effort_patch: false,
         })
-        .expect("model control is in flight");
+        .expect("pending model is dispatched");
 
-        s.rearm_controls_for_reconnect();
-        s.reconcile_rearmed_control_prefix(None);
-
-        assert!(!s.controls_pending(), "loaded default effort proves apply");
+        let intent_models = s.models_for_control_intent();
+        assert_eq!(intent_models.current, Some(pending));
+        assert_eq!(intent_models.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            s.models.current,
+            Some(old),
+            "committed projection is unchanged"
+        );
+        assert_eq!(
+            intent_models
+                .resolve_effort_for_model(intent_models.current.as_ref().unwrap(), "low")
+                .unwrap(),
+            ReasoningEffort::Low
+        );
     }
 
     #[test]
@@ -2731,15 +3528,431 @@ mod tests {
         .expect("Behavior control is in flight");
 
         s.rearm_controls_for_reconnect();
-        s.reconcile_rearmed_control_prefix(None);
 
         assert!(
             matches!(
-                s.in_flight_control(),
+                s.claim_control_for_dispatch(),
                 Some((_, PendingSessionControl::Behavior { mode }))
                     if mode == tools::types::BehaviorId::Normal
             ),
             "same-mode selection must be reissued to clear the Shell latch"
+        );
+    }
+
+    #[test]
+    fn reconnect_agent_terminal_resolves_only_the_exact_intent() {
+        use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+
+        let mut s = test_session();
+        let token = s
+            .enqueue_control(PendingSessionControl::Agent {
+                agent_name: "reviewer".into(),
+            })
+            .expect("Agent control is in flight")
+            .0;
+        s.rearm_controls_for_reconnect();
+        let current = ControlTarget::Agent {
+            agent_name: "reviewer".into(),
+        };
+        let mut stale = token.shell_intent();
+        stale.sequence = stale.sequence.saturating_add(1);
+        assert!(!s.resolve_reconnect_control_projection(
+            ControlDomain::Agent,
+            ControlPhase::Applied,
+            &current,
+            None,
+            Some(&stale),
+        ));
+        assert!(s.agent_control_pending());
+        assert!(s.resolve_reconnect_control_projection(
+            ControlDomain::Agent,
+            ControlPhase::Applied,
+            &current,
+            None,
+            Some(&token.shell_intent()),
+        ));
+        assert!(!s.agent_control_pending());
+    }
+
+    #[test]
+    fn reconnect_applied_receipt_matches_its_target_after_current_advances() {
+        use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+
+        let mut s = test_session();
+        let token = s
+            .enqueue_control(PendingSessionControl::Agent {
+                agent_name: "reviewer".into(),
+            })
+            .expect("Agent control is in flight")
+            .0;
+        s.rearm_controls_for_reconnect();
+        let later_current = ControlTarget::Agent {
+            agent_name: "coder".into(),
+        };
+        let applied_target = ControlTarget::Agent {
+            agent_name: "reviewer".into(),
+        };
+
+        assert!(s.resolve_reconnect_control_projection(
+            ControlDomain::Agent,
+            ControlPhase::Applied,
+            &later_current,
+            Some(&applied_target),
+            Some(&token.shell_intent()),
+        ));
+        assert!(!s.agent_control_pending());
+    }
+
+    #[test]
+    fn reconnect_behavior_waits_for_an_authoritative_terminal_projection() {
+        use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+
+        let mut s = test_session();
+        let token = s
+            .enqueue_control(PendingSessionControl::Behavior {
+                mode: tools::types::BehaviorId::Plan,
+            })
+            .expect("Behavior control is in flight")
+            .0;
+        s.rearm_controls_for_reconnect();
+        let current = ControlTarget::Behavior {
+            behavior_id: "normal".into(),
+        };
+        let desired = ControlTarget::Behavior {
+            behavior_id: "plan".into(),
+        };
+
+        assert!(!s.resolve_reconnect_control_projection(
+            ControlDomain::Behavior,
+            ControlPhase::Pending,
+            &current,
+            Some(&desired),
+            Some(&token.shell_intent()),
+        ));
+        assert!(
+            s.controls_pending(),
+            "pending confirmation must stay fenced"
+        );
+
+        assert!(s.resolve_reconnect_control_projection(
+            ControlDomain::Behavior,
+            ControlPhase::Applied,
+            &desired,
+            None,
+            Some(&token.shell_intent()),
+        ));
+        assert!(
+            !s.controls_pending(),
+            "applied snapshot is terminal authority"
+        );
+    }
+
+    #[test]
+    fn shell_control_status_combines_domains_without_committing_targets() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        let sampling_current = ControlTarget::Sampling {
+            model_id: "provider/old".into(),
+            reasoning_effort: None,
+        };
+        assert!(s.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Sampling,
+                revision: 1,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: sampling_current,
+                desired: Some(ControlTarget::Sampling {
+                    model_id: "provider/new".into(),
+                    reasoning_effort: Some("high".into()),
+                }),
+                message: None,
+            },
+            false
+        ));
+        assert!(s.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Agent,
+                revision: 4,
+                intent: None,
+                snapshot: false,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Agent {
+                    agent_name: "builder".into(),
+                },
+                desired: Some(ControlTarget::Agent {
+                    agent_name: "reviewer".into(),
+                }),
+                message: None,
+            },
+            false
+        ));
+        assert!(s.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Behavior,
+                revision: 2,
+                intent: None,
+                snapshot: false,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Behavior {
+                    behavior_id: "normal".into(),
+                },
+                desired: Some(ControlTarget::Behavior {
+                    behavior_id: "goal".into(),
+                }),
+                message: None,
+            },
+            false
+        ));
+
+        let wide = s.control_status(100).expect("pending status");
+        assert!(wide.contains("model→new (high)"), "{wide}");
+        assert!(wide.contains("agent→reviewer"), "{wide}");
+        assert!(wide.contains("behavior→Goal"), "{wide}");
+        assert_eq!(s.control_status(40).as_deref(), Some("3 changes pending"));
+        s.set_live_feedback(
+            "compaction",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Compacting…",
+        );
+        assert_eq!(
+            s.live_status(40).as_deref(),
+            Some("Compacting… · 3 changes pending")
+        );
+        assert_eq!(
+            s.models.current.as_ref().map(|model| model.0.as_ref()),
+            None,
+            "presentation desired state must never become committed model state"
+        );
+    }
+
+    #[test]
+    fn shell_control_projection_rejects_stale_phases_and_hides_terminals() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        let update = |revision, phase, desired: Option<&str>| ControlStateUpdate {
+            epoch: "epoch-a".into(),
+            domain: ControlDomain::Agent,
+            revision,
+            intent: None,
+            snapshot: revision == 2 && phase == ControlPhase::Applying,
+            receipt_only: false,
+            phase,
+            current: ControlTarget::Agent {
+                agent_name: "builder".into(),
+            },
+            desired: desired.map(|name| ControlTarget::Agent {
+                agent_name: name.into(),
+            }),
+            message: None,
+        };
+        assert!(
+            s.apply_shell_control_state(update(2, ControlPhase::Applying, Some("reviewer")), false)
+        );
+        s.shell_controls
+            .agent
+            .as_mut()
+            .expect("Agent projection")
+            .phase_since = Instant::now() - Duration::from_millis(301);
+        assert_eq!(
+            s.control_status(100).as_deref(),
+            Some("applying agent→reviewer")
+        );
+        assert!(
+            !s.apply_shell_control_state(update(1, ControlPhase::Applied, Some("stale")), false)
+        );
+        assert!(
+            !s.apply_shell_control_state(
+                update(2, ControlPhase::Pending, Some("regressed")),
+                false
+            )
+        );
+        assert!(s.apply_shell_control_state(update(2, ControlPhase::Applied, None), false));
+        assert_eq!(s.control_status(100), None);
+    }
+
+    #[test]
+    fn durable_control_terminal_seals_its_revision_but_may_follow_a_snapshot() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        let update = |phase, desired: Option<&str>, message: Option<&str>| ControlStateUpdate {
+            epoch: "epoch-a".into(),
+            domain: ControlDomain::Agent,
+            revision: 7,
+            intent: None,
+            snapshot: message.is_none(),
+            receipt_only: false,
+            phase,
+            current: ControlTarget::Agent {
+                agent_name: "builder".into(),
+            },
+            desired: desired.map(|name| ControlTarget::Agent {
+                agent_name: name.into(),
+            }),
+            message: message.map(str::to_owned),
+        };
+
+        assert!(s.apply_shell_control_state(update(ControlPhase::Applied, None, None), false));
+        assert!(s.apply_shell_control_state(
+            update(
+                ControlPhase::Rejected,
+                Some("reviewer"),
+                Some("Agent switch failed")
+            ),
+            false
+        ));
+        assert!(
+            !s.apply_shell_control_state(update(ControlPhase::Applied, None, None), false),
+            "a later reconnect snapshot must not rewrite a durable terminal"
+        );
+        assert!(
+            !s.apply_shell_control_state(
+                update(
+                    ControlPhase::Applied,
+                    Some("reviewer"),
+                    Some("conflicting terminal")
+                ),
+                false
+            ),
+            "one revision has exactly one immutable terminal outcome"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_may_reset_a_replayed_actor_local_revision() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        let update = |epoch: &str, revision, snapshot, name: &str| ControlStateUpdate {
+            epoch: epoch.into(),
+            domain: ControlDomain::Agent,
+            revision,
+            intent: None,
+            snapshot,
+            receipt_only: false,
+            phase: ControlPhase::Applied,
+            current: ControlTarget::Agent {
+                agent_name: name.into(),
+            },
+            desired: None,
+            message: None,
+        };
+        assert!(s.apply_shell_control_state(update("old", 9, true, "old"), false));
+        assert!(
+            s.apply_shell_control_state(update("replay", 0, false, "replayed"), true),
+            "the bounded load replay may establish its replacement epoch"
+        );
+        assert_eq!(s.shell_controls.active_epoch.as_deref(), Some("replay"));
+        assert!(s.apply_shell_control_state(update("fresh", 0, true, "fresh"), true));
+        let slot = s.shell_controls.agent.as_ref().expect("Agent snapshot");
+        assert_eq!(slot.revision, 0);
+        assert_eq!(
+            slot.current,
+            ControlTarget::Agent {
+                agent_name: "fresh".into()
+            }
+        );
+        assert!(
+            !s.apply_shell_control_state(update("old", 10, true, "delayed"), false),
+            "an actor-local reset is legal only inside the load window"
+        );
+    }
+
+    #[test]
+    fn control_epoch_requires_snapshot_for_a_new_live_epoch() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let update =
+            |epoch: &str, revision, snapshot, receipt_only, agent_name: &str| ControlStateUpdate {
+                epoch: epoch.into(),
+                domain: ControlDomain::Agent,
+                revision,
+                intent: None,
+                snapshot,
+                receipt_only,
+                phase: ControlPhase::Applied,
+                current: ControlTarget::Agent {
+                    agent_name: agent_name.into(),
+                },
+                desired: None,
+                message: Some(format!("Agent switched to {agent_name}")),
+            };
+        let mut session = test_session();
+
+        assert!(
+            session.apply_shell_control_state(update("epoch-b", 7, true, false, "b-agent"), false)
+        );
+        assert!(
+            !session
+                .apply_shell_control_state(update("epoch-c", 1, false, false, "c-agent"), false)
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-b")
+        );
+        assert_eq!(
+            session
+                .shell_controls
+                .agent
+                .as_ref()
+                .expect("epoch B projection")
+                .revision,
+            7
+        );
+        assert!(
+            session
+                .apply_shell_control_state(update("epoch-b", 8, false, false, "b-agent-2"), false)
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-b")
+        );
+        assert_eq!(session.shell_controls.agent.as_ref().unwrap().revision, 8);
+        assert!(
+            !session
+                .apply_shell_control_state(update("epoch-c", 2, false, true, "historical"), false)
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-b")
+        );
+        assert!(
+            session.apply_shell_control_state(update("epoch-c", 1, true, false, "c-agent"), false)
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-c")
+        );
+        assert!(
+            !session.apply_shell_control_state(
+                update("epoch-b", 9, false, false, "late-b-agent"),
+                false
+            ),
+            "an update from a retired epoch must never reactivate it"
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-c")
         );
     }
 }

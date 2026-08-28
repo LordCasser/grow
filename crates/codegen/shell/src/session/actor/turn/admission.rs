@@ -783,6 +783,7 @@ impl SessionActor {
             turn_timer = Some(std::time::Instant::now());
             let result = {
                 let mut stop_continuations_this_turn: u32 = 0;
+                let mut step_already_started = false;
                 loop {
                     if self.goal_runtime_available() {
                         let goal_loop_active = self.goal_tracker.lock().status()
@@ -794,6 +795,7 @@ impl SessionActor {
                             prompt_id,
                             origin.clone(),
                             json_schema.clone(),
+                            std::mem::take(&mut step_already_started),
                         )
                         .await;
                     if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
@@ -817,9 +819,32 @@ impl SessionActor {
                     {
                         StopGateDecision::AllowStop => break round,
                         StopGateDecision::KeepWorking { feedback } => {
+                            if self
+                                .enforce_goal_spending_limit_for_prompt(Some(prompt_id))
+                                .await
+                            {
+                                let snapshot = match round {
+                                    Ok(TurnOutcome::Completed { snapshot, .. }) => snapshot,
+                                    _ => Box::new(None),
+                                };
+                                break Ok(TurnOutcome::GoalSpendingStopped { snapshot });
+                            }
+                            if !self
+                                .start_step_after_control_boundary(
+                                    prompt_id,
+                                    Some(ConversationItem::stop_hook_feedback(feedback)),
+                                )
+                                .await
+                            {
+                                break Ok(TurnOutcome::Cancelled {
+                                    category: None,
+                                    context: Some(serde_json::json!({
+                                        "reason": "stop-hook continuation lost foreground admission",
+                                    })),
+                                });
+                            }
                             stop_continuations_this_turn += 1;
-                            self.chat_state_handle
-                                .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                            step_already_started = true;
                         }
                     }
                 }

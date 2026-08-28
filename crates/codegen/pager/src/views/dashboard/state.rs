@@ -16,6 +16,7 @@ use crate::app::root::InputOutcome;
 use crate::app::session::AgentId;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::key;
+use crate::scrollback::blocks::{NoticeTone, UiFeedback};
 use crate::views::prompt_widget::PromptWidget;
 
 const PROMPT_MULTI_CLICK_MS: u128 = 300;
@@ -497,10 +498,9 @@ pub struct DashboardState {
     /// Inline-rename state for `Ctrl+R` — `Some` when the cursor is on a
     /// row and the user is mid-edit.
     pub rename: Option<RenameDraft>,
-    /// Pending dispatch feedback toast (e.g. "✗ Session no longer
-    /// exists"). Rendered verbatim by `paint_dispatch_feedback_badge`;
-    /// error messages are built via [`Self::set_error_toast`].
-    pub error_toast: Option<String>,
+    /// Latest transient dashboard feedback. Tone and text are kept separate
+    /// so success, warning and error states share one presentation path.
+    pub feedback: Option<UiFeedback>,
     /// Row armed for delete, and when. A second gesture on the same row
     /// within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]);
     /// otherwise it lapses. Cleared on any focus change.
@@ -1340,7 +1340,7 @@ impl DashboardState {
             peek_reply_cwd: None,
             peek_reply_target_cwd: None,
             rename: None,
-            error_toast: None,
+            feedback: None,
             delete_confirm: None,
             motion_frame: crate::motion::FrameStamp::default(),
             row_rects: Vec::new(),
@@ -1431,17 +1431,28 @@ impl DashboardState {
         self.peek_reply.set_auto_mode_available(available);
     }
 
-    /// Set the dispatch feedback slot to an error `msg`, prefixed with
-    /// the error glyph (`✗`, or `x` on legacy consoles). The badge
-    /// (`paint_dispatch_feedback_badge`) paints the slot VERBATIM in a
-    /// neutral colour, so this leading glyph is what marks the message
-    /// as an error. Use for error messages without a glyph of their own
-    /// (fixed literals, slash-command `CommandResult::Error` strings);
-    /// pass-through messages that already carry their own glyph (e.g.
-    /// `show_toast` builders, slash-command `CommandResult::Message`
-    /// results) must be assigned to `error_toast` directly.
-    pub(crate) fn set_error_toast(&mut self, msg: &str) {
-        self.error_toast = Some(format!("{} {msg}", crate::glyphs::ballot_x()));
+    pub(crate) fn set_feedback(&mut self, tone: NoticeTone, msg: impl Into<String>) {
+        self.feedback = Some(UiFeedback::new(tone, msg));
+    }
+
+    pub(crate) fn set_info(&mut self, msg: impl Into<String>) {
+        self.set_feedback(NoticeTone::Info, msg);
+    }
+
+    pub(crate) fn set_success(&mut self, msg: impl Into<String>) {
+        self.set_feedback(NoticeTone::Success, msg);
+    }
+
+    pub(crate) fn set_warning(&mut self, msg: impl Into<String>) {
+        self.set_feedback(NoticeTone::Warning, msg);
+    }
+
+    pub(crate) fn set_error(&mut self, msg: impl Into<String>) {
+        self.set_feedback(NoticeTone::Error, msg);
+    }
+
+    pub(crate) fn clear_feedback(&mut self) {
+        self.feedback = None;
     }
 
     /// Focus the header's `[+ New Agent]` button. Clears any
@@ -1607,7 +1618,7 @@ impl DashboardState {
         self.search_mode = true;
         self.dispatch.set_text("");
         self.filter = Filter::None;
-        self.error_toast = None;
+        self.feedback = None;
         self.manual_scroll_active = false;
     }
 
@@ -2255,7 +2266,7 @@ impl DashboardState {
                 crate::app::actions::ClipboardPasteCompletion::Handled
             }
             Err(msg) => {
-                self.set_error_toast(&msg);
+                self.set_error(msg);
                 crate::app::actions::ClipboardPasteCompletion::Failed(
                     crate::app::actions::ClipboardPasteFailure::AlreadyReported,
                 )
@@ -2346,7 +2357,7 @@ impl DashboardState {
                 crate::app::actions::ClipboardPasteCompletion::Handled
             }
             Err(msg) => {
-                self.set_error_toast(&msg);
+                self.set_error(msg);
                 crate::app::actions::ClipboardPasteCompletion::Failed(
                     crate::app::actions::ClipboardPasteFailure::AlreadyReported,
                 )
@@ -2479,7 +2490,7 @@ impl DashboardState {
         let mut attachment = match image {
             ProbedAttachment::Image(pasted) => {
                 if peek_in_question {
-                    self.set_error_toast("Pasted image discarded — reply switched to a question");
+                    self.set_warning("Pasted image discarded — reply switched to a question");
                     ClipboardPasteCompletion::Dropped
                 } else {
                     let (_, completion) = if peek {
@@ -2491,7 +2502,7 @@ impl DashboardState {
                 }
             }
             ProbedAttachment::PersistFailed(msg) => {
-                self.set_error_toast(&msg);
+                self.set_error(msg);
                 ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
             }
             ProbedAttachment::NoRaster => ClipboardPasteCompletion::FullMiss,
@@ -2504,7 +2515,7 @@ impl DashboardState {
             if file_urls.as_deref().is_some_and(|urls| {
                 !crate::prompt_images::try_read_images_from_paste(urls).is_empty()
             }) {
-                self.set_error_toast("Pasted image discarded — reply switched to a question");
+                self.set_warning("Pasted image discarded — reply switched to a question");
             }
             attachment = ClipboardPasteCompletion::Dropped;
         }
@@ -2580,12 +2591,12 @@ impl DashboardState {
                 });
             } else if !same_row {
                 // Never reply to a row the user is no longer peeking.
-                self.set_error_toast("Reply canceled — peek panel changed");
+                self.set_warning("Reply canceled — peek panel changed");
             } else {
                 // A question now owns the panel (Enter answers it there, and the
                 // reply dispatch would silently queue a prompt + wipe the draft
                 // behind the dialog) — drop the stash; the draft stays put.
-                self.set_error_toast("Reply canceled — answer the question first");
+                self.set_warning("Reply canceled — answer the question first");
             }
         }
         actions
@@ -2719,7 +2730,7 @@ impl DashboardState {
             let valid = self.peek.as_ref().is_some_and(|p| idx < p.options.len());
             if !valid {
                 let n_opts = self.peek.as_ref().map(|p| p.options.len()).unwrap_or(0);
-                self.set_error_toast(&format!("No such option (only {n_opts} available)"));
+                self.set_error(format!("No such option (only {n_opts} available)"));
                 return Some(InputOutcome::Changed);
             }
             if let Some(p) = self.peek.as_mut() {
@@ -3115,11 +3126,11 @@ impl DashboardState {
         let from_registry =
             registry.lookup_with_mode(key, crate::actions::When::DashboardFocused, vim_mode);
 
-        // Clear `error_toast` on any keypress so it never lingers; kept for
+        // Clear transient feedback on any keypress so it never lingers; kept for
         // `Ctrl+X` so the arm path's own messaging survives its first press.
         let is_stop_key = matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
         if !is_stop_key {
-            self.error_toast = None;
+            self.feedback = None;
         }
 
         // Disarm delete-confirm on any non-confirming key. Two gestures are
@@ -3581,7 +3592,7 @@ impl DashboardState {
             }
         }
 
-        // (error_toast already cleared at top of handle_key.)
+        // (feedback already cleared at top of handle_key.)
 
         // Forward to the prompt widget (single-line).
         let old = self.dispatch.text().to_string();
@@ -4940,16 +4951,14 @@ impl DashboardState {
 mod tests {
     use super::*;
 
-    /// `set_error_toast` prefixes the message with the error glyph
-    /// (`✗`/`x`) so the verbatim-rendering badge marks it as an error.
+    /// Dashboard feedback carries severity independently from text.
     #[test]
-    fn set_error_toast_prefixes_error_glyph() {
+    fn set_error_feedback_preserves_tone_and_plain_message() {
         let mut state = DashboardState::new();
-        state.set_error_toast("boom");
-        assert_eq!(
-            state.error_toast.as_deref(),
-            Some(format!("{} boom", crate::glyphs::ballot_x()).as_str()),
-        );
+        state.set_error("boom");
+        let feedback = state.feedback.as_ref().expect("feedback");
+        assert_eq!(feedback.tone, NoticeTone::Error);
+        assert_eq!(feedback.message, "boom");
     }
 
     #[test]
@@ -9103,7 +9112,7 @@ mod tests {
         );
         assert!(state.deferred_peek_send.is_none(), "the stash is consumed");
         assert!(
-            state.error_toast.is_some(),
+            state.feedback.is_some(),
             "dropping the stashed reply must be announced with a toast"
         );
     }
@@ -9149,7 +9158,7 @@ mod tests {
         );
         assert!(!state.peek_reply.text().contains("[Image #"));
         assert!(
-            state.error_toast.is_some(),
+            state.feedback.is_some(),
             "discarding the deferred image must be announced with a toast"
         );
         assert_eq!(state.paste_probe_in_flight, 0);
@@ -9216,7 +9225,7 @@ mod tests {
             "file-url chips must not attach to a question-mode reply"
         );
         assert!(
-            state.error_toast.is_some(),
+            state.feedback.is_some(),
             "discarding the deferred file-url chips must be announced with a toast"
         );
         assert_eq!(state.paste_probe_in_flight, 0);
@@ -9244,7 +9253,7 @@ mod tests {
         );
         assert!(state.deferred_peek_send.is_none(), "the stash is consumed");
         assert!(
-            state.error_toast.is_some(),
+            state.feedback.is_some(),
             "dropping the stashed reply must be announced with a toast"
         );
         assert_eq!(
@@ -10188,7 +10197,7 @@ mod tests {
         let reg = crate::actions::ActionRegistry::defaults();
         let key_sec = SectionKey::State(RowState::Working);
         state.focus_section(key_sec);
-        state.set_error_toast("boom");
+        state.set_error("boom");
         let _ = state.handle_key(
             &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             &reg,
@@ -10196,7 +10205,7 @@ mod tests {
         );
         assert!(state.is_section_collapsed(key_sec), "Left must collapse");
         assert!(
-            state.error_toast.is_none(),
+            state.feedback.is_none(),
             "a collapse keypress must dismiss the pending toast",
         );
     }
@@ -10205,7 +10214,7 @@ mod tests {
     /// when `Ctrl+X` was pressed — any other key (nav included) must
     /// disarm it, otherwise the footer's "press again to delete" hint
     /// lingers while the cursor moves to other agents. The disarm must
-    /// NOT depend on `error_toast` (the Ctrl+X arm path plants none).
+    /// NOT depend on transient feedback (the Ctrl+X arm path plants none).
     #[test]
     fn nav_key_disarms_pending_delete_confirm() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
@@ -10213,7 +10222,7 @@ mod tests {
         let reg = crate::actions::ActionRegistry::defaults();
         state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
         state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
-        assert!(state.error_toast.is_none(), "arm path plants no toast");
+        assert!(state.feedback.is_none(), "arm path plants no toast");
         let _ = state.handle_key(
             &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &reg,

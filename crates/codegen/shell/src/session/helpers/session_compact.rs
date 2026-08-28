@@ -468,10 +468,9 @@ pub(crate) async fn generate_session_compact(
                                 timing.record_delta();
                                 content.push_str(delta_content);
                             }
-                            if let Some(fr) = choice.finish_reason {
-                                let sr = sampling_types::StopReason::from(fr);
-                                truncated = matches!(sr, sampling_types::StopReason::Length);
-                                stop_reason = Some(sr.as_str().to_string());
+                            if let Some(fr) = choice.finish_reason.as_ref() {
+                                truncated = matches!(fr, sampling_types::FinishReason::Length);
+                                stop_reason = Some(fr.as_str().to_owned());
                             }
                         }
                     }
@@ -1081,8 +1080,9 @@ mod reasoning_compaction_regression_tests {
     use serde_json::json;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    /// Minimal ChatCompletions SSE stream: one content token, `stop`, then `[DONE]`.
-    fn summary_stream() -> Vec<Event> {
+    /// Minimal ChatCompletions SSE stream: one content token and terminal reason,
+    /// then `[DONE]`.
+    fn summary_stream(finish_reason: &str) -> Vec<Event> {
         vec![
             Event::default().data(
                 json!({
@@ -1093,7 +1093,7 @@ mod reasoning_compaction_regression_tests {
                     "choices": [{
                         "index": 0,
                         "delta": { "role": "assistant", "content": "<summary>ok</summary>" },
-                        "finish_reason": "stop"
+                        "finish_reason": finish_reason
                     }]
                 })
                 .to_string(),
@@ -1246,7 +1246,7 @@ mod reasoning_compaction_regression_tests {
             "/v1/chat/completions",
             post(|| async {
                 let stream = stream::iter(
-                    summary_stream()
+                    summary_stream("unexpected_state")
                         .into_iter()
                         .map(Ok::<_, std::convert::Infallible>),
                 );
@@ -1295,6 +1295,7 @@ mod reasoning_compaction_regression_tests {
         let output = result
             .unwrap_or_else(|_| panic!("compaction must succeed for a Reasoning-bearing history"));
         assert_eq!(output.content, "<summary>ok</summary>");
+        assert_eq!(output.stop_reason.as_deref(), Some("unexpected_state"));
         let _ = shutdown_tx.send(());
     }
     #[tokio::test]
@@ -1309,7 +1310,7 @@ mod reasoning_compaction_regression_tests {
                 async move {
                     cap.lock().unwrap().push(body.0);
                     let stream = stream::iter(
-                        summary_stream()
+                        summary_stream("stop")
                             .into_iter()
                             .map(Ok::<_, std::convert::Infallible>),
                     );

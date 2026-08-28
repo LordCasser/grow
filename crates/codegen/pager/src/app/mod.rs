@@ -491,6 +491,7 @@ pub async fn run(
     >,
 ) -> anyhow::Result<bool> {
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
+    let screen_mode_control_handoffs = screen_mode_relaunch::take_screen_mode_control_handoffs();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
     let raw_config = shell::config::load_effective_config()
@@ -768,6 +769,7 @@ pub async fn run(
         remote_settings,
         term_state,
         materialized,
+        screen_mode_control_handoffs,
         bg_update_rx,
         writer_event_rx,
     )
@@ -802,6 +804,7 @@ pub async fn run(
                 if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
                     &relaunch.session_id,
                     relaunch.minimal,
+                    &relaunch.control_handoffs,
                 ) {
                     tracing::error!(error = %e, "screen-mode relaunch failed");
                     print_relaunch_failure_hint(

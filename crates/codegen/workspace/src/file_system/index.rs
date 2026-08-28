@@ -598,7 +598,34 @@ impl FileIndex {
         root: impl AsRef<Path>,
         options: WalkOptions,
     ) -> io::Result<Self> {
-        let root = root.as_ref();
+        Self::from_walk_impl(root.as_ref(), options, None)
+    }
+
+    /// Build an index like [`Self::from_walk_with_options`], but stop at the
+    /// next directory entry once `cancelled` is set. This is used by
+    /// session-owned background indexing so teardown never has to block an
+    /// async runtime thread on a synchronous filesystem walk.
+    pub fn from_walk_with_options_cancelled(
+        root: impl AsRef<Path>,
+        options: WalkOptions,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<Self> {
+        Self::from_walk_impl(root.as_ref(), options, Some(cancelled))
+    }
+
+    fn from_walk_impl(
+        root: &Path,
+        options: WalkOptions,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> io::Result<Self> {
+        use std::sync::atomic::Ordering;
+
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "file index walk cancelled",
+            ));
+        }
         let root_canonical = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
         let mut builder = WalkBuilder::new(&root_canonical);
@@ -628,6 +655,12 @@ impl FileIndex {
         let mut index = FileIndex::new();
 
         for entry in builder.build() {
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "file index walk cancelled",
+                ));
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -1239,6 +1272,18 @@ mod tests {
         let paths: Vec<_> = entries.iter().map(|(p, _)| p.as_str()).collect();
         assert!(paths.contains(&"src/main.rs"));
         assert!(paths.contains(&"src/lib"));
+    }
+
+    #[test]
+    fn cancelled_walk_stops_before_touching_the_tree() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let error = FileIndex::from_walk_with_options_cancelled(
+            "/path/that/need/not/exist",
+            WalkOptions::default(),
+            &cancelled,
+        )
+        .expect_err("a pre-cancelled walk must not begin");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     }
 
     #[test]

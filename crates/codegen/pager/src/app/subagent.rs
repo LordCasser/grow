@@ -328,6 +328,7 @@ pub(crate) fn restore_descendant_state(
     }
     if let Some(root) = app.agents.get_mut(&root_agent_id) {
         root.session.loading_replay = previous_loading_replay;
+        root.session.replay_live_cursor_seen = false;
     }
 }
 /// True when the child scrollback has no substantive replay content yet.

@@ -5,7 +5,18 @@
 //! handles, activity projections and UI clocks are intentionally absent and
 //! reconstructed after reload.
 
-pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 3;
+pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 4;
+
+/// Client intent whose successful desired-state transition is committed in
+/// the same Timeline fact as the authoritative domain state. This closes the
+/// crash window between applying a model/Agent/Behavior and publishing its
+/// UI-only terminal notification.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DurableControlReceipt {
+    pub domain: crate::extensions::notification::ControlDomain,
+    pub intent: crate::session::ControlIntent,
+    pub target: crate::extensions::notification::ControlTarget,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionControlSnapshot {
@@ -15,6 +26,8 @@ pub struct SessionControlSnapshot {
     pub behavior: crate::session::behavior::BehaviorSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::session::goal_tracker::GoalState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_control: Option<DurableControlReceipt>,
 }
 
 impl SessionControlSnapshot {
@@ -30,7 +43,22 @@ impl SessionControlSnapshot {
             agent_name: agent_name.into(),
             behavior,
             goal,
+            applied_control: None,
         }
+    }
+
+    pub fn with_applied_control(
+        mut self,
+        domain: crate::extensions::notification::ControlDomain,
+        target: crate::extensions::notification::ControlTarget,
+        intent: Option<crate::session::ControlIntent>,
+    ) -> Self {
+        self.applied_control = intent.map(|intent| DurableControlReceipt {
+            domain,
+            intent,
+            target,
+        });
+        self
     }
 
     pub fn architecture_is_current(&self) -> bool {
@@ -69,6 +97,41 @@ impl SessionControlSnapshot {
                 std::io::ErrorKind::InvalidData,
                 "session control Behavior contains cross-runtime state",
             ));
+        }
+        if let Some(receipt) = self.applied_control.as_ref() {
+            if receipt.domain == crate::extensions::notification::ControlDomain::Sampling {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Sampling receipts belong in model.changed observations",
+                ));
+            }
+            if receipt.target.domain() != receipt.domain {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session control receipt target does not match its domain",
+                ));
+            }
+            let receipt_matches_authoritative_state = match (&receipt.domain, &receipt.target) {
+                (
+                    crate::extensions::notification::ControlDomain::Agent,
+                    crate::extensions::notification::ControlTarget::Agent { agent_name },
+                ) => agent_name == &self.agent_name,
+                (
+                    crate::extensions::notification::ControlDomain::Behavior,
+                    crate::extensions::notification::ControlTarget::Behavior { behavior_id },
+                ) => behavior_id == self.behavior.behavior().as_id(),
+                _ => false,
+            };
+            if !receipt_matches_authoritative_state {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session control receipt target does not match authoritative state",
+                ));
+            }
+            receipt
+                .intent
+                .validate()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         }
         if let Some(goal) = self.goal.as_ref() {
             crate::session::goal_tracker::GoalTracker::validate_snapshot(goal)
@@ -173,6 +236,24 @@ impl SessionControlSnapshot {
         }
         Ok(latest)
     }
+
+    pub fn durable_receipts_from_timeline(
+        events: &[chat_state::TimelineEvent],
+    ) -> std::io::Result<Vec<DurableControlReceipt>> {
+        let mut receipts = Vec::new();
+        for control in events.iter().filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Control(control) => Some(control),
+            _ => None,
+        }) {
+            let snapshot: Self = serde_json::from_value(control.snapshot.clone())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            snapshot.validate()?;
+            if let Some(receipt) = snapshot.applied_control {
+                receipts.push(receipt);
+            }
+        }
+        Ok(receipts)
+    }
 }
 
 /// Render one append-only model context item for an Agent transition.
@@ -268,6 +349,108 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.control_revision, 5);
+    }
+
+    #[test]
+    fn applied_control_receipt_is_folded_from_its_authoritative_fact() {
+        let intent = crate::session::ControlIntent {
+            client_id: "pager-a".into(),
+            generation: 4,
+            sequence: 9,
+        };
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(
+                snapshot(6)
+                    .with_applied_control(
+                        crate::extensions::notification::ControlDomain::Agent,
+                        crate::extensions::notification::ControlTarget::Agent {
+                            agent_name: "grow".into(),
+                        },
+                        Some(intent.clone()),
+                    )
+                    .timeline_kind()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            SessionControlSnapshot::durable_receipts_from_timeline(timeline.events()).unwrap(),
+            vec![DurableControlReceipt {
+                domain: crate::extensions::notification::ControlDomain::Agent,
+                intent,
+                target: crate::extensions::notification::ControlTarget::Agent {
+                    agent_name: "grow".into(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn control_snapshot_rejects_sampling_or_empty_client_receipts() {
+        let empty_client = crate::session::ControlIntent {
+            client_id: "   ".into(),
+            generation: 1,
+            sequence: 1,
+        };
+        assert!(
+            snapshot(1)
+                .with_applied_control(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    crate::extensions::notification::ControlTarget::Agent {
+                        agent_name: "grow".into(),
+                    },
+                    Some(empty_client),
+                )
+                .timeline_kind()
+                .is_err()
+        );
+
+        let sampling = crate::session::ControlIntent {
+            client_id: "pager-a".into(),
+            generation: 1,
+            sequence: 2,
+        };
+        assert!(
+            snapshot(2)
+                .with_applied_control(
+                    crate::extensions::notification::ControlDomain::Sampling,
+                    crate::extensions::notification::ControlTarget::Sampling {
+                        model_id: "provider/model".into(),
+                        reasoning_effort: None,
+                    },
+                    Some(sampling),
+                )
+                .timeline_kind()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn control_snapshot_rejects_receipts_that_disagree_with_authoritative_state() {
+        let intent = crate::session::ControlIntent {
+            client_id: "pager-a".into(),
+            generation: 1,
+            sequence: 1,
+        };
+
+        let wrong_agent = snapshot(1).with_applied_control(
+            crate::extensions::notification::ControlDomain::Agent,
+            crate::extensions::notification::ControlTarget::Agent {
+                agent_name: "reviewer".into(),
+            },
+            Some(intent.clone()),
+        );
+        assert!(wrong_agent.timeline_kind().is_err());
+
+        let wrong_behavior = snapshot(2).with_applied_control(
+            crate::extensions::notification::ControlDomain::Behavior,
+            crate::extensions::notification::ControlTarget::Behavior {
+                behavior_id: "goal".into(),
+            },
+            Some(intent),
+        );
+        assert!(wrong_behavior.timeline_kind().is_err());
     }
 
     #[test]

@@ -12,7 +12,10 @@
 use agent_client_protocol as acp;
 use tools::implementations::skills::types::SkillScope;
 
-use super::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use super::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandKind, CommandResult, CommandSource, HostCommandRequest,
+    SlashCommand,
+};
 
 /// A slash command backed by an ACP `AvailableCommand`.
 ///
@@ -30,6 +33,8 @@ pub struct AcpSlashCommand {
     skill_scope: Option<SkillScope>,
     /// True if the ACP meta had skill-like keys but they were invalid.
     meta_malformed: bool,
+    kind: CommandKind,
+    source: CommandSource,
 }
 
 impl SlashCommand for AcpSlashCommand {
@@ -39,6 +44,14 @@ impl SlashCommand for AcpSlashCommand {
 
     fn description(&self) -> &str {
         &self.description
+    }
+
+    fn kind(&self) -> CommandKind {
+        self.kind
+    }
+
+    fn source(&self) -> CommandSource {
+        self.source
     }
 
     fn usage(&self) -> &str {
@@ -161,7 +174,10 @@ impl SlashCommand for AcpSlashCommand {
             } else {
                 format!("/{} {}", self.name, args)
             };
-            return CommandResult::HostCommand(text);
+            return CommandResult::HostCommand(HostCommandRequest::new(
+                text,
+                self.description.clone(),
+            ));
         }
 
         // --- Pass skill through to the shell for expansion ---
@@ -225,6 +241,39 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
             }
         };
 
+        let workflow = cmd
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.get("workflowDefinitionId").is_some());
+        let kind = cmd
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/commandKind"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_command_kind)
+            .unwrap_or_else(|| {
+                if skill_path.is_some() || workflow {
+                    CommandKind::Run
+                } else {
+                    CommandKind::Extension
+                }
+            });
+        let source = cmd
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/commandSource"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_command_source)
+            .unwrap_or_else(|| {
+                if skill_path.is_some() {
+                    CommandSource::Skill
+                } else if workflow {
+                    CommandSource::Workflow
+                } else {
+                    CommandSource::Extension
+                }
+            });
+
         Self {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
@@ -236,7 +285,31 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
             skill_path,
             skill_scope,
             meta_malformed,
+            kind,
+            source,
         }
+    }
+}
+
+fn parse_command_kind(value: &str) -> Option<CommandKind> {
+    match value.to_ascii_lowercase().as_str() {
+        "session" => Some(CommandKind::Session),
+        "control" => Some(CommandKind::Control),
+        "run" => Some(CommandKind::Run),
+        "view" => Some(CommandKind::View),
+        "settings" => Some(CommandKind::Settings),
+        "extension" => Some(CommandKind::Extension),
+        _ => None,
+    }
+}
+
+fn parse_command_source(value: &str) -> Option<CommandSource> {
+    match value.to_ascii_lowercase().as_str() {
+        "builtin" | "built-in" => Some(CommandSource::BuiltIn),
+        "skill" => Some(CommandSource::Skill),
+        "workflow" => Some(CommandSource::Workflow),
+        "extension" => Some(CommandSource::Extension),
+        _ => None,
     }
 }
 
@@ -259,6 +332,44 @@ mod tests {
         assert!(acp_cmd.skill_path.is_none());
         assert!(acp_cmd.skill_scope.is_none());
         assert!(!acp_cmd.meta_malformed);
+        assert_eq!(acp_cmd.kind(), CommandKind::Extension);
+        assert_eq!(acp_cmd.source(), CommandSource::Extension);
+    }
+
+    #[test]
+    fn grow_taxonomy_metadata_is_authoritative() {
+        let cmd = make_cmd(
+            "session-info",
+            Some(serde_json::json!({
+                "grow/commandKind": "view",
+                "grow/commandSource": "builtin"
+            })),
+        );
+        let acp_cmd = AcpSlashCommand::from(&cmd);
+        assert_eq!(acp_cmd.kind(), CommandKind::View);
+        assert_eq!(acp_cmd.source(), CommandSource::BuiltIn);
+    }
+
+    #[test]
+    fn workflow_and_skill_fallbacks_are_run_commands() {
+        let workflow = make_cmd(
+            "deep-research",
+            Some(serde_json::json!({ "workflowDefinitionId": "wf-1" })),
+        );
+        let workflow = AcpSlashCommand::from(&workflow);
+        assert_eq!(workflow.kind(), CommandKind::Run);
+        assert_eq!(workflow.source(), CommandSource::Workflow);
+
+        let skill = make_cmd(
+            "commit",
+            Some(serde_json::json!({
+                "scope": "local",
+                "path": "/tmp/commit/SKILL.md"
+            })),
+        );
+        let skill = AcpSlashCommand::from(&skill);
+        assert_eq!(skill.kind(), CommandKind::Run);
+        assert_eq!(skill.source(), CommandSource::Skill);
     }
 
     #[test]
@@ -283,8 +394,8 @@ mod tests {
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         match acp_cmd.run(&mut ctx, "fix the branch") {
-            CommandResult::HostCommand(text) => {
-                assert_eq!(text, "/pr-cleanup fix the branch");
+            CommandResult::HostCommand(request) => {
+                assert_eq!(request.command, "/pr-cleanup fix the branch");
             }
             other => panic!("expected HostCommand, got {other:?}"),
         }
@@ -393,6 +504,8 @@ mod tests {
             skill_path: Some(path.to_string()),
             skill_scope: serde_json::from_value(serde_json::json!(scope)).ok(),
             meta_malformed: false,
+            kind: CommandKind::Run,
+            source: CommandSource::Skill,
         }
     }
 
@@ -423,10 +536,12 @@ mod tests {
             skill_path: None,
             skill_scope: None,
             meta_malformed: false,
+            kind: CommandKind::Extension,
+            source: CommandSource::Extension,
         };
         let mut ctx = make_exec_ctx();
         let result = cmd.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::HostCommand(t) if t == "/flush"));
+        assert!(matches!(result, CommandResult::HostCommand(t) if t.command == "/flush"));
     }
 
     #[test]
@@ -439,6 +554,8 @@ mod tests {
             skill_path: None,
             skill_scope: None,
             meta_malformed: true,
+            kind: CommandKind::Extension,
+            source: CommandSource::Extension,
         };
         let mut ctx = make_exec_ctx();
         let result = cmd.run(&mut ctx, "");

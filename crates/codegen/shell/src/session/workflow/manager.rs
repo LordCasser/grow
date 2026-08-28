@@ -121,6 +121,8 @@ pub(crate) enum LaunchError {
         "session already has the maximum of {WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION} active workflow runs"
     )]
     TooManyActiveRuns,
+    #[error("session is shutting down; Workflow admission is closed")]
+    SessionShuttingDown,
 }
 
 pub(crate) struct WorkflowManager {
@@ -143,6 +145,11 @@ pub(crate) struct WorkflowManager {
     /// definitions are copied into that Run's immutable route.
     agent_catalog_source: WorkflowAgentCatalogSource,
     active: HashMap<String, ActiveRun>,
+    /// Session teardown closes this gate before draining executors.  The
+    /// generation makes an admission snapshot explicit: a launch must verify
+    /// it again after every await before mutating the run store/tracker.
+    admission_open: bool,
+    admission_generation: u64,
 }
 
 impl WorkflowManager {
@@ -198,6 +205,34 @@ impl WorkflowManager {
             next_run_route,
             agent_catalog_source,
             active: HashMap::new(),
+            admission_open: true,
+            admission_generation: 0,
+        }
+    }
+
+    pub(crate) fn close_admission(&mut self) -> u64 {
+        if self.admission_open {
+            self.admission_open = false;
+            self.admission_generation = self.admission_generation.saturating_add(1);
+        }
+        self.admission_generation
+    }
+
+    pub(crate) fn admission_snapshot(&self) -> Result<u64, LaunchError> {
+        self.admission_open
+            .then_some(self.admission_generation)
+            .ok_or(LaunchError::SessionShuttingDown)
+    }
+
+    pub(crate) fn ensure_open_for_ingress(&self) -> Result<(), LaunchError> {
+        self.admission_snapshot().map(|_| ())
+    }
+
+    pub(crate) fn check_admission(&self, generation: u64) -> Result<(), LaunchError> {
+        if self.admission_open && self.admission_generation == generation {
+            Ok(())
+        } else {
+            Err(LaunchError::SessionShuttingDown)
         }
     }
 
@@ -223,6 +258,15 @@ impl WorkflowManager {
 
     pub(crate) fn tracker(&self) -> Arc<parking_lot::Mutex<WorkflowTracker>> {
         self.tracker.clone()
+    }
+
+    fn signal_terminal_failure(&self, run_id: &str, error: impl Into<String>) {
+        let _ = self.session_cmd_tx.send(
+            crate::session::commands::SessionCommand::WorkflowTerminalFailure {
+                run_id: run_id.to_owned(),
+                error: error.into(),
+            },
+        );
     }
 
     /// Close a lifecycle boundary that was durably opened but could not reach
@@ -253,6 +297,10 @@ impl WorkflowManager {
             Ok(_) => self.notify.broadcast(&interrupted, elapsed, 0, true),
             Err(error) => {
                 tracing::error!(%run_id, %error, "failed to close rejected Workflow launch in Timeline");
+                self.signal_terminal_failure(
+                    run_id,
+                    format!("workflow terminal Timeline could not be committed: {error}"),
+                );
             }
         }
     }
@@ -262,6 +310,7 @@ impl WorkflowManager {
         resolved: ResolvedWorkflow,
         spec: LaunchSpec,
     ) -> Result<(String, oneshot::Receiver<WorkflowOutcome>), LaunchError> {
+        let admission_generation = self.admission_snapshot()?;
         self.reap_terminal_runs();
         if self.active.len() >= WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
             return Err(LaunchError::TooManyActiveRuns);
@@ -356,6 +405,7 @@ impl WorkflowManager {
                     .capture_agent_definitions(&self.agent_catalog_source)
                     .await
                     .map_err(|error| LaunchError::Store(error.to_owned()))?;
+                self.check_admission(admission_generation)?;
                 self.store
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
@@ -395,6 +445,7 @@ impl WorkflowManager {
                 (run_id, journal, state, false, 0)
             }
         };
+        self.check_admission(admission_generation)?;
         let lifecycle = if resumed {
             chat_state::WorkflowEvent::Resumed {
                 run_id: run_id.clone(),
@@ -463,7 +514,7 @@ impl WorkflowManager {
             if let Some(interrupted) = interrupted {
                 let _ = self.store.persist_ack(&interrupted).await;
             }
-            let _ = self
+            if let Err(timeline_error) = self
                 .timeline
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
                     chat_state::WorkflowEvent::Ended {
@@ -474,7 +525,13 @@ impl WorkflowManager {
                         message: Some(message.clone()),
                     },
                 ))
-                .await;
+                .await
+            {
+                self.signal_terminal_failure(
+                    &run_id,
+                    format!("workflow terminal Timeline could not be committed: {timeline_error}"),
+                );
+            }
             return Err(LaunchError::Journal(message));
         }
 
@@ -501,10 +558,17 @@ impl WorkflowManager {
                     .await
                 {
                     tracing::error!(run_id = %run_id, %timeline_error, "failed to close rejected workflow execution in Timeline");
+                    self.signal_terminal_failure(
+                        &run_id,
+                        format!(
+                            "workflow terminal Timeline could not be committed: {timeline_error}"
+                        ),
+                    );
                 }
             }
             return Err(LaunchError::Store(error.to_string()));
         }
+        self.check_admission(admission_generation)?;
         self.notify
             .emit(&state, self.tracker.lock().elapsed_ms(&run_id), 0);
 
@@ -559,6 +623,8 @@ impl WorkflowManager {
                 Arc::new(scratch)
             }
         };
+
+        self.check_admission(admission_generation)?;
 
         let (host_service, host_drained) = spawn_workflow_host_service(
             WorkflowHostParams {
@@ -662,6 +728,14 @@ impl WorkflowManager {
                 let mut manifest_persisted = true;
                 if let Err(error) = store.persist_ack(&state).await {
                     tracing::warn!(run_id = %watcher_run_id, %error, "workflow terminal manifest was not durably written");
+                    let _ = session_cmd_tx.send(
+                        crate::session::commands::SessionCommand::WorkflowTerminalFailure {
+                            run_id: watcher_run_id.clone(),
+                            error: format!(
+                                "workflow terminal manifest could not be committed: {error}"
+                            ),
+                        },
+                    );
                     outcome = WorkflowOutcome::Failed {
                         error: format!(
                             "workflow terminal state could not be persisted: {error}; run is interrupted"
@@ -725,6 +799,12 @@ impl WorkflowManager {
                     tracing::error!(run_id = %watcher_run_id, %error, manifest_persisted, "workflow terminal Timeline boundary was rejected");
                     let message =
                         format!("workflow Timeline terminal could not be committed: {error}");
+                    let _ = session_cmd_tx.send(
+                        crate::session::commands::SessionCommand::WorkflowTerminalFailure {
+                            run_id: watcher_run_id.clone(),
+                            error: message.clone(),
+                        },
+                    );
                     let _ = done_tx.send(Err(message.clone()));
                     let _ = outcome_tx.send(WorkflowOutcome::Failed { error: message });
                     return;
@@ -895,6 +975,10 @@ impl WorkflowManager {
             .await
         {
             tracing::error!(%run_id, %error, "refusing to cancel inactive Workflow without a durable Timeline close");
+            self.signal_terminal_failure(
+                run_id,
+                format!("workflow terminal Timeline could not be committed: {error}"),
+            );
             return Err(format!(
                 "workflow {run_id} Timeline close was not durable: {error}"
             ));
@@ -907,6 +991,10 @@ impl WorkflowManager {
             Some(state) => {
                 if let Err(error) = self.store.persist_ack(&state).await {
                     tracing::error!(%run_id, %error, "Workflow close is durable but cancelled manifest could not be persisted");
+                    self.signal_terminal_failure(
+                        run_id,
+                        format!("workflow terminal manifest could not be committed: {error}"),
+                    );
                 }
                 let (state, elapsed) = {
                     let tracker = self.tracker.lock();
@@ -943,25 +1031,35 @@ impl WorkflowManager {
             .map(|(run_id, run)| (Some(run_id), run.done))
             .collect();
 
+        let mut failures = Vec::new();
         let mut timed_out = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
         let mut pending = pending.into_iter();
         while let Some((run_id, done)) = pending.next() {
-            if tokio::time::timeout_at(deadline, done).await.is_err() {
-                if let Some(run_id) = run_id {
+            let Some(run_id) = run_id else {
+                continue;
+            };
+            match tokio::time::timeout_at(deadline, done).await {
+                Ok(Ok(Ok(_state))) => {}
+                Ok(Ok(Err(error))) => failures.push(format!("{run_id}: {error}")),
+                Ok(Err(error)) => failures.push(format!(
+                    "{run_id}: terminal watcher channel closed before acknowledgement ({error})"
+                )),
+                Err(_) => {
+                    failures.push(format!("{run_id}: terminal drain timed out"));
                     timed_out.push(run_id);
+                    timed_out.extend(pending.filter_map(|(run_id, _)| run_id));
+                    break;
                 }
-                timed_out.extend(pending.filter_map(|(run_id, _)| run_id));
-                break;
             }
         }
-        if timed_out.is_empty() {
+        if failures.is_empty() {
             return Ok(());
         }
 
         tracing::warn!(
-            run_ids = ?timed_out,
-            "workflow shutdown drain timed out; marking runs interrupted"
+            failures = ?failures,
+            "workflow shutdown drain did not complete cleanly"
         );
         for run_id in &timed_out {
             if self
@@ -984,10 +1082,40 @@ impl WorkflowManager {
                     tracing::error!(%run_id, %error, "failed to persist workflow shutdown interruption");
                 }
                 let elapsed = self.tracker.lock().elapsed_ms(run_id);
+                if let Err(error) = self
+                    .timeline
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                        chat_state::WorkflowEvent::Ended {
+                            run_id: run_id.clone(),
+                            execution_epoch: state.execution_epoch,
+                            status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            duration_ms: elapsed,
+                            message: state.pause_message.clone(),
+                        },
+                    ))
+                    .await
+                {
+                    tracing::error!(%run_id, %error, "failed to persist Workflow shutdown terminal in Timeline");
+                    self.signal_terminal_failure(
+                        run_id,
+                        format!("workflow terminal Timeline could not be committed: {error}"),
+                    );
+                }
                 self.notify.broadcast(&state, elapsed, 0, true);
             }
         }
-        Err(timed_out)
+        Err(failures)
+    }
+
+    /// Bounded fail-stop cancellation used when a session owner did not
+    /// drain and teardown must not await this manager's terminal/persistence
+    /// locks. Normal shutdown uses `cancel_all_and_drain`; this method only
+    /// revokes execution and child admission without claiming durability.
+    pub(crate) fn request_cancel_all(&self) {
+        for (run_id, run) in &self.active {
+            run.cancel.cancel();
+            let _ = self.cancel_children_for_run(run_id);
+        }
     }
 
     #[cfg(test)]
@@ -1851,13 +1979,71 @@ mod tests {
         let result = manager
             .cancel_all_and_drain(std::time::Duration::from_millis(1))
             .await;
-        assert_eq!(result.unwrap_err(), vec![run_id.clone()]);
+        assert_eq!(
+            result.unwrap_err(),
+            vec![format!("{run_id}: terminal drain timed out")]
+        );
         let state = manager.tracker.lock().get(&run_id).unwrap();
         assert_eq!(
             state.status,
             crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
         );
         assert!(!state.status.is_paused());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_preserves_terminal_watcher_error() {
+        let (mut manager, _rx) = test_manager(None);
+        let run_id = "wf_done_error".to_string();
+        let (done_tx, done_rx) = oneshot::channel();
+        manager.test_insert_active_run(run_id.clone(), done_rx);
+        done_tx
+            .send(Err("terminal Timeline append failed".into()))
+            .unwrap();
+
+        let result = manager
+            .cancel_all_and_drain(std::time::Duration::from_secs(1))
+            .await;
+        assert_eq!(
+            result.unwrap_err(),
+            vec![format!("{run_id}: terminal Timeline append failed")]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_preserves_closed_terminal_watcher() {
+        let (mut manager, _rx) = test_manager(None);
+        let run_id = "wf_done_closed".to_string();
+        let (done_tx, done_rx) = oneshot::channel::<Result<WorkflowRunState, String>>();
+        manager.test_insert_active_run(run_id.clone(), done_rx);
+        drop(done_tx);
+
+        let result = manager
+            .cancel_all_and_drain(std::time::Duration::from_secs(1))
+            .await;
+        let failure = result.unwrap_err().pop().expect("closed watcher failure");
+        assert!(failure.starts_with(&format!("{run_id}: ")));
+        assert!(failure.contains("terminal watcher channel closed"));
+    }
+
+    #[tokio::test]
+    async fn closed_admission_rejects_new_workflow_before_workspace_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let generation = manager.close_admission();
+        assert_eq!(generation, 1);
+        let result = manager
+            .launch(
+                resolve_inline(
+                    "let meta = #{ name: \"rejected\", description: \"no-op\" }; complete(\"no\");"
+                        .into(),
+                )
+                .unwrap(),
+                spec(),
+            )
+            .await;
+        assert!(matches!(result, Err(LaunchError::SessionShuttingDown)));
+        assert!(dir.path().join("workflows").read_dir().is_err());
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! `/quit` (alias `/exit`) -- quit the application.
+//! `/quit` -- quit the application.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -9,10 +9,6 @@ pub struct ExitCommand;
 impl SlashCommand for ExitCommand {
     fn name(&self) -> &str {
         "quit"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["exit"]
     }
 
     fn description(&self) -> &str {

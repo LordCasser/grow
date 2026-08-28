@@ -191,6 +191,8 @@ pub struct TurnStatusArgs<'a> {
     pub flat_background: bool,
     pub held_queue: usize,
     pub held_queue_top_sendable: bool,
+    /// Presentation-only pending control summary (`model→… · agent→…`).
+    pub control_status: Option<&'a str>,
 }
 
 /// Render the turn status line into the given area.
@@ -220,6 +222,7 @@ pub fn render_turn_status(
         flat_background,
         held_queue,
         held_queue_top_sendable,
+        control_status,
     } = args;
     // Resolve the mouse affordances: a keyboard-only host (`None`) suppresses
     // both buttons and reports no hover.
@@ -262,6 +265,27 @@ pub fn render_turn_status(
             ),
         ];
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        return TurnStatusOutput::default();
+    }
+
+    // Desired controls are live UI state, not transcript events. Idle
+    // sessions show them here until the authoritative terminal update arrives.
+    if state.is_idle()
+        && let Some(status) = control_status
+    {
+        let frames = crate::glyphs::braille_spinner_frames();
+        let icon = format!("{} ", crate::motion::spinner_glyph(frame, frames));
+        let max_status = (area.width as usize).saturating_sub(icon.width());
+        let status = truncate_str(status, max_status);
+        buf.set_line(
+            area.x,
+            area.y,
+            &Line::from(vec![
+                Span::styled(icon, Style::default().fg(theme.accent_running)),
+                Span::styled(status, Style::default().fg(theme.gray_bright)),
+            ]),
+            area.width,
+        );
         return TurnStatusOutput::default();
     }
 
@@ -438,12 +462,19 @@ pub fn render_turn_status(
         .bg(timer_bg)
         .remove_modifier(Modifier::all());
 
+    let control_suffix = control_status.map(|status| {
+        let max_width = (area.width as usize / 2).max(18);
+        format!(" · {}", truncate_str(status, max_width.saturating_sub(3)))
+    });
+    let control_suffix_width = control_suffix.as_deref().map_or(0, UnicodeWidthStr::width);
+
     // Available width for activity label (only the label truncates)
     // Layout: spinner + label + phase_timer + queued_hint + gap(1) + turn_timer + cancel
     let min_gap = 1;
     let available_for_label = (area.width as usize)
         .saturating_sub(spinner_width)
         .saturating_sub(phase_timer_width)
+        .saturating_sub(control_suffix_width)
         .saturating_sub(min_gap)
         .saturating_sub(right_width);
 
@@ -554,6 +585,10 @@ pub fn render_turn_status(
     // Phase timer (gray, never truncates)
     if !phase_timer_str.is_empty() {
         left_spans.push(Span::styled(phase_timer_str, timer_style));
+    }
+
+    if let Some(status) = control_suffix {
+        left_spans.push(Span::styled(status, Style::default().fg(theme.gray_bright)));
     }
 
     // After the phase timer, so the elapsed time reads as the wait's, not the hint's.
@@ -1112,6 +1147,7 @@ mod tests {
             flat_background: false,
             held_queue: 0,
             held_queue_top_sendable: false,
+            control_status: None,
         }
     }
 

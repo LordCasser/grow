@@ -187,6 +187,8 @@ pub fn render_btw_panel(
     hit_close: Option<&mut crate::app::agent_view::HitArea>,
     selection_model: &mut ResolvedSelectionModel,
     link_overlay: Option<&mut LinkOverlay>,
+    // Session/worktree cwd for resolving relative project links.
+    cwd: Option<&std::path::Path>,
     // Generated-media paths for resolving relative file-path link targets.
     media_paths: &[std::path::PathBuf],
 ) {
@@ -414,6 +416,7 @@ pub fn render_btw_panel(
                         max_screen_y,
                         content_x,
                         /* content_line_offset */ 0,
+                        cwd,
                         media_paths,
                         overlay,
                     );
@@ -478,6 +481,7 @@ mod tests {
             None,
             &mut model,
             None,
+            None,
             &[],
         );
         model
@@ -496,6 +500,7 @@ mod tests {
             false,
             None,
             &mut model,
+            None,
             None,
             &[],
         );
@@ -527,6 +532,7 @@ mod tests {
             None,
             &mut model,
             Some(&mut links),
+            None,
             &[],
         );
         (model, links)
@@ -903,6 +909,7 @@ mod tests {
             false,
             Some(&mut hit),
             &mut model,
+            None,
             None,
             &[],
         );

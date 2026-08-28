@@ -85,7 +85,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "memory",
         description: "Browse, view, and manage your memories",
         argument_hint: Some("on|off"),
-        aliases: &["mem"],
+        aliases: &[],
         gate: BuiltinGate::MemoryConfigured,
         resolve: |args| {
             let trimmed = args.trim().to_lowercase();
@@ -152,7 +152,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "plugins",
         description: "Manage plugins (list, reload, trust, add, remove)",
         argument_hint: Some("list | reload | trust <path> | add <path> | remove <path>"),
-        aliases: &["plugin"],
+        aliases: &[],
         gate: BuiltinGate::Plugins,
         resolve: |args| {
             let trimmed = args.trim();
@@ -200,18 +200,10 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
     BuiltinCommand {
-        name: "reload-plugins",
-        description: "Reload plugins from disk (alias for /plugins reload)",
-        argument_hint: None,
-        aliases: &[],
-        gate: BuiltinGate::Plugins,
-        resolve: |_args| BuiltinAction::PluginsReload,
-    },
-    BuiltinCommand {
         name: "session-info",
         description: "Show session details (model, turns, context usage)",
         argument_hint: None,
-        aliases: &["status", "info"],
+        aliases: &[],
         gate: BuiltinGate::AlwaysOn,
         resolve: |_args| BuiltinAction::SessionInfo,
     },
@@ -492,58 +484,45 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "behavior",
             "btw",
             "cd",
-            "changelog",
             "chat",
-            "clear",
             "cloud",
             "clarify",
             "compact",
             "compact-mode",
-            "config",
             "config-agents",
             "context",
             "copy",
-            "cost",
             "debug",
+            "delete",
             "docs",
             "doctor",
+            "edit-prompt",
             "effort",
-            "exit",
             "expand",
             "export",
             "feedback",
             "find",
             "fork",
-            "full",
             "fullscreen",
             "gboom",
-            "guides",
             "help",
             "history",
             "home",
             "hooks",
-            "howto",
             "jump",
             "login",
             "logout",
-            "log",
             "loop",
-            "m",
             "marketplace",
             "mcps",
             "minimal",
-            "ml",
             "model",
             "multiline",
             "new",
             "normal",
-            "onboarding",
             "permission",
             "plan",
-            "plan-view",
             "plugins",
-            "preferences",
-            "prefs",
             "privacy",
             "queue",
             "quit",
@@ -556,35 +535,32 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "scroll-debug",
             "session-info",
             "settings",
-            "show-plan",
             "shortcuts",
             "skills",
             "tasks",
-            "terminal-check",
-            "terminal-info",
-            "terminal-setup",
             "theme",
             "timeline",
             "timestamps",
-            "title",
             "toggle-mouse-reporting",
             "trajectory",
-            "tour",
             "transcript",
             "tutorial",
-            "t",
-            "undo",
             "usage",
             "view-plan",
             "vim-mode",
-            "welcome",
             "workflow",
             "workflow-run",
             "workflows",
             "?",
         ];
-        let mut taken: HashSet<String> = builtins
+        // Canonical built-in identities remain reserved even when their
+        // capability gate is closed. Otherwise the Shell can publish a bare
+        // Skill/Workflow name that the Pager must permanently reserve for the
+        // built-in, producing a client-invented qualified id that the Shell
+        // cannot resolve. Availability controls visibility, never identity.
+        let mut taken: HashSet<String> = BUILTIN_COMMANDS
             .iter()
+            .chain(PROMPT_COMMANDS.iter())
             .flat_map(|builtin| {
                 std::iter::once(builtin.name)
                     .chain(builtin.aliases.iter().copied())
@@ -685,19 +661,21 @@ pub(super) fn available_commands(
     let mut commands =
         Vec::with_capacity(catalog.builtins.len() + catalog.skills.len() + catalog.workflows.len());
     commands.extend(catalog.builtins.iter().map(|builtin| {
-        acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string()).input(
-            builtin.argument_hint.map(|hint| {
+        acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string())
+            .input(builtin.argument_hint.map(|hint| {
                 acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
                     hint.to_string(),
                 ))
-            }),
-        )
+            }))
+            .meta(command_meta(builtin_command_kind(builtin.name), "builtin"))
     }));
     commands.extend(catalog.skills.iter().map(|command| {
         let skill = command.skill;
         let mut meta_map = serde_json::Map::new();
         meta_map.insert("scope".into(), serde_json::json!(skill.scope));
         meta_map.insert("path".into(), serde_json::json!(skill.path));
+        meta_map.insert("grow/commandKind".into(), serde_json::json!("run"));
+        meta_map.insert("grow/commandSource".into(), serde_json::json!("skill"));
         if let Some(display_name) = skill.display_name.as_deref().filter(|s| !s.is_empty()) {
             meta_map.insert("displayName".into(), serde_json::json!(display_name));
         }
@@ -733,6 +711,8 @@ pub(super) fn available_commands(
             "workflowStatus": workflow.status,
             "workflowContentHash": workflow.content_hash,
             "workflowFocused": workflow.focused,
+            "grow/commandKind": "run",
+            "grow/commandSource": "workflow",
         })
         .as_object()
         .cloned();
@@ -762,15 +742,34 @@ pub(crate) fn builtin_commands(availability: CommandAvailability) -> Vec<acp::Av
         .iter()
         .filter(|cmd| availability.allows(cmd.gate))
         .map(|cmd| {
-            acp::AvailableCommand::new(cmd.name.to_string(), cmd.description.to_string()).input(
-                cmd.argument_hint.map(|hint| {
+            acp::AvailableCommand::new(cmd.name.to_string(), cmd.description.to_string())
+                .input(cmd.argument_hint.map(|hint| {
                     acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
                         hint.to_string(),
                     ))
-                }),
-            )
+                }))
+                .meta(command_meta(builtin_command_kind(cmd.name), "builtin"))
         })
         .collect()
+}
+
+fn command_meta(kind: &str, source: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::json!({
+        "grow/commandKind": kind,
+        "grow/commandSource": source,
+    })
+    .as_object()
+    .cloned()
+}
+
+fn builtin_command_kind(name: &str) -> &'static str {
+    match name {
+        "compact" | "always-approve" | "goal" => "control",
+        "dream" | "flush" | "loop" | "workflow-run" => "run",
+        "context" | "memory" | "session-info" | "workflows" | "hooks-list" | "plugins" => "view",
+        "hooks-add" | "hooks-remove" | "hooks-trust" | "hooks-untrust" => "settings",
+        _ => "extension",
+    }
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1323,6 +1322,29 @@ mod tests {
     fn all_gated() -> CommandAvailability {
         CommandAvailability::all_enabled()
     }
+
+    #[test]
+    fn every_shell_builtin_has_non_extension_taxonomy_metadata() {
+        let uncategorized: Vec<&str> = BUILTIN_COMMANDS
+            .iter()
+            .chain(PROMPT_COMMANDS.iter())
+            .filter(|command| builtin_command_kind(command.name) == "extension")
+            .map(|command| command.name)
+            .collect();
+        assert!(
+            uncategorized.is_empty(),
+            "Shell builtins must declare their user-facing purpose: {uncategorized:?}"
+        );
+
+        for command in builtin_commands(all_gated()) {
+            let meta = command.meta.expect("builtin command metadata");
+            assert_eq!(
+                meta.get("grow/commandSource")
+                    .and_then(serde_json::Value::as_str),
+                Some("builtin")
+            );
+        }
+    }
     fn text_block(s: &str) -> acp::ContentBlock {
         acp::ContentBlock::Text(acp::TextContent::new(s.to_string()))
     }
@@ -1455,19 +1477,26 @@ mod tests {
         ));
     }
     #[test]
-    fn status_alias_resolves_to_session_info() {
-        let outcome = resolve(
-            vec![text_block("/status")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::SessionInfo)
-        ));
+    fn removed_shell_aliases_are_forwarded_as_ordinary_prompts() {
+        for text in [
+            "/mem",
+            "/mem off",
+            "/plugin",
+            "/status",
+            "/info",
+            "/reload-plugins",
+        ] {
+            let blocks = vec![text_block(text)];
+            let outcome = resolve(
+                blocks.clone(),
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+                &[],
+            )
+            .expect("a removed alias must not dispatch a builtin command");
+            assert_eq!(outcome, blocks);
+        }
     }
     #[test]
     fn resolve_parses_skill_with_args() {
@@ -1684,7 +1713,6 @@ mod tests {
                 "hooks-remove",
                 "hooks-untrust",
                 "plugins",
-                "reload-plugins",
                 "session-info",
                 "workflows",
                 "workflow-run",
@@ -1694,6 +1722,17 @@ mod tests {
                 "deploy",
             ]
         );
+    }
+    #[test]
+    fn production_shell_catalog_registers_no_aliases() {
+        for command in BUILTIN_COMMANDS.iter().chain(PROMPT_COMMANDS) {
+            assert!(
+                command.aliases.is_empty(),
+                "/{} unexpectedly registers aliases: {:?}",
+                command.name,
+                command.aliases
+            );
+        }
     }
     fn advertised_names(availability: CommandAvailability) -> Vec<String> {
         available_commands(&[], availability, &[])
@@ -1765,7 +1804,6 @@ mod tests {
             "hooks-remove",
             "hooks-untrust",
             "plugins",
-            "reload-plugins",
         ] {
             assert!(
                 !names.iter().any(|x| x == n),
@@ -1891,7 +1929,6 @@ mod tests {
             "goal",
             "hooks-list",
             "plugins",
-            "reload-plugins",
         ] {
             assert!(
                 !names.iter().any(|n| n == forbidden),
@@ -2123,8 +2160,14 @@ mod tests {
         );
         let compact_cmd = commands.iter().find(|c| c.name == "compact").unwrap();
         assert!(
-            compact_cmd.meta.is_none(),
-            "bare 'compact' should be the builtin (no meta)"
+            compact_cmd.meta.as_ref().is_some_and(|meta| {
+                meta.get("grow/commandSource")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("builtin")
+                    && !meta.contains_key("scope")
+                    && !meta.contains_key("path")
+            }),
+            "bare 'compact' must remain the builtin taxonomy entry"
         );
         assert!(names.contains(&"deploy"));
     }
@@ -2193,7 +2236,6 @@ mod tests {
             "hooks-add",
             "hooks-remove",
             "plugins",
-            "reload-plugins",
         ] {
             assert!(
                 !names.iter().any(|n| n == forbidden),
@@ -2260,37 +2302,6 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn mem_alias_resolves_to_memory_browse() {
-        let outcome = resolve(
-            vec![text_block("/mem")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::MemoryBrowse)
-        ));
-    }
-    #[test]
-    fn mem_alias_resolves_toggle_with_args() {
-        let outcome = resolve(
-            vec![text_block("/mem off")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::MemoryToggle { enabled: false })
-        ));
-    }
-    #[test]
     fn memory_resolves_when_disabled_but_configured() {
         let availability = CommandAvailability {
             memory: false,
@@ -2503,7 +2514,7 @@ mod tests {
         ));
     }
     #[test]
-    fn workflow_collision_policy_includes_aliases_and_ambiguous_skills() {
+    fn workflow_collision_policy_uses_only_canonical_names_and_ambiguous_skills() {
         let skills = vec![
             make_scoped_skill("commit", SkillScope::Local),
             make_scoped_skill("commit", SkillScope::User),
@@ -2519,8 +2530,8 @@ mod tests {
             .into_iter()
             .map(|command| command.name)
             .collect();
-        assert!(!names.iter().any(|name| name == "status"));
-        assert!(!names.iter().any(|name| name == "mem"));
+        assert!(names.iter().any(|name| name == "status"));
+        assert!(names.iter().any(|name| name == "mem"));
         assert!(!names.iter().any(|name| name == "agent"));
         assert!(!names.iter().any(|name| name == "commit"));
         assert!(names.iter().any(|name| name == "local:commit"));
@@ -2535,7 +2546,8 @@ mod tests {
                 &workflows,
             )
             .unwrap_err(),
-            SlashCommandOutcome::Builtin(BuiltinAction::SessionInfo)
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { name, input })
+                if name == "status" && input.is_empty()
         ));
         for unavailable in ["agent", "commit"] {
             assert!(
@@ -2648,6 +2660,28 @@ mod tests {
             .unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::WorkflowWorkspace)
         ));
+    }
+
+    #[test]
+    fn gated_builtin_names_cannot_be_claimed_by_skills_or_workflows() {
+        let availability = CommandAvailability {
+            workflows: false,
+            workflow_management: false,
+            workflow_behavior: false,
+            ..CommandAvailability::default()
+        };
+        let skills = vec![make_scoped_skill("workflow-run", SkillScope::Local)];
+        let workflows = vec![listing("workflow-run")];
+        let names: Vec<_> = available_commands(&skills, availability, &workflows)
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+
+        // The hidden builtin still owns its canonical identity. A Skill may
+        // remain reachable only under its real scope-qualified identity; the
+        // unavailable Workflow may not publish a launch trigger.
+        assert!(!names.iter().any(|name| name == "workflow-run"));
+        assert!(names.iter().any(|name| name == "local:workflow-run"));
     }
     #[test]
     fn workflow_manage_parses_both_orders_and_optional_id() {

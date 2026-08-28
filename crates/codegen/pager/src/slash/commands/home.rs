@@ -11,10 +11,6 @@ impl SlashCommand for HomeCommand {
         "home"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["welcome"]
-    }
-
     fn description(&self) -> &str {
         "Return to the welcome screen"
     }

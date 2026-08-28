@@ -418,45 +418,11 @@ pub(super) fn should_drop_late_auto_recap(auto: bool, is_replay: bool, agent_idl
     auto && !is_replay && !agent_idle
 }
 
-/// Land a `SessionRecap` block: fill a manual `/recap`'s in-flight loading
-/// spinner in place (and stop its animation) when one is showing, otherwise
-/// append a fresh block. An automatic recap never consumes the manual loading
-/// slot (`auto`) — it would orphan the in-flight manual response into a second
-/// block — so it always appends.
-///
-/// Minimal (scrollback-native) mode may have already printed the loading
-/// spinner into the terminal's native scrollback (the idle commit pass consumes
-/// it print-once). Filling that entry in place would mutate state the terminal
-/// never re-reads — the recap text would exist only in `/transcript`, never on
-/// screen. Re-print instead: drop the stale committed entry from state (its
-/// printed copy can't be un-printed, matching the K10 re-print semantics) and
-/// append the real recap as a fresh block so the commit pass emits it.
-/// `is_committed` is always false outside minimal, so the fill-in-place path is
-/// unchanged for the alt-screen / inline modes.
+/// Land one immutable recap fact. Manual progress lives in the shared live
+/// status plane and is never committed into retained or native scrollback.
 pub(super) fn apply_recap_block(agent: &mut AgentView, auto: bool, recap_block: RenderBlock) {
-    let fill_id = if auto {
-        None
-    } else {
-        agent
-            .pending_recap_entry
-            .take()
-            .filter(|&id| agent.scrollback.get_by_id(id).is_some())
-    };
-    match fill_id {
-        Some(id) if agent.scrollback.is_committed(id) => {
-            agent.scrollback.remove_entry(id);
-            agent.scrollback.push_block(recap_block);
-        }
-        Some(id) => {
-            // Existence just confirmed; scope the `&mut` borrow so it
-            // ends before `finish_running` re-borrows the scrollback.
-            if let Some(entry) = agent.scrollback.get_by_id_mut(id) {
-                entry.block = recap_block;
-            }
-            agent.scrollback.finish_running(id);
-        }
-        None => {
-            agent.scrollback.push_block(recap_block);
-        }
+    if !auto {
+        agent.session.clear_live_feedback("recap");
     }
+    agent.scrollback.push_block(recap_block);
 }

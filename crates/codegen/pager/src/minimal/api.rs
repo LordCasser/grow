@@ -124,6 +124,17 @@ pub fn agent_cwd(agent: &AgentView) -> &std::path::Path {
     agent.session.cwd.as_path()
 }
 
+/// Refresh the authoritative generated-media path set used to resolve short
+/// transcript-relative links such as `images/1.png`.
+pub fn ensure_agent_media_link_paths(agent: &mut AgentView) {
+    agent.ensure_media_link_paths();
+}
+
+/// Absolute generated-media paths for hyperlink resolution.
+pub fn agent_media_link_paths(agent: &AgentView) -> &[std::path::PathBuf] {
+    &agent.media_link_paths
+}
+
 pub fn agent_current_model_name(agent: &AgentView) -> Option<String> {
     agent.session.models.current_model_name()
 }
@@ -152,6 +163,13 @@ pub fn agent_scrollback(agent: &AgentView) -> &ScrollbackState {
 
 pub fn agent_scrollback_mut(agent: &mut AgentView) -> &mut ScrollbackState {
     &mut agent.scrollback
+}
+
+/// Whether a reconnect `session/load` is currently staging an authoritative
+/// replacement for this agent's retained projection. Minimal freezes native
+/// scrollback commits and hides the staging tail until this resolves.
+pub fn agent_session_reload_active(agent: &AgentView) -> bool {
+    agent.session_reload.is_some()
 }
 
 pub fn agent_prompt(agent: &AgentView) -> &PromptWidget {
@@ -407,7 +425,7 @@ pub fn request_minimal_transcript(app: &mut AppView) {
     if ids.is_empty() {
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(
+            .push_block(crate::scrollback::block::RenderBlock::notice(
                 "No conversation transcript to view yet",
             ));
         return;
@@ -756,6 +774,12 @@ pub fn watchers(v: &AgentView) -> crate::views::turn_status::Watchers {
     v.watchers()
 }
 
+/// Shell/Pager control desired-state projection for minimal's live status row.
+/// Transient controls never become committed scrollback entries.
+pub fn control_status(v: &AgentView, width: usize) -> Option<String> {
+    v.session.live_status(width)
+}
+
 /// [`AgentView::held_queue_count`].
 pub fn held_queue_count(v: &AgentView) -> usize {
     v.held_queue_count()
@@ -995,6 +1019,16 @@ pub fn mark_committed(sb: &mut ScrollbackState, index: usize) {
     sb.mark_committed(index);
 }
 
+/// Entry whose native scrollback write failed during the current frame.
+pub fn minimal_failed_frontier(sb: &ScrollbackState) -> Option<EntryId> {
+    sb.minimal_failed_frontier()
+}
+
+/// Record or clear the native scrollback write failure for this frame.
+pub fn set_minimal_failed_frontier(sb: &mut ScrollbackState, id: Option<EntryId>) {
+    sb.set_minimal_failed_frontier(id);
+}
+
 /// [`ScrollbackState::record_committed_for_expand`].
 pub fn record_committed_for_expand(sb: &mut ScrollbackState, id: EntryId) {
     sb.record_committed_for_expand(id);
@@ -1006,6 +1040,34 @@ pub fn record_committed_for_expand(sb: &mut ScrollbackState, id: EntryId) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {
     crate::app::agent_view::test_agent_view(session_id, cwd)
+}
+
+/// Test-only: configure an unwired agent for Minimal's process-local behavior.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_agent_minimal_mode_for_test(v: &mut AgentView) {
+    v.prompt.set_screen_mode(crate::app::ScreenMode::Minimal);
+}
+
+/// Test-only reconnect lifecycle seam used by pager-minimal regression tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn begin_agent_session_reload_for_test(v: &mut AgentView, generation: u64) {
+    v.begin_session_reload(generation);
+}
+
+/// Test-only: flag that the reload delivered an authoritative full replay.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mark_agent_reload_replay_seen_for_test(v: &mut AgentView) {
+    v.mark_reload_replay_seen();
+}
+
+/// Test-only: resolve a reconnect reload window.
+#[cfg(any(test, feature = "test-support"))]
+pub fn finish_agent_session_reload_for_test(
+    v: &mut AgentView,
+    generation: u64,
+    success: bool,
+) -> bool {
+    v.finish_session_reload(generation, success)
 }
 
 /// Test-only setter for `AgentView::extensions_modal`.

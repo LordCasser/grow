@@ -176,7 +176,7 @@ pub(super) fn surface_always_approve_launch_block_notice(app: &mut AppView, targ
     {
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(
+            .push_block(crate::scrollback::block::RenderBlock::notice(
                 warning.to_string(),
             ));
         agent.show_toast(warning);

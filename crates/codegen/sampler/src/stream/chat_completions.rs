@@ -66,6 +66,7 @@ pub fn stream_chat_completions<'a>(
         let mut usage: Option<TokenUsage> = None;
         let mut cost_usd_ticks: Option<i64> = None;
         let mut finish_reason: Option<StopReason> = None;
+        let mut raw_unknown_finish_reason: Option<String> = None;
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
@@ -146,6 +147,13 @@ pub fn stream_chat_completions<'a>(
             for choice in chunk.choices.into_iter() {
                 first_choice_seen = true;
                 if let Some(fr) = choice.finish_reason {
+                    if let Some(raw) = fr.unknown_value() {
+                        // A later choice with a known terminal must not erase
+                        // provider diagnostics captured from an earlier
+                        // choice. Chat-completions normally returns one
+                        // choice, but the wire format permits several.
+                        raw_unknown_finish_reason.get_or_insert_with(|| raw.to_owned());
+                    }
                     finish_reason = Some(fr.into());
                     chunk_has_content = true;
                 }
@@ -293,7 +301,7 @@ pub fn stream_chat_completions<'a>(
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
+            raw_stop_reason: raw_unknown_finish_reason,
             stop_sequence: None,
         };
 
@@ -424,7 +432,127 @@ mod tests {
                 let a = response.assistant().expect("assistant item present");
                 assert_eq!(a.content.as_ref(), "Hello, world!");
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert_eq!(response.raw_stop_reason, None);
                 assert_eq!(response.message_chunks_emitted, 2);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_finish_reason_preserves_content_usage_and_raw_reason() {
+        let mut terminal = final_chunk(FinishReason::Unknown("unexpected_state".into()));
+        terminal.usage = Some(Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: None,
+        });
+        let raw = stream::iter(vec![Ok(text_chunk("done")), Ok(terminal)]).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "done");
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert_eq!(
+                    response.raw_stop_reason.as_deref(),
+                    Some("unexpected_state")
+                );
+                let usage = response.usage.as_ref().expect("terminal usage preserved");
+                assert_eq!(usage.prompt_tokens, 100);
+                assert_eq!(usage.completion_tokens, 50);
+                assert_eq!(usage.total_tokens, 150);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_finish_reason_with_tool_call_normalizes_to_tool_calls() {
+        let tool_chunk = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ChunkToolCallDelta {
+                index: 0,
+                id: Some("call_abc".into()),
+                kind: Some("function".into()),
+                function: Some(ToolCallFunctionDelta {
+                    name: Some("do_thing".into()),
+                    arguments: Some("{}".into()),
+                }),
+            }],
+            tool_call_id: None,
+        }]);
+        let raw = stream::iter(vec![
+            Ok(tool_chunk),
+            Ok(final_chunk(FinishReason::Unknown(
+                "unexpected_state".into(),
+            ))),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                assert_eq!(response.tool_calls().len(), 1);
+                assert_eq!(
+                    response.raw_stop_reason.as_deref(),
+                    Some("unexpected_state")
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_unknown_finish_reason_remains_empty_for_resampling() {
+        let reasoning = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: None,
+            reasoning_content: Some("unfinished reasoning".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }]);
+        let raw = stream::iter(vec![
+            Ok(reasoning),
+            Ok(final_chunk(FinishReason::Unknown(
+                "unexpected_state".into(),
+            ))),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert!(response.is_empty());
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert_eq!(
+                    response.raw_stop_reason.as_deref(),
+                    Some("unexpected_state")
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }

@@ -493,7 +493,7 @@ fn report_suspend_wait(app: &mut AppView, message: &str) {
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&id)
             {
-                let block = crate::scrollback::block::RenderBlock::system(message);
+                let block = crate::scrollback::block::RenderBlock::notice(message);
                 if let Some(child_sid) = agent.active_subagent.clone()
                     && let Some(child) = agent.subagent_views.get_mut(&child_sid)
                 {
@@ -735,6 +735,7 @@ pub(crate) async fn run(
     remote_settings: Option<shell::util::config::RemoteSettings>,
     term_state: TerminalState,
     materialized: crate::app::session_startup::MaterializedStartup,
+    screen_mode_control_handoffs: Vec<crate::app::session::SessionControlHandoff>,
     bg_update_rx: Option<
         tokio::sync::oneshot::Receiver<Option<update::auto_update::UpdateAvailable>>,
     >,
@@ -756,6 +757,10 @@ pub(crate) async fn run(
         connection.models,
         connection.available_commands,
     );
+    app.screen_mode_control_handoffs = screen_mode_control_handoffs
+        .into_iter()
+        .map(|handoff| (handoff.session_id.clone(), handoff))
+        .collect();
     let mut tracing_rx = tracing_handle.rx;
     let mut tracing_open = true;
     // Startup terminal height for the auto-compact derivation; kept fresh by
@@ -3747,7 +3752,7 @@ mod tests {
         let entry = agent.scrollback.last().expect("system block");
         assert!(matches!(
             &entry.block,
-            RenderBlock::System(block) if block.text == EDITOR_SUSPEND_WAIT
+            RenderBlock::Notice(block) if block.text == EDITOR_SUSPEND_WAIT
         ));
         assert!(agent.toast.is_none());
     }

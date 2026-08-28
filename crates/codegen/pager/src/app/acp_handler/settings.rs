@@ -46,9 +46,7 @@ pub(crate) fn apply_models_state_update(
 /// and retry it after every catalog publication; dropping it here would leave
 /// the selector permanently behind the Shell until another control event.
 fn retry_authoritative_controls_recursively(agent: &mut crate::app::agent_view::AgentView) -> bool {
-    let session_changed = if agent.session.controls_pending() {
-        false
-    } else if let Some(session_id) = agent.session.session_id.clone() {
+    let session_changed = if let Some(session_id) = agent.session.session_id.clone() {
         super::apply_deferred_authoritative_controls(agent, session_id.0.as_ref())
     } else {
         false

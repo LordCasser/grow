@@ -125,7 +125,7 @@ pub fn draw_live(
         if let Some(agent) = agent.as_deref_mut() {
             clear_btw_geometry(agent);
         }
-        pager::render::draw::draw_frame(terminal, cursor, |frame, _link_spans| {
+        pager::render::draw::draw_frame(terminal, cursor, |frame, link_spans| {
             let area = frame.area();
             if area.height == 0 || area.width < 4 {
                 return (None, None);
@@ -135,6 +135,8 @@ pub fn draw_live(
                 crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
                 return (None, None);
             };
+            minimal_api::ensure_agent_media_link_paths(agent);
+            let hyperlink_route = pager::hyperlink_route::hyperlink_route();
             minimal_api::set_agent_active_pane(agent, pager::app::agent_view::AgentPane::Prompt);
             let status_activity = minimal_advance_phase_timer(agent);
             let show_todos = crate::todo::todo_panel_visible(agent, force_todos);
@@ -181,7 +183,7 @@ pub fn draw_live(
                     .min(area.height.saturating_sub(status_h))
                     .max(1);
                 let tail_h = area.height.saturating_sub(status_h + modal_h);
-                if tail_h > 0 {
+                if tail_h > 0 && !minimal_api::agent_session_reload_active(agent) {
                     let turn_running = minimal_api::agent_state(agent).is_turn_running();
                     draw_tail(
                         frame.buffer_mut(),
@@ -196,7 +198,11 @@ pub fn draw_live(
                         &theme,
                         &commit_app,
                         minimal_api::agent_cwd(agent),
+                        minimal_api::agent_media_link_paths(agent),
                         frame_stamp,
+                        link_spans,
+                        hyperlink_route.emit_osc8,
+                        hyperlink_route.emit_id,
                     );
                 }
                 render_minimal_status(
@@ -271,7 +277,7 @@ pub fn draw_live(
             let todos_h = (todo_lines.len() as u16).min(after_btw);
             let btw_h = btw_desired;
             let tail_h = rest.saturating_sub(todos_h + btw_h);
-            if tail_h > 0 {
+            if tail_h > 0 && !minimal_api::agent_session_reload_active(agent) {
                 let tail_area = Rect {
                     x: area.x,
                     y: area.y,
@@ -287,7 +293,11 @@ pub fn draw_live(
                     &theme,
                     &commit_app,
                     minimal_api::agent_cwd(agent),
+                    minimal_api::agent_media_link_paths(agent),
                     frame_stamp,
+                    link_spans,
+                    hyperlink_route.emit_osc8,
+                    hyperlink_route.emit_id,
                 );
             }
             if todos_h > 0 {
@@ -326,6 +336,7 @@ pub fn draw_live(
                     focused,
                     None,
                     minimal_api::agent_btw_selection_model_mut(agent),
+                    None,
                     None,
                     &[],
                 );
@@ -429,7 +440,11 @@ fn draw_tail(
     theme: &Theme,
     appearance: &pager::appearance::AppearanceConfig,
     cwd: &std::path::Path,
+    media_paths: &[std::path::PathBuf],
     frame: pager::motion::FrameStamp,
+    link_spans: &mut Vec<ratatui_inline::LinkSpan>,
+    emit_links: bool,
+    emit_link_ids: bool,
 ) {
     if area.height == 0 {
         return;
@@ -477,7 +492,15 @@ fn draw_tail(
                 width,
                 height: draw_h,
             };
-            renderer(*e).with_skip_rows(entry_skip).render(rect, buf);
+            let renderer = renderer(*e).with_skip_rows(entry_skip);
+            if emit_links {
+                link_spans.extend(
+                    renderer
+                        .link_overlay(rect, media_paths)
+                        .resolved_spans(emit_link_ids),
+                );
+            }
+            renderer.render(rect, buf);
             y += draw_h;
             if y >= bottom {
                 break;
@@ -537,13 +560,16 @@ fn render_minimal_status(
     let watchers = minimal_api::watchers(agent);
     let drain_blocked = minimal_api::drain_blocked(agent);
     let parked = minimal_api::renders_parked(agent);
-    if !turn_status::should_show(
-        minimal_api::agent_state(agent),
-        drain_blocked,
-        minimal_api::mcp_init_progress(agent),
-        watchers,
-        parked,
-    ) {
+    let control_status = minimal_api::control_status(agent, area.width as usize);
+    if control_status.is_none()
+        && !turn_status::should_show(
+            minimal_api::agent_state(agent),
+            drain_blocked,
+            minimal_api::mcp_init_progress(agent),
+            watchers,
+            parked,
+        )
+    {
         render_idle_hint(buf, area, theme);
         return;
     }
@@ -570,6 +596,7 @@ fn render_minimal_status(
             flat_background: true,
             held_queue: minimal_api::held_queue_count(agent),
             held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
+            control_status: control_status.as_deref(),
         },
     );
 }
@@ -733,6 +760,9 @@ pub(super) fn tail_height(
     appearance: &pager::appearance::AppearanceConfig,
     frame: pager::motion::FrameStamp,
 ) -> u16 {
+    if minimal_api::agent_session_reload_active(agent) {
+        return 0;
+    }
     let theme = Theme::current();
     let sb = minimal_api::agent_scrollback(agent);
     let turn_running = minimal_api::agent_state(agent).is_turn_running();
@@ -750,6 +780,7 @@ pub(super) fn tail_height(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pager::scrollback::RenderBlock;
     fn agent() -> pager::app::agent_view::AgentView {
         minimal_api::test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"))
     }
@@ -817,6 +848,141 @@ mod tests {
             ),
             painted_height.saturating_add(super::super::commit::MINIMAL_BLOCK_GAP)
         );
+    }
+
+    #[test]
+    fn reconnect_full_replay_is_frozen_then_skipped_as_existing_history() {
+        let mut agent = agent();
+        minimal_api::set_agent_minimal_mode_for_test(&mut agent);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("old native history"));
+        super::super::commit::commit_leading_run(
+            minimal_api::agent_scrollback_mut(&mut agent),
+            false,
+            |_, _| true,
+        );
+
+        minimal_api::begin_agent_session_reload_for_test(&mut agent, 7);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("old native history"));
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("missed while disconnected"));
+        minimal_api::mark_agent_reload_replay_seen_for_test(&mut agent);
+        let appearance = super::super::commit::committed_appearance(
+            &pager::appearance::AppearanceConfig::default(),
+        );
+        assert_eq!(
+            tail_height(
+                &agent,
+                40,
+                &appearance,
+                pager::motion::FrameStamp::default(),
+            ),
+            0,
+            "staged replay must not leak into Minimal's live region"
+        );
+
+        assert!(minimal_api::finish_agent_session_reload_for_test(
+            &mut agent, 7, true
+        ));
+        let sb = minimal_api::agent_scrollback(&agent);
+        let scan = super::super::commit::scan_frontier(sb, false);
+        assert_eq!(scan.tail_start, 2);
+        assert!(
+            scan.will_commit,
+            "only the prefix already printed before reconnect is skipped"
+        );
+
+        let mut emitted = Vec::new();
+        super::super::commit::commit_leading_run(
+            minimal_api::agent_scrollback_mut(&mut agent),
+            false,
+            |_, index| {
+                emitted.push(index);
+                true
+            },
+        );
+        assert_eq!(
+            emitted,
+            vec![1],
+            "the missed replay tail prints exactly once"
+        );
+
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("new after reconnect"));
+        let scan =
+            super::super::commit::scan_frontier(minimal_api::agent_scrollback(&agent), false);
+        assert!(scan.will_commit, "only the true post-reload tail commits");
+    }
+
+    #[test]
+    fn reconnect_cursor_success_commits_only_the_staged_tail() {
+        let mut agent = agent();
+        minimal_api::set_agent_minimal_mode_for_test(&mut agent);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("old native history"));
+        super::super::commit::commit_leading_run(
+            minimal_api::agent_scrollback_mut(&mut agent),
+            false,
+            |_, _| true,
+        );
+
+        minimal_api::begin_agent_session_reload_for_test(&mut agent, 8);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("cursor tail"));
+        let appearance = super::super::commit::committed_appearance(
+            &pager::appearance::AppearanceConfig::default(),
+        );
+        assert_eq!(
+            tail_height(
+                &agent,
+                40,
+                &appearance,
+                pager::motion::FrameStamp::default(),
+            ),
+            0,
+            "cursor tail stays staged until the transaction resolves"
+        );
+
+        assert!(minimal_api::finish_agent_session_reload_for_test(
+            &mut agent, 8, true
+        ));
+        let mut emitted = Vec::new();
+        super::super::commit::commit_leading_run(
+            minimal_api::agent_scrollback_mut(&mut agent),
+            false,
+            |_, index| {
+                emitted.push(index);
+                true
+            },
+        );
+        assert_eq!(emitted, vec![1], "the old prefix must not be reprinted");
+    }
+
+    #[test]
+    fn reconnect_failure_discards_staged_replay_without_advancing_frontier() {
+        let mut agent = agent();
+        minimal_api::set_agent_minimal_mode_for_test(&mut agent);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("old native history"));
+        super::super::commit::commit_leading_run(
+            minimal_api::agent_scrollback_mut(&mut agent),
+            false,
+            |_, _| true,
+        );
+
+        minimal_api::begin_agent_session_reload_for_test(&mut agent, 9);
+        minimal_api::agent_scrollback_mut(&mut agent)
+            .push_block(RenderBlock::agent_message("partial replay to discard"));
+        assert!(minimal_api::finish_agent_session_reload_for_test(
+            &mut agent, 9, false
+        ));
+
+        let sb = minimal_api::agent_scrollback(&agent);
+        assert_eq!(sb.len(), 1, "failed staging state must be rolled back");
+        let scan = super::super::commit::scan_frontier(sb, false);
+        assert_eq!(scan.tail_start, 1);
+        assert!(!scan.will_commit, "restored native history stays committed");
     }
     /// The tail and the committed footprint are one builder with a different
     /// tick; this is the net for anyone tempted to fork them again.

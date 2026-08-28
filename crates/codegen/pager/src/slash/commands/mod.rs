@@ -250,7 +250,7 @@ mod tests {
         assert!(reg.get("loop").is_some());
     }
     #[test]
-    fn shell_collision_contract_covers_every_pager_command_and_alias() {
+    fn shell_collision_contract_covers_every_pager_command() {
         const SHELL_RESERVED: &[&str] = &[
             "agent",
             "agents",
@@ -261,25 +261,20 @@ mod tests {
             "behavior",
             "btw",
             "cd",
-            "changelog",
             "chat",
-            "clear",
             "cloud",
             "clarify",
             "compact",
             "compact-mode",
-            "config",
             "config-agents",
             "context",
             "copy",
-            "cost",
             "debug",
             "delete",
             "docs",
             "doctor",
             "edit-prompt",
             "effort",
-            "exit",
             "expand",
             "export",
             "feedback",
@@ -287,31 +282,22 @@ mod tests {
             "fork",
             "fullscreen",
             "gboom",
-            "guides",
             "help",
             "history",
             "home",
             "hooks",
-            "howto",
             "jump",
-            "log",
             "loop",
-            "m",
             "marketplace",
             "mcps",
             "minimal",
-            "ml",
             "model",
             "multiline",
             "new",
             "normal",
-            "onboarding",
             "permission",
             "plan",
-            "plan-view",
             "plugins",
-            "preferences",
-            "prefs",
             "queue",
             "quit",
             "recap",
@@ -323,29 +309,19 @@ mod tests {
             "scroll-debug",
             "session-info",
             "settings",
-            "show-plan",
             "shortcuts",
             "skills",
-            "summarize",
             "tasks",
-            "terminal-check",
-            "terminal-info",
-            "terminal-setup",
             "theme",
             "timeline",
             "timestamps",
-            "title",
             "toggle-mouse-reporting",
             "trajectory",
-            "tour",
             "transcript",
             "tutorial",
-            "t",
-            "undo",
             "usage",
             "view-plan",
             "vim-mode",
-            "welcome",
             "workflow",
             "workflow-run",
             "workflows",
@@ -357,31 +333,47 @@ mod tests {
         }
     }
     #[test]
-    fn builtin_registry_lookup_by_alias() {
+    fn removed_aliases_are_not_registered() {
         let reg = CommandRegistry::new(builtin_commands());
-        assert!(reg.get("exit").is_some());
-        assert!(reg.get("clear").is_some());
-        assert!(reg.get("m").is_some());
-        assert!(reg.get("welcome").is_some());
-        assert!(reg.get("show-plan").is_some());
-        assert!(reg.get("plan-view").is_some());
-        assert!(reg.get("undo").is_some());
+        for removed in [
+            "m",
+            "ml",
+            "config",
+            "preferences",
+            "prefs",
+            "undo",
+            "clear",
+            "exit",
+            "summarize",
+            "show-plan",
+            "plan-view",
+            "cost",
+            "terminal-setup",
+            "terminal-check",
+            "terminal-info",
+            "changelog",
+            "t",
+            "log",
+            "tour",
+            "onboarding",
+            "howto",
+            "guides",
+            "welcome",
+            "title",
+        ] {
+            assert!(reg.get(removed).is_none(), "/{removed} must remain unknown");
+        }
     }
     #[test]
-    fn aliases_resolve_to_same_command() {
-        let reg = CommandRegistry::new(builtin_commands());
-        let exit_cmd = reg.get("exit").unwrap();
-        let quit_cmd = reg.get("quit").unwrap();
-        assert_eq!(exit_cmd.name(), quit_cmd.name());
-        let doctor = reg.get("doctor").unwrap();
-        assert_eq!(doctor.usage(), "/doctor [fix [FIX]]");
-        for alias in ["terminal-setup", "terminal-check", "terminal-info"] {
-            assert_eq!(reg.get(alias).unwrap().name(), doctor.name());
-            assert_eq!(reg.get(alias).unwrap().usage(), doctor.usage());
+    fn production_builtin_catalog_registers_no_aliases() {
+        for command in builtin_commands() {
+            assert!(
+                command.aliases().is_empty(),
+                "/{} unexpectedly registers aliases: {:?}",
+                command.name(),
+                command.aliases()
+            );
         }
-        let rewind = reg.get("rewind").unwrap();
-        assert_eq!(reg.get("undo").unwrap().name(), rewind.name());
-        assert_eq!(reg.get("undo").unwrap().usage(), rewind.usage());
     }
     #[test]
     fn exit_returns_quit_action() {
@@ -656,6 +648,20 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[test]
+    fn every_builtin_declares_a_user_facing_purpose() {
+        let commands = builtin_commands();
+        let uncategorized: Vec<&str> = commands
+            .iter()
+            .filter(|command| command.kind() == crate::slash::CommandKind::Extension)
+            .map(|command| command.name())
+            .collect();
+        assert!(
+            uncategorized.is_empty(),
+            "builtins must not fall through to the external Extension category: {uncategorized:?}"
+        );
+    }
     #[test]
     fn cd_registered_in_builtin_commands() {
         let reg = CommandRegistry::new(builtin_commands());
@@ -681,9 +687,10 @@ mod tests {
         );
     }
     #[test]
-    fn cost_aliases_usage() {
+    fn usage_has_only_its_canonical_name() {
         let reg = CommandRegistry::new(builtin_commands());
-        assert_eq!(reg.get("cost").expect("/cost").name(), "usage");
+        assert_eq!(reg.get("usage").expect("/usage").name(), "usage");
+        assert!(reg.get("cost").is_none());
     }
     #[test]
     fn debug_is_registered_and_executable() {
@@ -734,11 +741,7 @@ mod tests {
             reg.get("recap").is_some(),
             "/recap should be registered in builtins"
         );
-        assert_eq!(
-            reg.get("summarize").map(|c| c.name()),
-            Some("recap"),
-            "/summarize should alias /recap"
-        );
+        assert!(reg.get("summarize").is_none());
     }
     #[test]
     fn gboom_bare_invocation_opens_game() {

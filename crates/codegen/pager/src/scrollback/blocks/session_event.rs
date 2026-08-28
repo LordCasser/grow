@@ -1,6 +1,6 @@
 //! SessionEventBlock — typed session-level events displayed in scrollback.
 //!
-//! Unlike [`super::SystemMessageBlock`] (which renders arbitrary text),
+//! Unlike [`super::NoticeBlock`] (which renders arbitrary text),
 //! `SessionEventBlock` uses a [`SessionEvent`] enum so each event variant
 //! carries structured data (e.g., elapsed time, error messages, token counts).
 //! This enables variant-specific rendering and future styling differentiation.
@@ -53,11 +53,6 @@ pub enum SessionEvent {
         error: String,
         /// Elapsed time, if available.
         elapsed: Option<Duration>,
-    },
-    /// Auto-compaction started (context window threshold reached).
-    CompactionStarted {
-        /// Percentage of context window used (e.g., 85).
-        percentage: u8,
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
@@ -174,9 +169,6 @@ impl SessionEvent {
             } => {
                 format!("Turn failed: {error}")
             }
-            SessionEvent::CompactionStarted { percentage } => {
-                format!("Context {percentage}% full. Compacting…")
-            }
             SessionEvent::CompactionCompleted {
                 tokens_before,
                 tokens_after,
@@ -207,6 +199,8 @@ impl SessionEvent {
                     "This session's conversation history is incompatible with the \
                      current model. Please start a new session."
                         .to_string()
+                } else if error_type.is_some() {
+                    format!("Model request failed: {error}")
                 } else {
                     format!("Retry failed: {error}")
                 }
@@ -295,7 +289,7 @@ fn format_tokens(tokens: u64) -> String {
 
 /// Block that renders a [`SessionEvent`] in scrollback.
 ///
-/// Visually identical to [`super::SystemMessageBlock`] (muted text, compact,
+/// Visually identical to [`super::NoticeBlock`] (muted text, compact,
 /// unselectable). The structured `event` field is available for future
 /// styling differentiation (e.g., red text for failures).
 #[derive(Debug, Clone)]
@@ -588,7 +582,7 @@ impl BlockContent for SessionEventBlock {
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
-        false // Compact like SystemMessageBlock
+        false // Compact like NoticeBlock
     }
 
     fn has_raw_mode(&self) -> bool {
@@ -763,12 +757,12 @@ mod tests {
     }
 
     #[test]
-    fn retry_failed_other_error_type_shows_raw() {
+    fn non_retryable_model_error_is_not_labeled_as_retry_failure() {
         let event = SessionEvent::RetryFailed {
             error: "bad request".into(),
             error_type: Some("api_400".into()),
         };
-        assert_eq!(event.message(), "Retry failed: bad request");
+        assert_eq!(event.message(), "Model request failed: bad request");
     }
 
     #[test]

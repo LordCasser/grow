@@ -4,6 +4,7 @@
 #![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use futures_util::FutureExt as _;
 
 fn permission_audit_text(value: Option<String>) -> Option<String> {
     value
@@ -722,21 +723,116 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
-    let (resumed_timeline, validated_timeline, mut conversation, fresh_session_rules) =
-        match timeline_bootstrap {
-            TimelineBootstrap::Fresh { session_rules } => {
-                (None, None, Vec::new(), Some(session_rules))
-            }
-            TimelineBootstrap::Existing(events) => {
-                let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
+    let (
+        resumed_timeline,
+        validated_timeline,
+        mut conversation,
+        fresh_session_rules,
+        mut restored_control_intents,
+    ) = match timeline_bootstrap {
+        TimelineBootstrap::Fresh { session_rules } => (
+            None,
+            None,
+            Vec::new(),
+            Some(session_rules),
+            std::collections::HashMap::new(),
+        ),
+        TimelineBootstrap::Existing(events) => {
+            let mut receipts = std::collections::HashMap::new();
+            let durable_receipts =
+                crate::session::control::SessionControlSnapshot::durable_receipts_from_timeline(
+                    &events,
+                )
+                .and_then(|mut receipts| {
+                    receipts.extend(crate::session::persistence::durable_model_control_receipts(
+                        &events,
+                    )?);
+                    Ok(receipts)
+                })
+                .map_err(|error| {
                     agent::AgentBuildError::InvalidConfig(format!(
-                        "invalid persisted conversation timeline: {error}"
+                        "invalid persisted control receipt: {error}"
                     ))
                 })?;
-                let surface = timeline.surface().to_vec();
-                (Some(timeline.clone()), Some(timeline), surface, None)
+            for receipt in durable_receipts {
+                AdmissionState::restore_terminal_control_intent(
+                    &mut receipts,
+                    receipt.domain,
+                    &receipt.intent,
+                    ControlIntentTerminal {
+                        phase: crate::extensions::notification::ControlPhase::Applied,
+                        target: receipt.target,
+                        message: None,
+                        ui_terminal_durable: false,
+                    },
+                )
+                .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
             }
-        };
+            let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
+                agent::AgentBuildError::InvalidConfig(format!(
+                    "invalid persisted conversation timeline: {error}"
+                ))
+            })?;
+            let surface = timeline.surface().to_vec();
+            (
+                Some(timeline.clone()),
+                Some(timeline),
+                surface,
+                None,
+                receipts,
+            )
+        }
+    };
+    let mut control_receipt_error = None;
+    let _ = crate::session::storage::stream_replay_grow_notifications_in(
+        session_directory.as_ref(),
+        |notification| {
+            let GrowSessionUpdate::ControlStateUpdate(update) = notification.update else {
+                return;
+            };
+            if !matches!(
+                update.phase,
+                crate::extensions::notification::ControlPhase::Applied
+                    | crate::extensions::notification::ControlPhase::Rejected
+                    | crate::extensions::notification::ControlPhase::Superseded
+            ) {
+                return;
+            }
+            if let Some(intent) = update.intent.as_ref() {
+                let target = update
+                    .desired
+                    .clone()
+                    .unwrap_or_else(|| update.current.clone());
+                if target.domain() != update.domain {
+                    control_receipt_error = Some(
+                        "persisted control terminal target does not match its domain".to_string(),
+                    );
+                    return;
+                }
+                if let Err(error) = AdmissionState::restore_terminal_control_intent(
+                    &mut restored_control_intents,
+                    update.domain,
+                    intent,
+                    ControlIntentTerminal {
+                        phase: update.phase,
+                        target,
+                        message: update.message.clone(),
+                        ui_terminal_durable: true,
+                    },
+                ) {
+                    control_receipt_error = Some(error);
+                }
+            }
+        },
+    )
+    .map_err(|error| {
+        agent::AgentBuildError::InvalidConfig(format!(
+            "failed to restore durable control receipts: {error}"
+        ))
+    })?;
+    if let Some(error) = control_receipt_error {
+        return Err(agent::AgentBuildError::InvalidConfig(error));
+    }
     if validated_timeline.is_some()
         && !matches!(conversation.first(), Some(ConversationItem::System(_)))
     {
@@ -916,6 +1012,7 @@ pub(crate) async fn spawn_session_actor(
     chat_state_handle.update_credentials(credentials);
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
+        termination: TerminationState::Open,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
         notifications_suppressed: false,
@@ -923,7 +1020,14 @@ pub(crate) async fn spawn_session_actor(
         nudges_used_this_session: 0,
         recent_terminals: VecDeque::new(),
         pending_manual_compact: None,
-        pending_step_controls: VecDeque::new(),
+        pending_step_controls: PendingStepControls::default(),
+        applying_step_control: None,
+        behavior_control_revision: 0,
+        pending_behavior_control: None,
+        applying_behavior_control: None,
+        behavior_control_worker_active: false,
+        behavior_control_foreground_claimed: false,
+        control_intents: restored_control_intents,
         terminal_preemption_pending: false,
     });
     let mcp_strategy = match std::env::var("MCP_INIT_STRATEGY") {
@@ -1155,27 +1259,6 @@ pub(crate) async fn spawn_session_actor(
                 error = %e,
                 "MEMORY_INIT: ensure_initialized failed, continuing without template files"
             );
-        }
-        {
-            let gc_storage = storage.clone();
-            let gc_max_age = memory_config.as_ref().map_or(30, |mc| mc.gc.max_age_days);
-            tokio::task::spawn_blocking(move || match gc_storage.gc(gc_max_age) {
-                Ok(removed) if removed > 0 => {
-                    tracing::info!(
-                        target: ::diagnostics::memory_log::TARGET,
-                        removed,
-                        "MEMORY_GC: cleaned orphaned workspace directories"
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        target: ::diagnostics::memory_log::TARGET,
-                        error = %e,
-                        "MEMORY_GC: failed"
-                    );
-                }
-                _ => {}
-            });
         }
         let watcher_config = memory_config
             .as_ref()
@@ -1513,11 +1596,12 @@ pub(crate) async fn spawn_session_actor(
     };
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<sampler::SamplingEvent>();
-    let sampler_handle = sampler::SamplerActor::spawn(
+    let sampler_owner = sampler::SamplerActor::spawn_owned(
         sampler_config_initial,
         sampler_retry_policy,
         sampler_event_tx,
     );
+    let sampler_handle = sampler_owner.handle();
     let mut hook_discovery_errors: Vec<::hooks::error::HookError> = Vec::new();
     let built_hook_registry: Option<Arc<::hooks::discovery::HookRegistry>> =
         if let Some(override_reg) = hook_registry_override {
@@ -1647,18 +1731,36 @@ pub(crate) async fn spawn_session_actor(
     let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >();
-    {
+    let workflow_service_shutdown = tokio_util::sync::CancellationToken::new();
+    let workflow_service_shutdown_signal = workflow_service_shutdown.clone();
+    let workflow_worker = {
         let manager = workflow_manager.clone();
+        let panic_manager = manager.clone();
         let behavior = behavior.clone();
         let workflow_cmd_tx = cmd_tx.clone();
+        let panic_cmd_tx = workflow_cmd_tx.clone();
         let launch_cwd = std::path::PathBuf::from(session_info.cwd.as_str());
         let launch_session_directory = workflow_session_directory.clone();
+        let panic_shutdown = workflow_service_shutdown_signal.clone();
         tokio::spawn(async move {
+            let worker_result = std::panic::AssertUnwindSafe(async move {
             use crate::session::workflow::{registry, workspace::WorkflowWorkspace};
             use tools::implementations::grow_build::workflow::{
                 WorkflowAck, WorkflowRunControl, WorkflowToolInput, WorkflowToolOutput,
             };
-            while let Some((req, ack)) = workflow_rx.recv().await {
+            loop {
+                let (req, ack) = tokio::select! {
+                    envelope = workflow_rx.recv() => match envelope {
+                        Some(envelope) => envelope,
+                        None => break,
+                    },
+                    _ = workflow_service_shutdown_signal.cancelled() => {
+                        while let Ok((_, ack)) = workflow_rx.try_recv() {
+                            reject_workflow_envelope(ack);
+                        }
+                        break;
+                    }
+                };
                 if !background_workflows_enabled {
                     let _ = ack.send(WorkflowAck::Rejected {
                         code: "workflows_disabled",
@@ -1690,6 +1792,13 @@ pub(crate) async fn spawn_session_actor(
                 // the live Behavior check and the side effect are one ordered
                 // operation rather than a check-then-act race.
                 let mut workflow_admission = manager.lock().await;
+                if let Err(error) = workflow_admission.ensure_open_for_ingress() {
+                    let _ = ack.send(WorkflowAck::Rejected {
+                        code: "workflow_session_shutting_down",
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
                 if behavior.lock().behavior() != tool_types::BehaviorId::Workflow {
                     let _ = ack.send(WorkflowAck::Rejected {
                         code: "workflow_behavior_required",
@@ -1759,20 +1868,53 @@ pub(crate) async fn spawn_session_actor(
                                 .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
                             let script = definition.resolved.script.clone();
                             let hash = definition.summary.content_hash.clone();
-                            let report = tokio::task::spawn_blocking(move || {
-                                workflow::validate_script_with_agent_budget(
-                                    &script,
-                                    args,
-                                    agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
-                                )
-                            })
+                            // Validation executes a synchronous Rhai preflight
+                            // on the blocking pool. Do not hold the shared
+                            // Workflow admission lock across it: teardown
+                            // must be able to close the generation promptly.
+                            drop(workflow_admission);
+                            let report = tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                tokio::task::spawn_blocking(move || {
+                                    workflow::validate_script_with_agent_budget(
+                                        &script,
+                                        args,
+                                        agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
+                                    )
+                                }),
+                            )
                             .await
+                            .map_err(|_| {
+                                (
+                                    "workflow_validation_failed",
+                                    "Workflow preflight timed out after 30 seconds.".into(),
+                                )
+                            })?
                             .map_err(|error| {
                                 ("workflow_validation_failed", format!("validator panicked: {error}"))
                             })?
                             .map_err(|error| {
                                 ("workflow_validation_failed", error.to_string())
                             })?;
+                            let mut workflow_admission = manager.lock().await;
+                            if let Err(error) = workflow_admission.ensure_open_for_ingress() {
+                                return Err(("workflow_session_shutting_down", error.to_string()));
+                            }
+                            if behavior.lock().behavior() != tool_types::BehaviorId::Workflow {
+                                return Err((
+                                    "workflow_behavior_required",
+                                    "Workflow behavior changed while validation was running.".into(),
+                                ));
+                            }
+                            let current = workspace
+                                .resolve(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            if current.summary.content_hash != hash {
+                                return Err((
+                                    "workflow_validation_stale",
+                                    "Workflow Definition changed while validation was running; retry validation.".into(),
+                                ));
+                            }
                             workspace
                                 .record_validated(&launch_cwd, &definition_id, &hash)
                                 .map_err(|error| ("workflow_workspace_failed", error.to_string()))?;
@@ -1793,26 +1935,61 @@ pub(crate) async fn spawn_session_actor(
                             max_concurrency,
                             agent_budget,
                         } => {
+                            let mut workflow_admission = Some(workflow_admission);
                             let mut definition = workspace
                                 .resolve(&launch_cwd, &definition_id)
                                 .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
                             if !definition.summary.status.contains("validated") {
                                 let script = definition.resolved.script.clone();
                                 let probe_args = args.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    workflow::validate_script_with_agent_budget(
-                                        &script,
-                                        probe_args,
-                                        agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
-                                    )
-                                })
+                                let definition_hash = definition.summary.content_hash.clone();
+                                drop(workflow_admission.take());
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(30),
+                                    tokio::task::spawn_blocking(move || {
+                                        workflow::validate_script_with_agent_budget(
+                                            &script,
+                                            probe_args,
+                                            agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
+                                        )
+                                    }),
+                                )
                                 .await
+                                .map_err(|_| {
+                                    (
+                                        "workflow_validation_failed",
+                                        "Workflow preflight timed out after 30 seconds.".into(),
+                                    )
+                                })?
                                 .map_err(|error| {
                                     ("workflow_validation_failed", format!("validator panicked: {error}"))
                                 })?
                                 .map_err(|error| {
                                     ("workflow_validation_failed", error.to_string())
                                 })?;
+                                workflow_admission = Some(manager.lock().await);
+                                if let Err(error) = workflow_admission
+                                    .as_ref()
+                                    .expect("Workflow admission guard restored after preflight")
+                                    .ensure_open_for_ingress()
+                                {
+                                    return Err(("workflow_session_shutting_down", error.to_string()));
+                                }
+                                if behavior.lock().behavior() != tool_types::BehaviorId::Workflow {
+                                    return Err((
+                                        "workflow_behavior_required",
+                                        "Workflow behavior changed while validation was running.".into(),
+                                    ));
+                                }
+                                let current = workspace
+                                    .resolve(&launch_cwd, &definition_id)
+                                    .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                                if current.summary.content_hash != definition_hash {
+                                    return Err((
+                                        "workflow_validation_stale",
+                                        "Workflow Definition changed while validation was running; retry the Run.".into(),
+                                    ));
+                                }
                                 workspace
                                     .record_validated(
                                         &launch_cwd,
@@ -1854,10 +2031,14 @@ pub(crate) async fn spawn_session_actor(
                                 resume_run_id: None,
                             };
                             let (run_id, outcome_rx) = workflow_admission
+                                .as_mut()
+                                .expect("Workflow admission guard restored before launch")
                                 .launch(definition.resolved, spec)
                                 .await
                                 .map_err(|error| ("workflow_launch_failed", error.to_string()))?;
                             let run_handle = workflow_admission
+                                .as_ref()
+                                .expect("Workflow admission guard restored before inspection")
                                 .tracker()
                                 .lock()
                                 .get(&run_id)
@@ -2024,8 +2205,22 @@ pub(crate) async fn spawn_session_actor(
                     Err((code, detail)) => ack.send(WorkflowAck::Rejected { code, detail }),
                 };
             }
-        });
-    }
+            })
+            .catch_unwind()
+            .await;
+            if worker_result.is_err() {
+                panic_manager.lock().await.close_admission();
+                panic_shutdown.cancel();
+                let _ = panic_cmd_tx.send(
+                    crate::session::commands::SessionCommand::WorkflowTerminalFailure {
+                        run_id: "workflow-worker".into(),
+                        error: "Workflow ingress worker panicked; session entered fatal teardown"
+                            .into(),
+                    },
+                );
+            }
+        })
+    };
     let mut effective_config = crate::config::load_effective_config()
         .ok()
         .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
@@ -2046,6 +2241,7 @@ pub(crate) async fn spawn_session_actor(
     let workflow_run_id = startup_hints.workflow_run_id.clone();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
+        control_epoch: uuid::Uuid::now_v7().to_string(),
         #[cfg(test)]
         test_session_dir_guard: None,
         session_dir: session_dir.clone(),
@@ -2055,6 +2251,7 @@ pub(crate) async fn spawn_session_actor(
         model_auth_memo: std::cell::RefCell::new(None),
         state,
         step_control_gate: TokioMutex::new(()),
+        goal_transaction_gate: TokioMutex::new(()),
         notifications: NotificationSender {
             gateway: gateway.clone(),
             gateway_enabled: gateway_enabled.clone(),
@@ -2111,6 +2308,23 @@ pub(crate) async fn spawn_session_actor(
             cancel: Default::default(),
         },
         sideband_cancel: tokio_util::sync::CancellationToken::new(),
+        finalizer_sideband_cancel: tokio_util::sync::CancellationToken::new(),
+        sideband_repair_cancel: tokio_util::sync::CancellationToken::new(),
+        durable_ui_cancel: tokio_util::sync::CancellationToken::new(),
+        sideband_fail_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sideband_admission_gate: tokio::sync::Mutex::new(()),
+        session_activities: SessionActivityTracker::new(),
+        mcp_dispatcher_worker: TaskSlot::new(),
+        mcp_initialization_worker: TaskSlot::new(),
+        project_discovery_worker: TaskSlot::new(),
+        fs_watch_handle: std::cell::RefCell::new(None),
+        background_service_shutdown: CancellationToken::new(),
+        user_question_worker: TaskSlot::new(),
+        context_recall_worker: TaskSlot::new(),
+        notification_reconciliation_worker: TaskSlot::new(),
+        memory_reindex_worker: TaskSlot::new(),
+        step_control_worker: TaskSlot::new(),
+        behavior_control_worker: TaskSlot::new(),
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(
                 || crate::config::MemoryFlushConfig {
@@ -2120,6 +2334,7 @@ pub(crate) async fn spawn_session_actor(
                 |mc| mc.flush.clone(),
             ),
             is_flushing: std::sync::atomic::AtomicBool::new(false),
+            is_dreaming: std::sync::atomic::AtomicBool::new(false),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
             storage: std::cell::RefCell::new(memory_storage_for_session),
             save_on_end: memory_config
@@ -2205,9 +2420,16 @@ pub(crate) async fn spawn_session_actor(
         goal_command_tx,
         workflow_manager: workflow_manager.clone(),
         workflow_tx: workflow_tx.clone(),
+        workflow_worker: {
+            let slot = TaskSlot::new();
+            slot.arm(workflow_worker);
+            slot
+        },
+        workflow_service_shutdown,
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
         deferred_prefix: TaskSlot::new(),
+        restored_plan_approval: TaskSlot::new(),
         idle_prompt_extension: Some(IdlePromptExtension::new(weak.clone())),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
@@ -2237,6 +2459,8 @@ pub(crate) async fn spawn_session_actor(
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle,
+        sampler_owner: std::cell::RefCell::new(Some(sampler_owner)),
+        sampler_event_drainer: TaskSlot::new(),
         rebuild_spec: rebuild_spec.clone(),
         image_description_model: parking_lot::RwLock::new(image_description_model),
         session_title_route: std::cell::RefCell::new(session_title_route),
@@ -2302,7 +2526,13 @@ pub(crate) async fn spawn_session_actor(
                 prefix_session.build_prefix_background().await
             }));
     }
-    crate::session::actor::context_recall::serve_context_recall(&session, context_recall_receiver);
+    session
+        .context_recall_worker
+        .arm(crate::session::actor::context_recall::serve_context_recall(
+            &session,
+            context_recall_receiver,
+            session.background_service_shutdown.clone(),
+        ));
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_runtime_availability().await;
@@ -2348,12 +2578,13 @@ pub(crate) async fn spawn_session_actor(
     {
         let drainer_session = session.clone();
         let mut sampler_event_rx = sampler_event_rx;
-        tokio::task::spawn_local(async move {
+        let drainer = tokio::task::spawn_local(async move {
             while let Some(event) = sampler_event_rx.recv().await {
                 drainer_session.handle_sampling_event(event).await;
             }
             tracing::debug!("sampler event drainer exiting (channel closed)");
         });
+        session.sampler_event_drainer.arm(drainer);
     }
     {
         let Some(mut goal_command_rx) = session.goal_command_rx.borrow_mut().take() else {
@@ -2404,6 +2635,9 @@ pub(crate) async fn spawn_session_actor(
                             %error,
                             "failed to durably append subagent permission audit event"
                         );
+                        return Err(format!(
+                            "subagent permission audit event was not durable: {error}"
+                        ));
                     }
                 }
                 session
@@ -2411,6 +2645,7 @@ pub(crate) async fn spawn_session_actor(
                     .mark_audit_event_processed(audit_sequence);
             }
             tracing::debug!("permission audit bridge exiting (channel closed)");
+            Ok(())
         });
         *session.permission_audit_bridge.lock() = Some(bridge);
     }
@@ -2457,59 +2692,136 @@ pub(crate) async fn spawn_session_actor(
         let sampling_api_key = embed_api_key.clone();
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
-        tokio::task::spawn_local(async move {
-            let db_path = storage.workspace_dir().join("index.sqlite");
-            if let Ok(mut index) = memory::MemoryIndex::open_or_create(
-                &db_path,
-                storage.clone(),
-                index_config,
-                embed_dims,
-            ) && let Ok(files) = storage.list_memory_files()
-            {
-                let reindex_start = std::time::Instant::now();
-                let (mut total_added, mut total_updated, mut total_removed) = (0, 0, 0);
+        let gc_max_age = memory_config.as_ref().map_or(30, |mc| mc.gc.max_age_days);
+        let shutdown = session.background_service_shutdown.clone();
+        let worker = tokio::task::spawn_local(async move {
+            let reindex_start = std::time::Instant::now();
+            let reindex_storage = storage.clone();
+            let reindex_shutdown = shutdown.clone();
+            let embed_index_config = index_config.clone();
+            let reindex = tokio::task::spawn_blocking(move || {
+                match reindex_storage.gc(gc_max_age) {
+                    Ok(removed) if removed > 0 => tracing::info!(
+                        target: ::diagnostics::memory_log::TARGET,
+                        removed,
+                        "MEMORY_GC: cleaned orphaned workspace directories"
+                    ),
+                    Err(error) => tracing::debug!(
+                        target: ::diagnostics::memory_log::TARGET,
+                        %error,
+                        "MEMORY_GC: failed"
+                    ),
+                    _ => {}
+                }
+                if reindex_shutdown.is_cancelled() {
+                    return Ok((0, 0, 0, 0));
+                }
+                let db_path = reindex_storage.workspace_dir().join("index.sqlite");
+                let mut index = memory::MemoryIndex::open_or_create(
+                    &db_path,
+                    reindex_storage.clone(),
+                    index_config,
+                    embed_dims,
+                )
+                .map_err(|error| error.to_string())?;
+                let files = reindex_storage
+                    .list_memory_files()
+                    .map_err(|error| error.to_string())?;
+                let (mut added, mut updated, mut removed) = (0, 0, 0);
                 for file in &files {
-                    let source = storage.classify_source(file);
+                    if reindex_shutdown.is_cancelled() {
+                        break;
+                    }
+                    let source = reindex_storage.classify_source(file);
                     if let Ok(stats) = index.reindex_file(file, source) {
-                        total_added += stats.added;
-                        total_updated += stats.updated;
-                        total_removed += stats.removed;
+                        added += stats.added;
+                        updated += stats.updated;
+                        removed += stats.removed;
                     }
                 }
-                tracing::info!(
-                    target: ::diagnostics::memory_log::TARGET,
-                    files = files.len(),
-                    "MEMORY_REINDEX: background reindex complete"
-                );
-                let embedded_count = if let Some(api_key) = sampling_api_key {
-                    if let Some(provider) = memory::embedding::ApiEmbeddingProvider::from_session(
-                        &embed_config,
-                        sampling_base_url,
-                        api_key,
-                    ) {
-                        memory::embed_missing_chunks(&index, &provider).await
-                    } else {
+                Ok::<_, String>((files.len(), added, updated, removed))
+            });
+            let (file_count, total_added, total_updated, total_removed) = match reindex.await {
+                Ok(Ok(stats)) => stats,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        target: ::diagnostics::memory_log::TARGET,
+                        %error,
+                        "MEMORY_REINDEX: initial reindex failed"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: ::diagnostics::memory_log::TARGET,
+                        %error,
+                        "MEMORY_REINDEX: blocking owner failed"
+                    );
+                    return;
+                }
+            };
+            if shutdown.is_cancelled() {
+                return;
+            }
+            let embedded_count = if let Some(api_key) = sampling_api_key {
+                let db_path = storage.workspace_dir().join("index.sqlite");
+                match memory::MemoryIndex::open_or_create(
+                    &db_path,
+                    storage.clone(),
+                    embed_index_config,
+                    embed_dims,
+                ) {
+                    Ok(index) => {
+                        if let Some(provider) =
+                            memory::embedding::ApiEmbeddingProvider::from_session(
+                                &embed_config,
+                                sampling_base_url,
+                                api_key,
+                            )
+                        {
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => 0,
+                                embedded = memory::embed_missing_chunks(&index, &provider) => embedded,
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: ::diagnostics::memory_log::TARGET,
+                            %error,
+                            "MEMORY_REINDEX: failed to reopen index for embeddings"
+                        );
                         0
                     }
-                } else {
-                    0
-                };
-                ::diagnostics::session_ctx::log_event(
-                    ::diagnostics::memory_events::MemoryReindex {
-                        session_id: session_id_for_reindex.clone(),
-                        source: "init".to_owned(),
-                        added: total_added,
-                        updated: total_updated,
-                        removed: total_removed,
-                        embedded: embedded_count,
-                        duration_ms: reindex_start.elapsed().as_millis() as u64,
-                        trigger: "init".to_owned(),
-                    },
-                );
-                chunks_added_counter
-                    .fetch_add(total_added as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                0
+            };
+            if shutdown.is_cancelled() {
+                return;
             }
+            tracing::info!(
+                target: ::diagnostics::memory_log::TARGET,
+                files = file_count,
+                "MEMORY_REINDEX: background reindex complete"
+            );
+            ::diagnostics::session_ctx::log_event(::diagnostics::memory_events::MemoryReindex {
+                session_id: session_id_for_reindex,
+                source: "init".to_owned(),
+                added: total_added,
+                updated: total_updated,
+                removed: total_removed,
+                embedded: embedded_count,
+                duration_ms: reindex_start.elapsed().as_millis() as u64,
+                trigger: "init".to_owned(),
+            });
+            chunks_added_counter
+                .fetch_add(total_added as u64, std::sync::atomic::Ordering::Relaxed);
         });
+        session.memory_reindex_worker.arm(worker);
     }
     {
         use agent_client_protocol::Client as _;
@@ -2521,10 +2833,19 @@ pub(crate) async fn spawn_session_actor(
         let session_id = session.session_info.id.clone();
         let behavior = session.behavior.clone();
         let pending_interactions = session.pending_interactions.clone();
-        let session_for_hooks = session.clone();
+        let weak_session = Arc::downgrade(&session);
+        let shutdown = session.background_service_shutdown.clone();
         let mut user_question_rx = user_question_rx;
-        tokio::task::spawn_local(async move {
-            while let Some(mut request) = user_question_rx.recv().await {
+        let worker = tokio::task::spawn_local(async move {
+            loop {
+                let mut request = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    request = user_question_rx.recv() => {
+                        let Some(request) = request else { break };
+                        request
+                    }
+                };
                 use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
                 let mode = match behavior.lock().behavior() {
                     tool_types::BehaviorId::Plan => AskUserQuestionMode::Plan,
@@ -2546,56 +2867,72 @@ pub(crate) async fn spawn_session_actor(
                         .expect("AskUserQuestionExtRequest serialization should not fail")
                         .into(),
                 );
-                session_for_hooks
-                    .dispatch_notification_hook(
-                        "elicitation_dialog",
-                        Some("User question requested".into()),
-                        None,
-                        Some("info".into()),
-                    )
-                    .await;
                 let questions_for_response = request.questions.clone();
                 let tool_call_id = request.tool_call_id.clone();
-                let result = {
-                    let _pending_guard =
-                        crate::session::pending_interaction::PendingInteractionGuard::new(
-                            pending_interactions.clone(),
-                            gateway.clone(),
-                            session_id.clone(),
-                            tool_call_id.clone(),
-                            crate::session::pending_interaction::PendingKind::Question,
-                        );
+                let _pending_guard =
+                    crate::session::pending_interaction::PendingInteractionGuard::new(
+                        pending_interactions.clone(),
+                        gateway.clone(),
+                        session_id.clone(),
+                        tool_call_id.clone(),
+                        crate::session::pending_interaction::PendingKind::Question,
+                    );
+                let hook_completed = if let Some(session) = weak_session.upgrade() {
                     tokio::select! {
                         biased;
-                        () = request.result_tx.closed() => {
-                            tracing::info!(
-                                %tool_call_id,
-                                "ask_user_question tool receiver closed (timeout or cancel); abandoning ACP wait"
-                            );
-                            Ok(UserQuestionResponse::Cancelled)
-                        }
-                        acp_result = gateway.ext_method(ext_request) => {
-                            match acp_result {
-                                Ok(raw) => {
-                                    match serde_json::from_str::<AskUserQuestionExtResponse>(
-                                        raw.0.get(),
-                                    ) {
-                                        Ok(typed) => {
-                                            Ok(typed.into_response(questions_for_response))
-                                        }
-                                        Err(e) => Err(UserQuestionError::MalformedResponse(
-                                            e.to_string(),
-                                        )),
+                        _ = shutdown.cancelled() => false,
+                        () = request.result_tx.closed() => false,
+                        _ = session.dispatch_notification_hook(
+                            "elicitation_dialog",
+                            Some("User question requested".into()),
+                            None,
+                            Some("info".into()),
+                        ) => true,
+                    }
+                } else {
+                    false
+                };
+                if !hook_completed {
+                    let _ = request.result_tx.send(Ok(UserQuestionResponse::Cancelled));
+                    break;
+                }
+                let result = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        Ok(UserQuestionResponse::Cancelled)
+                    }
+                    () = request.result_tx.closed() => {
+                        tracing::info!(
+                            %tool_call_id,
+                            "ask_user_question tool receiver closed (timeout or cancel); abandoning ACP wait"
+                        );
+                        Ok(UserQuestionResponse::Cancelled)
+                    }
+                    acp_result = gateway.ext_method(ext_request) => {
+                        match acp_result {
+                            Ok(raw) => {
+                                match serde_json::from_str::<AskUserQuestionExtResponse>(
+                                    raw.0.get(),
+                                ) {
+                                    Ok(typed) => {
+                                        Ok(typed.into_response(questions_for_response))
                                     }
+                                    Err(e) => Err(UserQuestionError::MalformedResponse(
+                                        e.to_string(),
+                                    )),
                                 }
-                                Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
                             }
+                            Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
                         }
                     }
                 };
                 let _ = request.result_tx.send(result);
+                if shutdown.is_cancelled() {
+                    break;
+                }
             }
         });
+        session.user_question_worker.arm(worker);
     }
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
     let diagnostics_ctx = ::diagnostics::session_ctx::DiagnosticCtx::new(
@@ -2629,13 +2966,17 @@ pub(crate) async fn spawn_session_actor(
         // The persisted adapter already owns the cross-process writer epoch.
         // Reconcile in bounded background batches so maintenance never extends
         // the session spawn critical path; the actor-local gate serializes each
-        // batch with live notification admission and resolution.
-        let reconciliation_session = session.clone();
-        tokio::task::spawn_local(async move {
-            reconciliation_session
-                .reconcile_notification_payloads()
-                .await;
+        // batch with live notification admission and resolution. The worker is
+        // Session-owned so payload deletion cannot cross the final frontier.
+        let weak_session = Arc::downgrade(&session);
+        let shutdown = session.background_service_shutdown.clone();
+        let worker = tokio::task::spawn_local(async move {
+            let Some(session) = weak_session.upgrade() else {
+                return;
+            };
+            session.reconcile_notification_payloads(&shutdown).await;
         });
+        session.notification_reconciliation_worker.arm(worker);
     }
     tokio::task::spawn_local(async move {
         ::diagnostics::session_ctx::with_session_ctx(
@@ -2697,27 +3038,143 @@ pub(crate) async fn spawn_session_actor(
         session_done_rx,
     ))
 }
+
+fn reject_workflow_envelope(
+    ack: tokio::sync::oneshot::Sender<tools::implementations::grow_build::workflow::WorkflowAck>,
+) {
+    let _ = ack.send(
+        tools::implementations::grow_build::workflow::WorkflowAck::Rejected {
+            code: "workflow_session_shutting_down",
+            detail: "Session is shutting down; Workflow admission is closed.".into(),
+        },
+    );
+}
 /// Handle for a session's dedicated thread. Stored separately from `SessionHandle`
 /// (which derives `Clone`) because `JoinHandle` is not `Clone`.
+#[derive(Clone)]
 pub struct SessionThread {
-    join_handle: std::thread::JoinHandle<()>,
+    owner: std::sync::Arc<SessionThreadOwner>,
+}
+enum SessionThreadState {
+    Running(std::thread::JoinHandle<()>),
+    Joining,
+    Joined { panicked: bool },
+}
+struct SessionThreadOwner {
+    state: std::sync::Mutex<SessionThreadState>,
+}
+fn session_thread_reaper() -> &'static std::sync::mpsc::Sender<std::thread::JoinHandle<()>> {
+    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<std::thread::JoinHandle<()>>> =
+        std::sync::OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<std::thread::JoinHandle<()>>();
+        std::thread::Builder::new()
+            .name("session-reaper".into())
+            .spawn(move || {
+                while let Ok(handle) = rx.recv() {
+                    let _ = handle.join();
+                }
+            })
+            .expect("session thread reaper must start");
+        tx
+    })
+}
+impl Drop for SessionThreadOwner {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        let SessionThreadState::Running(handle) =
+            std::mem::replace(state, SessionThreadState::Joining)
+        else {
+            return;
+        };
+        // The last logical owner disappearing must never detach a live session
+        // thread. One process-owned reaper serializes joins off the Tokio
+        // runtime. If the reaper itself is unavailable, fail closed and join
+        // synchronously rather than exposing a second writer admission.
+        if let Err(error) = session_thread_reaper().send(handle) {
+            let _ = error.0.join();
+        }
+    }
 }
 impl SessionThread {
+    fn new(join_handle: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            owner: std::sync::Arc::new(SessionThreadOwner {
+                state: std::sync::Mutex::new(SessionThreadState::Running(join_handle)),
+            }),
+        }
+    }
     /// Check if the session thread has exited (panicked or finished).
     pub fn is_finished(&self) -> bool {
-        self.join_handle.is_finished()
+        let state = self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*state {
+            SessionThreadState::Running(handle) => handle.is_finished(),
+            SessionThreadState::Joining => false,
+            SessionThreadState::Joined { .. } => true,
+        }
+    }
+    /// Consume and join a finished session thread so panic is not mistaken for
+    /// a clean writer shutdown. Callers must check `is_finished` first.
+    pub fn join(self) -> std::thread::Result<()> {
+        let handle = {
+            let mut state = self
+                .owner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match std::mem::replace(&mut *state, SessionThreadState::Joining) {
+                SessionThreadState::Running(handle) => handle,
+                SessionThreadState::Joined { panicked } => {
+                    *state = SessionThreadState::Joined { panicked };
+                    return if panicked {
+                        Err(Box::new("session thread panicked".to_string()))
+                    } else {
+                        Ok(())
+                    };
+                }
+                SessionThreadState::Joining => {
+                    *state = SessionThreadState::Joining;
+                    return Err(Box::new(
+                        "session thread join already in progress".to_string(),
+                    ));
+                }
+            }
+        };
+        let result = handle.join();
+        let panicked = result.is_err();
+        *self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = SessionThreadState::Joined { panicked };
+        result
     }
     /// Construct from a raw `JoinHandle`. Used in tests.
     #[cfg(test)]
     pub fn from_handle(handle: std::thread::JoinHandle<()>) -> Self {
-        Self {
-            join_handle: handle,
-        }
+        Self::new(handle)
     }
 }
 /// Return type from the session thread's initialization, sent via oneshot.
 struct SessionInitResult {
     handle: SessionHandle,
+}
+
+/// Join a session thread whose initialization did not produce a usable
+/// handle. Dropping a `std::thread::JoinHandle` detaches it; that would expose
+/// the caller to a retry while the old persistence owner is still unwinding,
+/// which is especially visible as file-sharing violations on Windows.
+async fn join_failed_session_init_thread(
+    session_thread: SessionThread,
+) -> Result<std::thread::Result<()>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || session_thread.join()).await
 }
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
 ///
@@ -2816,6 +3273,7 @@ pub(crate) async fn spawn_session_on_thread(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
+    on_thread_spawned: Option<&dyn Fn(SessionThread)>,
 ) -> Result<(SessionHandle, SessionThread), acp::Error> {
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, agent::AgentBuildError>>();
@@ -2950,16 +3408,48 @@ pub(crate) async fn spawn_session_on_thread(
             );
         }
     };
-    let init = init_rx
-        .await
-        .map_err(|_| {
-            tracing::error!("Session thread panicked during initialization");
-            acp::Error::internal_error().data("session thread panicked during initialization")
-        })?
-        .map_err(|e| {
-            acp::Error::internal_error().data(format!("session initialization failed: {e}"))
-        })?;
-    Ok((init.handle, SessionThread { join_handle }))
+    let session_thread = SessionThread::new(join_handle);
+    if let Some(register) = on_thread_spawned {
+        register(session_thread.clone());
+    }
+    match init_rx.await {
+        Ok(Ok(init)) => Ok((init.handle, session_thread)),
+        Ok(Err(error)) => {
+            let joined = join_failed_session_init_thread(session_thread)
+                .await
+                .map_err(|join_error| {
+                    acp::Error::internal_error().data(format!(
+                        "session initialization failed and its thread could not be joined: {join_error}"
+                    ))
+                })?;
+            if joined.is_err() {
+                tracing::error!("Session thread panicked after reporting an initialization error");
+                return Err(acp::Error::internal_error().data(format!(
+                    "session initialization failed: {error}; session thread panicked while unwinding"
+                )));
+            }
+            Err(acp::Error::internal_error()
+                .data(format!("session initialization failed: {error}")))
+        }
+        Err(_) => {
+            let joined = join_failed_session_init_thread(session_thread)
+                .await
+                .map_err(|join_error| {
+                    acp::Error::internal_error().data(format!(
+                        "session initialization channel closed and its thread could not be joined: {join_error}"
+                    ))
+                })?;
+            if joined.is_err() {
+                tracing::error!("Session thread panicked during initialization");
+                Err(acp::Error::internal_error()
+                    .data("session thread panicked during initialization"))
+            } else {
+                tracing::error!("Session thread exited without publishing initialization");
+                Err(acp::Error::internal_error()
+                    .data("session thread exited without publishing initialization"))
+            }
+        }
+    }
 }
 /// Production [`crate::session::mcp_restart::RestartActions`] impl.
 ///
@@ -3091,5 +3581,106 @@ mod terminal_backend_select_tests {
             select_terminal_backend_kind(false, false, false, false),
             TerminalBackendKind::LocalNonPersistent
         );
+    }
+}
+
+#[cfg(test)]
+mod workflow_ingress_shutdown_tests {
+    use super::reject_workflow_envelope;
+    use tools::implementations::grow_build::workflow::WorkflowAck;
+
+    #[tokio::test]
+    async fn queued_envelope_is_rejected_at_worker_shutdown() {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        reject_workflow_envelope(ack_tx);
+        assert!(matches!(
+            ack_rx.await.expect("shutdown rejection"),
+            WorkflowAck::Rejected {
+                code: "workflow_session_shutting_down",
+                ..
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod failed_session_init_join_tests {
+    use super::{SessionThread, SessionThreadState, join_failed_session_init_thread};
+
+    #[tokio::test]
+    async fn failed_initialization_waits_for_thread_teardown() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        let join = join_failed_session_init_thread(SessionThread::new(thread));
+        tokio::pin!(join);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut join)
+                .await
+                .is_err(),
+            "initialization failure must not expose a retry boundary before teardown"
+        );
+        let _ = release_tx.send(());
+        assert!(join.await.expect("blocking join task").is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_initialization_observes_thread_panic() {
+        let thread = std::thread::spawn(|| panic!("init panic fixture"));
+        assert!(
+            join_failed_session_init_thread(SessionThread::new(thread))
+                .await
+                .expect("blocking join task")
+                .is_err(),
+            "panic must be joined and classified instead of detached"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_init_waiter_cannot_detach_the_registered_thread() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        let registered = SessionThread::new(thread);
+        let waiter = tokio::spawn(join_failed_session_init_thread(registered.clone()));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let joining = {
+                    let state = registered
+                        .owner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    matches!(&*state, SessionThreadState::Joining)
+                };
+                if joining {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the blocking join must claim the shared owner");
+
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(
+            !registered.is_finished(),
+            "cancelling the async waiter must leave the SessionId draining"
+        );
+
+        let _ = release_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !registered.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the uncancellable blocking join must publish its terminal state");
+        assert!(registered.join().is_ok());
     }
 }

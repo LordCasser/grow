@@ -420,7 +420,7 @@ pub enum AutoCompactCancelReason {
     UserCancelled,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentPermissionOutcome {
     Approved,
@@ -430,9 +430,143 @@ pub enum SubagentPermissionOutcome {
     Cancelled,
 }
 
+/// Tone of an immutable, UI-only Shell notice.
+///
+/// A notice is a durable UI projection. It deliberately does not reuse ACP
+/// assistant chunks, so replaying it can never make Shell prose look like
+/// model output or feed it back into ChatState.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiNoticeTone {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UiNoticeCategory {
+    Command,
+    Lifecycle,
+}
+
+/// Durable presentation fact emitted by the Shell. It is not assistant text
+/// and never participates in ChatState/provider context projection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiNotice {
+    /// Logical correlation identity. Several notices may share it while each
+    /// durable event still receives its own outer Timeline event id.
+    pub correlation_id: String,
+    pub category: UiNoticeCategory,
+    /// Command text or lifecycle object (for example `/goal status` or `goal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Short catalog/lifecycle description captured at emission time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Concise user-facing output. Details belong in `details`.
+    pub message: String,
+    #[serde(default)]
+    pub tone: UiNoticeTone,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+/// Independent desired-state domains exposed by the Shell control plane.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlDomain {
+    Sampling,
+    Agent,
+    Behavior,
+}
+
+/// Lifecycle of one Shell-authoritative desired-state revision.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPhase {
+    Pending,
+    Applying,
+    Applied,
+    Rejected,
+    Superseded,
+}
+
+/// A complete target for one control domain. Sampling deliberately keeps the
+/// provider-qualified model id and effort together so changing one cannot
+/// resurrect a stale value of the other.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ControlTarget {
+    Sampling {
+        model_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+    },
+    Agent {
+        agent_name: String,
+    },
+    Behavior {
+        behavior_id: String,
+    },
+}
+
+impl ControlTarget {
+    pub fn domain(&self) -> ControlDomain {
+        match self {
+            Self::Sampling { .. } => ControlDomain::Sampling,
+            Self::Agent { .. } => ControlDomain::Agent,
+            Self::Behavior { .. } => ControlDomain::Behavior,
+        }
+    }
+}
+
+/// Shell-authoritative control projection. Pending/applying instances are
+/// transient UI state; terminal instances are durable UI events. Neither
+/// projection is ever appended to ChatState or a provider request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlStateUpdate {
+    /// Identity of the live SessionActor revision sequence. Revisions are only
+    /// monotonic inside one epoch; durable replay may contain several epochs.
+    pub epoch: String,
+    pub domain: ControlDomain,
+    pub revision: u64,
+    /// Original client-authored desired-state identity. Terminal projections
+    /// retain it so reconnect/reload can settle exactly the request that was
+    /// applied, rejected, or superseded instead of guessing from target text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<crate::session::ControlIntent>,
+    /// True only for the transient authoritative snapshot emitted after a
+    /// client load/reconnect. Revisions are monotonic within one live actor;
+    /// a freshly spawned actor may restart them, so the Pager may replace a
+    /// replayed high-water mark only when this explicit snapshot arrives.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot: bool,
+    /// Durable terminal receipt for one exact client intent. Receipt-only
+    /// events settle reconnecting clients and render immutable history, but
+    /// never replace the live domain projection: a newer desired target may
+    /// already be pending when a crash-recovered receipt is repaired.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub receipt_only: bool,
+    pub phase: ControlPhase,
+    pub current: ControlTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<ControlTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate", deny_unknown_fields)]
 pub enum SessionUpdate {
+    /// Durable UI-only terminal fact from a Shell command or lifecycle.
+    UiNotice(UiNotice),
+    /// UI-only projection of a session control domain.
+    ControlStateUpdate(ControlStateUpdate),
     /// A diff review request containing one or more file diffs for user review.
     DiffReview {
         /// The diff content to be reviewed.

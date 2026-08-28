@@ -35,6 +35,63 @@ pub struct SamplerActor {
     tasks: JoinSet<RequestId>,
 }
 
+/// Sole join owner for a spawned sampler actor.
+pub struct SamplerOwner {
+    handle: SamplerHandle,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SamplerOwner {
+    pub fn handle(&self) -> SamplerHandle {
+        self.handle.clone()
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.handle.close();
+        match self.task.take() {
+            Some(task) => task.await,
+            None => Ok(()),
+        }
+    }
+
+    pub async fn abort_and_join(&mut self) -> Result<(), tokio::task::JoinError> {
+        let Some(task) = self.task.take() else {
+            return Ok(());
+        };
+        task.abort();
+        match task.await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Close admission and join within `timeout`; on timeout, abort and still
+    /// observe the actor terminal so no detached owner survives teardown.
+    pub async fn shutdown_bounded(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        self.handle.close();
+        let Some(mut task) = self.task.take() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(timeout, &mut task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("sampler actor failed: {error}")),
+            Err(_) => {
+                task.abort();
+                match task.await {
+                    Ok(()) => Err("sampler actor shutdown timed out".into()),
+                    Err(error) if error.is_cancelled() => {
+                        Err("sampler actor shutdown timed out".into())
+                    }
+                    Err(error) => Err(format!(
+                        "sampler actor shutdown timed out and abort failed: {error}"
+                    )),
+                }
+            }
+        }
+    }
+}
+
 impl SamplerActor {
     /// Spawn the actor on the current tokio runtime and return a
     /// handle. The actor stops when the returned handle (and all its
@@ -44,15 +101,31 @@ impl SamplerActor {
         retry_policy: RetryPolicy,
         event_tx: mpsc::UnboundedSender<SamplingEvent>,
     ) -> SamplerHandle {
+        let mut owner = Self::spawn_owned(config, retry_policy, event_tx);
+        let handle = owner.handle();
+        drop(owner.task.take());
+        handle
+    }
+
+    /// Spawn an actor with an explicit shutdown and join owner.
+    pub fn spawn_owned(
+        config: SamplerConfig,
+        retry_policy: RetryPolicy,
+        event_tx: mpsc::UnboundedSender<SamplingEvent>,
+    ) -> SamplerOwner {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let handle = SamplerHandle::new(cmd_tx);
         let actor = Self {
             cmd_rx,
             event_tx,
             state: ActorState::new(config, retry_policy),
             tasks: JoinSet::new(),
         };
-        tokio::spawn(actor.run());
-        SamplerHandle::new(cmd_tx)
+        let task = tokio::spawn(actor.run());
+        SamplerOwner {
+            handle,
+            task: Some(task),
+        }
     }
 
     async fn run(mut self) {
@@ -80,6 +153,7 @@ impl SamplerActor {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
+                        Some(SamplerCommand::Shutdown) => break,
                         Some(cmd) => self.handle_command(cmd),
                         None => break, // all handles dropped
                     }
@@ -97,6 +171,7 @@ impl SamplerActor {
 
     fn handle_command(&mut self, cmd: SamplerCommand) {
         match cmd {
+            SamplerCommand::Shutdown => unreachable!("shutdown is handled by the run loop"),
             SamplerCommand::Submit {
                 request_id,
                 request,
@@ -145,5 +220,44 @@ impl SamplerActor {
                 let _ = reply.send(self.state.active_requests.len());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    fn owner_for(task: tokio::task::JoinHandle<()>) -> SamplerOwner {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        SamplerOwner {
+            handle: SamplerHandle::new(cmd_tx),
+            task: Some(task),
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_aborts_and_observes_hung_owner() {
+        let mut owner = owner_for(tokio::spawn(std::future::pending()));
+
+        let error = owner
+            .shutdown_bounded(std::time::Duration::from_millis(10))
+            .await
+            .expect_err("hung owner must fail the shutdown barrier");
+
+        assert!(error.contains("timed out"));
+        assert!(owner.task.is_none(), "timed-out task must not be detached");
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_observes_panicked_owner() {
+        let mut owner = owner_for(tokio::spawn(async { panic!("sampler owner panic") }));
+
+        let error = owner
+            .shutdown_bounded(std::time::Duration::from_secs(1))
+            .await
+            .expect_err("panicked owner must fail the shutdown barrier");
+
+        assert!(error.contains("failed"));
+        assert!(owner.task.is_none(), "panicked task must be observed");
     }
 }

@@ -14,10 +14,6 @@ impl SlashCommand for SettingsCommand {
         "settings"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["config", "preferences", "prefs"]
-    }
-
     fn description(&self) -> &str {
         "Open the settings modal"
     }
@@ -86,9 +82,8 @@ mod tests {
     }
 
     #[test]
-    fn aliases_are_registered() {
+    fn canonical_name_is_settings() {
         let cmd = SettingsCommand;
         assert_eq!(cmd.name(), "settings");
-        assert_eq!(cmd.aliases(), &["config", "preferences", "prefs"]);
     }
 }

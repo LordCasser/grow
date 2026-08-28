@@ -232,7 +232,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use std::io::stdout;
     ///
     /// use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
@@ -679,7 +679,7 @@ where
         self.swap_buffers();
 
         // Flush
-        self.backend.flush()?;
+        Backend::flush(&mut self.backend)?;
 
         let completed_frame = CompletedFrame {
             buffer: &self.buffers[1 - self.current],
@@ -868,12 +868,38 @@ where
     pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
     where
         F: FnOnce(&mut Buffer),
+        B: Write,
     {
+        self.insert_before_with_links(height, |buf, _links| draw_fn(buf))
+    }
+
+    /// Insert rows before the inline viewport and emit OSC 8 links while those
+    /// rows are written into native terminal history.
+    ///
+    /// `LinkSpan` coordinates are local to the temporary insertion buffer
+    /// (`row = 0..height`, `col = 0..viewport_width`). This deliberately
+    /// mirrors [`set_frame_links`](Self::set_frame_links): callers render one
+    /// semantic buffer and attach a separate link layer, so compact display
+    /// text never replaces or truncates the activation target.
+    pub fn insert_before_with_links<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut Buffer, &mut Vec<LinkSpan>),
+        B: Write,
+    {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: self.viewport_area.width,
+            height,
+        };
+        let mut buffer = Buffer::empty(area);
+        let mut links = Vec::new();
+        draw_fn(&mut buffer, &mut links);
         match self.viewport {
             #[cfg(feature = "scrolling-regions")]
-            Viewport::Inline(_) => self.insert_before_scrolling_regions(height, draw_fn),
+            Viewport::Inline(_) => self.insert_before_scrolling_regions(buffer, &links),
             #[cfg(not(feature = "scrolling-regions"))]
-            Viewport::Inline(_) => self.insert_before_no_scrolling_regions(height, draw_fn),
+            Viewport::Inline(_) => self.insert_before_no_scrolling_regions(buffer, &links),
             _ => Ok(()),
         }
     }
@@ -963,21 +989,18 @@ where
     #[cfg(not(feature = "scrolling-regions"))]
     fn insert_before_no_scrolling_regions(
         &mut self,
-        height: u16,
-        draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+        buffer: Buffer,
+        links: &[LinkSpan],
+    ) -> io::Result<()>
+    where
+        B: Write,
+    {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: self.viewport_area.width,
-            height,
-        };
-        let mut buffer = Buffer::empty(area);
-        draw_fn(&mut buffer);
+        let height = buffer.area.height;
         let mut buffer = buffer.content.as_slice();
+        let mut source_row = 0u16;
 
         // Use i32 variables so we don't have worry about overflowed u16s when adding, or about
         // negative results when subtracting.
@@ -1009,7 +1032,14 @@ where
             let to_draw = buffer_height.min(screen_height);
             let scroll_up = 0.max(drawn_height + to_draw - screen_height);
             self.scroll_up(scroll_up as u16)?;
-            buffer = self.draw_lines((drawn_height - scroll_up) as u16, to_draw as u16, buffer)?;
+            buffer = self.draw_lines_with_links(
+                (drawn_height - scroll_up) as u16,
+                to_draw as u16,
+                source_row,
+                buffer,
+                links,
+            )?;
+            source_row = source_row.saturating_add(to_draw as u16);
             drawn_height += to_draw - scroll_up;
             buffer_height -= to_draw;
         }
@@ -1030,10 +1060,12 @@ where
         //   scroll_up = drawn_height + buffer_height + viewport_height - screen_height
         let scroll_up = 0.max(drawn_height + buffer_height + viewport_height - screen_height);
         self.scroll_up(scroll_up as u16)?;
-        self.draw_lines(
+        self.draw_lines_with_links(
             (drawn_height - scroll_up) as u16,
             buffer_height as u16,
+            source_row,
             buffer,
+            links,
         )?;
         drawn_height += buffer_height - scroll_up;
 
@@ -1064,21 +1096,18 @@ where
     #[cfg(feature = "scrolling-regions")]
     fn insert_before_scrolling_regions(
         &mut self,
-        mut height: u16,
-        draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+        buffer: Buffer,
+        links: &[LinkSpan],
+    ) -> io::Result<()>
+    where
+        B: Write,
+    {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: self.viewport_area.width,
-            height,
-        };
-        let mut buffer = Buffer::empty(area);
-        draw_fn(&mut buffer);
+        let mut height = buffer.area.height;
         let mut buffer = buffer.content.as_slice();
+        let mut source_row = 0u16;
 
         // Handle the special case where the viewport takes up the whole screen.
         if self.viewport_area.height == self.last_known_area.height {
@@ -1087,10 +1116,11 @@ where
             let mut first = true;
             while !buffer.is_empty() {
                 buffer = if first {
-                    self.draw_lines(0, 1, buffer)?
+                    self.draw_lines_with_links(0, 1, source_row, buffer, links)?
                 } else {
-                    self.draw_lines_over_cleared(0, 1, buffer)?
+                    self.draw_lines_over_cleared_with_links(0, 1, source_row, buffer, links)?
                 };
+                source_row = source_row.saturating_add(1);
                 first = false;
                 self.backend.scroll_region_up(0..1, 1)?;
             }
@@ -1111,7 +1141,14 @@ where
                 let to_draw = height.min(screen_bottom - viewport_bottom);
                 self.backend
                     .scroll_region_down(viewport_top..viewport_bottom + to_draw, to_draw)?;
-                buffer = self.draw_lines_over_cleared(viewport_top, to_draw, buffer)?;
+                buffer = self.draw_lines_over_cleared_with_links(
+                    viewport_top,
+                    to_draw,
+                    source_row,
+                    buffer,
+                    links,
+                )?;
+                source_row = source_row.saturating_add(to_draw);
                 self.set_viewport_area(Rect {
                     y: viewport_top + to_draw,
                     ..self.viewport_area
@@ -1124,31 +1161,111 @@ where
         while height > 0 {
             let to_draw = height.min(viewport_top);
             self.backend.scroll_region_up(0..viewport_top, to_draw)?;
-            buffer = self.draw_lines_over_cleared(viewport_top - to_draw, to_draw, buffer)?;
+            buffer = self.draw_lines_over_cleared_with_links(
+                viewport_top - to_draw,
+                to_draw,
+                source_row,
+                buffer,
+                links,
+            )?;
+            source_row = source_row.saturating_add(to_draw);
             height -= to_draw;
         }
 
         Ok(())
     }
 
-    /// Draw lines at the given vertical offset. The slice of cells must contain enough cells
-    /// for the requested lines. A slice of the unused cells are returned.
-    fn draw_lines<'a>(
+    /// Draw a contiguous slice of insertion-buffer rows, preserving its local
+    /// hyperlink layer while mapping rows to their current screen position.
+    fn draw_lines_with_links<'a>(
         &mut self,
         y_offset: u16,
         lines_to_draw: u16,
+        source_row: u16,
         cells: &'a [Cell],
-    ) -> io::Result<&'a [Cell]> {
+        links: &[LinkSpan],
+    ) -> io::Result<&'a [Cell]>
+    where
+        B: Write,
+    {
         let width: usize = self.last_known_area.width.into();
         let (to_draw, remainder) = cells.split_at(width * lines_to_draw as usize);
-        if lines_to_draw > 0 {
-            let iter = to_draw
+        if lines_to_draw == 0 {
+            return Ok(remainder);
+        }
+        if links.is_empty() {
+            let mut skip = 0usize;
+            let iter = to_draw.iter().enumerate().filter_map(|(i, cell)| {
+                if skip > 0 {
+                    skip -= 1;
+                    return None;
+                }
+                skip = cell.symbol().width().saturating_sub(1);
+                Some(((i % width) as u16, y_offset + (i / width) as u16, cell))
+            });
+            self.backend.draw(iter)?;
+            Backend::flush(&mut self.backend)?;
+            return Ok(remainder);
+        }
+
+        for local_row in 0..lines_to_draw {
+            let row_start = local_row as usize * width;
+            let row_cells = &to_draw[row_start..row_start + width];
+            let mut skip = 0usize;
+            let drawable = row_cells
                 .iter()
                 .enumerate()
-                .map(|(i, c)| ((i % width) as u16, y_offset + (i / width) as u16, c));
-            self.backend.draw(iter)?;
-            self.backend.flush()?;
+                .filter_map(|(col, cell)| {
+                    if skip > 0 {
+                        skip -= 1;
+                        return None;
+                    }
+                    skip = cell.symbol().width().saturating_sub(1);
+                    Some((col, cell))
+                })
+                .collect::<Vec<_>>();
+            let logical_row = source_row.saturating_add(local_row);
+            let mut index = 0usize;
+            while index < drawable.len() {
+                let col = drawable[index].0;
+                let link = links.iter().find(|span| {
+                    span.row == logical_row
+                        && usize::from(span.col_start) <= col
+                        && col < usize::from(span.col_end)
+                });
+                let mut end = index + 1;
+                while end < drawable.len() {
+                    let next_col = drawable[end].0;
+                    let next = links.iter().find(|span| {
+                        span.row == logical_row
+                            && usize::from(span.col_start) <= next_col
+                            && next_col < usize::from(span.col_end)
+                    });
+                    if next != link {
+                        break;
+                    }
+                    end += 1;
+                }
+
+                if let Some(link) = link {
+                    write_osc8_open(&mut self.backend, &link.url, link.id)?;
+                    let result =
+                        self.backend
+                            .draw(drawable[index..end].iter().map(|(draw_col, cell)| {
+                                (*draw_col as u16, y_offset.saturating_add(local_row), *cell)
+                            }));
+                    write_osc8_close(&mut self.backend)?;
+                    result?;
+                } else {
+                    self.backend
+                        .draw(drawable[index..end].iter().map(|(draw_col, cell)| {
+                            (*draw_col as u16, y_offset.saturating_add(local_row), *cell)
+                        }))?;
+                }
+                index = end;
+            }
         }
+        Backend::flush(&mut self.backend)?;
         Ok(remainder)
     }
 
@@ -1172,9 +1289,31 @@ where
                 content: to_draw.to_vec(),
             };
             self.backend.draw(old.diff(&new).into_iter())?;
-            self.backend.flush()?;
+            Backend::flush(&mut self.backend)?;
         }
         Ok(remainder)
+    }
+
+    #[cfg(feature = "scrolling-regions")]
+    fn draw_lines_over_cleared_with_links<'a>(
+        &mut self,
+        y_offset: u16,
+        lines_to_draw: u16,
+        source_row: u16,
+        cells: &'a [Cell],
+        links: &[LinkSpan],
+    ) -> io::Result<&'a [Cell]>
+    where
+        B: Write,
+    {
+        if links.is_empty() {
+            return self.draw_lines_over_cleared(y_offset, lines_to_draw, cells);
+        }
+        // The scrolling-region path has already cleared these rows. OSC 8
+        // still needs the same per-cell emission as the regular draw; the
+        // linked helper deliberately writes the full row, which is equivalent
+        // to diffing against an empty buffer here.
+        self.draw_lines_with_links(y_offset, lines_to_draw, source_row, cells, links)
     }
 
     /// Scroll the whole screen up by the given number of lines.

@@ -114,21 +114,24 @@
         }
         let expected = app.agents[&AgentId(0)].subagent_views["child-session"]
             .session
-            .in_flight_control()
-            .unwrap()
-            .0;
-        assert!(expected.generation > 0, "reload must rearm the child token");
+            .current_control_token_for_test();
+        assert_eq!(
+            expected.generation, 0,
+            "transport reconnect must preserve the semantic user-intent generation"
+        );
+        assert!(
+            expected.dispatch_generation > 0,
+            "reload must rearm the child transport dispatch epoch"
+        );
 
         handle(spawn(), &mut app);
 
         let actual = app.agents[&AgentId(0)].subagent_views["child-session"]
             .session
-            .in_flight_control()
-            .unwrap()
-            .0;
+            .current_control_token_for_test();
         assert_eq!(
             actual, expected,
-            "durable spawn replay must reuse the exact child view instead of resetting its FIFO"
+            "durable spawn replay must reuse the exact child view instead of resetting its control revision"
         );
     }
 
@@ -451,6 +454,164 @@
         assert_eq!(info.status.as_deref(), Some("cancelled"));
     }
 
+    #[test]
+    fn replaying_the_same_subagent_lifecycle_twice_keeps_one_started_and_one_terminal_row() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let spawned = || subagent_ext_replay(
+            "sess-1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_spawned",
+                "subagent_id": "sa-once",
+                "parent_session_id": "sess-1",
+                "child_session_id": "child-once",
+                "subagent_type": "reviewer",
+                "description": "review once",
+            }),
+            "subagent-start-once",
+        );
+        let finished = || subagent_ext_replay(
+            "sess-1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_finished",
+                "subagent_id": "sa-once",
+                "child_session_id": "child-once",
+                "status": "completed",
+                "error": null,
+                "tool_calls": 1,
+                "turns": 1,
+                "duration_ms": 250,
+                "tokens_used": 10,
+            }),
+            "subagent-finish-once",
+        );
+
+        for _ in 0..2 {
+            handle_ext_notification(&spawned(), &mut app);
+            handle_ext_notification(&finished(), &mut app);
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.scrollback.len(), 2);
+        assert!(
+            agent
+                .session
+                .subagent_sessions
+                .get("child-once")
+                .is_some_and(|info| info.finished)
+        );
+    }
+
+    #[test]
+    fn replayed_spawn_does_not_reset_existing_terminal_entity() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let spawn = || {
+            subagent_ext_replay(
+                "sess-1",
+                serde_json::json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": "sa-preserve",
+                    "parent_session_id": "sess-1",
+                    "child_session_id": "child-preserve",
+                    "subagent_type": "reviewer",
+                    "description": "preserve terminal state",
+                }),
+                "spawn-preserve",
+            )
+        };
+        handle_ext_notification(&spawn(), &mut app);
+        {
+            let info = app.agents[&AgentId(0)]
+                .session
+                .subagent_sessions
+                .get_mut("child-preserve")
+                .unwrap();
+            info.finished = true;
+            info.status = Some("completed".into());
+            info.tokens_used = Some(91);
+            info.duration_ms = Some(1200);
+        }
+
+        // The same durable spawn fact is replayed again. It must merge its
+        // descriptor without turning the already-terminal entity running.
+        handle_ext_notification(&spawn(), &mut app);
+        let info = app.agents[&AgentId(0)]
+            .session
+            .subagent_sessions
+            .get("child-preserve")
+            .unwrap();
+        assert!(info.finished);
+        assert_eq!(info.status.as_deref(), Some("completed"));
+        assert_eq!(info.tokens_used, Some(91));
+        assert_eq!(info.duration_ms, Some(1200));
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
+    }
+
+    #[test]
+    fn finished_before_replayed_spawn_does_not_append_reversed_started_row() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let finished = subagent_ext_replay(
+            "sess-1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_finished",
+                "subagent_id": "sa-order",
+                "child_session_id": "child-order",
+                "status": "completed",
+                "error": null,
+                "tool_calls": 1,
+                "turns": 1,
+                "duration_ms": 250,
+                "tokens_used": 10,
+            }),
+            "finish-order",
+        );
+        assert!(handle_ext_notification(&finished, &mut app));
+
+        let spawned = subagent_ext_replay(
+            "sess-1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_spawned",
+                "subagent_id": "sa-order",
+                "parent_session_id": "sess-1",
+                "child_session_id": "child-order",
+                "subagent_type": "reviewer",
+                "description": "ordered lifecycle",
+            }),
+            "spawn-order",
+        );
+        assert!(handle_ext_notification(&spawned, &mut app));
+
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.scrollback.len(), 1);
+        assert!(agent
+            .session
+            .subagent_sessions
+            .get("child-order")
+            .is_some_and(|info| info.finished));
+        let (_, entry) = agent.scrollback.iter_entries().next().unwrap();
+        let crate::scrollback::block::RenderBlock::Subagent(block) = &entry.block else {
+            panic!("out-of-order lifecycle must leave a subagent row");
+        };
+        assert!(!block.is_running(), "a terminal row must not be followed by Started");
+    }
+
     /// `cancelled = false` must finalize the row, not revert "killing" to "running".
     #[test]
     fn kill_finalizes_orphan_when_shell_reports_not_cancelled() {
@@ -596,7 +757,10 @@
         };
         assert_eq!(sb.child_session_id, child_sid);
         assert!(matches!(sb.kind, SubagentBlockKind::Started));
-        assert!(agent.scrollback.needs_animation());
+        assert!(
+            !agent.scrollback.needs_animation(),
+            "started scrollback events are immutable; live activity belongs to the entity projection"
+        );
 
         let affected = handle(
             make_ext_session_notification_with_method(
@@ -620,29 +784,68 @@
         assert_eq!(info.duration_ms, Some(500));
         assert_eq!(info.scrollback_entry_id, Some(entry_id));
 
-        let entry = agent.scrollback.get_by_id(entry_id).unwrap();
-        let RenderBlock::Subagent(sb) = &entry.block else {
-            panic!("finished subagent must keep the started scrollback entry");
+        assert_eq!(agent.scrollback.len(), 2);
+        let started = agent.scrollback.get_by_id(entry_id).unwrap();
+        let RenderBlock::Subagent(started_block) = &started.block else {
+            panic!("started subagent event must remain a Subagent block");
         };
-        match &sb.kind {
+        assert!(matches!(started_block.kind, SubagentBlockKind::Started));
+        assert!(!started.is_running, "finish_running must stop the started event");
+        let terminal = agent.scrollback.entry(1).unwrap();
+        let RenderBlock::Subagent(terminal_block) = &terminal.block else {
+            panic!("finished subagent must append a terminal Subagent block");
+        };
+        match &terminal_block.kind {
             SubagentBlockKind::Completed { elapsed } => {
                 assert_eq!(*elapsed, std::time::Duration::from_millis(500));
             }
             other => {
-                panic!("blocking subagent must mutate started block to Completed, got {other:?}")
+                panic!("blocking subagent must append Completed, got {other:?}")
             }
         }
-        assert!(!entry.is_running, "finish_running must clear running flag");
         assert!(
             !agent.scrollback.needs_animation(),
-            "finished subagent entry must not keep scrollback animation"
+            "finished subagent events must not keep scrollback animation"
         );
     }
 
-    /// The live activity label fans out to `SubagentInfo` (tasks pane /
-    /// dashboard rows) alongside the scrollback block — from both the child
-    /// session/update path and the `SubagentProgress` path — and
-    /// `SubagentFinished` clears both surfaces.
+    #[test]
+    fn workflow_children_do_not_emit_orphan_subagent_lifecycle_rows() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "workflow-child";
+        let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+        let GrowSessionUpdate::SubagentSpawned {
+            workflow_run_id, ..
+        } = &mut spawned
+        else {
+            unreachable!("test fixture is SubagentSpawned")
+        };
+        *workflow_run_id = Some("workflow-run-1".into());
+
+        assert!(handle(
+            make_ext_session_notification("sess-parent", spawned),
+            &mut app,
+        ));
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 0);
+
+        assert!(handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_finished(child_sid),
+            ),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.subagent_sessions[child_sid].finished);
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "workflow-owned children use the workflow projection, so Finished must not create an orphan row"
+        );
+    }
+
+    /// Live activity belongs only to the mutable entity projection used by the
+    /// tasks/dashboard panes. Started/Finished scrollback rows remain immutable.
     #[test]
     fn subagent_activity_label_stamps_info_and_clears_on_finish() {
         let mut app = make_app_with_agent("sess-parent");
@@ -655,8 +858,7 @@
             &mut app,
         );
 
-        // A live child message chunk resolves "Responding" and stamps both
-        // the block and the info.
+        // A live child message chunk resolves "Responding" in entity state.
         let _ = handle(
             make_agent_chunk_with_event(child_sid, "child text", "p-child", None),
             &mut app,
@@ -665,11 +867,6 @@
         let info = agent.session.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.activity_label.as_deref(), Some("Responding"));
         let entry_id = info.scrollback_entry_id.unwrap();
-        let entry = agent.scrollback.get_by_id(entry_id).unwrap();
-        let RenderBlock::Subagent(sb) = &entry.block else {
-            panic!("expected Subagent block");
-        };
-        assert_eq!(sb.activity_label, info.activity_label);
 
         // SubagentProgress recomputes from the child tracker and restamps.
         app.agents
@@ -709,12 +906,9 @@
         );
         let entry = agent.scrollback.get_by_id(entry_id).unwrap();
         let RenderBlock::Subagent(sb) = &entry.block else {
-            panic!("expected Subagent block");
+            panic!("expected immutable SubagentStarted block");
         };
-        assert!(
-            sb.activity_label.is_none(),
-            "finish must clear the block label"
-        );
+        assert!(matches!(sb.kind, SubagentBlockKind::Started));
     }
 
     /// Regression: replayed SubagentSpawned (resumed_from unset) must load child
@@ -1120,11 +1314,19 @@
         let info = agent_a.session.subagent_sessions.get(child_sid).unwrap();
         assert!(info.finished);
         assert_eq!(info.status.as_deref(), Some("completed"));
-        let entry = agent_a.scrollback.get_by_id(entry_id).unwrap();
-        let RenderBlock::Subagent(sb) = &entry.block else {
-            panic!("inactive finish must keep SubagentBlock");
+        let started = agent_a.scrollback.get_by_id(entry_id).unwrap();
+        let RenderBlock::Subagent(started_block) = &started.block else {
+            panic!("inactive finish must keep the started Subagent block");
         };
-        assert!(matches!(sb.kind, SubagentBlockKind::Completed { .. }));
+        assert!(matches!(started_block.kind, SubagentBlockKind::Started));
+        let terminal = agent_a.scrollback.entry(1).unwrap();
+        let RenderBlock::Subagent(terminal_block) = &terminal.block else {
+            panic!("inactive finish must append a terminal Subagent block");
+        };
+        assert!(matches!(
+            terminal_block.kind,
+            SubagentBlockKind::Completed { .. }
+        ));
     }
 
     #[test]

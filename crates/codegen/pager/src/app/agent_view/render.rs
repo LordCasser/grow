@@ -1106,13 +1106,15 @@ impl AgentView {
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
         let parked = self.renders_parked();
-        let turn_status_height = if turn_status::should_show(
-            &self.session.state,
-            drain_blocked,
-            self.session.mcp_init_progress(),
-            watchers,
-            parked,
-        ) {
+        let control_status = self.session.live_status(area.width as usize);
+        let turn_status_height = if control_status.is_some()
+            || turn_status::should_show(
+                &self.session.state,
+                drain_blocked,
+                self.session.mcp_init_progress(),
+                watchers,
+                parked,
+            ) {
             1
         } else {
             0
@@ -1814,7 +1816,7 @@ impl AgentView {
                 self.hit_follow_indicator.clear();
             }
         }
-        if let Some(msg) = self.active_toast_message() {
+        if let Some((tone, msg)) = self.active_toast() {
             let sb = layout.scrollback;
             if let Some(toast_text) = fit_toast_text(msg, sb.width) {
                 let w = toast_text.chars().count() as u16;
@@ -1824,7 +1826,7 @@ impl AgentView {
                     for (i, ch) in toast_text.chars().enumerate() {
                         if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
                             cell.set_char(ch);
-                            cell.fg = theme.accent_user;
+                            cell.fg = tone.color(&theme);
                             cell.bg = theme.bg_base;
                             cell.modifier = ratatui::prelude::Modifier::BOLD;
                         }
@@ -1937,6 +1939,7 @@ impl AgentView {
                 Some(&mut self.hit_btw_close),
                 &mut self.last_btw_selection_model,
                 Some(&mut btw_links),
+                Some(self.session.cwd.as_path()),
                 &self.media_link_paths,
             );
             self.last_btw_area = layout.btw;
@@ -2073,6 +2076,7 @@ impl AgentView {
                         flat_background: false,
                         held_queue,
                         held_queue_top_sendable,
+                        control_status: control_status.as_deref(),
                     },
                 );
                 self.hit_cancel_button
@@ -3717,7 +3721,7 @@ impl AgentView {
             };
             let entry = if viewer.kind == crate::views::block_viewer::ViewerKind::PlainText {
                 Some(crate::scrollback::entry::ScrollbackEntry::new(
-                    crate::scrollback::block::RenderBlock::system(String::new()),
+                    crate::scrollback::block::RenderBlock::notice(String::new()),
                 ))
             } else {
                 self.scrollback.get_by_id(viewer.entry_id).cloned()
@@ -4625,7 +4629,7 @@ mod empty_state_logo_tests {
         let mut agent = make_agent();
         agent
             .scrollback
-            .push_block(crate::scrollback::RenderBlock::system("boot"));
+            .push_block(crate::scrollback::RenderBlock::notice("boot"));
         let buf = draw(&mut agent, Rect::new(0, 0, 200, 60));
         let rows = rendered_rows(&buf);
         assert!(

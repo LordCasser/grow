@@ -146,7 +146,7 @@ fn all_system_texts(app: &AppView, id: AgentId) -> Vec<String> {
     let sb = &app.agents[&id].scrollback;
     (0..sb.len())
         .filter_map(|i| match &sb.get(i).expect("index in range").block {
-            RenderBlock::System(sys) => Some(sys.text.clone()),
+            RenderBlock::Notice(sys) => Some(sys.text.clone()),
             _ => None,
         })
         .collect()

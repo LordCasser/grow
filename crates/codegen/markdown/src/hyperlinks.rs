@@ -6,8 +6,9 @@
 //!    `LinkTarget::source_range` lives here.
 //! 2. **Transformed bytes** -- what `apply_transforms` produces for a *chunk*
 //!    of source bytes between two render events.  In pretty mode the
-//!    transforms strip `[` and rewrite `](` as ` (`, so transformed bytes
-//!    do not line up with source bytes.
+//!    transforms strip `[` and either rewrite `](` as ` (` or hide a compact
+//!    link destination. Long path-like labels may also be replaced by their
+//!    final component, so transformed bytes do not line up with source bytes.
 //! 3. **Display cells** -- `(line_index, display_column)`.  What
 //!    `HyperlinkTarget` exposes for the OSC 8 layer to consume.
 //!
@@ -48,20 +49,17 @@ pub(crate) struct ChunkLinkRange {
 /// 1. `transforms` is sorted by `range.start` (the existing `apply_transforms`
 ///    relies on the same invariant; the parser pushes transforms in source
 ///    order).
-/// 2. No transform's source range overlaps the bytes a caller intends to
-///    locate — i.e. transforms touch *boundary* characters around link text
-///    (the `[` and `](` markers), never the link text itself.  All transforms
-///    pushed by the parser today (link bracket removal, bullet substitutions)
-///    satisfy this; the `debug_assert!` at the call sites in `render_ratatui`
-///    enforces it via the cursor invariant.
+/// 2. A transform may exactly cover the located range (used by compact path
+///    labels). In that case the start maps to the replacement start and the
+///    end maps to its end. A transform must not partially straddle an endpoint.
 ///
-/// **Straddle policy** (when a transform DOES contain `src_pos` despite the
-/// invariant above): the source position is clamped to the start of the
+/// **Straddle policy** (when a transform contains `src_pos` despite the
+/// exact-range rule above): the source position is clamped to the start of the
 /// transform's replacement string.  Both endpoints (start/end) clamp the
 /// same direction, so a link whose endpoint straddles a transform produces
 /// a column range that excludes the straddling bytes.  This is intentional
-/// rather than precise — a future transform that intentionally rewrites
-/// link text should add a typed mapping instead of relying on this clamp.
+/// rather than precise — an endpoint inside a partial text rewrite is
+/// ambiguous and should be represented with an exact-range transform instead.
 pub(crate) fn source_to_chunk_offset(
     src_pos: usize,
     chunk_start: usize,
@@ -85,7 +83,7 @@ pub(crate) fn source_to_chunk_offset(
             debug_assert!(
                 false,
                 "source_to_chunk_offset: transform [{}..{}) straddles src_pos {}; \
-                 link text should never overlap a transform.  See straddle policy.",
+                 link endpoint must not partially overlap a transform.  See straddle policy.",
                 t.range.start, t.range.end, src_pos,
             );
             let consumed = (src_pos - t_src_start) as isize;
@@ -180,6 +178,7 @@ pub(crate) fn emit_segment_hyperlinks(
             column_range: col_start..col_end,
             url: lt.url.clone(),
             id: lt.id,
+            provenance: lt.provenance,
         });
     }
 }
@@ -273,6 +272,236 @@ mod hyperlink_tests {
             slice, "link",
             "column_range should cover only the link text glyphs"
         );
+    }
+
+    #[test]
+    fn pretty_short_local_destination_remains_visible() {
+        let text = "Read [the guide](docs/guide.md) next.\n";
+        let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read the guide (docs/guide.md) next.");
+        let link = parser_link_text(&out, "the guide");
+        assert_eq!(link.url, "docs/guide.md");
+    }
+
+    #[test]
+    fn pretty_file_link_shows_filename_and_preserves_full_destination() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let destination = url::Url::from_file_path(path).unwrap();
+        let text = format!("Full report: [{path}](<{destination}>)\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Full report: report.md");
+        let link = parser_link_text(&out, "report.md");
+        assert_eq!(link.url, destination.as_str());
+        assert_eq!(
+            slice_by_cells(&rendered, link.column_range.clone()),
+            "report.md"
+        );
+    }
+
+    #[test]
+    fn pretty_long_inline_code_path_is_compact_but_raw_mode_is_lossless() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let text = format!("Open `{path}` now.\n");
+        let (pretty, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+        let pretty_text = line_to_string(&pretty.lines[0]);
+        assert_eq!(pretty_text, "Open report.md now.");
+        let link = parser_link_text(&pretty, "report.md");
+        assert_eq!(link.url, path);
+
+        let (raw, _) = render_markdown_ratatui_full(&text, test_style::STYLE, false, None);
+        assert!(line_to_string(&raw.lines[0]).contains(path));
+        let raw_link = raw
+            .hyperlinks
+            .iter()
+            .find(|link| link.url == path)
+            .expect("raw path keeps the semantic target");
+        assert_eq!(
+            slice_by_cells(
+                &line_to_string(&raw.lines[raw_link.line_index]),
+                raw_link.column_range.clone(),
+            ),
+            path,
+        );
+    }
+
+    #[test]
+    fn pretty_windows_drive_path_is_not_misclassified_as_url_scheme() {
+        let path = r"C:\Users\example\workspace\a-very-long-project-directory\reports\report.md";
+        let text = format!("Open `{path}` now.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Open report.md now.");
+        let link = parser_link_text(&out, "report.md");
+        assert_eq!(link.url, path);
+    }
+
+    #[test]
+    fn pretty_inline_code_path_with_spaces_uses_filename_boundary() {
+        let path = "/Users/example/a very long workspace/reports/Release Notes Final.md";
+        let text = format!("Open `{path}` now.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Open Release Notes Final.md now.");
+        let link = parser_link_text(&out, "Release Notes Final.md");
+        assert_eq!(link.url, path);
+    }
+
+    #[test]
+    fn pretty_long_plain_path_is_compact_and_keeps_full_target() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let text = format!("Full report: {path}\n");
+        let (pretty, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&pretty.lines[0]);
+        assert_eq!(rendered, "Full report: report.md");
+        let link = parser_link_text(&pretty, "report.md");
+        assert_eq!(link.url, path);
+
+        let (raw, _) = render_markdown_ratatui_full(&text, test_style::STYLE, false, None);
+        assert_eq!(
+            line_to_string(&raw.lines[0]),
+            format!("Full report: {path}")
+        );
+    }
+
+    #[test]
+    fn pretty_quoted_plain_path_with_spaces_is_compact() {
+        let path = "/Users/example/a very long workspace/reports/Release Notes Final.md";
+        let text = format!("Full report: \"{path}\"\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Full report: \"Release Notes Final.md\"");
+        let link = parser_link_text(&out, "Release Notes Final.md");
+        assert_eq!(link.url, path);
+    }
+
+    #[test]
+    fn long_inline_code_command_is_not_mistaken_for_a_file_reference() {
+        let command = "cargo run --manifest-path /Users/example/a/very/long/workspace/Cargo.toml";
+        let text = format!("Run `{command}` now.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        assert!(line_to_string(&out.lines[0]).contains(command));
+        assert!(out.hyperlinks.iter().all(|link| link.url != command));
+    }
+
+    #[test]
+    fn pretty_long_web_destination_keeps_short_label_and_full_target() {
+        let destination =
+            "https://example.com/a/very/long/path/to/the/complete/reference/report.html?view=full";
+        let text = format!("Read [the report]({destination}) next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read the report next.");
+        let link = parser_link_text(&out, "the report");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn pretty_long_plain_web_url_is_compact_and_keeps_full_target() {
+        let destination =
+            "https://example.com/a/very/long/path/to/the/complete/reference/report.html?view=full";
+        let text = format!("Read {destination} next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read report.html next.");
+        let link = parser_link_text(&out, "report.html");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn entity_before_long_plain_url_keeps_transform_order_and_link_target() {
+        let destination =
+            "https://example.com/a/very/long/path/to/the/complete/reference/report.html?view=full";
+        let text = format!("Read &amp; compare {destination} next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read & compare report.html next.");
+        let link = parser_link_text(&out, "report.html");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn entity_inside_compact_explicit_label_is_replaced_once() {
+        let label = "/Users/example/a/very/long/workspace/reports/report&amp;notes.md";
+        let destination = "file:///Users/example/a/very/long/workspace/reports/report%26notes.md";
+        let text = format!("Read [{label}]({destination}) next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read report&notes.md next.");
+        let link = parser_link_text(&out, "report&notes.md");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn descriptive_explicit_label_with_slash_is_not_compacted() {
+        let label = "Issue #123 / full investigation and mitigation details";
+        let destination =
+            "https://example.com/a/very/long/project/issues/123?view=full-investigation";
+        let text = format!("Read [{label}]({destination}) next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        assert_eq!(line_to_string(&out.lines[0]), format!("Read {label} next."));
+        let link = parser_link_text(&out, label);
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn pretty_long_autolink_is_compact_and_keeps_full_target() {
+        let destination =
+            "https://example.com/a/very/long/path/to/the/complete/reference/report.html?view=full";
+        let text = format!("Read <{destination}> next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read report.html next.");
+        let link = parser_link_text(&out, "report.html");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn pretty_long_web_self_label_uses_last_url_component() {
+        let destination =
+            "https://example.com/a/very/long/path/to/the/complete/reference/report.html?view=full";
+        let text = format!("Read [{destination}]({destination}) next.\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let rendered = line_to_string(&out.lines[0]);
+        assert_eq!(rendered, "Read report.html next.");
+        let link = parser_link_text(&out, "report.html");
+        assert_eq!(link.url, destination);
+    }
+
+    #[test]
+    fn compact_file_link_streaming_matches_full_render() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let destination = url::Url::from_file_path(path).unwrap();
+        let text = format!("Full report: [{path}](<{destination}>)\n\n");
+        let (full, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+
+        let split = text.find("workflows").unwrap() + 4;
+        let mut streaming = StreamingMarkdownRenderer::new(test_style::STYLE, true);
+        streaming.push_and_render(&text[..split], None);
+        streaming.push_and_render(&text[split..], None);
+        let streamed = streaming.finish(None);
+
+        assert_eq!(streamed.lines, full.lines);
+        assert_eq!(streamed.hyperlinks, full.hyperlinks);
     }
 
     /// In non-pretty mode the rendered text keeps `[link](url)` literally
@@ -619,6 +848,49 @@ mod hyperlink_tests {
             "link text span inside the cell should carry link_text styling \
              (bold in test_style), got style={:?}",
             click_span.style,
+        );
+    }
+
+    #[test]
+    fn long_file_link_inside_table_uses_filename_with_full_target() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let destination = url::Url::from_file_path(path).unwrap();
+        let text = format!("| Report |\n|---|\n| [{path}](<{destination}>) |\n",);
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+        let link = out
+            .hyperlinks
+            .iter()
+            .find(|link| link.url == destination.as_str())
+            .expect("table keeps the full file URL");
+        let rendered = line_to_string(&out.lines[link.line_index]);
+
+        assert!(rendered.contains("report.md"), "{rendered:?}");
+        assert!(!rendered.contains("/Users/example"), "{rendered:?}");
+        assert_eq!(
+            slice_by_cells(&rendered, link.column_range.clone()),
+            "report.md"
+        );
+    }
+
+    #[test]
+    fn long_plain_file_path_inside_table_uses_filename_with_full_target() {
+        let path =
+            "/Users/example/.grow/sessions/encoded/session/workflows/wf_123/scratch/report.md";
+        let text = format!("| Report |\n|---|\n| {path} |\n");
+        let (out, _) = render_markdown_ratatui_full(&text, test_style::STYLE, true, None);
+        let link = out
+            .hyperlinks
+            .iter()
+            .find(|link| link.url == path)
+            .expect("table keeps the full file target");
+        let rendered = line_to_string(&out.lines[link.line_index]);
+
+        assert!(rendered.contains("report.md"), "{rendered:?}");
+        assert!(!rendered.contains("/Users/example"), "{rendered:?}");
+        assert_eq!(
+            slice_by_cells(&rendered, link.column_range.clone()),
+            "report.md"
         );
     }
 

@@ -411,8 +411,12 @@ pub struct MvpAgent {
     /// LEADER-SAFE(per-session): in-flight `session/load` guards. Lets a racing
     /// `session/prompt` wait via [`Self::wait_for_in_flight_session_load`] instead
     /// of failing "unknown session id"; the RAII guard's drop wakes waiters.
-    loading_sessions: RefCell<
-        HashMap<acp::SessionId, tokio::sync::watch::Receiver<bool>>,
+    loading_sessions: RefCell<HashMap<acp::SessionId, std::rc::Rc<SessionLoadMarker>>>,
+    /// Per-session transaction gates for lifecycle mutations. The map keeps
+    /// weak references so dormant session ids do not accumulate, while every
+    /// waiter owns the same gate until the last serialized transaction exits.
+    session_lifecycle_gates: RefCell<
+        HashMap<acp::SessionId, std::sync::Weak<tokio::sync::Mutex<()>>>,
     >,
     /// LEADER-SAFE(per-session): reclaimed at `remove_session`. See [`RetainedResources`].
     retained_resources: RefCell<HashMap<acp::SessionId, RetainedResources>>,
@@ -744,23 +748,66 @@ fn plan_hunk_tracking(mode_str: Option<&str>) -> HunkTrackingPlan {
         actor_mode: resolve_hunk_tracking_mode(mode_str),
     }
 }
-/// RAII marker for an in-flight `session/load` (see
-/// [`MvpAgent::begin_session_load`]). Holding the guard keeps the session id
-/// in `MvpAgent::loading_sessions`; dropping it removes the marker and wakes
-/// every [`MvpAgent::wait_for_in_flight_session_load`] waiter (the held
-/// watch sender drops with the guard, closing the channel).
+/// Shared marker for every queued/running `session/load` targeting one Session
+/// ID. The lifecycle gate serializes the actual loads, while this lease spans
+/// the entire queue so cancelling a later waiter cannot make an earlier load
+/// temporarily invisible to prompt/control lookup.
+struct SessionLoadMarker {
+    leases: std::cell::Cell<usize>,
+    _completion: tokio::sync::watch::Sender<()>,
+}
+/// RAII lease for an in-flight `session/load` (see
+/// [`MvpAgent::begin_session_load`]). Only the final lease removes the shared
+/// marker; dropping its watch sender wakes every load-race waiter.
 pub(crate) struct SessionLoadGuard<'a> {
     agent: &'a MvpAgent,
     session_id: acp::SessionId,
-    rx: tokio::sync::watch::Receiver<bool>,
-    /// Dropped with the guard — closes the watch channel, waking waiters.
-    _tx: tokio::sync::watch::Sender<bool>,
+    marker: std::rc::Rc<SessionLoadMarker>,
 }
 impl Drop for SessionLoadGuard<'_> {
     fn drop(&mut self) {
+        let remaining = self
+            .marker
+            .leases
+            .get()
+            .checked_sub(1)
+            .expect("Session load lease count cannot underflow");
+        self.marker.leases.set(remaining);
+        if remaining != 0 {
+            return;
+        }
         let mut map = self.agent.loading_sessions.borrow_mut();
-        if map.get(&self.session_id).is_some_and(|rx| rx.same_channel(&self.rx)) {
+        if map
+            .get(&self.session_id)
+            .is_some_and(|marker| std::rc::Rc::ptr_eq(marker, &self.marker))
+        {
             map.remove(&self.session_id);
+        }
+    }
+}
+/// Exclusive transaction for one session's load/close/delete/eviction
+/// lifecycle. The owned mutex guard makes cancellation release the gate, and
+/// the weak registry entry is reclaimed once no operation is queued behind it.
+pub(crate) struct SessionLifecycleGuard<'a> {
+    agent: &'a MvpAgent,
+    session_id: acp::SessionId,
+    gate: std::sync::Weak<tokio::sync::Mutex<()>>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+impl Drop for SessionLifecycleGuard<'_> {
+    fn drop(&mut self) {
+        // This LocalSet cannot interleave another acquisition between the
+        // strong-count check and removal. A waiter owns a strong reference, so
+        // only the final transaction can reclaim the weak registry entry.
+        if self.gate.strong_count() != 1 {
+            return;
+        }
+        let mut gates = self.agent.session_lifecycle_gates.borrow_mut();
+        if gates
+            .get(&self.session_id)
+            .is_some_and(|registered| std::sync::Weak::ptr_eq(registered, &self.gate))
+        {
+            gates.remove(&self.session_id);
         }
     }
 }
@@ -770,6 +817,7 @@ mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
 pub(crate) use session_lifecycle::RegistrySnapshot;
+pub(crate) use session_lifecycle::SessionThreadExit;
 pub(super) use super::ext_parsers;
 /// Metadata captured from a replayed `task_backgrounded` entry.
 pub(crate) struct OrphanedTask {

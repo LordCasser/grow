@@ -32,7 +32,7 @@ pub mod stream;
 pub mod types;
 
 // Public re-exports — the API surface consumers see.
-pub use actor::SamplerActor;
+pub use actor::{SamplerActor, SamplerOwner};
 pub use attribution::{
     Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
 };

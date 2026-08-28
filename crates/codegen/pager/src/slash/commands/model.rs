@@ -1,4 +1,4 @@
-//! `/model` (alias `/m`) — switch model + (optionally) reasoning effort.
+//! `/model` — switch model + (optionally) reasoning effort.
 //! Chained autocomplete: pick a reasoning-supported model → trailing space
 //! re-opens the dropdown into a `low|medium|high|xhigh` sub-menu.
 
@@ -15,10 +15,6 @@ pub struct ModelCommand;
 impl SlashCommand for ModelCommand {
     fn name(&self) -> &str {
         "model"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["m"]
     }
 
     fn description(&self) -> &str {

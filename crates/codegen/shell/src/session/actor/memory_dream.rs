@@ -121,7 +121,7 @@ impl SessionActor {
     /// Called at session end after the session summary is written.
     /// Uses the same sampling client infrastructure as flush but sends
     /// the dream prompt instead. The model call has a 60s timeout.
-    pub(super) async fn maybe_run_dream(&self) {
+    pub(super) async fn maybe_run_dream(&self, finalizer: bool) {
         if self.startup_hints.is_subagent {
             tracing::debug!(
                 target: ::diagnostics::memory_log::TARGET,
@@ -129,6 +129,21 @@ impl SessionActor {
             );
             return;
         }
+
+        if !self.memory.try_begin_dream() {
+            tracing::debug!(
+                target: ::diagnostics::memory_log::TARGET,
+                "MEMORY_DREAM: skipped because another consolidation is active"
+            );
+            return;
+        }
+        struct DreamActivityGuard<'a>(&'a super::super::memory_state::SessionMemory);
+        impl Drop for DreamActivityGuard<'_> {
+            fn drop(&mut self) {
+                self.0.finish_dream();
+            }
+        }
+        let _activity = DreamActivityGuard(&self.memory);
 
         use memory::dream::*;
 
@@ -155,8 +170,15 @@ impl SessionActor {
             "MEMORY_DREAM: gates passed, starting consolidation"
         );
 
-        self.run_dream_inner(&storage, &lock, &sessions_dir, &sessions, "MEMORY_DREAM")
-            .await;
+        self.run_dream_inner(
+            &storage,
+            &lock,
+            &sessions_dir,
+            &sessions,
+            "MEMORY_DREAM",
+            finalizer,
+        )
+        .await;
     }
 
     /// Run dream from `/dream` slash command, bypassing time/session gates.
@@ -202,6 +224,7 @@ impl SessionActor {
             &sessions_dir,
             &sessions,
             "MEMORY_DREAM_SLASH",
+            false,
         )
         .await;
     }
@@ -214,6 +237,7 @@ impl SessionActor {
         sessions_dir: &std::path::Path,
         sessions: &[String],
         log_prefix: &str,
+        finalizer: bool,
     ) {
         use memory::dream::*;
 
@@ -231,7 +255,10 @@ impl SessionActor {
                 }
             };
 
-        let model_response = match self.run_dream_model_call(&dream_msg.content).await {
+        let model_response = match self
+            .run_dream_model_call(&dream_msg.content, finalizer)
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(
@@ -303,7 +330,11 @@ impl SessionActor {
     }
 
     /// Make the dream model call using the session's sampling client.
-    async fn run_dream_model_call(&self, user_message: &str) -> Result<String, acp::Error> {
+    async fn run_dream_model_call(
+        &self,
+        user_message: &str,
+        finalizer: bool,
+    ) -> Result<String, acp::Error> {
         let sampling_client = self.prepare_chat_completion(false).await?;
         let model = self
             .chat_state_handle
@@ -319,23 +350,35 @@ impl SessionActor {
             model: Some(model),
             ..Default::default()
         };
-        let mut sideband = self
-            .begin_sideband(
+        let budget_policy = chat_state::SidebandBudgetPolicy::for_request(&request, 1);
+        let route = chat_state::SidebandRoute {
+            model: request.model.clone().unwrap_or_default(),
+            backend: sampling_client.api_backend(),
+        };
+        let sideband = if finalizer {
+            self.begin_finalizer_sideband(
                 chat_state::SidebandPurpose::MemoryDream,
                 user_message.to_owned(),
                 SidebandSource::None,
-                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
-                chat_state::SidebandRoute {
-                    model: request.model.clone().unwrap_or_default(),
-                    backend: sampling_client.api_backend(),
-                },
+                budget_policy,
+                route,
                 None,
             )
             .await
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("dream Sideband could not start: {error}"))
-            })?;
+        } else {
+            self.begin_sideband(
+                chat_state::SidebandPurpose::MemoryDream,
+                user_message.to_owned(),
+                SidebandSource::None,
+                budget_policy,
+                route,
+                None,
+            )
+            .await
+        };
+        let mut sideband = sideband.map_err(|error| {
+            acp::Error::internal_error().data(format!("dream Sideband could not start: {error}"))
+        })?;
         sideband
             .attempt_all_sources(&request, sampling_client.api_backend(), None)
             .await
@@ -433,6 +476,13 @@ impl SessionActor {
             );
             return false;
         }
+        struct FlushActivityGuard<'a>(&'a super::super::memory_state::SessionMemory);
+        impl Drop for FlushActivityGuard<'_> {
+            fn drop(&mut self) {
+                self.0.release_flush_lock();
+            }
+        }
+        let _activity = FlushActivityGuard(&self.memory);
 
         tracing::info!(target: ::diagnostics::memory_log::TARGET, "MEMORY_FLUSH: starting");
         let flush_start = std::time::Instant::now();
@@ -775,7 +825,6 @@ impl SessionActor {
             response_length: response_len,
         });
 
-        self.memory.release_flush_lock();
         self.send_grow_notification(GrowSessionUpdate::MemoryFlushCompleted {
             result: outcome,
             path: flush_path,

@@ -30,7 +30,7 @@ Syntax highlighting in minimal mode does **not** switch between light and dark t
 
 ### In the TUI
 
-Run the `/theme` slash command (alias `/t`) to open the theme picker. As you move through the list with the arrow keys, Grow previews each theme in real time. Press Enter to apply and save your choice, or press Escape to revert.
+Run the `/theme` slash command to open the theme picker. As you move through the list with the arrow keys, Grow previews each theme in real time. Press Enter to apply and save your choice, or press Escape to revert.
 
 To switch without the picker, pass a name directly:
 
@@ -84,7 +84,7 @@ Once running, Grow polls for appearance changes every 5 seconds. Toggling your O
 
 ### Via the Settings Pane
 
-Run `/settings` (alias `/config`) and open the **Appearance** category to set the **Auto dark theme** and **Auto light theme** interactively. Selecting `auto` in the `/theme` picker enables auto mode using these mappings.
+Run `/settings` and open the **Appearance** category to set the **Auto dark theme** and **Auto light theme** interactively. Selecting `auto` in the `/theme` picker enables auto mode using these mappings.
 
 ---
 

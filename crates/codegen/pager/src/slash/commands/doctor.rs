@@ -49,10 +49,6 @@ impl SlashCommand for DoctorCommand {
         "doctor"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["terminal-setup", "terminal-check", "terminal-info"]
-    }
-
     fn description(&self) -> &str {
         "Check this session and show available fixes"
     }

@@ -41,6 +41,19 @@ pub struct LinkTarget {
     pub url: String,
     /// Monotonically increasing identifier assigned during parsing.
     pub id: u32,
+    /// Whether the author declared this destination or Grow inferred it from
+    /// visible prose. Consumers use this to keep permissive explicit-link
+    /// resolution separate from conservative filesystem discovery.
+    pub provenance: HyperlinkProvenance,
+}
+
+/// Origin of a rendered hyperlink's semantic destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HyperlinkProvenance {
+    /// A Markdown link/image/autolink explicitly declared the destination.
+    Explicit,
+    /// The renderer inferred a target from prose or inline-code content.
+    Inferred,
 }
 
 /// Parse-time record of a closed fenced code block.
@@ -84,9 +97,9 @@ pub struct CellSpan {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
-    /// Hyperlink (url, id) when this span is inside a `[label](url)` link
-    /// or autolink inside a table cell. `None` for plain text.
-    pub link: Option<(String, u32)>,
+    /// Hyperlink (url, id, provenance) when this span is linked. `None` for
+    /// plain text.
+    pub link: Option<(String, u32, HyperlinkProvenance)>,
 }
 
 impl CellSpan {
@@ -95,7 +108,7 @@ impl CellSpan {
         bold: bool,
         italic: bool,
         code: bool,
-        link: Option<(String, u32)>,
+        link: Option<(String, u32, HyperlinkProvenance)>,
     ) -> Self {
         Self {
             text,
@@ -146,11 +159,13 @@ pub struct TableState {
     pub cell_bold: bool,
     pub cell_italic: bool,
     pub cell_code: bool,
-    /// Current link state: `Some((url, id))` while inside a `Tag::Link` /
+    /// Current link state: `Some((url, id, provenance))` while linked. Explicit
+    /// `Tag::Link`/`Tag::Image` state and inferred table references share the
+    /// same rendering path without losing their resolution policy.
     /// `Tag::Image` inside a table cell.  Text events captured while this
     /// is set produce link-tagged `CellSpan`s so the table renderer can
     /// apply link styling and emit `HyperlinkTarget`s.
-    pub cell_link: Option<(String, u32)>,
+    pub cell_link: Option<(String, u32, HyperlinkProvenance)>,
     /// Whether we're in the header section.
     pub in_header: bool,
     /// Source byte range of the entire table.
@@ -202,6 +217,8 @@ pub struct TableHyperlink {
     pub url: String,
     /// Stable identifier shared with the paragraph link path.
     pub id: u32,
+    /// Semantic origin of the target.
+    pub provenance: HyperlinkProvenance,
 }
 
 /// Formatted table replacement for pretty mode rendering.

@@ -635,7 +635,7 @@ impl BlockContent for ContextInfoBlock {
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
-        false // Compact like SystemMessageBlock
+        false // Compact like NoticeBlock
     }
 
     fn has_raw_mode(&self) -> bool {

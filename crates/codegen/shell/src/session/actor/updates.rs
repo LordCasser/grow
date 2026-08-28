@@ -568,9 +568,29 @@ impl SessionActor {
             .await;
     }
 
+    /// Forward ephemeral UI state without putting it in the immutable replay
+    /// log. Pending/applying control phases use this path; reconnect asks the
+    /// actor for a fresh authoritative snapshot instead of replaying stale
+    /// progress events.
+    pub(super) async fn send_transient_grow_notification(&self, update: GrowSessionUpdate) {
+        let mut notification = self.build_grow_notification(update, None);
+        if let Some(meta) = notification
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.as_object_mut())
+        {
+            // A transient event cannot be a reconnect cursor: it has no
+            // durable line for replay to resolve. Keep only timing/debug
+            // metadata and let the next load request a fresh snapshot.
+            meta.remove("eventId");
+            meta.insert("transient".to_string(), serde_json::Value::Bool(true));
+        }
+        self.forward_grow_notification(notification).await;
+    }
+
     /// Persist and forward a passive UI/audit update without changing rewind
-    /// interaction state. Permission audit projection must be observable only;
-    /// it is not a conversation or user-action boundary.
+    /// interaction state. UI projections such as permission audit and command
+    /// output are observable facts, not conversation or user-action boundaries.
     pub(super) async fn send_grow_passive_notification(
         &self,
         durable_update: GrowSessionUpdate,
@@ -581,14 +601,70 @@ impl SessionActor {
         // keeps the live reconnect cursor resolvable against the durable line.
         let mut live_notification = durable_notification.clone();
         live_notification.update = live_update;
-        let persist_result = self
-            .notifications
-            .append_update_durably(crate::session::storage::SessionUpdate::Grow(Box::new(
-                durable_notification,
-            )))
-            .await;
+        self.append_grow_notification_exact(durable_notification)
+            .await?;
         self.forward_grow_notification(live_notification).await;
-        persist_result
+        Ok(())
+    }
+
+    /// Append one already-stamped immutable UI fact until its durability is
+    /// known. Retrying the exact event id resolves acknowledgement loss
+    /// idempotently; a cursor-bearing live projection is never emitted first.
+    async fn append_grow_notification_exact(
+        &self,
+        notification: GrowSessionNotification,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        use crate::session::persistence::DurableAppendError;
+        let mut attempts = 0_u32;
+        loop {
+            let append = self.notifications.append_update_durably(
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
+            );
+            let result = tokio::select! {
+                biased;
+                _ = self.durable_ui_cancel.cancelled() => {
+                    return Err(DurableAppendError::NotCommitted(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "session stopped before durable UI event append",
+                    )));
+                }
+                result = append => result,
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if error.retry_exact() => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts == 1 || attempts % 10 == 0 {
+                        tracing::warn!(attempts, %error, "durable UI event append uncertain; retrying exact event");
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = self.durable_ui_cancel.cancelled() => {
+                            return Err(DurableAppendError::NotCommitted(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "session stopped during durable UI event retry",
+                            )));
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Persist a derived UI branch fact with the same durable barrier used by
+    /// visible passive events, but do not forward it to the live client.
+    pub(super) async fn persist_update_only_durably(
+        &self,
+        update: GrowSessionUpdate,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        let notification = GrowSessionNotification {
+            session_id: self.session_info.id.clone(),
+            update,
+            meta: Some(self.build_notification_meta()),
+        };
+        self.append_grow_notification_exact(notification).await
     }
     /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged
     /// Build the per-response boundary update, projecting the response's usage
@@ -869,10 +945,18 @@ mod grow_event_id_stamping_tests {
                     .await
                     .expect("entering plan mode must succeed in this fixture");
                 while let Ok(msg) = prx.try_recv() {
-                    assert!(
-                        !matches!(msg, PersistenceMsg::Update(_)),
-                        "the mode update must not short-circuit the event queue"
-                    );
+                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
+                        notification,
+                    )) = msg
+                    {
+                        assert!(
+                            !matches!(
+                                notification.update,
+                                acp::SessionUpdate::CurrentModeUpdate(_)
+                            ),
+                            "the mode update must not short-circuit the event queue"
+                        );
+                    }
                 }
                 let mut queued = Vec::new();
                 while let Ok(event) = event_rx.try_recv() {
@@ -955,10 +1039,18 @@ mod grow_event_id_stamping_tests {
                     .await
                     .expect("confirming normal mode must succeed in this fixture");
                 while let Ok(msg) = prx.try_recv() {
-                    assert!(
-                        !matches!(msg, PersistenceMsg::Update(_)),
-                        "the exit mode update must not short-circuit the event queue"
-                    );
+                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
+                        notification,
+                    )) = msg
+                    {
+                        assert!(
+                            !matches!(
+                                notification.update,
+                                acp::SessionUpdate::CurrentModeUpdate(_)
+                            ),
+                            "the exit mode update must not short-circuit the event queue"
+                        );
+                    }
                 }
                 let mut queued = Vec::new();
                 while let Ok(event) = event_rx.try_recv() {

@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use ratatui::text::Line;
 
-use crate::buffers::CodeBlockMeta;
+use crate::buffers::{CodeBlockMeta, HyperlinkProvenance};
 
 /// A hyperlink target extracted from rendered markdown.
 ///
@@ -22,6 +22,8 @@ pub struct HyperlinkTarget {
     /// Stable identifier for grouping link fragments that belong to the
     /// same logical link (e.g., a link whose text wraps across lines).
     pub id: u32,
+    /// Whether this destination was explicit Markdown or inferred from prose.
+    pub provenance: HyperlinkProvenance,
 }
 
 /// A fenced code block discovered while rendering markdown.

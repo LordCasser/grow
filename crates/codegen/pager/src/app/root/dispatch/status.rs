@@ -112,7 +112,7 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         }
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
-                agent.scrollback.push_block(RenderBlock::system(
+                agent.scrollback.push_block(RenderBlock::notice(
                     "Session usage is unavailable until the session starts.".to_string(),
                 ));
             }
@@ -190,7 +190,7 @@ pub(super) fn apply_session_usage_result(
             Ok(usage) => crate::app::status_blocks::session_usage_block_text(usage),
             Err(error) => format!("Couldn't load session usage: {error}"),
         };
-        agent.scrollback.push_block(RenderBlock::system(text));
+        agent.scrollback.push_block(RenderBlock::notice(text));
         return vec![];
     }
     if usage_modal_matches(agent, nonce) {
@@ -213,7 +213,7 @@ pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &s
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        agent.scrollback.push_block(RenderBlock::system(format!(
+        agent.scrollback.push_block(RenderBlock::notice(format!(
             "Update available: v{latest_version} — restart to apply."
         )));
     }
@@ -228,7 +228,7 @@ pub(super) fn dispatch_show_queue(app: &mut AppView) -> Vec<Effect> {
         && let Some(agent) = app.agents.get_mut(&id)
     {
         let text = crate::app::status_blocks::queue_block_text(agent);
-        agent.scrollback.push_block(RenderBlock::system(text));
+        agent.scrollback.push_block(RenderBlock::notice(text));
     }
     vec![]
 }
@@ -243,7 +243,7 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
         && let Some(agent) = app.agents.get_mut(&id)
     {
         let text = crate::app::status_blocks::tasks_block_text(agent);
-        agent.scrollback.push_block(RenderBlock::system(text));
+        agent.scrollback.push_block(RenderBlock::notice(text));
     }
     vec![]
 }
@@ -326,7 +326,7 @@ pub(super) fn handle_session_info_complete(
     }
     agent.apply_full_context_info(info.data.context.clone());
     if nonce == 0 {
-        agent.scrollback.push_block(RenderBlock::system(text));
+        agent.scrollback.push_block(RenderBlock::notice(text));
     } else if usage_modal_matches(agent, nonce) {
         let rows = crate::views::usage_modal::session_info_rows(
             &info,
@@ -351,7 +351,7 @@ pub(super) fn handle_session_info_failed(
         return vec![];
     };
     if nonce == 0 {
-        agent.scrollback.push_block(RenderBlock::system(format!(
+        agent.scrollback.push_block(RenderBlock::notice(format!(
             "Couldn't load session info: {error}"
         )));
     } else if usage_modal_matches(agent, nonce) {
@@ -405,7 +405,7 @@ pub(super) fn handle_context_info_failed(
         return vec![];
     };
     if nonce == 0 {
-        agent.scrollback.push_block(RenderBlock::system(format!(
+        agent.scrollback.push_block(RenderBlock::notice(format!(
             "Couldn't load context info: {error}"
         )));
     } else if usage_modal_matches(agent, nonce) {

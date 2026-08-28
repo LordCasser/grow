@@ -4,6 +4,18 @@ use super::support::*;
 use super::turn::should_capture_implicit_goal_objective;
 use super::*;
 
+/// Match the dedicated production session thread's stack. The full prompt
+/// admission future is intentionally large and does not fit the test harness'
+/// smaller default thread stack in debug builds.
+fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(body)
+        .unwrap()
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn foreground_snapshot_carries_origin_and_kind_without_parsing_its_id() {
     tokio::task::LocalSet::new()
@@ -38,6 +50,35 @@ async fn completed_runner_keeps_foreground_fenced_until_terminal_settlement() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn goal_failure_keeps_its_origin_across_terminalization() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut task = running_task_stub("goal-terminal");
+            task.origin = crate::session::PromptOrigin::GoalContinuation {
+                goal_id: "goal-1".into(),
+                definition_revision: 7,
+            };
+            task.turn_kind = crate::session::TurnKind::Internal;
+            let mut foreground = ForegroundState::RegularTurn(task);
+            assert!(foreground.begin_terminalization("goal-terminal"));
+            let origin = foreground
+                .identity("goal-terminal")
+                .map(|(origin, _)| origin)
+                .expect("settling Goal keeps structured origin");
+            let result: PromptTurnResult =
+                Err(acp::Error::internal_error().data("provider failed"));
+            let (_, suppress, goal_stop) =
+                SessionActor::post_turn_goal_degradation_plan(&result, Some(&origin));
+            assert!(!suppress);
+            assert!(
+                goal_stop.is_some(),
+                "Goal-owned failure must stop continuation"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn only_active_goal_keeps_an_idle_session_resident() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -61,6 +102,14 @@ async fn only_active_goal_keeps_an_idle_session_resident() {
             ] {
                 assert!(!session_has_work(&state, Some(stopped), false));
             }
+            drop(state);
+            let mut state = actor.state.lock().await;
+            state.behavior_control_worker_active = true;
+            assert!(
+                session_has_work(&state, None, false),
+                "an idle Behavior worker must fence actor unload"
+            );
+            state.behavior_control_worker_active = false;
         })
         .await;
 }
@@ -149,10 +198,15 @@ async fn implicit_goal_objective_commits_its_turn_terminal_before_continuation()
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn autonomous_first_turn_commits_the_deferred_prefix_before_turn_started() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
+#[test]
+fn autonomous_first_turn_commits_the_deferred_prefix_before_turn_started() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
             actor.deferred_prefix.arm(tokio::task::spawn_local(async {
                 "<user_info>deferred bootstrap prefix</user_info>".to_string()
@@ -234,8 +288,8 @@ async fn autonomous_first_turn_commits_the_deferred_prefix_before_turn_started()
                         if messages.cause == chat_state::MessageCause::ContextRebuild
                 )
             }));
-        })
-        .await;
+        }));
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]

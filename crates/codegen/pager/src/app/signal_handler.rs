@@ -39,7 +39,7 @@ pub(crate) fn set_current_session_id(id: Option<acp::SessionId>) {
 }
 
 /// Lets the signal handler route SIGINT/SIGTERM/SIGHUP into the same graceful
-/// quit as `/exit` (running teardown + history/diagnostics flushes) instead of a
+/// quit as `/quit` (running teardown + history/diagnostics flushes) instead of a
 /// hard exit. Registered by the event loop before it starts.
 static QUIT_NOTIFY: parking_lot::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>> =
     parking_lot::Mutex::new(None);

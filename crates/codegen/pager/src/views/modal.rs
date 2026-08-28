@@ -1497,10 +1497,10 @@ mod palette_tests {
             let invocation = crate::slash::parse_invocation(&row)
                 .unwrap_or_else(|| panic!("palette row {row:?} is not a slash invocation"));
             assert!(
-                builtins
-                    .iter()
-                    .any(|command| command.name() == invocation.token
-                        || command.aliases().contains(&invocation.token)),
+                builtins.iter().any(|command| {
+                    command.name() == invocation.token
+                        || command.aliases().contains(&invocation.token)
+                }),
                 "palette row {row:?} names no builtin command"
             );
         }

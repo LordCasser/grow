@@ -262,6 +262,17 @@ fn format_workflow_elapsed(ms: u64) -> String {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
+
+fn workflow_report_markdown_link(report_path: &std::path::Path) -> Option<String> {
+    let label = report_path.file_name()?.to_string_lossy();
+    let label = label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    let destination = url::Url::from_file_path(report_path).ok()?;
+    Some(format!("[{label}](<{destination}>)"))
+}
+
 fn format_workflow_completion_notification(
     run: &crate::session::workflow::tracker::WorkflowRunState,
     report_path: Option<&std::path::Path>,
@@ -351,20 +362,21 @@ fn format_workflow_completion_notification(
         );
     }
     if let Some(report_path) = report_path {
+        let report_link = workflow_report_markdown_link(report_path)
+            .unwrap_or_else(|| report_path.display().to_string());
+        let exact_path = serde_json::to_string(&report_path.to_string_lossy())
+            .unwrap_or_else(|_| format!("\"{}\"", report_path.display()));
         match read_tool_name {
             Some(read_tool_name) => {
                 let _ = writeln!(
                     buf,
-                    "  Full report: {} (use {} on that path to view it)",
-                    report_path.display(),
-                    read_tool_name,
+                    "  Full report: {report_link} (use {read_tool_name} with the exact local path {exact_path} to view it). Preserve this Markdown link verbatim when reporting it to the user; never abbreviate its destination with an ellipsis.",
                 );
             }
             None => {
                 let _ = writeln!(
                     buf,
-                    "  Full report stored at {}. This Agent has no file-read tool; report the path to the user if the inline summary is insufficient.",
-                    report_path.display(),
+                    "  Full report: {report_link}. This Agent has no file-read tool. Preserve this Markdown link verbatim when reporting it to the user; never abbreviate its destination with an ellipsis.",
                 );
             }
         }
@@ -617,15 +629,24 @@ mod workflow_reminder_tests {
         run.status = WorkflowRunStatus::Complete;
         run.pause_message = None;
         run.result_summary = Some("verified output from the completed workflow".to_string());
-        let report_path = std::path::Path::new("/session/workflows/wf_1/scratch/report.md");
+        let report_path = std::env::temp_dir()
+            .join("grow-workflow-link-test")
+            .join("workflows/wf_1/scratch/report.md");
 
-        let notification =
-            format_workflow_completion_notification(&run, Some(report_path), Some("read_file"));
+        let notification = format_workflow_completion_notification(
+            &run,
+            Some(report_path.as_path()),
+            Some("read_file"),
+        );
+        let report_url = url::Url::from_file_path(&report_path).unwrap();
 
         assert!(notification.contains("status: complete"));
         assert!(notification.contains("verified output from the completed workflow"));
         assert!(notification.contains(report_path.to_str().unwrap()));
+        assert!(notification.contains(&format!("[report.md](<{report_url}>)")));
         assert!(notification.contains("use read_file"));
+        assert!(notification.contains("Preserve this Markdown link verbatim"));
+        assert!(notification.contains("never abbreviate its destination"));
         assert!(!notification.contains("Review the workflow completion reminder"));
     }
 

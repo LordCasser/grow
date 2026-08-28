@@ -1,4 +1,4 @@
-//! `/new` (alias `/clear`) -- create a new session.
+//! `/new` -- create a new session.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -9,10 +9,6 @@ pub struct NewCommand;
 impl SlashCommand for NewCommand {
     fn name(&self) -> &str {
         "new"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["clear"]
     }
 
     fn description(&self) -> &str {

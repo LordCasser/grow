@@ -32,7 +32,7 @@ fn scrollback_has_recent_context_too_large(
             {
                 return true;
             }
-            Some(RenderBlock::SessionEvent(_)) | Some(RenderBlock::System(_)) => {}
+            Some(RenderBlock::SessionEvent(_)) | Some(RenderBlock::Notice(_)) => {}
             _ => break,
         }
     }
@@ -102,7 +102,7 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
     match request {
         DoctorRequest::Report => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.scrollback.push_block(RenderBlock::system(
+                agent.scrollback.push_block(RenderBlock::notice(
                     crate::diagnostics::format_doctor(&report),
                 ));
             }
@@ -135,7 +135,7 @@ pub(super) fn open_doctor_fix_question(
         return;
     };
     if agent.question_view.is_some() {
-        agent.scrollback.push_block(RenderBlock::system(
+        agent.scrollback.push_block(RenderBlock::notice(
             "Close the current question before applying this fix.",
         ));
         return;
@@ -501,9 +501,14 @@ pub(super) fn dispatch_send_prompt_inner(
         use crate::slash::parse_invocation;
 
         // Build execution context.
+        // Control commands are interpreted against the newest desired
+        // Sampling target, while the ordinary UI continues to project only
+        // the committed model. In particular `/model B` followed immediately
+        // by `/effort high` must become `B + high`, never `old-model + high`.
+        let control_intent_models = agent.session.models_for_control_intent();
         let exec_result = {
             let mut ctx = CommandExecCtx {
-                models: &agent.session.models,
+                models: &control_intent_models,
                 session_id: agent.session.session_id.as_ref(),
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
@@ -511,9 +516,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
                     permission_mode: agent.session.permission_mode(),
-                    current_model_id: agent
-                        .session
-                        .models
+                    current_model_id: control_intent_models
                         .current_model_id_str()
                         .map(str::to_owned),
                     available_models: agent
@@ -597,14 +600,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                agent.scrollback.push_block(RenderBlock::notice(msg));
                 return vec![];
             }
             CommandResult::Message(msg) => {
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                agent.scrollback.push_block(RenderBlock::notice(msg));
                 return vec![];
             }
             CommandResult::Doctor(request) => {
@@ -637,7 +640,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     if consume_input {
                         agent.prompt.set_text("");
                     }
-                    agent.scrollback.push_block(RenderBlock::system(
+                    agent.scrollback.push_block(RenderBlock::notice(
                         "/compact requires an active session.".to_string(),
                     ));
                     return vec![];
@@ -707,7 +710,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     );
                 }
             }
-            CommandResult::HostCommand(command_text) => {
+            CommandResult::HostCommand(request) => {
                 if let Some(session_id) = agent.session.session_id.clone() {
                     if consume_input {
                         agent.prompt.set_text("");
@@ -715,10 +718,10 @@ pub(super) fn dispatch_send_prompt_inner(
                     return vec![Effect::ExecuteSlashCommand {
                         agent_id: id,
                         session_id,
-                        command: command_text,
+                        request,
                     }];
                 }
-                agent.scrollback.push_block(RenderBlock::system(
+                agent.scrollback.push_block(RenderBlock::notice(
                     "This command requires an active session.".to_string(),
                 ));
                 return vec![];
@@ -1295,7 +1298,7 @@ pub(super) fn handle_compact_complete(
                 }
                 Err(error) => format!("Compaction request failed: {error}"),
             };
-            agent.scrollback.push_block(RenderBlock::system(message));
+            agent.scrollback.push_block(RenderBlock::notice(message));
             return vec![];
         }
         // Defensive: only process if we're still in a compact command state.
@@ -1330,12 +1333,12 @@ pub(super) fn handle_compact_complete(
                 ));
             }
             Ok(crate::app::actions::CompactRequestStatus::Scheduled) => {
-                agent.scrollback.push_block(RenderBlock::system(
+                agent.scrollback.push_block(RenderBlock::notice(
                     "Compaction scheduled after the current turn.".to_string(),
                 ));
             }
             Ok(crate::app::actions::CompactRequestStatus::AlreadyRunning) => {
-                agent.scrollback.push_block(RenderBlock::system(
+                agent.scrollback.push_block(RenderBlock::notice(
                     "Compaction is already pending or running.".to_string(),
                 ));
             }

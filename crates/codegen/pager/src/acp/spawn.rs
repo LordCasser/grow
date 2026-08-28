@@ -325,7 +325,7 @@ fn spawn_agent_thread_direct(
                 // actor (SessionEnd hooks + memory save) before the LocalSet /
                 // agent drop. Session actors live on dedicated OS threads and
                 // only exit cleanly on SessionCommand::Shutdown; without this
-                // flush, /exit and headless quit race process death and skip
+                // flush, /quit and headless quit race process death and skip
                 // SessionEnd. Mirrors leader auto-update / relaunch.
                 cancel.cancelled().await;
                 agent_rc.flush_all_sessions(SESSION_FLUSH_GRACE).await;

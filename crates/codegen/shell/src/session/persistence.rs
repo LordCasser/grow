@@ -46,6 +46,7 @@ pub(crate) fn model_change_event(
     previous_transport_key: &sampling_types::ModelImageInputKey,
     transport_key: &sampling_types::ModelImageInputKey,
     reason: &str,
+    control_intent: Option<&crate::session::ControlIntent>,
 ) -> chat_state::TimelineEventKind {
     chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
         scope: MODEL_CHANGE_SCOPE.into(),
@@ -62,6 +63,7 @@ pub(crate) fn model_change_event(
             "from_model_transport": previous_transport_key,
             "to_model_transport": transport_key,
             "reason": reason,
+            "control_intent": control_intent,
         })),
     })
 }
@@ -97,7 +99,7 @@ pub(crate) fn latest_model_selection(
             .as_ref()
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| invalid_model_change(event, "data must be an object"))?;
-        const FIELDS: [&str; 9] = [
+        const FIELDS: [&str; 10] = [
             "from_model_id",
             "to_model_id",
             "from_reasoning_effort",
@@ -107,6 +109,7 @@ pub(crate) fn latest_model_selection(
             "from_model_transport",
             "to_model_transport",
             "reason",
+            "control_intent",
         ];
         if data.len() != FIELDS.len() || FIELDS.iter().any(|field| !data.contains_key(*field)) {
             return Err(invalid_model_change(
@@ -149,6 +152,15 @@ pub(crate) fn latest_model_selection(
         let from_transport = transport_key("from_model_transport")?;
         let to_transport = transport_key("to_model_transport")?;
         let _reason = required_string("reason")?;
+        let control_intent: Option<crate::session::ControlIntent> =
+            serde_json::from_value(data["control_intent"].clone()).map_err(|error| {
+                invalid_model_change(event, &format!("invalid control_intent: {error}"))
+            })?;
+        if let Some(intent) = control_intent.as_ref() {
+            intent
+                .validate()
+                .map_err(|error| invalid_model_change(event, error))?;
+        }
         if let Some((previous_model, previous_effort, previous_provider, previous_transport)) =
             &latest
             && (previous_model != &from_model
@@ -164,6 +176,62 @@ pub(crate) fn latest_model_selection(
         latest = Some((to_model, to_effort, to_provider, to_transport));
     }
     Ok(latest.map(|(model, effort, _, _)| (acp::ModelId::new(model), effort)))
+}
+
+pub(crate) fn durable_model_control_receipts(
+    events: &[chat_state::TimelineEvent],
+) -> io::Result<Vec<crate::session::control::DurableControlReceipt>> {
+    let mut receipts = Vec::new();
+    for event in events {
+        let chat_state::TimelineEventKind::Observation(observation) = &event.kind else {
+            continue;
+        };
+        if observation.scope != MODEL_CHANGE_SCOPE || observation.name != MODEL_CHANGE_NAME {
+            continue;
+        }
+        let data = observation
+            .data
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| invalid_model_change(event, "data must be an object"))?;
+        let intent: Option<crate::session::ControlIntent> = serde_json::from_value(
+            data.get("control_intent")
+                .cloned()
+                .ok_or_else(|| invalid_model_change(event, "control_intent is missing"))?,
+        )
+        .map_err(|error| {
+            invalid_model_change(event, &format!("invalid control_intent: {error}"))
+        })?;
+        if let Some(intent) = intent {
+            intent
+                .validate()
+                .map_err(|error| invalid_model_change(event, error))?;
+            let model_id = data
+                .get("to_model_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    invalid_model_change(event, "to_model_id must be a non-empty string")
+                })?
+                .to_owned();
+            let effort: Option<ReasoningEffort> =
+                serde_json::from_value(data.get("to_reasoning_effort").cloned().ok_or_else(
+                    || invalid_model_change(event, "to_reasoning_effort is missing"),
+                )?)
+                .map_err(|error| {
+                    invalid_model_change(event, &format!("invalid to_reasoning_effort: {error}"))
+                })?;
+            receipts.push(crate::session::control::DurableControlReceipt {
+                domain: crate::extensions::notification::ControlDomain::Sampling,
+                intent,
+                target: crate::extensions::notification::ControlTarget::Sampling {
+                    model_id,
+                    reasoning_effort: effort.map(|effort| effort.to_string()),
+                },
+            });
+        }
+    }
+    Ok(receipts)
 }
 
 fn invalid_model_change(event: &chat_state::TimelineEvent, reason: &str) -> io::Error {

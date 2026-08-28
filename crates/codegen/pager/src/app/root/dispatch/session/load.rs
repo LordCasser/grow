@@ -11,8 +11,8 @@ use crate::app::root::dispatch::ctx::{
 use crate::app::root::dispatch::modes::inherit_permission_mode;
 use crate::app::root::dispatch::prompt::defer_to_open_reload_window;
 use crate::app::root::dispatch::queue::{
-    enqueue_behavior_control, enqueue_model_control, maybe_drain_queue, next_control_effect,
-    note_peek_page_flip,
+    enqueue_behavior_control, enqueue_model_control, maybe_drain_queue, note_peek_page_flip,
+    pending_control_effects,
 };
 use crate::app::root::dispatch::status::notify_session_ready;
 use crate::app::root::dispatch::transcript::extensions_modal_tab_fetches;
@@ -22,7 +22,7 @@ use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 
-/// Reconcile and reissue the exact-session control FIFO after a replacement
+/// Reconcile and reissue each exact-session control domain after a replacement
 /// ACP transport has restored authoritative state. Descendants retain their
 /// own tokens and session ids; `agent_id` is the owning root used for result
 /// routing and page-flip effects.
@@ -40,21 +40,18 @@ pub(crate) fn reconcile_controls_after_reconnect(
         let Some(session_id) = view.session.session_id.clone() else {
             return;
         };
-        let agent_name = view.session.agent_name().map(str::to_owned);
-        view.session
-            .reconcile_rearmed_control_prefix(agent_name.as_deref());
-
         if let Some((model_id, effort)) =
             super::lifecycle::apply_deferred_model_switch(view, cli_effort_token)
             && !view.session.has_pending_model_control(&model_id, effort)
         {
-            let _ = enqueue_model_control(
+            effects.extend(enqueue_model_control(
                 agent_id,
                 session_id.clone(),
                 &mut view.session,
                 model_id,
                 effort,
-            );
+                true,
+            ));
         }
         if let Some(mode) = view.session.deferred_session_mode {
             if !view.session.has_pending_behavior_control(mode) {
@@ -62,13 +59,20 @@ pub(crate) fn reconcile_controls_after_reconnect(
                 // interrupt-confirmation latch is clear. Keep the prompt
                 // parked and reissue the exact Behavior selection; only its
                 // authoritative applied update may release admission.
-                let _ =
-                    enqueue_behavior_control(agent_id, session_id.clone(), &mut view.session, mode);
+                effects.extend(enqueue_behavior_control(
+                    agent_id,
+                    session_id.clone(),
+                    &mut view.session,
+                    mode,
+                    true,
+                ));
             }
         }
-        if let Some(effect) = next_control_effect(agent_id, session_id, &view.session) {
-            effects.push(effect);
-        }
+        effects.extend(pending_control_effects(
+            agent_id,
+            session_id,
+            &mut view.session,
+        ));
         for child in view.subagent_views.values_mut() {
             visit(agent_id, child, cli_effort_token, effects);
         }
@@ -117,8 +121,6 @@ pub(in crate::app::root::dispatch) fn clear_stale_session_id(
 }
 /// If a local agent already owns this id, focus it.
 ///
-/// - Eager `session_id` + leftover load placeholder after `SessionLoadFailed`
-///   is not "open" — reissue load instead of focusing.
 /// - Overlay: retarget when on the dashboard list, already in overlay (attached
 ///   matches visible), or attached already points at the agent we will show
 ///   (so switch activates overlay with the correct `focus_row`).
@@ -135,9 +137,6 @@ pub(in crate::app::root::dispatch) fn focus_if_session_already_open(
             .as_ref()
             .is_some_and(|sid| &*sid.0 == session_id);
         if !sid_ok {
-            return None;
-        }
-        if a.loading_placeholder_id.is_some() && !a.session.loading_replay {
             return None;
         }
         Some(*id)
@@ -169,16 +168,16 @@ fn dispatch_load_session_ungated(
         return vec![];
     }
     let acp_session_id = clear_stale_session_id(app, &session_id);
+    let control_handoff = app.screen_mode_control_handoffs.remove(&session_id);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
     let loading_msg = if matches!(app.restore_code, Some(true)) {
-        format!("Restoring code for session {}...", &session_id)
+        format!("Restoring code for session {}\u{2026}", &session_id)
     } else {
-        format!("Loading session {}...", &session_id)
+        format!("Loading session {}\u{2026}", &session_id)
     };
-    let loading_placeholder_id = scrollback.push_block(RenderBlock::system(loading_msg));
     let agent = AgentView::new(
         {
             let mut session = AgentSession::new(
@@ -189,6 +188,9 @@ fn dispatch_load_session_ungated(
                 session_cwd.clone().unwrap_or_else(|| app.cwd.clone()),
                 inherit_permission_mode(app),
             );
+            if let Some(handoff) = control_handoff {
+                session.restore_screen_mode_control_handoff(handoff);
+            }
             session.begin_replay();
             session.available_commands = app.bootstrap_acp_commands.clone();
             session.available_commands_generation = 1;
@@ -201,7 +203,11 @@ fn dispatch_load_session_ungated(
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
     agent_mut.session.attached_as_viewer = true;
     agent_mut.begin_replay_window();
-    agent_mut.loading_placeholder_id = Some(loading_placeholder_id);
+    agent_mut.session.set_live_feedback(
+        "session-load",
+        crate::scrollback::blocks::NoticeTone::Progress,
+        loading_msg,
+    );
     agent_mut.prompt.set_compact(app.appearance.prompt.compact);
     agent_mut.prompt.adopt_slash_mru(app.slash_mru.clone());
     agent_mut
@@ -567,14 +573,13 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         }
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
+        agent.session.clear_live_feedback("session-load");
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
+        agent.session.replay_live_cursor_seen = false;
         agent.session.restore_degree = restore_degree;
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
-        if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
-            agent.scrollback.remove_entry(placeholder_id);
-        }
         if let Some(m) = new_models {
             agent.session.models = Some(m).into();
         }
@@ -582,10 +587,10 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             (true, Some(s)) => {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(format!("\u{2713} Code restored: {s}")));
+                    .push_block(RenderBlock::notice(format!("\u{2713} Code restored: {s}")));
             }
             (false, Some(s)) => {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "\u{26A0} Code restore failed: {s}"
                 )));
             }
@@ -604,7 +609,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
                 info.worktree,
                 crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal()),
             );
-            agent.scrollback.push_block(RenderBlock::system(banner));
+            agent.scrollback.push_block(RenderBlock::notice(banner));
         }
         let running_prompt_id = foreground.map(|snapshot| snapshot.prompt_id);
         let adopting = running_prompt_id
@@ -687,13 +692,19 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
             return vec![];
         }
         agent.session.clear_pending_extensions_fetch();
+        agent.session.clear_live_feedback("session-load");
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();
         agent.mark_turn_finished();
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
+        agent.session.replay_live_cursor_seen = false;
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
+        // A failed load is not an open session. Release the eager identity so
+        // selecting the same session retries instead of focusing this error
+        // surface; the failure Notice remains attached to this view.
+        agent.unbind_session_id();
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {

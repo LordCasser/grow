@@ -8,7 +8,8 @@ use serde::Deserialize;
 
 use super::super::mvp_agent::MvpAgent;
 use crate::session::{
-    ContextInfo, ExtMethodResult, SessionCommand, SessionInfoData, SessionInfoResponse,
+    ContextInfo, ControlIntent, ExtMethodResult, SessionCommand, SessionInfoData,
+    SessionInfoResponse,
 };
 
 /// Router for the current session query and control methods.
@@ -31,6 +32,7 @@ pub async fn handle(
 struct SetSessionAgentRequest {
     session_id: String,
     agent_name: String,
+    intent: Option<ControlIntent>,
 }
 
 async fn handle_set_session_agent(
@@ -95,13 +97,25 @@ async fn handle_set_session_agent(
         .cmd_tx
         .send(SessionCommand::RebuildAgentForDefinition {
             definition,
+            intent: request.intent,
             responds_to,
         })
         .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
-    response
+    let outcome = response
         .await
         .map_err(|_| acp::Error::internal_error().data("session actor closed"))??;
-    ExtMethodResult::success(serde_json::json!({ "agentName": selected_name }))
+    let response = match outcome {
+        crate::session::DesiredStateOutcome::Applied(()) => {
+            serde_json::json!({ "status": "applied", "agentName": selected_name })
+        }
+        crate::session::DesiredStateOutcome::InFlight => {
+            serde_json::json!({ "status": "in_flight" })
+        }
+        crate::session::DesiredStateOutcome::Superseded => {
+            serde_json::json!({ "status": "superseded" })
+        }
+    };
+    ExtMethodResult::success(response)
         .to_ext_response()
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))
 }
@@ -214,14 +228,18 @@ async fn handle_session_close(
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
 
     let sid = acp::SessionId::new(req.session_id.clone());
-    let existed = agent.sessions.borrow().contains_key(&sid);
+    // The existence check belongs inside the per-session lifecycle
+    // transaction. Otherwise a racing load can appear after this handler has
+    // already reported a successful no-op close.
+    let existed = agent
+        .close_session_explicit(&sid)
+        .await
+        .map_err(|error| acp::Error::internal_error().data(error))?;
     if existed {
         // Explicit terminal close: shut the actor down and finalize the cloud
         // replica (genuine session end). Distinct from a mere client disconnect,
         // which detaches but keeps the session resumable and never finalizes
         // (see `MvpAgent::handle_evict_sessions` / `close_session_explicit`).
-        agent.request_session_shutdown(&sid);
-        agent.close_session_explicit(&sid);
         tracing::info!(session_id = %req.session_id, "session closed via grow/session/close");
     } else {
         tracing::debug!(session_id = %req.session_id, "session/close: session not found (already closed)");

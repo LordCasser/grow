@@ -3,6 +3,30 @@
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+
+/// Cancellation-safe mute lease for the actor incarnation observed by a
+/// resident reconnect. Every exit path restores that exact notifier gate;
+/// replacing the session handle cannot make an old guard unmute a new actor.
+pub(super) struct ReconnectGatewayMute {
+    gate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+impl ReconnectGatewayMute {
+    pub(super) fn acquire(gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        gate.store(false, std::sync::atomic::Ordering::Relaxed);
+        Self { gate: Some(gate) }
+    }
+
+    fn restore(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+impl Drop for ReconnectGatewayMute {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// In the meta, we provide
@@ -230,7 +254,6 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
-        let catalog_transaction = self.model_reload_lock.lock().await;
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         let init = self
             .initialize_request
@@ -278,6 +301,18 @@ impl acp::Agent for MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        // The session-id lifecycle gate is the outer transaction lock for
+        // every writer-creating path. Keep the global catalog lock inside it
+        // so new/load/close/delete/evict share one lock order and a retried
+        // client-supplied id can never detach an existing actor incarnation.
+        let _lifecycle_guard = self.lock_session_lifecycle(&session_id).await;
+        if self.has_live_or_draining_session(&session_id) {
+            return Err(acp::Error::invalid_params().data(format!(
+                "session {} is already live; use session/load to reconnect",
+                session_id.0
+            )));
+        }
+        let catalog_transaction = self.model_reload_lock.lock().await;
         let mut session_timer = crate::instrumentation_timer!("session.new_session");
         session_timer.with_field("session_id", session_id.0.as_ref());
         session_timer.with_field("cwd", cwd.as_str());
@@ -571,9 +606,8 @@ impl acp::Agent for MvpAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let _load_guard = self.begin_session_load(&arguments.session_id);
+        let _lifecycle_guard = self.lock_session_lifecycle(&arguments.session_id).await;
         let catalog_transaction = self.model_reload_lock.lock().await;
-        self.sweep_dead_sessions();
-        self.drain_old_session_thread(&arguments.session_id).await;
         tracing::debug!("Received load session request {arguments:?}");
         let init = self
             .initialize_request
@@ -635,21 +669,45 @@ impl acp::Agent for MvpAgent {
                 Some(&current_session_dir),
             );
         });
-        let session_exists = self
+        let resident_actor = self
             .sessions
             .borrow()
             .get(&session_id)
-            .is_some_and(|handle| !handle.cmd_tx.is_closed());
+            .filter(|handle| !handle.cmd_tx.is_closed())
+            .map(|handle| handle.cmd_tx.clone());
+        let session_exists = resident_actor.is_some();
+        let mut reconnect_gateway_mute = resident_actor.as_ref().and_then(|expected| {
+            self.sessions.borrow().get(&session_id).and_then(|handle| {
+                handle
+                    .cmd_tx
+                    .same_channel(expected)
+                    .then(|| ReconnectGatewayMute::acquire(handle.gateway_enabled.clone()))
+            })
+        });
+        if !session_exists {
+            // A closed handle is not a writer candidate, but remove it before
+            // joining its registered thread so a fresh writer can only be
+            // claimed after the previous persistence owner has fully exited.
+            if self.sessions.borrow().contains_key(&session_id) {
+                self.take_session(&session_id);
+            }
+            let old_writer_exit = self
+                .drain_old_session_thread(&session_id)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error))?;
+            if old_writer_exit == SessionThreadExit::Panicked {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    "previous session writer panicked; replaying durable state in a new incarnation"
+                );
+                self.remove_session_terminal(&session_id, SessionLiveState::DeadFailed);
+            }
+        }
         if session_exists {
             tracing::info!(
                 session_id = %session_id.0,
                 "Reconnect detected: flushing persistence buffer before replay"
             );
-            if let Some(handle) = self.sessions.borrow().get(&session_id) {
-                handle
-                    .gateway_enabled
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-            }
             let mut flush_timer = crate::instrumentation_timer!("session.reconnect_flush");
             flush_timer.with_field("session_id", session_id.0.as_ref());
             if let Err(reason) = self.flush_session(&session_id).await {
@@ -669,7 +727,7 @@ impl acp::Agent for MvpAgent {
             );
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
-        let claim_writer = !session_exists;
+        let claim_writer = resident_actor.is_none();
         let (observed_info, observed_persistence) = crate::session::persistence::load_light(
                 &session_info,
                 Some(self.gateway.clone()),
@@ -681,15 +739,35 @@ impl acp::Agent for MvpAgent {
         // flight. Never let that stale observer snapshot fall through into a
         // writer spawn: reacquire the writer epoch and replay from scratch
         // before deriving any runtime state.
+        let resident_still_open = resident_actor.as_ref().is_none_or(|expected| {
+            self.sessions.borrow().get(&session_id).is_some_and(|handle| {
+                !handle.cmd_tx.is_closed() && handle.cmd_tx.same_channel(expected)
+            })
+        });
         let (persistence_info, persistence, spawn_new_actor) =
-            if !claim_writer
-                && self
-                    .sessions
-                    .borrow()
-                    .get(&session_id)
-                    .is_none_or(|handle| handle.cmd_tx.is_closed())
-            {
+            if !claim_writer && !resident_still_open {
                 drop(observed_persistence);
+                if let Some(expected) = resident_actor.as_ref() {
+                    let is_expected = self
+                        .sessions
+                        .borrow()
+                        .get(&session_id)
+                        .is_some_and(|handle| handle.cmd_tx.same_channel(expected));
+                    if is_expected {
+                        self.take_session(&session_id);
+                    }
+                }
+                let old_writer_exit = self
+                    .drain_old_session_thread(&session_id)
+                    .await
+                    .map_err(|error| acp::Error::internal_error().data(error))?;
+                if old_writer_exit == SessionThreadExit::Panicked {
+                    tracing::warn!(
+                        session_id = %session_id.0,
+                        "resident writer exited during observer replay; joining before writer reclaim"
+                    );
+                    self.remove_session_terminal(&session_id, SessionLiveState::DeadFailed);
+                }
                 let (owned_info, owned_persistence) = crate::session::persistence::load_light(
                         &session_info,
                         Some(self.gateway.clone()),
@@ -926,8 +1004,8 @@ impl acp::Agent for MvpAgent {
             };
             (completions, subagent_projections)
         };
-        if let Some(handle) = self.sessions.borrow().get(&session_id) {
-            handle.gateway_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mute) = reconnect_gateway_mute.as_mut() {
+            mute.restore();
         }
         for rx in delta_completions {
             let _ = rx.await;
@@ -1039,6 +1117,34 @@ impl acp::Agent for MvpAgent {
                 "load_session: reconnecting to existing session (feedback manager already initialized)"
             );
         }
+        // A control snapshot is part of session-load completion, not a
+        // best-effort side effect. Fresh actors did not exist at the earlier
+        // replay boundary, while resident actors may still have their
+        // snapshot queued behind replay deltas. Wait for the actor ack so the
+        // client never observes a loaded session without its authoritative
+        // current/pending control state.
+        let control_tx = self
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .map(|handle| handle.cmd_tx.clone())
+            .ok_or_else(|| {
+                acp::Error::internal_error()
+                    .data("Session actor disappeared before control state publication")
+            })?;
+        let (control_ack_tx, control_ack_rx) = tokio::sync::oneshot::channel();
+        control_tx
+            .send(SessionCommand::PublishControlState {
+                respond_to: control_ack_tx,
+            })
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("Session actor ended before control state publication")
+            })?;
+        control_ack_rx.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("Session actor ended while publishing control state")
+        })?;
         if session_exists
             && let Some(hooks) = crate::extensions::hooks::reconnect_client_hooks(
                 request_meta.as_ref(),
@@ -1694,8 +1800,9 @@ impl acp::Agent for MvpAgent {
         args: acp::SetSessionModeRequest,
     ) -> Result<acp::SetSessionModeResponse, acp::Error> {
         tracing::info!("Received set session mode request {args:?}");
+        let intent = crate::session::ControlIntent::from_meta(args.meta.as_ref())?;
         let handle = self
-            .session_handle_waiting_for_load(&args.session_id)
+            .control_session_handle_waiting_for_load(&args.session_id)
             .await
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         let (tx, rx) = oneshot::channel();
@@ -1703,6 +1810,7 @@ impl acp::Agent for MvpAgent {
             .cmd_tx
             .send(SessionCommand::BehaviorChange {
                 session_mode: args.mode_id,
+                intent,
                 responds_to: tx,
             })
             .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
@@ -2010,6 +2118,7 @@ impl acp::Agent for MvpAgent {
                     .cmd_tx
                     .send(SessionCommand::BehaviorChange {
                         session_mode: next_mode_id.clone(),
+                        intent: None,
                         responds_to: tx,
                     });
                 if rx.await.is_err() {

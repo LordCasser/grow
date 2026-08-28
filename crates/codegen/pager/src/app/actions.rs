@@ -352,6 +352,12 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    /// Patch only reasoning effort. `model_id` is a local display/validation
+    /// hint; Shell composes the patch with its newest Sampling target.
+    PatchEffort {
+        model_id: acp::ModelId,
+        effort: ReasoningEffort,
+    },
     /// Switch the active prompt profile without changing model, permissions, or Behavior.
     SwitchAgent {
         agent_name: String,
@@ -702,7 +708,7 @@ pub enum Action {
     /// The text starts with `/`. The dispatcher resolves it through
     /// the slash registry (builtin / ACP / unknown) without a
     /// per-Agent session context — commands like `/agents`,
-    /// `/exit`, `/theme`, `/settings`, `/help` work without a
+    /// `/quit`, `/theme`, `/settings`, `/help` work without a
     /// session; commands that need one return a friendly toast.
     DashboardDispatchSlash {
         text: String,
@@ -1412,6 +1418,7 @@ pub enum Effect {
         control_token: super::session::SessionControlToken,
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
+        effort_patch: bool,
     },
     /// Switch the active prompt profile for an existing session.
     SwitchAgent {
@@ -1534,9 +1541,9 @@ pub enum Effect {
         expected_version: u64,
         new_text: Option<String>,
     },
-    /// A serialized per-exact-session Behavior request. Unlike the legacy
-    /// fire-and-forget mode effect, its token keeps rapid model/Agent/Behavior
-    /// changes in one FIFO and makes stale reconnect completions harmless.
+    /// A correlated per-exact-session Behavior request. The token identifies
+    /// the latest local intent in this domain and makes stale completions
+    /// harmless without coupling Behavior to Sampling or Agent requests.
     SwitchBehavior {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1774,7 +1781,7 @@ pub enum Effect {
     ExecuteSlashCommand {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        command: String,
+        request: crate::slash::HostCommandRequest,
     },
     QueryPromptStatus {
         agent_id: AgentId,
@@ -1960,6 +1967,22 @@ pub enum PromptStatusWire {
     },
 }
 
+/// Correlation outcome returned by a Shell control RPC. Committed state and
+/// user-visible terminal feedback still arrive through session updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlRpcOutcome {
+    AuthoritativeUpdatePending,
+    Superseded,
+}
+
+/// Transport/application failure for a control request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlRequestFailure {
+    pub message: String,
+    /// The Shell actor already owns a durable Rejected notice for this failure.
+    pub terminal_published: bool,
+}
+
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
@@ -2101,14 +2124,14 @@ pub enum TaskResult {
         prompt_id: Option<String>,
     },
     /// Transport completion for [`Effect::SwitchBehavior`]. Success waits for
-    /// the authoritative CurrentModeUpdate; only an error advances the local
-    /// FIFO, while preserving any queued prompt admission latch.
+    /// the authoritative CurrentModeUpdate; a terminal error only clears the
+    /// matching local correlation while preserving any prompt admission latch.
     SwitchBehaviorComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
         control_token: crate::app::session::SessionControlToken,
         mode: tools::types::BehaviorId,
-        result: Result<(), String>,
+        result: Result<ControlRpcOutcome, ControlRequestFailure>,
     },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer —
     /// the prompt never reached the shell's queue. Carries the payload so
@@ -2154,7 +2177,7 @@ pub enum TaskResult {
         control_token: super::session::SessionControlToken,
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
-        result: Result<(), String>,
+        result: Result<ControlRpcOutcome, ControlRequestFailure>,
     },
     /// Agent profile switch completed.
     SwitchAgentComplete {
@@ -2162,7 +2185,7 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         control_token: super::session::SessionControlToken,
         agent_name: String,
-        result: Result<(), String>,
+        result: Result<ControlRpcOutcome, ControlRequestFailure>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
@@ -2419,6 +2442,8 @@ pub enum TaskResult {
     /// Out-of-band slash-command acknowledgement or transport/command error.
     SlashCommandExecuted {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        request: crate::slash::HostCommandRequest,
         error: Option<String>,
     },
     /// The independent Trajectory server either reached its ready boundary or

@@ -41,7 +41,10 @@ use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
-use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
+use crate::app::actions::{
+    Action, ControlRequestFailure, ControlRpcOutcome, Effect, PermissionModeKind,
+    SubagentKillOutcome, TaskResult,
+};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::root::{
     ActiveView, AppView, PasteProvenance, TrustState, WelcomeAnnouncementState,
@@ -55,6 +58,17 @@ use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+fn control_rpc_accepted() -> Result<ControlRpcOutcome, ControlRequestFailure> {
+    Ok(ControlRpcOutcome::AuthoritativeUpdatePending)
+}
+
+fn local_control_failure(message: impl Into<String>) -> ControlRequestFailure {
+    ControlRequestFailure {
+        message: message.into(),
+        terminal_published: false,
+    }
+}
 fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
@@ -152,6 +166,7 @@ fn test_app() -> AppView {
         pending_update_version: None,
         restart_for_update: false,
         relaunch: None,
+        screen_mode_control_handoffs: Default::default(),
         screen_mode: crate::app::ScreenMode::Inline,
         pending_effects: Vec::new(),
         pending_editor: None,
@@ -323,7 +338,7 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
     let idx = sb.len() - 1 - offset;
     let entry = sb.get(idx).expect("scrollback index out of bounds");
     match &entry.block {
-        RenderBlock::System(sys) => sys.text.clone(),
+        RenderBlock::Notice(sys) => sys.text.clone(),
         other => panic!("expected System block at index {idx}, got {other:?}"),
     }
 }
@@ -539,7 +554,7 @@ fn read_toast(app: &AppView) -> String {
     agent
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast should be set")
 }
 /// Helper: enqueue a single permission containing the new
@@ -612,7 +627,7 @@ fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
 }
 /// Use the `theme_cache::test_lock` to serialize tests that touch
 /// the in-memory theme state (single mutable global). Mirrors the

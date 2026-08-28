@@ -103,7 +103,6 @@ pub(crate) struct InlineMediaHitAreas {
 use super::actions::Action;
 use super::root::InputOutcome;
 use super::session::AgentSession;
-use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::{
@@ -925,10 +924,10 @@ pub struct AgentView {
     pub(crate) btw_focused: bool,
     /// Hit area for the [Esc] close button in the /btw panel title.
     pub(crate) hit_btw_close: HitArea,
-    /// Toast message to display briefly (e.g., "Copied!" after y).
-    /// Tuple of (message, absolute expiry).
+    /// Typed toast to display briefly (e.g., "Copied!" after y).
+    /// Tuple of (feedback, absolute expiry).
     /// Does **not** carry sticky status banners — see [`Self::sticky_toast`].
-    pub(crate) toast: Option<(String, Instant)>,
+    pub(crate) toast: Option<(crate::scrollback::blocks::UiFeedback, Instant)>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box
     /// submit (prompt/interject/bash/feedback/remember), or explicit clear.
@@ -1134,17 +1133,6 @@ pub struct AgentView {
     /// `WorktreeSessionFailed` (non-orphan branch), and
     /// `ForkSessionFailed`.
     pub(crate) pending_fork_banner: Option<PendingForkBanner>,
-    /// Entry ID of the "Loading session ..." placeholder block pushed
-    /// by `dispatch_load_session_inner`. Cleared by the `SessionLoaded`
-    /// handler so the placeholder doesn't linger on screen when the
-    /// loaded session has no replay content.
-    pub(crate) loading_placeholder_id: Option<EntryId>,
-    /// Entry ID of the in-flight manual `/recap` loading block (rendered with
-    /// the animated "running" sidebar). Set when `/recap` is dispatched and
-    /// taken by the `SessionRecap` handler, which fills the block with the
-    /// summary and stops the animation. `None` when no manual recap is
-    /// pending (auto recaps never show a loading block).
-    pub(crate) pending_recap_entry: Option<EntryId>,
     /// The manually-chosen session title (`/rename` or the dashboard
     /// rename flow), as distinct from the auto-generated
     /// `generated_session_title` below. Set optimistically at dispatch,

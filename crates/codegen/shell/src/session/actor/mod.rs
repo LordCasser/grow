@@ -60,6 +60,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 use tools::computer::local::LocalTerminalBackend;
 use tools::implementations::BashToolInput;
 use tools::implementations::grow_build::web_fetch::WebFetchConfig;
@@ -104,6 +105,7 @@ use super::diagnostics;
 use super::helpers;
 use super::memory_state;
 use super::timeline_persistence;
+use slash_exec::HOST_COMMAND_INVOCATION;
 mod prompt_build;
 use prompt_build::*;
 mod session_mode;
@@ -160,6 +162,9 @@ pub(crate) struct InputItem {
     pub(crate) json_schema: Option<serde_json::Value>,
     /// Who originated this prompt — user or auto-wake system.
     pub(crate) origin: super::PromptOrigin,
+    /// Presentation identity for a Shell-owned slash command. This survives
+    /// idle scheduling without becoming part of the command's prompt blocks.
+    pub(crate) host_command: Option<crate::session::HostCommandInvocation>,
     /// Durable notification receipts atomically consumed by this synthetic
     /// turn's model-visible input. Empty for ordinary prompts.
     pub(crate) notification_ids: Vec<String>,
@@ -179,18 +184,71 @@ pub(crate) struct InputItem {
 /// fully migrated to `ChatStateActor` via `chat_state_handle`.
 /// Credentials (api_key, optional extra access key, client_version) live in
 /// the `credentials` sync mutex on `SessionActor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminationState {
+    Open,
+    Graceful,
+    Fatal,
+}
+
+impl TerminationState {
+    pub(crate) fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub(crate) fn request(&mut self, requested: Self) {
+        if matches!(requested, Self::Fatal) || matches!(self, Self::Open) {
+            *self = requested;
+        }
+    }
+}
+
 struct AdmissionState {
     /// The sole owner of foreground execution. Goal's future continuation
     /// right is not foreground work and therefore cannot block user admission.
     pub(crate) foreground: ForegroundState,
+    /// Actor-owned admission latch. Once termination begins, detached idle
+    /// producers may finish an already-owned foreground transaction, but no
+    /// new prompt, compaction, notification, Goal continuation, or Control
+    /// transaction may be admitted.
+    pub(crate) termination: TerminationState,
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
     /// Controls accepted while a step owns its immutable model-facing state.
-    /// The turn drains this single FIFO after StepEnded and before the next
-    /// sample; an idle session drains it before admitting any new foreground.
-    /// Model, Agent and Goal-definition changes must never form independent
-    /// queues because their relative admission order is observable.
-    pending_step_controls: VecDeque<PendingStepControl>,
+    /// Sampling and Agent are latest-wins desired-state domains; ordered
+    /// lifecycle mutations keep their causal admission sequence. The turn
+    /// drains the resulting snapshot after StepEnded and before the next
+    /// sample; an idle session drains it before admitting new foreground.
+    pending_step_controls: PendingStepControls,
+    /// Control currently being prepared or durably applied. A newer desired
+    /// revision may coexist while an older Agent preparation finishes; UI
+    /// snapshots always prefer the newer pending revision.
+    applying_step_control: Option<StepControlProjection>,
+    /// Monotonic Behavior control revision. Behavior retains its dedicated
+    /// admission/confirmation state machine but shares the typed projection
+    /// protocol with Sampling and Agent.
+    behavior_control_revision: u64,
+    /// Newest Behavior request not yet claimed by the dedicated worker.
+    pending_behavior_control: Option<PendingBehaviorSelection>,
+    /// Behavior request currently owned by the dedicated worker. A newer
+    /// pending revision may coexist while capability or ownership checks run.
+    applying_behavior_control: Option<StepControlProjection>,
+    /// Exactly one local worker drains Behavior desired state. Keeping this
+    /// outside the main mailbox allows later requests to supersede an older
+    /// target while capability/ownership checks are still preparing.
+    behavior_control_worker_active: bool,
+    /// The Behavior worker claimed an otherwise-idle foreground before it was
+    /// detached from the mailbox. This is the runtime admission fence that
+    /// prevents a later prompt, compaction, notification, Goal continuation,
+    /// or Sampling/Agent drain from overtaking the earlier Behavior request.
+    behavior_control_foreground_claimed: bool,
+    /// Per-client desired-state high-water marks. Actor-local revisions order
+    /// accepted requests; these tokens reject transport reordering before it
+    /// can manufacture the wrong local order.
+    control_intents: std::collections::HashMap<
+        (crate::extensions::notification::ControlDomain, String),
+        ControlIntentReceipt,
+    >,
     /// A durable lifecycle/Behavior preemption committed while the current
     /// foreground producer still owns the turn. No subsequent Step may start
     /// until that exact turn reaches its terminal.
@@ -215,6 +273,152 @@ struct AdmissionState {
     pub(crate) recent_terminals: VecDeque<crate::session::prompt_queue::RecentPromptTerminal>,
 }
 
+impl AdmissionState {
+    fn restore_terminal_control_intent(
+        receipts: &mut std::collections::HashMap<
+            (crate::extensions::notification::ControlDomain, String),
+            ControlIntentReceipt,
+        >,
+        domain: crate::extensions::notification::ControlDomain,
+        intent: &crate::session::ControlIntent,
+        terminal: ControlIntentTerminal,
+    ) -> Result<(), String> {
+        let key = (domain, intent.client_id.clone());
+        let token = (intent.generation, intent.sequence);
+        match receipts.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ControlIntentReceipt {
+                    token,
+                    lifecycle: ControlIntentLifecycle::Terminal(terminal),
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().token < token {
+                    entry.insert(ControlIntentReceipt {
+                        token,
+                        lifecycle: ControlIntentLifecycle::Terminal(terminal),
+                    });
+                } else if entry.get().token == token {
+                    let ControlIntentLifecycle::Terminal(existing) = &entry.get().lifecycle else {
+                        return Err(
+                            "persisted control receipt conflicts with an in-flight intent".into(),
+                        );
+                    };
+                    if existing.phase != terminal.phase || existing.target != terminal.target {
+                        return Err(format!(
+                            "persisted {:?} control receipt has conflicting terminal facts for client `{}` generation {} sequence {}",
+                            domain, intent.client_id, intent.generation, intent.sequence
+                        ));
+                    }
+                    if terminal.ui_terminal_durable && !existing.ui_terminal_durable {
+                        entry.insert(ControlIntentReceipt {
+                            token,
+                            lifecycle: ControlIntentLifecycle::Terminal(terminal),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_control_intent(
+        &mut self,
+        domain: crate::extensions::notification::ControlDomain,
+        intent: Option<&crate::session::ControlIntent>,
+    ) -> ControlIntentAdmission {
+        let Some(intent) = intent else {
+            return ControlIntentAdmission::New;
+        };
+        let key = (domain, intent.client_id.clone());
+        let candidate = (intent.generation, intent.sequence);
+        if let Some(current) = self.control_intents.get(&key) {
+            if current.token > candidate {
+                return ControlIntentAdmission::Older;
+            }
+            if current.token == candidate {
+                return match &current.lifecycle {
+                    ControlIntentLifecycle::InFlight => ControlIntentAdmission::DuplicateInFlight,
+                    ControlIntentLifecycle::Terminal(terminal) => {
+                        ControlIntentAdmission::ExactTerminal(terminal.clone())
+                    }
+                };
+            }
+        }
+        self.control_intents.insert(
+            key,
+            ControlIntentReceipt {
+                token: candidate,
+                lifecycle: ControlIntentLifecycle::InFlight,
+            },
+        );
+        ControlIntentAdmission::New
+    }
+
+    fn mark_control_intent_terminal(
+        &mut self,
+        domain: crate::extensions::notification::ControlDomain,
+        intent: Option<&crate::session::ControlIntent>,
+        terminal: ControlIntentTerminal,
+    ) {
+        let Some(intent) = intent else {
+            return;
+        };
+        let key = (domain, intent.client_id.clone());
+        let token = (intent.generation, intent.sequence);
+        if let Some(receipt) = self.control_intents.get_mut(&key)
+            && receipt.token == token
+        {
+            receipt.lifecycle = ControlIntentLifecycle::Terminal(terminal);
+        }
+    }
+
+    fn mark_control_terminal_ui_durable(
+        &mut self,
+        domain: crate::extensions::notification::ControlDomain,
+        intent: &crate::session::ControlIntent,
+    ) {
+        let key = (domain, intent.client_id.clone());
+        let token = (intent.generation, intent.sequence);
+        if let Some(ControlIntentReceipt {
+            token: current,
+            lifecycle: ControlIntentLifecycle::Terminal(terminal),
+        }) = self.control_intents.get_mut(&key)
+            && *current == token
+        {
+            terminal.ui_terminal_durable = true;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlIntentLifecycle {
+    InFlight,
+    Terminal(ControlIntentTerminal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlIntentReceipt {
+    token: (u64, u64),
+    lifecycle: ControlIntentLifecycle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlIntentAdmission {
+    New,
+    DuplicateInFlight,
+    ExactTerminal(ControlIntentTerminal),
+    Older,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlIntentTerminal {
+    phase: crate::extensions::notification::ControlPhase,
+    target: crate::extensions::notification::ControlTarget,
+    message: Option<String>,
+    ui_terminal_durable: bool,
+}
+
 struct PendingModelReload {
     catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
     responders: Vec<tokio::sync::oneshot::Sender<Result<(), acp::Error>>>,
@@ -223,12 +427,27 @@ struct PendingModelReload {
 struct PendingModelSelection {
     route: crate::agent::models::PublishedSessionRoute,
     catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
-    responds_to: tokio::sync::oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+    respond_to: tokio::sync::oneshot::Sender<
+        Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+    >,
+    intent: Option<crate::session::ControlIntent>,
 }
 
 struct PendingAgentSelection {
     preparation: std::rc::Rc<AgentPreparation>,
-    responds_to: tokio::sync::oneshot::Sender<Result<(), acp::Error>>,
+    respond_to:
+        tokio::sync::oneshot::Sender<Result<crate::session::DesiredStateOutcome<()>, acp::Error>>,
+    intent: Option<crate::session::ControlIntent>,
+}
+
+struct PendingBehaviorSelection {
+    session_mode: acp::SessionModeId,
+    revision: u64,
+    confirmation_owner: Option<String>,
+    responds_to: tokio::sync::oneshot::Sender<
+        Result<crate::session::behavior::BehaviorChangeOutcome, acp::Error>,
+    >,
+    intent: Option<crate::session::ControlIntent>,
 }
 
 enum PendingGoalDefinitionMutation {
@@ -256,14 +475,20 @@ struct PendingGoalDefinitionControl {
 }
 
 struct AgentPreparation {
+    target_name: String,
     result: std::cell::RefCell<Option<Result<agent::Agent, acp::Error>>>,
+    superseded: std::cell::Cell<bool>,
+    abort: std::cell::RefCell<Option<tokio::task::AbortHandle>>,
     ready: tokio::sync::Notify,
 }
 
 impl AgentPreparation {
-    fn ready(result: Result<agent::Agent, acp::Error>) -> std::rc::Rc<Self> {
+    fn ready(target_name: String, result: Result<agent::Agent, acp::Error>) -> std::rc::Rc<Self> {
         std::rc::Rc::new(Self {
+            target_name,
             result: std::cell::RefCell::new(Some(result)),
+            superseded: std::cell::Cell::new(false),
+            abort: std::cell::RefCell::new(None),
             ready: tokio::sync::Notify::new(),
         })
     }
@@ -275,11 +500,14 @@ impl AgentPreparation {
     ) -> std::rc::Rc<Self> {
         let new_agent_name = definition.selector_identity();
         let preparation = std::rc::Rc::new(Self {
+            target_name: new_agent_name.clone(),
             result: std::cell::RefCell::new(None),
+            superseded: std::cell::Cell::new(false),
+            abort: std::cell::RefCell::new(None),
             ready: tokio::sync::Notify::new(),
         });
         let output = std::rc::Rc::clone(&preparation);
-        tokio::task::spawn_local(async move {
+        let task = tokio::task::spawn_local(async move {
             let result = std::panic::AssertUnwindSafe(rebuild_spec.build_agent(definition))
                 .catch_unwind()
                 .await
@@ -309,21 +537,48 @@ impl AgentPreparation {
             *output.result.borrow_mut() = Some(result);
             output.ready.notify_waiters();
         });
+        *preparation.abort.borrow_mut() = Some(task.abort_handle());
         preparation
     }
 
-    async fn wait_ready(&self) {
+    /// `false` means a newer desired Agent revision replaced this candidate.
+    async fn wait_ready(&self) -> bool {
         loop {
             let ready = self.ready.notified();
+            if self.superseded.get() {
+                return false;
+            }
             if self.result.borrow().is_some() {
-                return;
+                return true;
             }
             ready.await;
         }
     }
 
+    async fn wait_superseded(&self) {
+        loop {
+            let changed = self.ready.notified();
+            if self.superseded.get() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn mark_superseded(&self) {
+        self.superseded.set(true);
+        if let Some(abort) = self.abort.borrow_mut().take() {
+            abort.abort();
+        }
+        self.ready.notify_waiters();
+    }
+
     fn has_agent(&self) -> bool {
         matches!(&*self.result.borrow(), Some(Ok(_)))
+    }
+
+    fn target_name(&self) -> &str {
+        &self.target_name
     }
 
     fn take(&self) -> Result<agent::Agent, acp::Error> {
@@ -334,14 +589,453 @@ impl AgentPreparation {
     }
 }
 
-/// Ordered next-step control mutations. Catalog reloads only coalesce when
-/// they are adjacent; every different control is an ordering barrier and must
-/// remain observable.
+impl Drop for AgentPreparation {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.get_mut().take() {
+            abort.abort();
+        }
+    }
+}
+
+/// A concrete control claimed for application at a causal boundary.
 enum PendingStepControl {
     ModelReload(PendingModelReload),
     ModelSelection(PendingModelSelection),
     AgentSelection(PendingAgentSelection),
     GoalDefinition(PendingGoalDefinitionControl),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingStepControlKey {
+    Ordered { sequence: u64 },
+    Sampling { sequence: u64, revision: u64 },
+    Agent { sequence: u64, revision: u64 },
+}
+
+struct SequencedStepControl<T> {
+    sequence: u64,
+    revision: u64,
+    value: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StepControlProjection {
+    revision: u64,
+    target: crate::extensions::notification::ControlTarget,
+    intent: Option<crate::session::ControlIntent>,
+}
+
+/// Immutable admission horizon captured atomically with `StepEnded`.
+/// Controls admitted after this sequence belong to the next Step even when
+/// they arrive before its `StepStarted` event is appended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StepControlBoundary {
+    cutoff: Option<u64>,
+    /// A desired-state domain that existed at `StepEnded` stays eligible for
+    /// this boundary until one revision durably settles. A newer revision may
+    /// replace an in-flight preparation and inherit the same boundary; a
+    /// domain first admitted after `StepEnded` must wait for the next one.
+    sampling_eligible: bool,
+    agent_eligible: bool,
+}
+
+impl StepControlBoundary {
+    fn close_domain(&mut self, key: PendingStepControlKey) {
+        match key {
+            PendingStepControlKey::Sampling { .. } => self.sampling_eligible = false,
+            PendingStepControlKey::Agent { .. } => self.agent_eligible = false,
+            PendingStepControlKey::Ordered { .. } => {}
+        }
+    }
+}
+
+/// Server-authoritative desired state for the next causal Step boundary.
+///
+/// Sampling and Agent each have exactly one replaceable slot. Goal-definition
+/// changes and catalog reloads are lifecycle mutations, not user-facing
+/// desired-state domains, so they remain ordered. A global admission sequence
+/// provides deterministic application order between the surviving targets
+/// and those ordered mutations without retaining superseded controls.
+#[derive(Default)]
+struct PendingStepControls {
+    next_sequence: u64,
+    sampling_revision: u64,
+    agent_revision: u64,
+    sampling: Option<SequencedStepControl<PendingModelSelection>>,
+    agent: Option<SequencedStepControl<PendingAgentSelection>>,
+    ordered: VecDeque<SequencedStepControl<PendingStepControl>>,
+}
+
+impl PendingStepControls {
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        sequence
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sampling.is_none() && self.agent.is_none() && self.ordered.is_empty()
+    }
+
+    fn revision(&self, domain: crate::extensions::notification::ControlDomain) -> u64 {
+        match domain {
+            crate::extensions::notification::ControlDomain::Sampling => self.sampling_revision,
+            crate::extensions::notification::ControlDomain::Agent => self.agent_revision,
+            crate::extensions::notification::ControlDomain::Behavior => 0,
+        }
+    }
+
+    fn reserve_terminal_replay_revision(
+        &mut self,
+        domain: crate::extensions::notification::ControlDomain,
+    ) -> u64 {
+        match domain {
+            crate::extensions::notification::ControlDomain::Sampling => {
+                self.sampling_revision = self.sampling_revision.saturating_add(1);
+                self.sampling_revision
+            }
+            crate::extensions::notification::ControlDomain::Agent => {
+                self.agent_revision = self.agent_revision.saturating_add(1);
+                self.agent_revision
+            }
+            crate::extensions::notification::ControlDomain::Behavior => {
+                unreachable!("Behavior revisions are owned by AdmissionState")
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.sampling.is_some())
+            + usize::from(self.agent.is_some())
+            + self.ordered.len()
+    }
+
+    fn desired_sampling_model_id(&self) -> Option<acp::ModelId> {
+        self.sampling
+            .as_ref()
+            .map(|pending| pending.value.route.model_id.clone())
+    }
+
+    fn admit_sampling(
+        &mut self,
+        route: crate::agent::models::PublishedSessionRoute,
+        catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        >,
+    ) -> (u64, Option<(u64, PendingModelSelection)>) {
+        self.sampling_revision = self.sampling_revision.saturating_add(1);
+        let revision = self.sampling_revision;
+        let sequence = self.next_sequence();
+        let superseded = self
+            .sampling
+            .take()
+            .map(|pending| (pending.revision, pending.value));
+        self.sampling = Some(SequencedStepControl {
+            sequence,
+            revision,
+            value: PendingModelSelection {
+                route,
+                catalog,
+                respond_to: responds_to,
+                intent,
+            },
+        });
+        (revision, superseded)
+    }
+
+    fn admit_agent(
+        &mut self,
+        preparation: std::rc::Rc<AgentPreparation>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<()>, acp::Error>,
+        >,
+    ) -> (u64, Option<(u64, PendingAgentSelection)>) {
+        self.agent_revision = self.agent_revision.saturating_add(1);
+        let revision = self.agent_revision;
+        let sequence = self.next_sequence();
+        let superseded = if let Some(pending) = self.agent.take() {
+            pending.value.preparation.mark_superseded();
+            Some((pending.revision, pending.value))
+        } else {
+            None
+        };
+        self.agent = Some(SequencedStepControl {
+            sequence,
+            revision,
+            value: PendingAgentSelection {
+                preparation,
+                respond_to: responds_to,
+                intent,
+            },
+        });
+        (revision, superseded)
+    }
+
+    fn admit_model_reload(
+        &mut self,
+        catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
+        responds_to: tokio::sync::oneshot::Sender<Result<(), acp::Error>>,
+    ) {
+        let last_sequence = [
+            self.sampling.as_ref().map(|pending| pending.sequence),
+            self.agent.as_ref().map(|pending| pending.sequence),
+            self.ordered.back().map(|pending| pending.sequence),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        if self.ordered.back().is_some_and(|pending| {
+            Some(pending.sequence) == last_sequence
+                && matches!(pending.value, PendingStepControl::ModelReload(_))
+        }) {
+            let PendingStepControl::ModelReload(pending) =
+                &mut self.ordered.back_mut().expect("checked above").value
+            else {
+                unreachable!("checked model reload variant")
+            };
+            pending.catalog = catalog;
+            pending.responders.push(responds_to);
+            return;
+        }
+        let sequence = self.next_sequence();
+        self.ordered.push_back(SequencedStepControl {
+            sequence,
+            revision: 0,
+            value: PendingStepControl::ModelReload(PendingModelReload {
+                catalog,
+                responders: vec![responds_to],
+            }),
+        });
+    }
+
+    fn admit_goal_definition(&mut self, pending: PendingGoalDefinitionControl) {
+        let sequence = self.next_sequence();
+        self.ordered.push_back(SequencedStepControl {
+            sequence,
+            revision: 0,
+            value: PendingStepControl::GoalDefinition(pending),
+        });
+    }
+
+    fn next_key(&self) -> Option<PendingStepControlKey> {
+        let ordered = self
+            .ordered
+            .front()
+            .map(|pending| PendingStepControlKey::Ordered {
+                sequence: pending.sequence,
+            });
+        let sampling = self
+            .sampling
+            .as_ref()
+            .map(|pending| PendingStepControlKey::Sampling {
+                sequence: pending.sequence,
+                revision: pending.revision,
+            });
+        let agent = self
+            .agent
+            .as_ref()
+            .map(|pending| PendingStepControlKey::Agent {
+                sequence: pending.sequence,
+                revision: pending.revision,
+            });
+        [ordered, sampling, agent]
+            .into_iter()
+            .flatten()
+            .min_by_key(|key| match key {
+                PendingStepControlKey::Ordered { sequence }
+                | PendingStepControlKey::Sampling { sequence, .. }
+                | PendingStepControlKey::Agent { sequence, .. } => *sequence,
+            })
+    }
+
+    fn boundary(&self) -> StepControlBoundary {
+        StepControlBoundary {
+            cutoff: self.next_sequence.checked_sub(1),
+            sampling_eligible: self.sampling.is_some(),
+            agent_eligible: self.agent.is_some(),
+        }
+    }
+
+    fn next_key_at_boundary(&self, boundary: StepControlBoundary) -> Option<PendingStepControlKey> {
+        let ordered = boundary.cutoff.and_then(|cutoff| {
+            self.ordered
+                .front()
+                .filter(|pending| pending.sequence <= cutoff)
+                .map(|pending| PendingStepControlKey::Ordered {
+                    sequence: pending.sequence,
+                })
+        });
+        let sampling = boundary.sampling_eligible.then(|| {
+            self.sampling
+                .as_ref()
+                .map(|pending| PendingStepControlKey::Sampling {
+                    sequence: pending.sequence,
+                    revision: pending.revision,
+                })
+        });
+        let agent = boundary.agent_eligible.then(|| {
+            self.agent
+                .as_ref()
+                .map(|pending| PendingStepControlKey::Agent {
+                    sequence: pending.sequence,
+                    revision: pending.revision,
+                })
+        });
+        [ordered, sampling.flatten(), agent.flatten()]
+            .into_iter()
+            .flatten()
+            .min_by_key(|key| match key {
+                PendingStepControlKey::Ordered { sequence }
+                | PendingStepControlKey::Sampling { sequence, .. }
+                | PendingStepControlKey::Agent { sequence, .. } => *sequence,
+            })
+    }
+
+    fn agent_preparation(
+        &self,
+        key: PendingStepControlKey,
+    ) -> Option<std::rc::Rc<AgentPreparation>> {
+        let PendingStepControlKey::Agent { sequence, revision } = key else {
+            return None;
+        };
+        self.agent
+            .as_ref()
+            .filter(|pending| pending.sequence == sequence && pending.revision == revision)
+            .map(|pending| std::rc::Rc::clone(&pending.value.preparation))
+    }
+
+    fn projection(&self, key: PendingStepControlKey) -> Option<StepControlProjection> {
+        match key {
+            PendingStepControlKey::Sampling { sequence, revision } => self
+                .sampling
+                .as_ref()
+                .filter(|pending| pending.sequence == sequence && pending.revision == revision)
+                .map(|pending| StepControlProjection {
+                    revision,
+                    target: crate::extensions::notification::ControlTarget::Sampling {
+                        model_id: pending.value.route.model_id.0.to_string(),
+                        reasoning_effort: pending
+                            .value
+                            .route
+                            .sampling_config
+                            .reasoning_effort
+                            .map(|effort| effort.to_string()),
+                    },
+                    intent: pending.value.intent.clone(),
+                }),
+            PendingStepControlKey::Agent { sequence, revision } => self
+                .agent
+                .as_ref()
+                .filter(|pending| pending.sequence == sequence && pending.revision == revision)
+                .map(|pending| StepControlProjection {
+                    revision,
+                    target: crate::extensions::notification::ControlTarget::Agent {
+                        agent_name: pending.value.preparation.target_name().to_owned(),
+                    },
+                    intent: pending.value.intent.clone(),
+                }),
+            PendingStepControlKey::Ordered { .. } => None,
+        }
+    }
+
+    fn domain_projection(
+        &self,
+        domain: crate::extensions::notification::ControlDomain,
+    ) -> Option<StepControlProjection> {
+        match domain {
+            crate::extensions::notification::ControlDomain::Sampling => {
+                self.sampling.as_ref().and_then(|pending| {
+                    self.projection(PendingStepControlKey::Sampling {
+                        sequence: pending.sequence,
+                        revision: pending.revision,
+                    })
+                })
+            }
+            crate::extensions::notification::ControlDomain::Agent => {
+                self.agent.as_ref().and_then(|pending| {
+                    self.projection(PendingStepControlKey::Agent {
+                        sequence: pending.sequence,
+                        revision: pending.revision,
+                    })
+                })
+            }
+            crate::extensions::notification::ControlDomain::Behavior => None,
+        }
+    }
+
+    fn take(&mut self, key: PendingStepControlKey) -> Option<PendingStepControl> {
+        match key {
+            PendingStepControlKey::Ordered { sequence } => self
+                .ordered
+                .front()
+                .is_some_and(|pending| pending.sequence == sequence)
+                .then(|| self.ordered.pop_front().expect("checked above").value),
+            PendingStepControlKey::Sampling { sequence, revision } => self
+                .sampling
+                .as_ref()
+                .is_some_and(|pending| pending.sequence == sequence && pending.revision == revision)
+                .then(|| {
+                    PendingStepControl::ModelSelection(
+                        self.sampling.take().expect("checked above").value,
+                    )
+                }),
+            PendingStepControlKey::Agent { sequence, revision } => self
+                .agent
+                .as_ref()
+                .is_some_and(|pending| pending.sequence == sequence && pending.revision == revision)
+                .then(|| {
+                    PendingStepControl::AgentSelection(
+                        self.agent.take().expect("checked above").value,
+                    )
+                }),
+        }
+    }
+
+    fn cancel_goal_definitions(&mut self, goal_id: &str, message: &str) {
+        self.ordered.retain_mut(|pending| {
+            let PendingStepControl::GoalDefinition(goal) = &mut pending.value else {
+                return true;
+            };
+            if goal.goal_id != goal_id {
+                return true;
+            }
+            if let Some(respond_to) = goal.responds_to.take() {
+                let _ = respond_to.send(Err(message.to_owned()));
+            }
+            false
+        });
+    }
+
+    fn cancel_for_shutdown(&mut self) {
+        let error = || acp::Error::internal_error().data("session is shutting down");
+        if let Some(pending) = self.sampling.take() {
+            let _ = pending.value.respond_to.send(Err(error()));
+        }
+        if let Some(pending) = self.agent.take() {
+            pending.value.preparation.mark_superseded();
+            let _ = pending.value.respond_to.send(Err(error()));
+        }
+        for pending in self.ordered.drain(..) {
+            match pending.value {
+                PendingStepControl::ModelReload(pending) => {
+                    for respond_to in pending.responders {
+                        let _ = respond_to.send(Err(error()));
+                    }
+                }
+                PendingStepControl::GoalDefinition(mut pending) => {
+                    if let Some(respond_to) = pending.responds_to.take() {
+                        let _ = respond_to.send(Err("session is shutting down".to_string()));
+                    }
+                }
+                PendingStepControl::ModelSelection(_) | PendingStepControl::AgentSelection(_) => {
+                    unreachable!("replaceable controls never enter the ordered queue")
+                }
+            }
+        }
+    }
 }
 
 pub(crate) enum ForegroundState {
@@ -442,6 +1136,29 @@ impl ForegroundState {
         }
     }
 
+    /// Structured identity for the exact prompt across both producer-owned
+    /// and durable-terminal settlement phases.
+    pub(crate) fn identity(
+        &self,
+        prompt_id: &str,
+    ) -> Option<(crate::session::PromptOrigin, crate::session::TurnKind)> {
+        match self {
+            Self::RegularTurn(task) if task.prompt_id == prompt_id => {
+                Some((task.origin.clone(), task.turn_kind))
+            }
+            Self::Settling {
+                prompt_id: active,
+                origin,
+                turn_kind,
+            } if active == prompt_id => Some((origin.clone(), *turn_kind)),
+            Self::Idle
+            | Self::ApplyingControl
+            | Self::RegularTurn(_)
+            | Self::Settling { .. }
+            | Self::Compaction => None,
+        }
+    }
+
     pub(crate) fn finish_settling(&mut self, prompt_id: &str) -> bool {
         if matches!(self, Self::Settling { prompt_id: active, .. } if active == prompt_id) {
             *self = Self::Idle;
@@ -453,6 +1170,19 @@ impl ForegroundState {
 }
 
 impl AdmissionState {
+    /// Whether `prompt_id` still owns the live regular-turn admission epoch.
+    /// Step and provider admission both use this predicate while holding the
+    /// step-control gate, so termination and terminal preemption cannot split
+    /// those two boundaries into subtly different policies.
+    pub(crate) fn can_continue_regular_turn(&self, prompt_id: &str) -> bool {
+        self.termination.is_open()
+            && !self.terminal_preemption_pending
+            && matches!(
+                self.foreground.regular(),
+                Some(task) if task.prompt_id == prompt_id
+            )
+    }
+
     /// Prompt id of the in-flight regular turn, if any. Foreground ownership
     /// and the FIFO share this lock, so completion and queue mutations compare
     /// against one race-free identity.
@@ -519,7 +1249,10 @@ impl AdmissionState {
 /// user prompt is queued, and interactive Ctrl+C has not suppressed
 /// notifications pending genuine user re-engagement.
 fn is_session_idle_for_injection(state: &AdmissionState) -> bool {
-    state.foreground.is_idle() && state.pending_inputs.is_empty() && !state.notifications_suppressed
+    state.termination.is_open()
+        && state.foreground.is_idle()
+        && state.pending_inputs.is_empty()
+        && !state.notifications_suppressed
 }
 /// Canonical actor-owned blocker for idle unload. An Active Goal remains
 /// resident because it owns the right to request the next idle continuation.
@@ -532,6 +1265,11 @@ fn session_has_work(
 ) -> bool {
     !state.foreground.is_idle()
         || state.pending_manual_compact.is_some()
+        || !state.pending_step_controls.is_empty()
+        || state.applying_step_control.is_some()
+        || state.behavior_control_worker_active
+        || state.pending_behavior_control.is_some()
+        || state.applying_behavior_control.is_some()
         || !state.pending_inputs.is_empty()
         || goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
         || has_parked_plan_approval
@@ -649,6 +1387,8 @@ struct HookSessionState {
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
+    /// Unique authority epoch for actor-local desired-state revisions.
+    pub(crate) control_epoch: String,
     #[cfg(test)]
     pub(crate) test_session_dir_guard: Option<tempfile::TempDir>,
     /// Canonical storage location of this Timeline entity. This is explicit
@@ -681,6 +1421,12 @@ pub(crate) struct SessionActor {
     /// transition halfway through its durable commit and live-state swap.
     /// The turn remains abortable everywhere else.
     step_control_gate: TokioMutex<()>,
+    /// Serializes every root Goal read-modify-persist transaction. Goal token
+    /// settlement can arrive from primary sampling, Sideband work, or child
+    /// mailboxes while lifecycle commands mutate the same durable snapshot;
+    /// the in-memory rollback path is only sound when those transactions are
+    /// linearized.
+    goal_transaction_gate: TokioMutex<()>,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
@@ -732,6 +1478,51 @@ pub(crate) struct SessionActor {
     /// Sideband durability retries are exact and may otherwise wait forever
     /// after the session has entered teardown.
     pub(crate) sideband_cancel: tokio_util::sync::CancellationToken,
+    /// SessionEnd memory/dream work runs only after ordinary auxiliary owners
+    /// have been cancelled and drained, so it receives an isolated token that
+    /// cannot accidentally resurrect the normal Sideband epoch.
+    pub(crate) finalizer_sideband_cancel: tokio_util::sync::CancellationToken,
+    /// Drop recovery uses an epoch owned by the Session rather than an
+    /// untracked token. Fatal/final teardown revokes it and drains the
+    /// associated activity permits before crossing the persistence barrier.
+    pub(crate) sideband_repair_cancel: tokio_util::sync::CancellationToken,
+    /// Cancellation epoch for append-only UI facts. Provider Sidebands stop
+    /// at graceful-shutdown entry, while control terminals, permission audit,
+    /// and child lifecycle notices remain valid until their producers drain.
+    /// Keeping those epochs distinct prevents shutdown from discarding the
+    /// final user-visible state before the persistence frontier.
+    pub(crate) durable_ui_cancel: tokio_util::sync::CancellationToken,
+    /// Once fatal/final persistence begins, Drop recovery must not create an
+    /// independent post-barrier Sideband writer.
+    pub(crate) sideband_fail_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Linearizes Sideband activity acquisition with fail-stop publication so
+    /// no nested writer can appear after the final activity-idle observation.
+    pub(crate) sideband_admission_gate: tokio::sync::Mutex<()>,
+    /// Finite work detached from foreground admission (title/recap/auxiliary
+    /// model calls, memory timers, manual compaction). Teardown closes this
+    /// admission authority and drains every already-issued permit before the
+    /// Goal window or final persistence barrier is closed.
+    pub(crate) session_activities: SessionActivityTracker,
+    /// Long-lived session services are explicit owners rather than detached
+    /// LocalSet tasks. Teardown closes their ingress, then joins them before
+    /// dismantling persistence and permission authorities.
+    mcp_dispatcher_worker: TaskSlot<()>,
+    mcp_initialization_worker: TaskSlot<()>,
+    project_discovery_worker: TaskSlot<()>,
+    fs_watch_handle: std::cell::RefCell<Option<crate::session::fs_watch::FsWatchHandle>>,
+    /// Shared stop epoch for the remaining long-lived Session services. Each
+    /// service also has an explicit join owner below; the token requests a
+    /// cooperative stop before teardown applies its bounded join policy.
+    background_service_shutdown: CancellationToken,
+    user_question_worker: TaskSlot<()>,
+    context_recall_worker: TaskSlot<()>,
+    notification_reconciliation_worker: TaskSlot<()>,
+    memory_reindex_worker: TaskSlot<()>,
+    /// Actor-owned handles for the two detached control drains. Retaining the
+    /// JoinHandles makes shutdown a bounded join instead of polling mutable
+    /// flags forever, and preserves panic results for fail-closed teardown.
+    step_control_worker: TaskSlot<Result<(), String>>,
+    behavior_control_worker: TaskSlot<Result<(), String>>,
     /// Memory subsystem: storage, flush config, injection state, diagnostics.
     pub(crate) memory: super::memory_state::SessionMemory,
     /// Diagnostic counters for session summary.
@@ -800,7 +1591,8 @@ pub(crate) struct SessionActor {
     pub(crate) owns_permission_manager: bool,
     /// Primary-owned receiver bridge. Shutdown joins it after the permission
     /// actor closes its event sender and before the final persistence flush.
-    pub(crate) permission_audit_bridge: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(crate) permission_audit_bridge:
+        parking_lot::Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),
@@ -868,8 +1660,17 @@ pub(crate) struct SessionActor {
     pub(crate) workflow_tx: tokio::sync::mpsc::UnboundedSender<
         tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >,
+    /// Session-owned Workflow ingress worker. Teardown closes admission,
+    /// wakes this worker to reject queued envelopes, and joins it before
+    /// draining Workflow executors.
+    pub(crate) workflow_worker: TaskSlot<()>,
+    pub(crate) workflow_service_shutdown: CancellationToken,
     /// Background-computed user-message prefix, injected before the first prompt.
     pub(crate) deferred_prefix: TaskSlot<String>,
+    /// Re-parked Plan approval is an open-ended reverse request. Retaining its
+    /// owner lets teardown abort and join it before the final Control/Timeline
+    /// persistence barrier.
+    restored_plan_approval: TaskSlot<()>,
     /// Debounced idle notification state. Tests that construct the actor
     /// directly leave this disabled.
     pub(crate) idle_prompt_extension: Option<IdlePromptExtension>,
@@ -937,6 +1738,10 @@ pub(crate) struct SessionActor {
     /// tests and other constructor sites use `SamplerHandle::noop()`.
     /// All inference flows through this handle.
     pub(crate) sampler_handle: sampler::SamplerHandle,
+    /// Sole shutdown/join owner for the sampler actor.
+    sampler_owner: std::cell::RefCell<Option<sampler::SamplerOwner>>,
+    /// Drains sampler events and is joined after sampler shutdown closes the channel.
+    sampler_event_drainer: TaskSlot<()>,
     /// Cached recipe for constructing this session's [`agent::Agent`].
     ///
     /// Populated once at session spawn and then reused by the next-step Agent
@@ -1106,37 +1911,100 @@ impl SessionActor {
     ) -> Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>> {
         self.workflow_manager.lock().await.tracker()
     }
-    /// Send visible text output to the TUI from a slash command.
-    ///
-    /// Uses `AgentMessageChunk` so the text appears in the conversation
-    /// scrollback. The session actor owns replay flushing; callers running in
-    /// that actor must never enqueue a flush event and wait for the same actor
-    /// to acknowledge it.
-    async fn send_slash_command_output(&self, text: &str) {
-        self.send_slash_command_output_with_meta(text, None).await;
-    }
+    /// Append durable, UI-only output for a Shell-owned command or lifecycle
+    /// control. It never enters ChatState and never masquerades as assistant
+    /// prose. The outer notification metadata supplies the immutable event id;
+    /// `invocation_id` groups multiple terminal rows from one command.
     async fn send_host_turn_slash_command_output(&self, text: &str) {
-        let mut chunk_meta = serde_json::Map::new();
-        chunk_meta.insert(
-            crate::session::storage::HOST_TURN_META_KEY.into(),
-            serde_json::json!(true),
-        );
-        self.send_slash_command_output_with_meta(text, Some(chunk_meta))
-            .await;
-    }
-    async fn send_slash_command_output_with_meta(
-        &self,
-        text: &str,
-        meta: Option<serde_json::Map<String, serde_json::Value>>,
-    ) {
-        self.send_update(
-            acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
-                    text.to_string(),
-                )))
-                .meta(meta),
-            ),
+        self.send_host_turn_slash_command_notice(
+            crate::extensions::notification::UiNoticeTone::Info,
+            text,
             None,
+        )
+        .await;
+    }
+
+    async fn send_host_turn_slash_command_notice(
+        &self,
+        tone: crate::extensions::notification::UiNoticeTone,
+        message: &str,
+        details: Option<String>,
+    ) {
+        let invocation = HOST_COMMAND_INVOCATION
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| crate::session::HostCommandInvocation {
+                command: "session-control".to_string(),
+                description: "Session lifecycle control".to_string(),
+                invocation_id: format!("session-control-{}", uuid::Uuid::now_v7()),
+            });
+        self.send_ui_notice(crate::extensions::notification::UiNotice {
+            correlation_id: invocation.invocation_id,
+            category: crate::extensions::notification::UiNoticeCategory::Command,
+            subject: Some(invocation.command),
+            description: Some(invocation.description),
+            message: message.to_string(),
+            tone,
+            details,
+        })
+        .await;
+    }
+
+    async fn send_lifecycle_notice(
+        &self,
+        subject: &str,
+        tone: crate::extensions::notification::UiNoticeTone,
+        message: &str,
+        details: Option<String>,
+    ) {
+        self.send_ui_notice(crate::extensions::notification::UiNotice {
+            correlation_id: format!("lifecycle-{subject}-{}", uuid::Uuid::now_v7()),
+            category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+            subject: Some(subject.to_string()),
+            description: None,
+            message: message.to_string(),
+            tone,
+            details,
+        })
+        .await;
+    }
+
+    async fn send_ui_notice(&self, notice: crate::extensions::notification::UiNotice) {
+        let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
+        if let Err(error) = self
+            .send_grow_passive_notification(update.clone(), update)
+            .await
+        {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                error = %error,
+                "failed to persist Shell command output",
+            );
+        }
+    }
+
+    async fn send_host_turn_slash_command_success(&self, message: &str) {
+        self.send_host_turn_slash_command_notice(
+            crate::extensions::notification::UiNoticeTone::Success,
+            message,
+            None,
+        )
+        .await;
+    }
+
+    async fn send_host_turn_slash_command_warning(&self, message: &str) {
+        self.send_host_turn_slash_command_notice(
+            crate::extensions::notification::UiNoticeTone::Warning,
+            message,
+            None,
+        )
+        .await;
+    }
+
+    async fn send_host_turn_slash_command_error(&self, message: &str, details: impl Into<String>) {
+        self.send_host_turn_slash_command_notice(
+            crate::extensions::notification::UiNoticeTone::Error,
+            message,
+            Some(details.into()),
         )
         .await;
     }

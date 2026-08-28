@@ -384,6 +384,10 @@ pub struct ScreenModeRelaunch {
     pub minimal: bool,
     /// Active session to reopen via `--resume`.
     pub session_id: String,
+    /// Newest desired controls in the reopened root Session and descendants.
+    /// The relaunch transports these privately and reissues their original
+    /// Shell intent tokens after replay reconstructs each Session.
+    pub control_handoffs: Vec<crate::app::session::SessionControlHandoff>,
 }
 /// Root view component — owns all application state.
 pub struct AppView {
@@ -591,8 +595,8 @@ pub struct AppView {
     /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → `AnnouncementsOpenCta`).
     pub welcome_promo_cta_rect: Option<ratatui::layout::Rect>,
-    /// Transient welcome toast: (message, wall-clock expiry).
-    pub welcome_toast: Option<(String, std::time::Instant)>,
+    /// Transient welcome feedback and wall-clock expiry.
+    pub welcome_toast: Option<(crate::scrollback::blocks::UiFeedback, std::time::Instant)>,
     /// Sticky hover flag for the welcome promo CTA (redraw on enter/leave).
     pub welcome_on_promo_cta: bool,
     /// Fetched session list for the session picker (None = not yet fetched).
@@ -750,6 +754,10 @@ pub struct AppView {
     /// other screen mode. Driven by `/minimal` and `/fullscreen`. Captures the
     /// session id at action time so a later teardown cannot drop `--resume`.
     pub relaunch: Option<ScreenModeRelaunch>,
+    /// Relaunch-only desired controls waiting for their Session view to be
+    /// reconstructed. Keyed by the authoritative Session ID.
+    pub(crate) screen_mode_control_handoffs:
+        std::collections::HashMap<String, crate::app::session::SessionControlHandoff>,
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
     /// Set from the resolved terminal state at startup.
     pub(crate) screen_mode: super::ScreenMode,
@@ -776,7 +784,12 @@ pub struct AppView {
     pub(crate) keyboard_normalizer: KeyboardNormalizer,
 }
 /// Bottom-right toast overlay on the welcome screen (mirrors agent toast style).
-fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, msg: &str) {
+fn paint_welcome_toast(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    tone: crate::scrollback::blocks::NoticeTone,
+    msg: &str,
+) {
     let theme = crate::theme::Theme::current();
     let max_msg = (area.width as usize).saturating_sub(4);
     if max_msg == 0 || area.height == 0 {
@@ -794,7 +807,7 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
     for (i, ch) in toast.chars().enumerate() {
         if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
             cell.set_char(ch);
-            cell.fg = theme.accent_user;
+            cell.fg = tone.color(&theme);
             cell.bg = theme.bg_base;
             cell.modifier = ratatui::prelude::Modifier::BOLD;
         }
@@ -926,6 +939,7 @@ impl AppView {
             pending_update_version: None,
             restart_for_update: false,
             relaunch: None,
+            screen_mode_control_handoffs: Default::default(),
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
             plugin_cta_enabled: false,
@@ -1062,27 +1076,35 @@ impl AppView {
     /// fires. On welcome, a bottom-right overlay for
     /// [`WELCOME_TOAST_DURATION`].
     pub fn show_toast(&mut self, msg: &str) {
+        self.show_typed_toast(crate::scrollback::blocks::NoticeTone::Info, msg);
+    }
+
+    /// Show one latest-wins transient notice using the same tone vocabulary
+    /// across agent, dashboard and welcome surfaces.
+    pub fn show_typed_toast(&mut self, tone: crate::scrollback::blocks::NoticeTone, msg: &str) {
         match self.active_view {
             ActiveView::Agent(id) => {
                 if let Some(agent) = self.agents.get_mut(&id) {
                     if let Some(child_sid) = agent.active_subagent.clone()
                         && let Some(child) = agent.subagent_views.get_mut(&child_sid)
                     {
-                        child.show_toast(msg);
+                        child.show_toast_with_tone(tone, msg);
                     } else {
-                        agent.show_toast(msg);
+                        agent.show_toast_with_tone(tone, msg);
                     }
                 }
             }
             ActiveView::AgentDashboard => {
                 if let Some(d) = self.dashboard.as_mut() {
-                    d.error_toast = Some(crate::glyphs::legacy_glyph_fallback(msg).into_owned());
+                    d.set_feedback(tone, crate::glyphs::legacy_glyph_fallback(msg).into_owned());
                 }
             }
             ActiveView::Welcome => {
                 let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
-                self.welcome_toast =
-                    Some((msg, std::time::Instant::now() + WELCOME_TOAST_DURATION));
+                self.welcome_toast = Some((
+                    crate::scrollback::blocks::UiFeedback::new(tone, msg),
+                    std::time::Instant::now() + WELCOME_TOAST_DURATION,
+                ));
             }
         }
     }
@@ -2793,8 +2815,13 @@ impl AppView {
                         );
                         self.welcome_menu_rects = result.menu_rects;
                         self.welcome_promo_cta_rect = result.promo_cta_rect;
-                        if let Some((ref msg, _)) = self.welcome_toast {
-                            paint_welcome_toast(f.buffer_mut(), view_area, msg);
+                        if let Some((ref feedback, _)) = self.welcome_toast {
+                            paint_welcome_toast(
+                                f.buffer_mut(),
+                                view_area,
+                                feedback.tone,
+                                feedback.as_str(),
+                            );
                         }
                         self.welcome_announcement.truncated = result.announcement_truncated;
                         self.welcome_announcement.rect = result.announcement_rect;
@@ -2967,11 +2994,8 @@ impl AppView {
                                 && !agents.contains_key(&id)
                             {
                                 dashboard.close_popup();
-                                if dashboard.error_toast.is_none() {
-                                    dashboard.error_toast = Some(format!(
-                                        "{} Session closed",
-                                        crate::glyphs::check_mark()
-                                    ));
+                                if dashboard.feedback.is_none() {
+                                    dashboard.set_success("Session closed");
                                 }
                             }
                             let dashboard_roster: &[crate::app::roster::RosterEntry] =
@@ -3764,6 +3788,7 @@ impl AppView {
             ActiveView::Agent(id) => {
                 let agent = self.agents.get(&id)?;
                 let surface_fast = Self::agent_surface_animating(agent)
+                    || agent.session.control_feedback_active()
                     || agent.mode_banner_animating(now)
                     || agent.scrollback.needs_animation()
                     || agent.tasks.has_live_motion()
@@ -3800,6 +3825,7 @@ impl AppView {
                     || agent.active_subagent.as_deref().is_some_and(|sid| {
                         agent.subagent_views.get(sid).is_some_and(|child| {
                             Self::agent_surface_animating(child)
+                                || child.session.control_feedback_active()
                                 || child.mode_banner_animating(now)
                                 || child.has_visible_inline_media_load()
                                 || child
@@ -4078,6 +4104,7 @@ pub(crate) mod tests {
             pending_update_version: None,
             restart_for_update: false,
             relaunch: None,
+            screen_mode_control_handoffs: Default::default(),
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -4161,7 +4188,7 @@ pub(crate) mod tests {
             .get_mut(&id)
             .unwrap()
             .scrollback
-            .push_block(crate::scrollback::RenderBlock::system("boot"));
+            .push_block(crate::scrollback::RenderBlock::notice("boot"));
     }
     #[test]
     fn background_submission_arms_lifecycle_without_visible_frames() {
@@ -4239,6 +4266,60 @@ pub(crate) mod tests {
             "a paused goal must not keep ticks alive"
         );
     }
+
+    #[test]
+    fn visible_frame_interval_tracks_idle_control_feedback_until_terminal() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = test_app_with_agent();
+        let id = super::super::session::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        let update = |phase, desired: Option<&str>| ControlStateUpdate {
+            epoch: "epoch-a".into(),
+            domain: ControlDomain::Agent,
+            revision: 1,
+            intent: None,
+            snapshot: phase == ControlPhase::Pending,
+            receipt_only: false,
+            phase,
+            current: ControlTarget::Agent {
+                agent_name: "builder".into(),
+            },
+            desired: desired.map(|name| ControlTarget::Agent {
+                agent_name: name.into(),
+            }),
+            message: None,
+        };
+
+        assert!(
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .apply_shell_control_state(update(ControlPhase::Pending, Some("reviewer")), false)
+        );
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
+            "idle pending feedback must animate and advance into Applying text"
+        );
+
+        assert!(
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .apply_shell_control_state(update(ControlPhase::Applied, None), false)
+        );
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
+            "a terminal control projection must release its frame demand"
+        );
+    }
+
     #[test]
     fn visible_frame_interval_is_fast_while_idle_with_running_bg_task() {
         // A turn-idle agent with a running background task shows the
@@ -7726,7 +7807,7 @@ pub(crate) mod tests {
         crate::startup::StartupWarning {
             severity: crate::startup::WarningSeverity::Warning,
             message: "test warning".to_string(),
-            action: Some("run /terminal-setup".to_string()),
+            action: Some("run /doctor".to_string()),
         }
     }
     #[test]
@@ -9407,7 +9488,7 @@ pub(crate) mod tests {
     /// `Action::ExitSession` (via the synchronous outcome path,
     /// e.g. user presses the keybind for ExitSession inside the
     /// popup), the popup is closed but the agent stays in
-    /// `app.agents`. The `/exit` slash command takes a different
+    /// `app.agents`. The `/quit` slash command takes a different
     /// path (emits an effect) — see the user-guide for the
     /// asymmetry; this test pins only the synchronous-outcome
     /// branch.

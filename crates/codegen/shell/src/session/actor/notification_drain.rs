@@ -5,7 +5,10 @@ use super::*;
 impl SessionActor {
     /// Stream write-ahead payload candidates and reconcile each bounded batch
     /// against the current Timeline projection within this writer epoch.
-    pub(super) async fn reconcile_notification_payloads(&self) {
+    pub(super) async fn reconcile_notification_payloads(
+        &self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) {
         let directory = match self.session_directory.try_clone() {
             Ok(directory) => directory,
             Err(error) => {
@@ -14,10 +17,11 @@ impl SessionActor {
             }
         };
         let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<Vec<String>>(1);
+        let producer_shutdown = shutdown.clone();
         let producer = tokio::task::spawn_blocking(move || {
             crate::session::notification_inbox::visit_payload_hash_batches(
                 &directory,
-                || batch_tx.is_closed(),
+                || batch_tx.is_closed() || producer_shutdown.is_cancelled(),
                 |batch| {
                     batch_tx.blocking_send(batch).map_err(|_| {
                         std::io::Error::new(
@@ -29,7 +33,15 @@ impl SessionActor {
             )
         });
         let mut removed_total = 0usize;
-        while let Some(mut hashes) = batch_rx.recv().await {
+        loop {
+            let mut hashes = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                hashes = batch_rx.recv() => {
+                    let Some(hashes) = hashes else { break };
+                    hashes
+                }
+            };
             let _artifact_guard = self.notification_artifact_gate.lock().await;
             let Some(pending) = self.chat_state_handle.pending_notifications().await else {
                 tracing::warn!(
@@ -361,7 +373,7 @@ impl SessionActor {
         let may_combine;
         {
             let state = self.state.lock().await;
-            if !state.foreground.is_idle() {
+            if !state.termination.is_open() || !state.foreground.is_idle() {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     ::diagnostics::unified_log::debug(
@@ -408,7 +420,10 @@ impl SessionActor {
         let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
-        if !state.foreground.is_idle() || state.pending_inputs.is_empty() {
+        if !state.termination.is_open()
+            || !state.foreground.is_idle()
+            || state.pending_inputs.is_empty()
+        {
             return;
         }
 
@@ -445,6 +460,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
+            host_command,
             notification_ids,
             turn_kind,
             running_display,
@@ -462,6 +478,7 @@ impl SessionActor {
                 front.verbatim,
                 front.json_schema.clone(),
                 front.origin.clone(),
+                front.host_command.clone(),
                 front.notification_ids.clone(),
                 front.turn_kind,
                 running_display,
@@ -506,6 +523,7 @@ impl SessionActor {
             self.clone(),
             prompt_id.clone(),
             origin.clone(),
+            host_command,
             notification_ids,
             turn_kind,
             prompt_blocks,
@@ -733,6 +751,7 @@ impl SessionActor {
                 verbatim: true,
                 json_schema: None,
                 origin,
+                host_command: None,
                 notification_ids,
                 respond_to,
                 persist_ack: None,
@@ -1121,7 +1140,9 @@ mod tests {
                     std::fs::write(artifact_dir.join(format!("unknown-{index}")), b"keep").unwrap();
                 }
 
-                actor.reconcile_notification_payloads().await;
+                actor
+                    .reconcile_notification_payloads(&tokio_util::sync::CancellationToken::new())
+                    .await;
 
                 assert_eq!(
                     crate::session::notification_inbox::read_payload(

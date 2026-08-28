@@ -120,8 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn has_no_legacy_aliases() {
+    fn canonical_name_is_agents() {
         let cmd = DashboardCommand;
-        assert!(cmd.aliases().is_empty());
+        assert_eq!(cmd.name(), "agents");
     }
 }

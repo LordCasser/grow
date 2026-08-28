@@ -479,7 +479,7 @@ pub fn peek_model_and_mode(
     match row {
         DashboardRowId::TopLevel(id) => match agents.get(id) {
             Some(agent) => {
-                // The serialized Behavior FIFO provides the one optimistic
+                // The latest-wins Behavior target provides the one optimistic
                 // projection; authoritative CurrentModeUpdate commits it.
                 let plan = agent.session.effective_plan_mode();
                 PeekModeBadge {
@@ -1097,7 +1097,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             // no agent response after it yet.
             RenderBlock::UserPrompt(_) => break,
             // Structural blocks carry no response type — keep scanning.
-            RenderBlock::System(_)
+            RenderBlock::Notice(_)
             | RenderBlock::SessionEvent(_)
             | RenderBlock::SubagentPermission(_)
             | RenderBlock::Stub(_) => {}
@@ -1216,7 +1216,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::UserPrompt(b) => Some(format!("\u{2771} {}", first_line_of(&b.text))),
         RenderBlock::AgentMessage(b) => Some(first_line_of(&b.text())),
         RenderBlock::Thinking(b) => Some(format!("(thinking) {}", first_line_of(&b.text()))),
-        RenderBlock::System(_) => Some("(system event)".to_string()),
+        RenderBlock::Notice(_) => Some("(system event)".to_string()),
         RenderBlock::SessionEvent(_) => Some("(session event)".to_string()),
         RenderBlock::ToolCall(_) => Some("(tool call)".to_string()),
         RenderBlock::BgTask(_) => Some("(background task)".to_string()),

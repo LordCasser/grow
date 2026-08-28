@@ -961,7 +961,11 @@ fn build_empty_context(
         None => (0, 0, String::new(), false),
     };
 
-    let finish_reason = response.stop_reason.map(|sr| sr.as_str().to_owned());
+    let finish_reason = response.raw_stop_reason.clone().or_else(|| {
+        response
+            .stop_reason
+            .map(|stop_reason| stop_reason.as_str().to_owned())
+    });
     let (completion_tokens, reasoning_tokens, prompt_tokens) = response
         .usage
         .as_ref()
@@ -1390,6 +1394,31 @@ mod tests {
             SamplingError::EventStreamError(msg) => assert_eq!(msg, "first"),
             other => panic!("expected EventStreamError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_response_diagnostics_preserve_unknown_wire_finish_reason() {
+        let response = ConversationResponse {
+            items: vec![
+                sampling_types::ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item("internal reasoning"),
+                ),
+                sampling_types::ConversationItem::assistant(""),
+            ],
+            stop_reason: Some(sampling_types::StopReason::Stop),
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: Some("unexpected_state".into()),
+            stop_sequence: None,
+        };
+
+        let context = build_empty_context(sampling_types::EmptyReason::ReasoningOnly, &response);
+        assert!(context.had_reasoning);
+        assert_eq!(context.finish_reason.as_deref(), Some("unexpected_state"));
     }
 
     // ── drive_l2 stop_reason classification ──────────────────────────

@@ -109,8 +109,23 @@ pub(crate) enum SessionEvent {
     /// actor mailbox. Wakes the actor so an idle session can synthesize a
     /// model turn; an active turn drains it at its next safe boundary.
     ForegroundWake,
+    /// The detached manual-compaction owner has fully settled its durable
+    /// transaction and emitted its terminal UI result. Only the main actor may
+    /// release `ForegroundState::Compaction` or admit the next idle owner.
+    ManualCompactionFinished {
+        /// A panic means the detached owner could not produce its normal
+        /// durable/UI terminal. The actor must fail-stop the session after
+        /// releasing foreground ownership instead of silently continuing.
+        failure: Option<String>,
+    },
     FlushReplay {
         respond_to: Option<oneshot::Sender<()>>,
+    },
+    /// A detached control worker panicked or crossed a fatal persistence
+    /// boundary. The main actor owns teardown; workers may only report the
+    /// failure, never dismantle shared session authorities themselves.
+    ControlWorkerFailed {
+        message: String,
     },
 }
 

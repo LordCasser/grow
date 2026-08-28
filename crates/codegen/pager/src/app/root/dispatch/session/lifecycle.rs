@@ -21,7 +21,7 @@ use crate::app::root::dispatch::transcript::extensions_modal_tab_fetches;
 use crate::app::root::{ActiveView, AppView, TrustState};
 use crate::app::session::{AgentCommand, AgentId, AgentSession};
 use crate::scrollback::block::RenderBlock;
-use crate::scrollback::blocks::SessionEvent;
+use crate::scrollback::blocks::{NoticeCategory, NoticeTone, SessionEvent};
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use shell::sampling::types::ReasoningEffort;
@@ -107,7 +107,7 @@ pub(crate) fn apply_deferred_switch_outcome(
         let msg = format!("--reasoning-effort: {}", err.message());
         tracing::warn!("{msg}");
         agent.show_toast(&msg);
-        agent.scrollback.push_block(RenderBlock::system(msg));
+        agent.scrollback.push_block(RenderBlock::notice(msg));
     }
     outcome.switch
 }
@@ -697,6 +697,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
     new_models: Option<acp::SessionModelState>,
 ) -> Vec<Effect> {
     let agent_count = app.agents.len();
+    let dispatch_controls = !app.reconnect_pending;
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -705,12 +706,12 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
             && agent_count > 1
             && let Some(cmd) = switch_hint
         {
-            agent.scrollback.push_block(RenderBlock::system(format!(
+            agent.scrollback.push_block(RenderBlock::notice(format!(
                 "Session {} \u{2014} use {cmd} to switch between sessions",
                 session_id_clone.0,
             )));
         } else if agent_count > 1 {
-            agent.scrollback.push_block(RenderBlock::system(format!(
+            agent.scrollback.push_block(RenderBlock::notice(format!(
                 "Session: {}",
                 session_id_clone.0,
             )));
@@ -733,6 +734,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
                     &mut agent.session,
                     model_id,
                     effort,
+                    dispatch_controls,
                 )
             })
             .unwrap_or_default();
@@ -783,6 +785,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
                 session_id_clone.clone(),
                 &mut agent.session,
                 mode,
+                dispatch_controls,
             ));
         }
         if agent.session.take_pending_extensions_fetch()
@@ -812,6 +815,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
     session_cwd: std::path::PathBuf,
     new_models: Option<acp::SessionModelState>,
 ) -> Vec<Effect> {
+    let dispatch_controls = !app.reconnect_pending;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
         agent.mark_turn_finished();
@@ -823,7 +827,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
             agent.session.models = Some(m).into();
         }
         agent.prompt.file_search.retarget(&session_cwd);
-        agent.scrollback.push_block(RenderBlock::system(format!(
+        agent.scrollback.push_block(RenderBlock::notice(format!(
             "Worktree ready: {}",
             worktree_path.display()
         )));
@@ -838,6 +842,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
                     &mut agent.session,
                     model_id,
                     effort,
+                    dispatch_controls,
                 )
             })
             .unwrap_or_default();
@@ -885,6 +890,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
                 session_id_clone.clone(),
                 &mut agent.session,
                 mode,
+                dispatch_controls,
             ));
         }
         if agent.session.take_pending_extensions_fetch()
@@ -953,6 +959,7 @@ pub(in crate::app::root::dispatch) fn handle_session_failed(
             push_session_create_failure_warning(app, &msg);
         }
     } else if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("worktree");
         agent.session.clear_pending_extensions_fetch();
         agent.session.prompt_history_loading = false;
         agent.session.clear_mcp_init_progress();
@@ -1003,6 +1010,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_failed(
             });
         }
     } else if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("worktree");
         agent.session.clear_pending_extensions_fetch();
         agent.session.prompt_history_loading = false;
         agent.session.clear_mcp_init_progress();
@@ -1026,68 +1034,55 @@ pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
     session_id: acp::SessionId,
     control_token: crate::app::session::SessionControlToken,
     model_id: acp::ModelId,
-    effort: Option<ReasoningEffort>,
-    result: Result<(), String>,
+    _effort: Option<ReasoningEffort>,
+    result: Result<
+        crate::app::actions::ControlRpcOutcome,
+        crate::app::actions::ControlRequestFailure,
+    >,
 ) -> Vec<Effect> {
     if let Some(agent) =
         super::super::ctx::find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
     {
+        if result == Ok(crate::app::actions::ControlRpcOutcome::AuthoritativeUpdatePending) {
+            return vec![];
+        }
         let completion = agent.session.complete_control(control_token);
         if completion == crate::app::session::SessionControlCompletion::Stale {
             return vec![];
         }
         let mut effects = match result {
-            Ok(()) => {
-                // Session-scoped only: never write `[models].default` here.
-                // Future-session defaults are set exclusively via Settings /
-                // `Action::SetDefaultModel`.
-                agent.session.user_model_preference = Some(model_id.clone());
-                let display_name = model_id.0.to_string();
-                let prev_model = agent.session.models.current.clone();
-                let prev_effort = agent.session.models.reasoning_effort;
-                agent.session.models.set_current(model_id.clone(), effort);
-                let resolved_effort = agent.session.models.reasoning_effort;
-                let unchanged =
-                    prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
-                let msg = if unchanged {
-                    if let Some(eff) = resolved_effort {
-                        format!("Already using {display_name} ({eff} effort)")
-                    } else {
-                        format!("Already using {display_name}")
-                    }
-                } else if let Some(eff) = resolved_effort {
-                    format!("Switched to {display_name} ({eff} effort)")
-                } else {
-                    format!("Switched to {display_name}")
-                };
-                agent.scrollback.push_block(RenderBlock::system(msg));
+            // ModelChanged + the durable ControlStateUpdate are the only
+            // authoritative committed-state and UI projections. The RPC is
+            // request correlation, not a second source of user-visible truth.
+            Ok(crate::app::actions::ControlRpcOutcome::Superseded) => vec![],
+            Ok(crate::app::actions::ControlRpcOutcome::AuthoritativeUpdatePending) => {
+                unreachable!("handled above")
+            }
+            Err(error) if !error.terminal_published => {
+                agent.scrollback.push_block(RenderBlock::terminal_notice(
+                    format!(
+                        "control:sampling:{}:{}:{}",
+                        session_id.0, control_token.generation, control_token.sequence
+                    ),
+                    NoticeTone::Error,
+                    NoticeCategory::Control,
+                    format!("Model switch to {} failed", model_id.0),
+                    Some(format!(
+                        "Reason: {}. Retry /model {} or choose another model.",
+                        error.message, model_id.0
+                    )),
+                ));
                 vec![]
             }
-            Err(msg) => {
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::system(format!("Couldn't switch model: {msg}")));
-                vec![]
-            }
+            Err(_) => vec![],
         };
-        let page_flip_entry = if completion == crate::app::session::SessionControlCompletion::Next {
-            if let Some(next) = crate::app::root::dispatch::queue::next_control_effect(
-                agent_id,
-                session_id.clone(),
-                &agent.session,
-            ) {
-                effects.push(next);
-            }
-            None
-        } else {
-            crate::app::acp_handler::apply_deferred_authoritative_controls(
-                agent,
-                session_id.0.as_ref(),
-            );
-            let drain = maybe_drain_queue(agent);
-            effects.extend(drain.effects);
-            drain.page_flip_entry
-        };
+        crate::app::acp_handler::apply_deferred_authoritative_controls(
+            agent,
+            session_id.0.as_ref(),
+        );
+        let drain = maybe_drain_queue(agent);
+        effects.extend(drain.effects);
+        let page_flip_entry = drain.page_flip_entry;
         crate::app::acp_handler::sync_child_control_projection_by_session_id(
             app,
             session_id.0.as_ref(),

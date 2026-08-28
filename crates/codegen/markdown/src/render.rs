@@ -898,6 +898,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 column_range: link.column_range.clone(),
                                 url: link.url.clone(),
                                 id: link.id,
+                                provenance: link.provenance,
                             });
                         }
                         // Table emits whole pre-rendered lines; reset col so

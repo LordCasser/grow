@@ -49,6 +49,7 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     completed_order: VecDeque<String>,
     waiters: HashMap<String, Vec<BlockingWaiter>>,
     goal_cancel_waiters: Vec<GoalCancelWaiter>,
+    session_cancel_waiters: Vec<GoalCancelWaiter>,
     workflow_cancel_waiters: HashMap<String, Vec<oneshot::Sender<SubagentCancelOutcome>>>,
     /// Parent sessions that received `ParentSession` cancel. Non-workflow spawns
     /// are rejected until [`SubagentEvent::OpenSpawnAdmission`] (next turn) or
@@ -109,6 +110,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             completed_order: VecDeque::new(),
             waiters: HashMap::new(),
             goal_cancel_waiters: Vec::new(),
+            session_cancel_waiters: Vec::new(),
             workflow_cancel_waiters: HashMap::new(),
             spawn_blocked_sessions: HashSet::new(),
             cancelled_prompt_scopes: HashSet::new(),
@@ -326,8 +328,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let _ = request.respond_to.send(SubagentCancelOutcome::Cancelled);
                 }
                 SubagentCancelTarget::ParentSession => {
+                    let remaining_ids =
+                        self.session_child_ids(request.parent_session_id.as_deref());
                     let outcome = self.cancel_parent_session(request.parent_session_id.as_deref());
-                    let _ = request.respond_to.send(outcome);
+                    if remaining_ids.is_empty()
+                        || matches!(outcome, SubagentCancelOutcome::NotFound)
+                    {
+                        let _ = request.respond_to.send(outcome);
+                    } else {
+                        self.session_cancel_waiters.push(GoalCancelWaiter {
+                            remaining_ids,
+                            respond_to: request.respond_to,
+                        });
+                    }
                 }
                 SubagentCancelTarget::Goal {
                     goal_id,
@@ -698,6 +711,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             disposition,
         });
         self.resolve_goal_cancel_waiters(id);
+        self.resolve_session_cancel_waiters(id);
         if let Some(run_id) = workflow_run_id {
             self.resolve_workflow_cancel_waiters(&run_id);
         }
@@ -955,6 +969,47 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
         }
         self.goal_cancel_waiters = pending;
+    }
+
+    fn resolve_session_cancel_waiters(&mut self, finished_id: &str) {
+        let mut pending = Vec::with_capacity(self.session_cancel_waiters.len());
+        for mut waiter in std::mem::take(&mut self.session_cancel_waiters) {
+            waiter.remaining_ids.remove(finished_id);
+            if waiter.remaining_ids.is_empty() {
+                let _ = waiter.respond_to.send(SubagentCancelOutcome::Cancelled);
+            } else {
+                pending.push(waiter);
+            }
+        }
+        self.session_cancel_waiters = pending;
+    }
+
+    fn session_child_ids(&self, parent_session_id: Option<&str>) -> HashSet<String> {
+        self.pending
+            .values()
+            .filter(|child| {
+                !child.request.owner.is_workflow()
+                    && belongs_to_session(
+                        &child.request,
+                        &child.immediate_parent_session_id,
+                        parent_session_id,
+                    )
+            })
+            .map(|child| child.request.id.clone())
+            .chain(
+                self.active
+                    .values()
+                    .filter(|child| {
+                        !child.request.owner.is_workflow()
+                            && belongs_to_session(
+                                &child.request,
+                                &child.immediate_parent_session_id,
+                                parent_session_id,
+                            )
+                    })
+                    .map(|child| child.request.id.clone()),
+            )
+            .collect()
     }
 
     fn goal_child_ids(

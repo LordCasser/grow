@@ -97,76 +97,62 @@
         );
     }
 
-    /// Manual recap with an uncommitted in-flight spinner: filled in place
-    /// (no second block), animation stopped.
+    /// Manual recap clears only the ephemeral status and appends one immutable
+    /// result block.
     #[test]
-    fn recap_fills_uncommitted_spinner_in_place() {
+    fn manual_recap_clears_live_status_and_appends_terminal_block() {
         let mut agent = make_agent(Some("s1"));
-        let spinner = agent
-            .scrollback
-            .push(crate::scrollback::entry::ScrollbackEntry::running(
-                recap_block(""),
-            ));
-        agent.pending_recap_entry = Some(spinner);
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
 
         apply_recap_block(&mut agent, false, recap_block("THE RECAP"));
 
-        assert_eq!(agent.scrollback.len(), 1, "filled in place, not appended");
-        let entry = agent.scrollback.get_by_id(spinner).expect("entry kept");
-        assert!(!entry.is_running, "spinner animation stopped");
-        assert!(agent.pending_recap_entry.is_none());
+        assert_eq!(agent.scrollback.len(), 1);
+        assert!(agent.session.live_status(100).is_none());
+        assert!(!agent.scrollback.get(0).expect("recap").is_running);
     }
 
-    /// Regression (minimal mode): the spinner was already committed into
-    /// native scrollback (print-once) — an in-place fill would never reach the
-    /// terminal. The stale committed entry is dropped from state and the recap
-    /// appended as a fresh (uncommitted) block so the commit pass prints it.
+    /// Minimal's print-once frontier sees only the terminal recap; transient
+    /// status never becomes a committed entry.
     #[test]
-    fn recap_reprints_fresh_block_when_spinner_already_committed() {
+    fn manual_recap_terminal_is_fresh_for_minimal_commit() {
         let mut agent = make_agent(Some("s1"));
-        let spinner = agent
-            .scrollback
-            .push(crate::scrollback::entry::ScrollbackEntry::running(
-                recap_block(""),
-            ));
-        agent.pending_recap_entry = Some(spinner);
-        // The minimal idle commit pass consumed the spinner.
-        agent.scrollback.finish_running(spinner);
-        agent.scrollback.mark_committed(0);
-        agent.scrollback.set_commit_scan_cursor(1);
-        assert!(agent.scrollback.is_committed(spinner));
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
 
         apply_recap_block(&mut agent, false, recap_block("THE RECAP"));
 
-        assert_eq!(
-            agent.scrollback.len(),
-            1,
-            "stale committed spinner dropped, fresh block appended"
-        );
+        assert_eq!(agent.scrollback.len(), 1);
         let fresh = agent.scrollback.get(0).expect("fresh block");
-        assert_ne!(fresh.id, spinner, "a NEW entry, not the committed one");
         assert!(
             !agent.scrollback.is_committed(fresh.id),
             "fresh block is uncommitted so the commit pass will print it"
         );
     }
 
-    /// An automatic recap never consumes the manual loading slot — it always
-    /// appends its own block and leaves the pending spinner alone.
+    /// An automatic recap does not consume an unrelated manual live status.
     #[test]
-    fn auto_recap_appends_and_leaves_manual_spinner_pending() {
+    fn auto_recap_appends_and_leaves_manual_live_status() {
         let mut agent = make_agent(Some("s1"));
-        let spinner = agent
-            .scrollback
-            .push(crate::scrollback::entry::ScrollbackEntry::running(
-                recap_block(""),
-            ));
-        agent.pending_recap_entry = Some(spinner);
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
 
         apply_recap_block(&mut agent, true, recap_block("AUTO RECAP"));
 
-        assert_eq!(agent.scrollback.len(), 2, "auto recap appended");
-        assert_eq!(agent.pending_recap_entry, Some(spinner));
+        assert_eq!(agent.scrollback.len(), 1, "auto recap appended");
+        assert_eq!(
+            agent.session.live_status(100).as_deref(),
+            Some("Generating session recap\u{2026}")
+        );
     }
 
     #[test]

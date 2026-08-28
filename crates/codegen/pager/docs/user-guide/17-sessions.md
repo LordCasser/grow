@@ -51,7 +51,7 @@ The TUI creates a new session each time you launch. To explicitly start fresh mi
 /new
 ```
 
-This clears the current context and begins a new conversation. Alias: `/clear`.
+This clears the current context and begins a new conversation.
 
 ### Exit
 
@@ -61,7 +61,7 @@ End the session and quit Grow:
 /quit
 ```
 
-Alias: `/exit`. To leave the current session but stay in Grow, use `/home` to return to the welcome screen.
+To leave the current session but stay in Grow, use `/home` to return to the welcome screen.
 
 ### Delete the current session
 
@@ -127,20 +127,17 @@ Rename the current session's title:
 /rename <title>
 ```
 
-Alias: `/title`.
-
 ---
 
 ## The /rewind Command
 
-`/rewind` (alias `/undo`) undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
+`/rewind` restores files to their state at an earlier point in the conversation. Use it to recover from mistakes.
 
 ```
 /rewind
-/undo
 ```
 
-When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grow:
+When you run `/rewind` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grow:
 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to

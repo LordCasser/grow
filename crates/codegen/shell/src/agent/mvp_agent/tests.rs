@@ -1009,6 +1009,112 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     MvpAgent::new(gateway, &cfg).expect("valid test config")
 }
 
+#[test]
+fn reconnect_gateway_mute_restores_only_the_captured_incarnation() {
+    use std::sync::atomic::Ordering;
+
+    let old_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let replacement_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mute = super::acp_agent::ReconnectGatewayMute::acquire(old_gate.clone());
+    assert!(!old_gate.load(Ordering::Relaxed));
+
+    // Dropping an aborted reconnect restores its own actor, never whatever
+    // handle may now be registered for the same SessionId.
+    drop(mute);
+    assert!(old_gate.load(Ordering::Relaxed));
+    assert!(!replacement_gate.load(Ordering::Relaxed));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_lifecycle_gate_serializes_close_behind_load_incarnation() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("lifecycle-race");
+    let load_transaction = agent.lock_session_lifecycle(&sid).await;
+    let close = agent.close_session_explicit(&sid);
+    tokio::pin!(close);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut close)
+            .await
+            .is_err(),
+        "close must wait for the complete load transaction"
+    );
+
+    let mut loaded = make_test_handle("test/default", None);
+    loaded.info.id = sid.clone();
+    agent.sessions.borrow_mut().insert(sid.clone(), loaded);
+    drop(load_transaction);
+
+    assert!(close.await.expect("serialized close succeeds"));
+    assert!(
+        !agent.sessions.borrow().contains_key(&sid),
+        "a close racing load must retire the incarnation registered by that load"
+    );
+    assert!(
+        agent.session_lifecycle_gates.borrow().is_empty(),
+        "weak lifecycle gates are reclaimed after the final waiter exits"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_failure_cannot_evict_a_new_actor_incarnation() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("catalog-incarnation");
+    let stale_actor = make_test_handle("test/default", None).cmd_tx;
+    let mut current = make_test_handle("test/default", None);
+    current.info.id = sid.clone();
+    let current_actor = current.cmd_tx.clone();
+    agent.sessions.borrow_mut().insert(sid.clone(), current);
+
+    assert!(
+        !agent
+            .evict_catalog_diverged_session(
+                &sid,
+                &stale_actor,
+                agent.models_manager.catalog_revision(),
+            )
+            .await
+            .expect("stale failure is ignored"),
+        "a convergence result is scoped to the actor that received it"
+    );
+    assert!(agent.sessions.borrow().contains_key(&sid));
+
+    assert!(
+        agent
+            .evict_catalog_diverged_session(
+                &sid,
+                &current_actor,
+                agent.models_manager.catalog_revision(),
+            )
+            .await
+            .expect("current incarnation is evicted")
+    );
+    assert!(!agent.sessions.borrow().contains_key(&sid));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_failure_cannot_evict_after_a_newer_publication() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("catalog-generation-race");
+    let mut current = make_test_handle("test/default", None);
+    current.info.id = sid.clone();
+    let current_actor = current.cmd_tx.clone();
+    agent.sessions.borrow_mut().insert(sid.clone(), current);
+
+    let superseded_revision = agent.models_manager.catalog_revision().saturating_add(1);
+    assert!(
+        !agent
+            .evict_catalog_diverged_session(&sid, &current_actor, superseded_revision)
+            .await
+            .expect("superseded generation is ignored"),
+        "generation must be revalidated inside the lifecycle transaction"
+    );
+    assert!(
+        agent.sessions.borrow().contains_key(&sid),
+        "the actor may have converged on the current catalog after the stale failure"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn session_control_lookup_addresses_live_child_without_promoting_it_to_roster() {
     let agent = build_minimal_agent_for_tests();
@@ -1053,6 +1159,46 @@ async fn session_control_lookup_addresses_live_child_without_promoting_it_to_ros
         !reload_targets.contains_key(&workflow_child_id),
         "automatic catalog publication must not rewrite a Workflow Run's frozen child route"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_session_mode_routes_to_a_live_child_actor() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            let child_id = acp::SessionId::new("behavior-child");
+            let (mut child, mut commands) = make_test_handle_with_receiver("child-model", None);
+            child.info.id = child_id.clone();
+            agent
+                .active_child_sessions
+                .borrow_mut()
+                .insert(child_id.clone(), child);
+
+            tokio::task::spawn_local(async move {
+                let crate::session::SessionCommand::BehaviorChange {
+                    session_mode,
+                    responds_to,
+                    ..
+                } = commands.recv().await.expect("Behavior control command")
+                else {
+                    panic!("unexpected child control command")
+                };
+                assert_eq!(session_mode.0.as_ref(), "plan");
+                let _ =
+                    responds_to.send(Ok(crate::session::behavior::BehaviorChangeOutcome::Applied));
+            });
+
+            let response = acp::Agent::set_session_mode(
+                &agent,
+                acp::SetSessionModeRequest::new(child_id, acp::SessionModeId::new("plan")),
+            )
+            .await;
+            assert!(
+                response.is_ok(),
+                "child Behavior routing failed: {response:?}"
+            );
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1106,6 +1252,7 @@ async fn workflow_child_switch_uses_frozen_model_after_live_catalog_removal() {
                 let crate::session::SessionCommand::SetSessionModel {
                     route,
                     catalog,
+                    intent: _,
                     responds_to,
                 } = commands.recv().await.expect("model control command")
                 else {
@@ -1114,7 +1261,9 @@ async fn workflow_child_switch_uses_frozen_model_after_live_catalog_removal() {
                 assert_eq!(route.model_id.0.as_ref(), "catalog/frozen");
                 assert_eq!(route.sampling_config.model, "frozen-wire-model");
                 assert!(catalog.is_none());
-                let _ = responds_to.send(Ok(route.model_id));
+                let _ = responds_to.send(Ok(crate::session::DesiredStateOutcome::Applied(
+                    route.model_id,
+                )));
             });
 
             let response = acp::Agent::set_session_model(
@@ -1308,6 +1457,27 @@ async fn concurrent_load_guards_do_not_clobber_each_other() {
     assert!(
         agent.loading_sessions.borrow().is_empty(),
         "all markers removed once every load finished"
+    );
+}
+/// A later queued load may be cancelled before the earlier load publishes its
+/// handle. Its lease must not remove the shared marker owned by that earlier
+/// load, or prompt/control requests would observe a false unknown-session gap.
+#[tokio::test]
+async fn cancelled_later_load_keeps_the_earlier_marker_alive() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-cancelled-later-load");
+    let earlier = agent.begin_session_load(&sid);
+    let later = agent.begin_session_load(&sid);
+
+    drop(later);
+    assert!(
+        agent.loading_sessions.borrow().contains_key(&sid),
+        "cancelling a later load must not hide the earlier live load"
+    );
+    drop(earlier);
+    assert!(
+        agent.loading_sessions.borrow().is_empty(),
+        "the final load lease must remove the shared marker"
     );
 }
 /// `resident_activity` returns `NeedsInput` whenever the session's
@@ -2054,6 +2224,31 @@ fn spawn_fake_actor(
     });
     observed_rx
 }
+/// Fake actor that acknowledges the unload admission immediately, then keeps
+/// tearing down for a while. The leader must remove the session from the
+/// resident roster after the ACK rather than waiting for this tail.
+fn spawn_slow_teardown_actor(
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
+    teardown_delay: std::time::Duration,
+) -> tokio::sync::mpsc::UnboundedReceiver<FakeActorEvent> {
+    let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                TestSessionCommand::UnloadIfIdle { respond_to } => {
+                    let _ = observed_tx.send(FakeActorEvent::IdleUnloadCommitted);
+                    let _ = respond_to.send(true);
+                    tokio::time::sleep(teardown_delay).await;
+                    break;
+                }
+                other => {
+                    let _ = observed_tx.send(FakeActorEvent::Command(other));
+                }
+            }
+        }
+    });
+    observed_rx
+}
 /// Drive `grow/internal/evict_sessions` through the real `ext_notification`
 /// handler path (not the internal helper) — matches how the leader server
 /// signals a client disconnect.
@@ -2236,6 +2431,35 @@ fn disconnect_unloads_idle_session_without_finalize() {
         );
     });
 }
+/// The actor-owned unload ACK is an admission boundary, not a teardown join.
+/// A slow post-ACK teardown must still remove the handle and publish Dormant
+/// within the leader's 500ms unload budget.
+#[test]
+fn disconnect_unloads_before_slow_actor_teardown_finishes() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-slow-unload");
+        let (handle, _cmd_tx, cmd_rx) = make_live_session_handle(&sid, None);
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let mut observed = spawn_slow_teardown_actor(cmd_rx, std::time::Duration::from_secs(2));
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            drive_disconnect(&agent, &sid),
+        )
+        .await
+        .expect("post-ACK teardown must not hold up disconnect eviction");
+        assert!(!agent.sessions.borrow().contains_key(&sid));
+        assert_eq!(
+            agent.session_live_state_for(&sid),
+            Some(SessionLiveState::Dormant)
+        );
+        assert!(matches!(
+            observed.try_recv(),
+            Ok(FakeActorEvent::IdleUnloadCommitted)
+        ));
+    });
+}
 /// A between-turns session whose actor rejects `UnloadIfIdle` because it owns
 /// queued work must stay resident.
 #[test]
@@ -2363,6 +2587,77 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
         );
     });
 }
+
+/// An idle-unload acknowledgement belongs to the actor incarnation that
+/// received the request. A reconnect/new writer for the same SessionId must
+/// wait until that acknowledgement has been consumed and the old handle has
+/// been removed, rather than being installed early and then removed by the
+/// stale disconnect transaction.
+#[test]
+fn disconnect_unload_serializes_a_replacement_incarnation() {
+    run_local_for_bridge_test(|| async {
+        let agent = std::rc::Rc::new(build_minimal_agent_for_tests());
+        let sid = acp::SessionId::new("sess-evict-incarnation-race");
+        let (old_handle, _old_tx, mut old_rx) = make_live_session_handle(&sid, None);
+        agent.sessions.borrow_mut().insert(sid.clone(), old_handle);
+
+        let (unload_seen_tx, unload_seen_rx) = tokio::sync::oneshot::channel();
+        let (release_ack_tx, release_ack_rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_local(async move {
+            while let Some(command) = old_rx.recv().await {
+                if let TestSessionCommand::UnloadIfIdle { respond_to } = command {
+                    let _ = unload_seen_tx.send(());
+                    let _ = release_ack_rx.await;
+                    let _ = respond_to.send(true);
+                    break;
+                }
+            }
+        });
+
+        let disconnect_agent = agent.clone();
+        let disconnect_sid = sid.clone();
+        let disconnect = tokio::task::spawn_local(async move {
+            drive_disconnect(&disconnect_agent, &disconnect_sid).await;
+        });
+        unload_seen_rx
+            .await
+            .expect("old actor must receive idle-unload request");
+
+        let (replacement, replacement_tx, _replacement_rx) =
+            make_live_session_handle(&sid, None);
+        let replacement_agent = agent.clone();
+        let replacement_sid = sid.clone();
+        let install = tokio::task::spawn_local(async move {
+            let _lifecycle = replacement_agent
+                .lock_session_lifecycle(&replacement_sid)
+                .await;
+            replacement_agent
+                .sessions
+                .borrow_mut()
+                .insert(replacement_sid, replacement);
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !install.is_finished(),
+            "replacement writer must wait behind the complete eviction transaction"
+        );
+
+        let _ = release_ack_tx.send(());
+        disconnect.await.expect("disconnect task must finish");
+        install.await.expect("replacement install must finish");
+
+        let current = agent
+            .sessions
+            .borrow()
+            .get(&sid)
+            .cloned()
+            .expect("replacement incarnation must remain resident");
+        assert!(
+            current.cmd_tx.same_channel(&replacement_tx),
+            "the stale unload acknowledgement must not remove the replacement actor"
+        );
+    });
+}
 /// The bounded `session_live_state` map does not grow without bound
 /// across repeated create/close cycles — every terminal close drops its
 /// entry, so the map size stays at the live count, not the cumulative count.
@@ -2375,7 +2670,10 @@ fn session_live_state_map_is_bounded_across_cycles() {
             let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn"));
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
             agent.set_session_live_state(&sid, SessionLiveState::IdleResident);
-            agent.close_session_explicit(&sid);
+            agent
+                .close_session_explicit(&sid)
+                .await
+                .expect("test session has no outstanding writer thread");
         }
         assert_eq!(
             agent.session_live_state.borrow().len(),
@@ -2419,6 +2717,50 @@ fn explicit_close_removes_the_local_session() {
                 .iter()
                 .any(|(id, st)| id == sid.0.as_ref() && *st == SessionLiveState::Completed),
             "explicit close must emit a Completed roster delta"
+        );
+    });
+}
+
+#[test]
+fn explicit_close_reports_panicked_writer_as_failed() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-close-panicked");
+        let (mut handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn-1"));
+        handle.info.id = sid.clone();
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let thread = std::thread::spawn(|| panic!("injected writer panic"));
+        while !thread.is_finished() {
+            std::thread::yield_now();
+        }
+        agent.session_threads.borrow_mut().insert(
+            sid.clone(),
+            crate::session::SessionThread::from_handle(thread),
+        );
+
+        assert!(
+            agent
+                .close_session_explicit(&sid)
+                .await
+                .expect("panicked writer is already terminal")
+        );
+        assert!(
+            agent
+                .roster_delta_spy
+                .borrow()
+                .iter()
+                .any(|(id, state)| id == sid.0.as_ref()
+                    && *state == SessionLiveState::DeadFailed),
+            "joining the writer must preserve panic identity"
+        );
+        assert!(
+            !agent
+                .roster_delta_spy
+                .borrow()
+                .iter()
+                .any(|(id, state)| id == sid.0.as_ref()
+                    && *state == SessionLiveState::Completed),
+            "a panicked writer must never be reported as a clean close"
         );
     });
 }
@@ -2502,7 +2844,10 @@ fn reload_after_terminal_removal_starts_clean() {
         let sid = acp::SessionId::new("sess-reload");
         let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn-1"));
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        agent.close_session_explicit(&sid);
+        agent
+            .close_session_explicit(&sid)
+            .await
+            .expect("test session has no outstanding writer thread");
         assert_eq!(
             agent.session_live_state_for(&sid),
             None,

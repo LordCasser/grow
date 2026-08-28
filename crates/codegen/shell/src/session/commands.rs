@@ -8,6 +8,147 @@ use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
+
+/// One user-visible invocation on the Shell-owned command plane.
+///
+/// This identity crosses the ACP extension boundary and follows an idle
+/// command through the internal prompt scheduler. It is presentation
+/// metadata only: the command may create durable domain events, but neither
+/// the description nor the invocation id is projected into model context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCommandInvocation {
+    pub command: String,
+    pub description: String,
+    pub invocation_id: String,
+}
+
+/// Client-authored ordering authority for a desired-state control request.
+///
+/// Shell revisions describe the order in which requests reach the actor. This
+/// token preserves the user's intent order when two RPC tasks from one client
+/// race in transit: an older `(generation, sequence)` can never replace a
+/// newer target from the same client instance. Different clients remain
+/// ordered by actor admission.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlIntent {
+    pub client_id: String,
+    pub generation: u64,
+    pub sequence: u64,
+}
+
+pub const CONTROL_INTENT_META_KEY: &str = "grow/controlIntent";
+
+/// Marks `set_session_model` as an effort-only Sampling patch. The request's
+/// model id is a client display hint; the actor composes the effort with its
+/// newest desired Sampling model so a stale client cannot restore an older
+/// model while another client has a model change pending.
+pub const EFFORT_PATCH_META_KEY: &str = "grow/effortPatch";
+
+pub fn effort_patch_from_meta(meta: Option<&acp::Meta>) -> Result<bool, acp::Error> {
+    match meta.and_then(|meta| meta.get(EFFORT_PATCH_META_KEY)) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        Some(_) => {
+            Err(acp::Error::invalid_params()
+                .data(format!("{EFFORT_PATCH_META_KEY} must be a boolean")))
+        }
+    }
+}
+
+/// Immutable authority captured when an effort-only request enters Shell.
+/// Resolution remains actor-owned because only the actor knows the latest
+/// desired Sampling model. Ordinary sessions use one published catalog
+/// generation; Workflow children remain confined to their frozen Run route.
+#[derive(Clone)]
+pub enum SessionEffortAuthority {
+    Catalog {
+        catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
+        origin_client: Option<crate::http::OriginClientInfo>,
+    },
+    Workflow {
+        route: crate::session::workflow::tracker::WorkflowRuntimeRoute,
+        models_manager: crate::agent::models::ModelsManager,
+    },
+}
+
+impl ControlIntent {
+    pub fn from_meta(meta: Option<&acp::Meta>) -> Result<Option<Self>, acp::Error> {
+        let intent: Option<Self> = meta
+            .and_then(|meta| meta.get(CONTROL_INTENT_META_KEY))
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                acp::Error::invalid_params()
+                    .data(format!("invalid {CONTROL_INTENT_META_KEY}: {error}"))
+            })?;
+        if let Some(intent) = intent.as_ref() {
+            intent.validate().map_err(|error| {
+                acp::Error::invalid_params()
+                    .data(format!("invalid {CONTROL_INTENT_META_KEY}: {error}"))
+            })?;
+        }
+        Ok(intent)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.client_id.trim().is_empty() {
+            return Err("clientId must be a non-empty string");
+        }
+        Ok(())
+    }
+
+    pub fn insert_meta(&self, meta: &mut acp::Meta) {
+        meta.insert(
+            CONTROL_INTENT_META_KEY.to_owned(),
+            serde_json::to_value(self).expect("ControlIntent is JSON-serializable"),
+        );
+    }
+}
+
+/// Terminal outcome of a latest-wins desired-state request.
+/// Supersession is expected control flow, not a transport error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesiredStateOutcome<T> {
+    Applied(T),
+    /// An exact replay of an intent the resident actor is still applying.
+    /// The client keeps its pending projection and waits for the authoritative
+    /// terminal update; this is not supersession.
+    InFlight,
+    Superseded,
+}
+
+const CONTROL_TERMINAL_PUBLISHED_KEY: &str = "grow/controlTerminalPublished";
+
+/// Mark an ACP control error whose actor-owned terminal projection has already
+/// been scheduled. Clients can then avoid painting a second local error while
+/// still surfacing validation/transport failures that never reached the actor.
+pub fn mark_control_terminal_published(mut error: acp::Error) -> acp::Error {
+    let mut data = match error.data.take() {
+        Some(serde_json::Value::Object(data)) => data,
+        Some(detail) => serde_json::Map::from_iter([("detail".to_string(), detail)]),
+        None => serde_json::Map::new(),
+    };
+    data.insert(
+        CONTROL_TERMINAL_PUBLISHED_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    error.data = Some(serde_json::Value::Object(data));
+    error
+}
+
+pub fn control_terminal_was_published(error: &acp::Error) -> bool {
+    error
+        .data
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|data| data.get(CONTROL_TERMINAL_PUBLISHED_KEY))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Structured context for a cancelled turn, replacing stringly-typed JSON.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct CancellationContext {
@@ -170,7 +311,7 @@ pub enum SessionCommand {
     /// running and guarantees that slash-prefixed text never reaches the
     /// model as user input.
     ExecuteSlashCommand {
-        command: String,
+        invocation: HostCommandInvocation,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Append a user-authored `session/title` fact to the canonical Timeline.
@@ -189,6 +330,11 @@ pub enum SessionCommand {
     QueryForeground {
         respond_to: oneshot::Sender<Option<prompt_queue::ForegroundSnapshot>>,
     },
+    /// Re-publish transient Shell-authoritative control projections after a
+    /// client load or renderer restart. These snapshots never enter replay.
+    PublishControlState {
+        respond_to: oneshot::Sender<()>,
+    },
     /// Admit one source-owned signal into the durable Timeline inbox.
     /// Producers never queue model turns directly; the actor derives delivery
     /// from received-minus-consumed facts after the immutable payload lands.
@@ -203,6 +349,7 @@ pub enum SessionCommand {
     },
     BehaviorChange {
         session_mode: acp::SessionModeId,
+        intent: Option<ControlIntent>,
         responds_to:
             oneshot::Sender<Result<crate::session::behavior::BehaviorChangeOutcome, acp::Error>>,
     },
@@ -244,7 +391,17 @@ pub enum SessionCommand {
         /// selection. Workflow children carry `None` because their Run route
         /// is already the complete authority.
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
-        responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+        intent: Option<ControlIntent>,
+        responds_to: oneshot::Sender<Result<DesiredStateOutcome<acp::ModelId>, acp::Error>>,
+    },
+    /// Patch reasoning effort onto the actor's latest desired Sampling model.
+    /// This is distinct from `SetSessionModel`: composing at the actor is what
+    /// prevents cross-client stale model hints from winning accidentally.
+    PatchSessionEffort {
+        effort: sampling_types::ReasoningEffort,
+        authority: SessionEffortAuthority,
+        intent: Option<ControlIntent>,
+        responds_to: oneshot::Sender<Result<DesiredStateOutcome<acp::ModelId>, acp::Error>>,
     },
     /// Apply a validated hot-reload snapshot to an existing session without
     /// changing its harness or treating the update as a user model switch.
@@ -258,7 +415,8 @@ pub enum SessionCommand {
     /// swaps the harness and re-registers runtime resources.
     RebuildAgentForDefinition {
         definition: agent::AgentDefinition,
-        responds_to: oneshot::Sender<Result<(), acp::Error>>,
+        intent: Option<ControlIntent>,
+        responds_to: oneshot::Sender<Result<DesiredStateOutcome<()>, acp::Error>>,
     },
     GetCurrentModel {
         responds_to: oneshot::Sender<String>,
@@ -664,6 +822,13 @@ pub enum SessionCommand {
     WorkflowCompleted {
         state: crate::session::workflow::tracker::WorkflowRunState,
         respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// A Workflow owner failed to commit its terminal Timeline boundary.
+    /// This is a session-fatal persistence error, not merely a failed Run;
+    /// the actor must enter the same fail-stop teardown as a foreground turn.
+    WorkflowTerminalFailure {
+        run_id: String,
+        error: String,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).
     TakeTurnMessages {

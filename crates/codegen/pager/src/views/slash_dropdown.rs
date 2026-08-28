@@ -53,8 +53,28 @@ fn tag_suffix(row: &SuggestionRow) -> Option<String> {
 /// Rendered width of a row's `" [tag]"` suffix (0 when untagged). Measured
 /// without allocating: space + `[` + tag + `]` = tag width + 3. The tag shares
 /// the label column so descriptions stay aligned across tagged/untagged rows.
-fn tag_suffix_width(row: &SuggestionRow) -> usize {
-    row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
+fn tag_suffix_width(row: &SuggestionRow, content_w: usize) -> usize {
+    (content_w >= 52)
+        .then(|| row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// Purpose labels are secondary to the command trigger. At very narrow
+/// widths, reserve the available columns for the command name first; the
+/// label reappears as soon as the row can hold it without truncating the
+/// trigger.
+fn kind_prefix(row: &SuggestionRow, content_w: usize) -> Option<&'static str> {
+    (content_w >= 18)
+        .then(|| row.kind.map(|kind| kind.label()))
+        .flatten()
+}
+
+fn kind_prefix_width(row: &SuggestionRow, content_w: usize) -> usize {
+    kind_prefix(row, content_w).map_or(0, |label| label.width() + 2)
+}
+
+fn row_label_width(row: &SuggestionRow, content_w: usize) -> usize {
+    kind_prefix_width(row, content_w) + row.display.width() + tag_suffix_width(row, content_w)
 }
 
 /// Compute the aligned label column width from all visible items.
@@ -62,21 +82,19 @@ fn tag_suffix_width(row: &SuggestionRow) -> usize {
 /// The label column gets up to 60% of the available width (capped at `LABEL_CAP`).
 /// This prioritises showing the full command name over the description. The tag
 /// suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the
-/// same description column. Untagged rows keep origin/main behavior (overlong
-/// commands are ignored); tagged rows always contribute a `LABEL_CAP`-clamped
-/// width so a long tag can never zero out the column.
+/// same description column. Every row contributes a clamped width: ignoring
+/// an overlong command can otherwise make a one-row dynamic result collapse
+/// the aligned column to zero and hide the command name behind its kind.
 fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
-    let budget = (content_w * 3 / 5).min(LABEL_CAP);
+    let budget = if content_w < 52 {
+        content_w
+    } else {
+        content_w * 3 / 5
+    }
+    .min(LABEL_CAP);
     let max_display_w = items
         .iter()
-        .filter_map(|r| {
-            let base = r.display.width();
-            if r.tag.is_none() {
-                (base <= LABEL_CAP).then_some(base)
-            } else {
-                Some((base + tag_suffix_width(r)).min(LABEL_CAP))
-            }
-        })
+        .map(|row| row_label_width(row, content_w).min(LABEL_CAP))
         .max()
         .unwrap_or(0);
     max_display_w.min(budget)
@@ -263,15 +281,13 @@ pub struct RenderedDropdown {
 /// hundreds of descriptions just to compare against a single-digit height.
 fn flat_line_count(items: &[SuggestionRow], row_w: usize, cap: usize) -> usize {
     let label_col_w = compute_label_column_w(items, row_w.saturating_sub(PREFIX_W));
-    let desc_w = row_w
-        .saturating_sub(PREFIX_W + label_col_w + LABEL_DESC_GAP)
-        .max(1);
+    let desc_space = row_w.saturating_sub(PREFIX_W + label_col_w + LABEL_DESC_GAP);
     let mut lines = 0usize;
     for item in items {
-        lines += if item.description.is_empty() {
+        lines += if item.description.is_empty() || desc_space < 14 {
             1
         } else {
-            simple_word_wrap(&item.description, desc_w).len()
+            simple_word_wrap(&item.description, desc_space).len()
         };
         if lines >= cap {
             return cap;
@@ -330,12 +346,19 @@ fn build_item_lines(
     // (just left of the description). Truncated/reserved so the name never
     // overruns it at narrow widths. Leading space in the suffix separates
     // label and tag when padding is 0 (longest command+tag row).
-    let tag_text = tag_suffix(item).map(|s| truncate_str(&s, label_col_w));
+    let kind_text = kind_prefix(item, total_w);
+    let kind_w = kind_prefix_width(item, total_w);
+    // Source/scope is secondary metadata. Narrow layouts preserve the purpose
+    // label and command name first, then drop source before description.
+    let tag_text = (total_w >= 52)
+        .then(|| tag_suffix(item))
+        .flatten()
+        .map(|s| truncate_str(&s, label_col_w));
     let tag_w = tag_text.as_deref().map(|s| s.width()).unwrap_or(0);
 
-    let label = truncate_str(&item.display, label_col_w.saturating_sub(tag_w));
+    let label = truncate_str(&item.display, label_col_w.saturating_sub(tag_w + kind_w));
     let label_w = label.width();
-    let padding = label_col_w.saturating_sub(label_w + tag_w);
+    let padding = label_col_w.saturating_sub(label_w + tag_w + kind_w);
 
     // Build per-character spans for the label with fuzzy highlight.
     let label_spans = build_highlighted_spans(&label, &item.indices, normal_style, match_style);
@@ -343,13 +366,13 @@ fn build_item_lines(
     // Description column indent (prefix + label + gap). `label_col_w` already
     // includes the tag suffix, so descriptions align across tagged/untagged rows.
     let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
-    let desc_w = total_w.saturating_sub(desc_indent).max(1);
+    let desc_space = total_w.saturating_sub(desc_indent);
 
     // Word-wrap description into lines of `desc_w` width.
-    let desc_lines = if item.description.is_empty() {
+    let desc_lines = if item.description.is_empty() || desc_space < 14 {
         Vec::new()
     } else {
-        simple_word_wrap(&item.description, desc_w)
+        simple_word_wrap(&item.description, desc_space)
     };
 
     // 2. First line: prefix + label + padding + [tag] + gap + first desc line.
@@ -357,6 +380,12 @@ fn build_item_lines(
     // the label column (`]` sits just left of the description gap).
     {
         let mut spans = vec![prefix_span];
+        if let Some(kind) = kind_text {
+            spans.push(Span::styled(
+                format!("{kind}  "),
+                Style::default().fg(theme.accent_system).bg(row_bg),
+            ));
+        }
         spans.extend(label_spans);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), bg_style));
@@ -365,7 +394,7 @@ fn build_item_lines(
             spans.push(Span::styled(tag_text, tag_style));
         }
         if let Some(first_desc) = desc_lines.first() {
-            spans.push(Span::styled(" ".to_string(), bg_style));
+            spans.push(Span::styled(" ".repeat(LABEL_DESC_GAP), bg_style));
             spans.push(Span::styled(first_desc.clone(), desc_style));
         }
         out.push(Line::from(spans).style(bg_style));
@@ -503,6 +532,8 @@ mod tests {
                 insert_text: format!("/cmd{i}"),
                 indices: vec![],
                 tag: None,
+                kind: Some(crate::slash::CommandKind::Extension),
+                source: Some(crate::slash::CommandSource::Extension),
             })
             .collect();
         assert_eq!(desired_item_rows(&matches, 80), MAX_DROPDOWN_ROWS);
@@ -524,6 +555,8 @@ mod tests {
                 insert_text: format!("/cmd{i}"),
                 indices: vec![],
                 tag: None,
+                kind: Some(crate::slash::CommandKind::Extension),
+                source: Some(crate::slash::CommandSource::Extension),
             })
             .collect();
         let snap = SlashSnapshot {
@@ -559,6 +592,8 @@ mod tests {
             insert_text: display.into(),
             indices: vec![],
             tag: None,
+            kind: Some(crate::slash::CommandKind::Extension),
+            source: Some(crate::slash::CommandSource::Extension),
         }
     }
 
@@ -618,7 +653,7 @@ mod tests {
         assert!(rows <= MAX_DROPDOWN_ROWS);
 
         // All-short descriptions keep the one-row-per-item sizing.
-        let short = vec![row("/exit", "Quit"), row("/model", "Switch model")];
+        let short = vec![row("/quit", "Quit"), row("/model", "Switch model")];
         assert_eq!(desired_item_rows(&short, 60), 2);
     }
 
@@ -778,16 +813,14 @@ mod tests {
         );
 
         // Tag is right-aligned: closing `]` sits at the label-column right edge,
-        // immediately before the first-line gap space and then the description.
-        // First-line gap is one space (see build_item_lines), so `]` column ==
-        // desc_col - 1 - 1. (Do not use str::find — multi-byte selected prefix.)
+        // immediately before the fixed first-line gap and then the description.
         let close_bracket_x = (0..width)
             .rev()
             .find(|&x| buf.cell((x, 0)).map(|c| c.symbol()) == Some("]"))
             .expect("closing ] on tagged row");
         assert_eq!(
             close_bracket_x,
-            desc0_x - 1 - 1,
+            desc0_x - LABEL_DESC_GAP as u16 - 1,
             "tag right-aligned: ] should sit just left of the desc gap (row0={})",
             row_text(0)
         );
@@ -806,6 +839,113 @@ mod tests {
             let mut nb = Buffer::empty(Rect::new(0, 0, w.max(1), 1));
             let na = Rect::new(0, 0, w, 1);
             let _ = render_dropdown(&mut nb, na, &narrow, None, &theme);
+        }
+    }
+
+    #[test]
+    fn narrow_rows_keep_kind_and_command_before_source_metadata() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::default();
+        let mut item = row("/model", "Switch model and effort");
+        item.kind = Some(crate::slash::CommandKind::Control);
+        item.tag = Some("workflow".into());
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![item],
+            selected: 0,
+            ..Default::default()
+        };
+        let width = 32;
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+        render_dropdown(&mut buf, Rect::new(0, 0, width, 1), &snap, None, &theme);
+        let text = (0..width)
+            .filter_map(|x| buf.cell((x, 0)).map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(text.contains("CONTROL"), "purpose label was lost: {text}");
+        assert!(text.contains("/model"), "command name was lost: {text}");
+        assert!(
+            !text.contains("workflow"),
+            "source metadata must collapse first on narrow rows: {text}"
+        );
+
+        // At widths where the purpose label would consume the command's
+        // columns, hide the secondary kind instead of truncating `/model`.
+        let narrow_width = 16;
+        let mut narrow_buf = Buffer::empty(Rect::new(0, 0, narrow_width, 1));
+        render_dropdown(
+            &mut narrow_buf,
+            Rect::new(0, 0, narrow_width, 1),
+            &snap,
+            None,
+            &theme,
+        );
+        let narrow_text = (0..narrow_width)
+            .filter_map(|x| narrow_buf.cell((x, 0)).map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(
+            narrow_text.contains("/model"),
+            "narrow rows must preserve the command trigger: {narrow_text}"
+        );
+        assert!(
+            !narrow_text.contains("CONTROL"),
+            "purpose label is secondary at narrow widths: {narrow_text}"
+        );
+    }
+
+    #[test]
+    fn long_dynamic_command_names_remain_visible_without_overflowing() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::default();
+        let mut ascii = row(
+            "/project-specific-command-with-a-very-long-name",
+            "dynamic command",
+        );
+        ascii.kind = Some(crate::slash::CommandKind::Run);
+        let mut cjk = row("/项目专用的超长动态命令名称", "动态命令");
+        cjk.kind = Some(crate::slash::CommandKind::Run);
+
+        for item in [ascii, cjk] {
+            let width = 64;
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+            let snap = SlashSnapshot {
+                open: true,
+                matches: vec![item.clone()],
+                selected: 0,
+                ..Default::default()
+            };
+            render_dropdown(&mut buf, Rect::new(0, 0, width, 1), &snap, None, &theme);
+            let text = (0..width)
+                .filter_map(|x| buf.cell((x, 0)).map(|cell| cell.symbol()))
+                .collect::<String>();
+            assert!(
+                text.contains("RUN"),
+                "kind label must remain visible: {text}"
+            );
+            let prefix = &item.display[..item
+                .display
+                .char_indices()
+                .nth(8)
+                .map(|(i, _)| i)
+                .unwrap_or(item.display.len())];
+            if prefix.is_ascii() {
+                assert!(
+                    text.contains(prefix),
+                    "command prefix must remain visible: {text}"
+                );
+            } else {
+                // Ratatui stores the continuation cell of each wide glyph as
+                // a blank cell. Verify the glyph sequence independently of
+                // those terminal cells.
+                let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+                assert!(
+                    compact.contains(prefix),
+                    "wide command prefix must remain visible: {text}"
+                );
+            }
         }
     }
 }

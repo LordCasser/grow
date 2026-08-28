@@ -98,7 +98,7 @@ pub(crate) fn handle_ask_user_question(
             } else {
                 format!("{cmd} cancelled because another question opened.")
             };
-            agent.scrollback.push_block(RenderBlock::system(message));
+            agent.scrollback.push_block(RenderBlock::notice(message));
         }
     }
 

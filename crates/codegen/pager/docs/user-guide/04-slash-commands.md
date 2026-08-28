@@ -4,7 +4,7 @@ Type `/` in the prompt to open the command menu. It fuzzy-matches as you type, a
 
 Commands come from two places: **shell builtins**, handled by the agent backend (shell), and **pager builtins**, handled by the TUI frontend (pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too.
 
-Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
+The menu lists canonical command names. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
 
 ---
 
@@ -12,7 +12,7 @@ Every command below lists its aliases where it has them. A few commands only app
 
 ### `/new`
 
-Start a fresh session and clear the current conversation. Alias: `/clear`.
+Start a fresh session and clear the current conversation.
 
 ### `/resume`
 
@@ -20,7 +20,7 @@ Open the session picker to reload a previous session from disk.
 
 ### `/dashboard`
 
-Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
+Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach).
 
 Not `/config-agents`, which manages Agent definitions. Hidden in minimal mode; disable with `GROW_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
 
@@ -43,7 +43,7 @@ In fullscreen and inline modes this opens the tabbed usage modal (Usage · Conte
 
 ### `/session-info`
 
-Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
+Show session details — auth method, model, turn count, and context usage.
 
 In fullscreen and inline modes this opens the tabbed usage modal on the Session Info tab, where each row (Session ID, working directory, model, …) can be clicked to copy. Minimal mode keeps the inline scrollback output.
 
@@ -59,9 +59,9 @@ session from which it was opened.
 
 Branch the current session into a new agent, keeping history up to this point.
 
-### `/rewind` (alias: `/undo`)
+### `/rewind`
 
-Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
+Roll the conversation back to an earlier turn and discard everything after it.
 
 ### `/edit-prompt`
 
@@ -92,11 +92,11 @@ Export the conversation to a file or the clipboard.
 
 ### `/quit`
 
-Quit the application. Alias: `/exit`.
+Quit the application.
 
 ### `/home`
 
-Leave the current session and return to the welcome screen. Alias: `/welcome`.
+Leave the current session and return to the welcome screen.
 
 ### `/delete`
 
@@ -106,7 +106,7 @@ To delete a session you are not in, open `/resume` or the welcome session list a
 
 ### `/rename`
 
-Rename the current session. Alias: `/title`.
+Rename the current session.
 
 ```
 /rename new session title
@@ -120,7 +120,7 @@ The selector commands below open a compact picker when invoked without arguments
 
 ### `/model [name] [effort]`
 
-Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
+Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument.
 
 ```
 /model deepseek/deepseek-chat
@@ -152,7 +152,7 @@ These commands modify only the current session. Persistent defaults remain in Se
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still steers the top queued prompt into the active turn. Alias: `/ml`.
+Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still steers the top queued prompt into the active turn.
 
 ### `/history`
 
@@ -184,7 +184,7 @@ Enter plan mode.
 
 ### `/view-plan`
 
-Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
+Open a preview of the current saved plan.
 
 ---
 
@@ -194,7 +194,7 @@ Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
 
 ### `/memory`
 
-Browse, view, and manage saved memories. Pass `on` or `off` to enable or disable memory. Alias: `/mem`.
+Browse, view, and manage saved memories. Pass `on` or `off` to enable or disable memory.
 
 ```
 /memory
@@ -317,7 +317,7 @@ Open the searchable keyboard-shortcuts modal. This is the only entry point.
 
 ### `/theme`
 
-Switch the color theme. Alias: `/t`.
+Switch the color theme.
 
 ### `/feedback`
 
@@ -337,15 +337,15 @@ Open the MCP servers management modal.
 
 ### `/doctor`
 
-Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
+Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps.
 
 ### `/release-notes`
 
-View release notes for the current version. Alias: `/changelog`.
+View release notes for the current version.
 
 ### `/docs`
 
-Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
+Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title.
 
 ```
 /docs
@@ -353,7 +353,7 @@ Browse the built-in How-to Guides, open the online Build docs, or jump straight 
 /docs Getting Started
 ```
 
-- Bare `/docs` (or `/docs how-to`) opens the How-to Guides picker.
+- Bare `/docs` opens the How-to Guides picker.
 - `/docs web` opens https://docs.example.com/build/overview in your browser.
 - `/docs <title>` opens a specific guide by case-insensitive title match.
 
@@ -365,8 +365,6 @@ Open the onboarding tutorial: a short list of topics (your first prompt, attachi
 /tutorial
 ```
 
-Aliases: `/tour`, `/onboarding`
-
 ## Agents
 
 ### `/config-agents`
@@ -375,7 +373,7 @@ Open the configuration surface for Agent definitions.
 
 ### `/agents`
 
-Open the Agent Dashboard. This is the only formal dashboard Slash command; removed aliases such as `/dashboard` and `/sessions` are not retained.
+Open the Agent Dashboard.
 
 Not the live multi-session [Agent Dashboard](23-dashboard.md) (`/agents` / `Ctrl+\`).
 
@@ -385,7 +383,7 @@ Not the live multi-session [Agent Dashboard](23-dashboard.md) (`/agents` / `Ctrl
 
 ### `/usage`
 
-View local token and context usage for the current session. Alias: `/cost`.
+View local token and context usage for the current session.
 
 In fullscreen and inline modes this opens the tabbed usage modal on the Usage tab; `Esc` closes it and nothing is written into the transcript. Minimal mode keeps the inline scrollback output.
 
@@ -411,7 +409,7 @@ Local diagnostic logs are independent of `/privacy`; Grow never uploads them.
 
 ### `/settings`
 
-Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`.
+Open the settings modal to view and change configuration interactively.
 
 ### `/timestamps`
 

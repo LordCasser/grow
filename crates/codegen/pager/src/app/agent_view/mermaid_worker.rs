@@ -2176,7 +2176,7 @@ mod tests {
         agent
             .toast
             .as_ref()
-            .map(|(m, _)| m.clone())
+            .map(|(m, _)| m.message.clone())
             .unwrap_or_default()
     }
 

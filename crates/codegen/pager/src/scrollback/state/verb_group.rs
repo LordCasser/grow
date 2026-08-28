@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn truncation_label_none_for_prefix_with_unbucketable_rows() {
-        let system = ScrollbackEntry::new(RenderBlock::system("hook ran"))
+        let system = ScrollbackEntry::new(RenderBlock::notice("hook ran"))
             .with_display_mode(DisplayMode::Collapsed);
         let entries = vec![execute(), system, execute()];
         assert!(
@@ -649,7 +649,7 @@ mod tests {
         // The unbucketable row past the limit never walks: the prefix labels.
         let entries = vec![
             execute(),
-            ScrollbackEntry::new(RenderBlock::system("hook ran"))
+            ScrollbackEntry::new(RenderBlock::notice("hook ran"))
                 .with_display_mode(DisplayMode::Collapsed),
         ];
         let l = trunc_label(&entries, Some(1)).expect("prefix buckets");

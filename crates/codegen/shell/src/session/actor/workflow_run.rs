@@ -143,17 +143,23 @@ impl SessionActor {
             return "Background workflows are disabled for this session ([workflows] enabled = false / GROW_WORKFLOWS=0 / remote flag)."
                 .into();
         }
-        // This lock is also the special-Behavior admission gate. Recheck the
-        // Behavior after acquiring it: a slash command may have been resolved
-        // while a concurrent Behavior switch was still committing.
-        let mut manager = self.workflow_manager.lock().await;
-        let behavior = self.behavior.lock().behavior();
-        if behavior != tool_types::BehaviorId::Workflow {
-            return format!(
-                "Saved Workflow Definitions can only run in Workflow behavior. Use /workflow [prompt] (current: {}).",
-                behavior.display_label(),
-            );
-        }
+        // Snapshot admission under the Behavior/Workflow gate, then release
+        // it before the synchronous Rhai preflight. Shutdown and Behavior
+        // changes must never wait behind user script execution.
+        let admission_generation = {
+            let manager = self.workflow_manager.lock().await;
+            let behavior = self.behavior.lock().behavior();
+            if behavior != tool_types::BehaviorId::Workflow {
+                return format!(
+                    "Saved Workflow Definitions can only run in Workflow behavior. Use /workflow [prompt] (current: {}).",
+                    behavior.display_label(),
+                );
+            }
+            match manager.admission_snapshot() {
+                Ok(generation) => generation,
+                Err(error) => return format!("Workflow '{name}' could not start: {error}"),
+            }
+        };
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
         let mut workspace =
             match crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
@@ -182,9 +188,6 @@ impl SessionActor {
                 );
             }
         };
-        if let Err(error) = workspace.focus(cwd, &definition_id) {
-            return format!("Could not focus Workflow '{name}': {error}");
-        }
         let definition = match workspace.resolve(cwd, &definition_id) {
             Ok(definition) => definition,
             Err(error) => return format!("Workflow '{name}' unavailable: {error}"),
@@ -196,32 +199,66 @@ impl SessionActor {
         // Rhai and its Host seam are deliberately synchronous: Host functions
         // wait with `blocking_recv`. Keep the public-Workflow admission guard,
         // but execute preflight off the async session worker.
-        match tokio::task::spawn_blocking(move || {
-            workflow::validate_script_with_agent_budget(
-                &validation_script,
-                Some(validation_args),
-                workflow::DEFAULT_AGENT_BUDGET,
-            )
-        })
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(move || {
+                workflow::validate_script_with_agent_budget(
+                    &validation_script,
+                    Some(validation_args),
+                    workflow::DEFAULT_AGENT_BUDGET,
+                )
+            }),
+        )
         .await
         {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(error))) => {
                 return format!("Workflow '{name}' failed preflight and was not started: {error}");
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 return format!(
                     "Workflow '{name}' preflight could not be completed and was not started: \
                      validator task failed: {error}"
                 );
             }
+            Err(_) => {
+                return format!(
+                    "Workflow '{name}' preflight timed out after 30 seconds and was not started."
+                );
+            }
+        }
+        let mut manager = self.workflow_manager.lock().await;
+        if let Err(error) = manager.check_admission(admission_generation) {
+            return format!("Workflow '{name}' could not start after preflight: {error}");
+        }
+        let behavior = self.behavior.lock().behavior();
+        if behavior != tool_types::BehaviorId::Workflow {
+            return format!(
+                "Workflow behavior changed during preflight (current: {}); no Run was started.",
+                behavior.display_label(),
+            );
+        }
+        let current = match workspace.resolve(cwd, &definition_id) {
+            Ok(definition) => definition,
+            Err(error) => return format!("Workflow '{name}' changed during preflight: {error}"),
+        };
+        if current.summary.content_hash != definition.summary.content_hash {
+            return format!(
+                "Workflow '{name}' changed during preflight; retry the command against the new Definition."
+            );
         }
         if let Err(error) =
             workspace.record_validated(cwd, &definition_id, &definition.summary.content_hash)
         {
             return format!("Workflow '{name}' changed during preflight: {error}");
         }
-        let resolved = definition.resolved;
+        if let Err(error) = workspace.focus(cwd, &definition_id) {
+            return format!("Could not focus Workflow '{name}': {error}");
+        }
+        let resolved = match workspace.resolve(cwd, &definition_id) {
+            Ok(definition) => definition.resolved,
+            Err(error) => return format!("Workflow '{name}' changed during preflight: {error}"),
+        };
         let spec = crate::session::workflow::manager::LaunchSpec {
             objective,
             args,

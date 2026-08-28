@@ -11,10 +11,6 @@ impl SlashCommand for ReleaseNotesCommand {
         "release-notes"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["changelog"]
-    }
-
     fn description(&self) -> &str {
         "View release notes for the current version"
     }
@@ -43,7 +39,6 @@ mod tests {
     fn release_notes_metadata() {
         let cmd = ReleaseNotesCommand;
         assert_eq!(cmd.name(), "release-notes");
-        assert_eq!(cmd.aliases(), &["changelog"]);
         assert!(!cmd.takes_args());
     }
 

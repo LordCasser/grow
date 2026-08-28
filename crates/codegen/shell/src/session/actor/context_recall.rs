@@ -95,29 +95,53 @@ impl ContextRecallBackend for ShellContextRecallBackend {
 pub(crate) fn serve_context_recall(
     session: &Arc<SessionActor>,
     mut receiver: ContextRecallReceiver,
-) {
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     let session = Arc::downgrade(session);
     tokio::task::spawn_local(async move {
-        while let Some(request) = receiver.recv().await {
-            let result = if request.cancellation.is_cancelled() {
-                Err("context recall was cancelled before execution".into())
-            } else {
-                match Weak::upgrade(&session) {
-                    Some(session) => {
-                        session
-                            .run_context_recall(
-                                &request.call_id,
-                                &request.query,
-                                &request.cancellation,
-                            )
-                            .await
-                    }
-                    None => Err("calling session no longer exists".into()),
+        loop {
+            let mut request = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                request = receiver.recv() => {
+                    let Some(request) = request else { break };
+                    request
                 }
             };
+            let result = if request.cancellation.is_cancelled() {
+                Err("context recall was cancelled before execution".into())
+            } else if let Some(session) = Weak::upgrade(&session) {
+                match session.session_activities.try_start("context_recall") {
+                    None => Err("context recall service is closing".into()),
+                    Some(_activity) => tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => {
+                            request.cancellation.cancel();
+                            Err("context recall service stopped during session shutdown".into())
+                        }
+                        _ = request.reply.closed() => {
+                            request.cancellation.cancel();
+                            Err("context recall caller stopped awaiting the result".into())
+                        }
+                        _ = request.cancellation.cancelled() => {
+                            Err("context recall was cancelled during execution".into())
+                        }
+                        result = session.run_context_recall(
+                            &request.call_id,
+                            &request.query,
+                            &request.cancellation,
+                        ) => result,
+                    },
+                }
+            } else {
+                Err("calling session no longer exists".into())
+            };
             let _ = request.reply.send(result);
+            if shutdown.is_cancelled() {
+                break;
+            }
         }
-    });
+    })
 }
 
 impl SessionActor {

@@ -1,4 +1,4 @@
-//! `/rename` (alias `/title`) -- rename the current session.
+//! `/rename` -- rename the current session.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -9,10 +9,6 @@ pub struct RenameCommand;
 impl SlashCommand for RenameCommand {
     fn name(&self) -> &str {
         "rename"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["title"]
     }
 
     fn description(&self) -> &str {

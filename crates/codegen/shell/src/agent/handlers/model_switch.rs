@@ -2,7 +2,7 @@
 //! selections use the catalog generation protected by the caller's lock;
 //! Workflow children use their immutable Run route instead.
 use crate::agent::mvp_agent::MvpAgent;
-use crate::session::SessionCommand;
+use crate::session::{ControlIntent, SessionCommand, SessionEffortAuthority};
 use agent_client_protocol::{self as acp};
 use sampling_types::parse_reasoning_effort_meta;
 use tokio::sync::oneshot;
@@ -11,7 +11,8 @@ pub(crate) struct EnqueuedModelSwitch {
     session_id: acp::SessionId,
     model_id: acp::ModelId,
     previous_model_id: acp::ModelId,
-    response: oneshot::Receiver<Result<acp::ModelId, acp::Error>>,
+    response:
+        oneshot::Receiver<Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>>,
 }
 
 /// Resolve and enqueue a model route while the caller owns the catalog
@@ -32,7 +33,9 @@ pub(crate) fn enqueue(
         Some(args.session_id.0.as_ref()),
         Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
     );
+    let intent = ControlIntent::from_meta(args.meta.as_ref())?;
     let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
+    let effort_patch = crate::session::effort_patch_from_meta(args.meta.as_ref())?;
     let acp::SetSessionModelRequest {
         session_id,
         model_id,
@@ -54,6 +57,41 @@ pub(crate) fn enqueue(
                 })
         })
         .transpose()?;
+    if effort_patch {
+        let effort = effort_override.ok_or_else(|| {
+            acp::Error::invalid_params().data(format!(
+                "{} requires a reasoning-effort value",
+                crate::session::EFFORT_PATCH_META_KEY
+            ))
+        })?;
+        let authority = if let Some(route) = workflow_route {
+            SessionEffortAuthority::Workflow {
+                route,
+                models_manager: agent.models_manager.clone(),
+            }
+        } else {
+            SessionEffortAuthority::Catalog {
+                catalog: std::sync::Arc::new(agent.models_manager.published_catalog()),
+                origin_client: handle.origin_client.clone(),
+            }
+        };
+        let (responds_to, response) = oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SessionCommand::PatchSessionEffort {
+                effort,
+                authority,
+                intent,
+                responds_to,
+            })
+            .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
+        return Ok(EnqueuedModelSwitch {
+            session_id,
+            model_id,
+            previous_model_id,
+            response,
+        });
+    }
     let (mut route, catalog) = if let Some(workflow_route) = &workflow_route {
         (
             workflow_route
@@ -101,6 +139,7 @@ pub(crate) fn enqueue(
         .send(SessionCommand::SetSessionModel {
             route,
             catalog,
+            intent,
             responds_to,
         })
         .map_err(|_| acp::Error::internal_error().data("session actor closed"))?;
@@ -125,21 +164,37 @@ pub(crate) async fn finish(
         previous_model_id,
         response,
     } = enqueued;
-    let updated_model = response
+    let outcome = response
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
-    ::diagnostics::session_ctx::log_event(::diagnostics::events::ModelSwitched {
-        session_id: session_id.0.to_string(),
-        previous_model_id: previous_model_id.0.to_string(),
-        new_model_id: model_id.0.to_string(),
-        success: true,
-        error_code: None,
-        required_agent_type: None,
-        current_agent_type: None,
-    });
-    Ok(acp::SetSessionModelResponse::new().meta(
-        serde_json::json!({ "model": updated_model })
-            .as_object()
-            .cloned(),
-    ))
+    match outcome {
+        crate::session::DesiredStateOutcome::Applied(updated_model) => {
+            ::diagnostics::session_ctx::log_event(::diagnostics::events::ModelSwitched {
+                session_id: session_id.0.to_string(),
+                previous_model_id: previous_model_id.0.to_string(),
+                new_model_id: updated_model.0.to_string(),
+                success: true,
+                error_code: None,
+                required_agent_type: None,
+                current_agent_type: None,
+            });
+            Ok(acp::SetSessionModelResponse::new().meta(
+                serde_json::json!({ "status": "applied", "model": updated_model })
+                    .as_object()
+                    .cloned(),
+            ))
+        }
+        crate::session::DesiredStateOutcome::InFlight => Ok(acp::SetSessionModelResponse::new()
+            .meta(
+                serde_json::json!({ "status": "in_flight" })
+                    .as_object()
+                    .cloned(),
+            )),
+        crate::session::DesiredStateOutcome::Superseded => Ok(acp::SetSessionModelResponse::new()
+            .meta(
+                serde_json::json!({ "status": "superseded" })
+                    .as_object()
+                    .cloned(),
+            )),
+    }
 }

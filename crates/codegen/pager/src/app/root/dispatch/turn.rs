@@ -260,7 +260,10 @@ pub(super) fn dispatch_goal_interrupt_choice(
                 effects.push(Effect::ExecuteSlashCommand {
                     agent_id: id,
                     session_id,
-                    command: "/goal pause".into(),
+                    request: crate::slash::HostCommandRequest::new(
+                        "/goal pause",
+                        "Pause the active Goal",
+                    ),
                 });
             }
         }

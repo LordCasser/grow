@@ -2615,6 +2615,7 @@ fn is_source_bound_projection_update(update: &super::SessionUpdate) -> bool {
                 &notification.update,
                 crate::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
                     | crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
+                    | crate::extensions::notification::SessionUpdate::ControlStateUpdate(_)
                     | crate::extensions::notification::SessionUpdate::SubagentSpawned { .. }
                     | crate::extensions::notification::SessionUpdate::SubagentProgress { .. }
                     | crate::extensions::notification::SessionUpdate::SubagentFinished { .. }
@@ -2829,6 +2830,7 @@ impl JsonlStorageAdapter {
                     // receives a new explicit control fact, not a copied parent
                     // snapshot or sidecar.
                     control.goal = None;
+                    control.applied_control = None;
                     let behavior_normalized = matches!(
                         control.behavior.state,
                         crate::session::behavior::BehaviorState::Plan(_)

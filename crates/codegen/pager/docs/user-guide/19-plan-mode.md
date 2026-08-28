@@ -45,7 +45,7 @@ You can enter plan mode yourself in two ways:
 Permission is selected independently through `Ctrl+X P` or `/permission`;
 `Ctrl+R` remains the prompt editor's redo shortcut.
 
-After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen its saved preview.
+After a plan exists, run **`/view-plan`** to reopen its saved preview.
 
 ---
 

@@ -15,10 +15,6 @@ impl SlashCommand for TutorialCommand {
         "tutorial"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["tour", "onboarding"]
-    }
-
     fn description(&self) -> &str {
         "Quick tips to get the most out of Grow"
     }

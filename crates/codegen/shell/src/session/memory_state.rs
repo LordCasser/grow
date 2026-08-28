@@ -27,6 +27,10 @@ pub struct SessionMemory {
     pub flush_config: crate::config::MemoryFlushConfig,
     /// When `true`, auto-compact checks are suppressed during memory flush.
     pub is_flushing: AtomicBool,
+    /// Periodic dream consolidation is detached from the actor mailbox. The
+    /// shutdown barrier waits for this owner so its Sideband and memory writes
+    /// cannot land after the final persistence flush.
+    pub is_dreaming: AtomicBool,
     /// The compaction count at which the last flush ran (once-per-cycle guard).
     pub last_flush_compaction: AtomicU64,
     /// Number of flushes executed in this session.
@@ -85,6 +89,22 @@ impl SessionMemory {
     pub fn release_flush_lock(&self) {
         self.is_flushing
             .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn try_begin_dream(&self) -> bool {
+        self.is_dreaming
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn finish_dream(&self) {
+        self.is_dreaming
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Record a flush result and increment the appropriate counter.

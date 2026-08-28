@@ -6,7 +6,7 @@ use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
-use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
+use crate::scrollback::blocks::ToolCallBlock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic counter for correlating async rewrite responses with the modal
@@ -48,7 +48,7 @@ pub(super) fn dispatch_send_remember_note(app: &mut AppView, text: String) -> Ve
 
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
-        agent.scrollback.push_block(RenderBlock::system(
+        agent.scrollback.push_block(RenderBlock::notice(
             "Please provide a memory note.".to_string(),
         ));
         return vec![];
@@ -127,9 +127,11 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
     };
 
     agent.active_modal = None;
-    agent
-        .scrollback
-        .push_block(RenderBlock::system("Saving memory note...".to_string()));
+    agent.session.set_live_feedback(
+        "memory-note",
+        crate::scrollback::blocks::NoticeTone::Progress,
+        "Saving memory note\u{2026}",
+    );
 
     vec![Effect::SaveMemoryNote {
         agent_id: id,
@@ -243,7 +245,7 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             if minimal {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(
                         "No active session",
                     ));
             } else {
@@ -344,29 +346,11 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
             agent.show_toast(recap_unavailable_toast(false));
             return vec![];
         }
-        // Show an immediate loading block with the animated "running" sidebar so
-        // the user has feedback that a recap is being generated. The
-        // `SessionRecap` handler fills this entry in and stops the animation.
-        // Reuse an existing in-flight loading block instead of stacking spinners
-        // when `/recap` is pressed repeatedly.
-        let already_loading = agent.pending_recap_entry.is_some_and(|eid| {
-            agent
-                .scrollback
-                .get_by_id(eid)
-                .is_some_and(|entry| entry.is_running)
-        });
-        if !already_loading {
-            let entry_id =
-                agent
-                    .scrollback
-                    .push(crate::scrollback::entry::ScrollbackEntry::running(
-                        RenderBlock::session_event(SessionEvent::Recap {
-                            summary: String::new(),
-                            auto: false,
-                        }),
-                    ));
-            agent.pending_recap_entry = Some(entry_id);
-        }
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
     } else {
         // Retry backoff only — do not consume the away period on dispatch.
         // The shell often no-ops auto recap until ≥3 min since the last main
@@ -388,11 +372,12 @@ pub(super) fn handle_memory_note_saved(
     result: Result<(), String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("memory-note");
         match result {
             Ok(()) => {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(format!(
                         "Memory saved to {}",
                         crate::util::display_user_grow_path("memory/MEMORY.md")
                     )));
@@ -400,7 +385,7 @@ pub(super) fn handle_memory_note_saved(
             Err(error) => {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(format!(
                         "Couldn't save memory note: {error}"
                     )));
             }

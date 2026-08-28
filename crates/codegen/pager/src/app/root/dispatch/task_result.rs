@@ -9,7 +9,7 @@ use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
     handle_compact_complete, handle_prompt_response, handle_suggestion_debounce_expired,
 };
-use super::queue::{maybe_drain_queue, next_control_effect};
+use super::queue::maybe_drain_queue;
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
     handle_rewind_preview_complete, handle_rewind_preview_failed,
@@ -46,6 +46,7 @@ use crate::app::actions::{
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
 use agent_client_protocol as acp;
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
@@ -104,7 +105,7 @@ fn show_clipboard_toast(target: &ClipboardPasteTarget, message: &str, app: &mut 
         }
         ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => {
             if let Some(dashboard) = app.dashboard.as_mut() {
-                dashboard.error_toast = Some(message.to_owned());
+                dashboard.set_info(message);
             }
         }
     }
@@ -237,7 +238,12 @@ pub(crate) fn current_doctor_target(
         _ => None,
     }
 }
-pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, message: String) {
+pub(crate) fn deliver_doctor_message(
+    app: &mut AppView,
+    preferred: AgentId,
+    tone: NoticeTone,
+    message: String,
+) {
     let destination = app
         .agents
         .contains_key(&preferred)
@@ -249,11 +255,20 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
     if let Some(destination) = destination
         && let Some(agent) = app.agents.get_mut(&destination)
     {
-        agent.scrollback.push_block(RenderBlock::system(message));
+        agent.scrollback.push_block(RenderBlock::typed_notice(
+            tone,
+            NoticeCategory::Command,
+            message,
+            None,
+        ));
         return;
     }
     app.startup_warnings.push(crate::startup::StartupWarning {
-        severity: crate::startup::WarningSeverity::Info,
+        severity: if matches!(tone, NoticeTone::Warning | NoticeTone::Error) {
+            crate::startup::WarningSeverity::Warning
+        } else {
+            crate::startup::WarningSeverity::Info
+        },
         message,
         action: None,
     });
@@ -515,7 +530,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Err(err) = result
                 && let Some(agent) = get_active_agent_mut(app)
             {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "Couldn't save preferred model: {err} (still active for this session)"
                 )));
             }
@@ -569,6 +584,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_name,
             result,
         } => {
+            if result == Ok(crate::app::actions::ControlRpcOutcome::AuthoritativeUpdatePending) {
+                return vec![];
+            }
             let mut page_flip_entry = None;
             let mut effects = vec![];
             if let Some(agent) =
@@ -579,33 +597,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     return vec![];
                 }
                 match result {
-                    Ok(()) => {
-                        agent.session.apply_agent_name(Some(agent_name.clone()));
-                        agent
-                            .scrollback
-                            .push_block(RenderBlock::system(format!("Switched to {agent_name}")));
+                    // AgentChanged + durable ControlStateUpdate own the
+                    // committed projection and terminal Notice.
+                    Ok(crate::app::actions::ControlRpcOutcome::Superseded) => {}
+                    Ok(crate::app::actions::ControlRpcOutcome::AuthoritativeUpdatePending) => {
+                        unreachable!("handled above")
                     }
-                    Err(error) => {
-                        agent.scrollback.push_block(RenderBlock::system(format!(
-                            "Couldn't switch Agent: {error}"
-                        )));
+                    Err(error) if !error.terminal_published => {
+                        agent.scrollback.push_block(RenderBlock::terminal_notice(
+                            format!(
+                                "control:agent:{}:{}:{}",
+                                session_id.0, control_token.generation, control_token.sequence
+                            ),
+                            NoticeTone::Error,
+                            NoticeCategory::Control,
+                            format!("Agent switch to {agent_name} failed"),
+                            Some(format!(
+                                "Reason: {}. Retry /agent {agent_name} or choose another Agent.",
+                                error.message
+                            )),
+                        ));
                     }
+                    Err(_) => {}
                 }
-                if completion == crate::app::session::SessionControlCompletion::Next {
-                    if let Some(next) =
-                        next_control_effect(agent_id, session_id.clone(), &agent.session)
-                    {
-                        effects.push(next);
-                    }
-                } else {
-                    crate::app::acp_handler::apply_deferred_authoritative_controls(
-                        agent,
-                        session_id.0.as_ref(),
-                    );
-                    let drain = maybe_drain_queue(agent);
-                    page_flip_entry = drain.page_flip_entry;
-                    effects.extend(drain.effects);
-                }
+                crate::app::acp_handler::apply_deferred_authoritative_controls(
+                    agent,
+                    session_id.0.as_ref(),
+                );
+                let drain = maybe_drain_queue(agent);
+                page_flip_entry = drain.page_flip_entry;
+                effects.extend(drain.effects);
             }
             crate::app::acp_handler::sync_child_control_projection_by_session_id(
                 app,
@@ -625,9 +646,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             // CurrentModeUpdate commits a Behavior transition. This prevents a
             // successful transport response from releasing a first prompt when
             // the shell subsequently reports rejected/confirmation_required.
-            let Err(error) = result else {
+            if result == Ok(crate::app::actions::ControlRpcOutcome::AuthoritativeUpdatePending) {
                 return vec![];
-            };
+            }
             let mut effects = vec![];
             let mut page_flip_entry = None;
             if let Some(agent) =
@@ -637,16 +658,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 if completion == crate::app::session::SessionControlCompletion::Stale {
                     return vec![];
                 }
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Couldn't switch to {} Behavior: {error}",
-                    mode.display_label()
-                )));
-                if completion == crate::app::session::SessionControlCompletion::Next
-                    && let Some(next) =
-                        next_control_effect(agent_id, session_id.clone(), &agent.session)
+                if let Err(error) = result
+                    && !error.terminal_published
                 {
-                    effects.push(next);
-                } else if completion == crate::app::session::SessionControlCompletion::Drained {
+                    agent.scrollback.push_block(RenderBlock::terminal_notice(
+                        format!(
+                            "control:behavior:{}:{}:{}",
+                            session_id.0, control_token.generation, control_token.sequence
+                        ),
+                        NoticeTone::Error,
+                        NoticeCategory::Control,
+                        format!("{} Behavior switch failed", mode.display_label()),
+                        Some(format!(
+                            "Reason: {}. Retry the Behavior command after the current foreground boundary.",
+                            error.message
+                        )),
+                    ));
+                }
+                if completion == crate::app::session::SessionControlCompletion::Drained {
                     crate::app::acp_handler::apply_deferred_authoritative_controls(
                         agent,
                         session_id.0.as_ref(),
@@ -772,6 +801,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 deliver_doctor_message(
                     app,
                     target.agent_id,
+                    NoticeTone::Warning,
                     "This fix was cancelled because the session changed. Run `/doctor fix` again."
                         .to_owned(),
                 );
@@ -779,7 +809,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             };
             match result {
                 Ok(DoctorPlanningOutcome::Listing(listing)) => {
-                    deliver_doctor_message(app, target.agent_id, listing);
+                    deliver_doctor_message(app, target.agent_id, NoticeTone::Info, listing);
                 }
                 Ok(DoctorPlanningOutcome::Plan(plan)) => {
                     super::prompt::open_doctor_fix_question(app, target, plan);
@@ -788,6 +818,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     deliver_doctor_message(
                         app,
                         target.agent_id,
+                        NoticeTone::Info,
                         format!(
                             "This fix configures your local computer, not this SSH session.\nOn your local computer, run: {command}"
                         ),
@@ -796,6 +827,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 Err(error) => deliver_doctor_message(
                     app,
                     target.agent_id,
+                    NoticeTone::Error,
                     if error.starts_with("Could not prepare the fix:") {
                         error
                     } else {
@@ -806,12 +838,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::DoctorFixApplied { target, result } => {
-            let message = match result {
-                Ok(outcome) => crate::diagnostics::format_fix_success(&outcome),
-                Err(error) if error.starts_with("Could not apply the fix:") => error,
-                Err(error) => format!("Could not apply the fix: {error}"),
+            if let Some(agent) = app.agents.get_mut(&target.agent_id) {
+                agent.session.clear_live_feedback("doctor-fix");
+            }
+            let (tone, message) = match result {
+                Ok(outcome) => (
+                    NoticeTone::Success,
+                    crate::diagnostics::format_fix_success(&outcome),
+                ),
+                Err(error) if error.starts_with("Could not apply the fix:") => {
+                    (NoticeTone::Error, error)
+                }
+                Err(error) => (
+                    NoticeTone::Error,
+                    format!("Could not apply the fix: {error}"),
+                ),
             };
-            deliver_doctor_message(app, target.agent_id, message);
+            deliver_doctor_message(app, target.agent_id, tone, message);
             vec![]
         }
         TaskResult::AnnouncementsHiddenPersisted { result } => {
@@ -992,7 +1035,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 let safe = crate::views::session_title::sanitize_display_text(&title);
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(format!(
                         "Session renamed to \"{safe}\""
                     )));
             }
@@ -1002,7 +1045,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(format!(
                         "Couldn't rename session: {error}"
                     )));
             }
@@ -1164,7 +1207,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(format!("Couldn't load entry: {error}")));
+                    .push_block(RenderBlock::notice(format!("Couldn't load entry: {error}")));
             }
             vec![]
         }
@@ -1183,9 +1226,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 tracing::debug!(%error, "recap request failed");
                 if !auto
                     && let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id.0)
-                    && let Some(pending_id) = agent.pending_recap_entry.take()
                 {
-                    agent.scrollback.remove_entry(pending_id);
+                    agent.session.clear_live_feedback("recap");
                     agent.show_toast(super::recap_unavailable_toast(
                         super::scrollback_has_user_messages(&agent.scrollback),
                     ));
@@ -1220,11 +1262,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::SlashCommandExecuted { agent_id, error } => {
+        TaskResult::SlashCommandExecuted {
+            agent_id: _,
+            session_id,
+            request,
+            error,
+        } => {
             if let Some(error) = error
-                && let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(agent) =
+                    find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
             {
-                agent.show_toast(&error);
+                agent.scrollback.push_block(RenderBlock::terminal_notice(
+                    format!("command:{}:rejected", request.invocation_id),
+                    NoticeTone::Error,
+                    NoticeCategory::Command,
+                    format!("{} failed", request.command),
+                    Some(format!(
+                        "Reason: {error}\nRecovery: verify the command arguments and retry."
+                    )),
+                ));
             }
             vec![]
         }
@@ -1267,7 +1323,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 return vec![];
             };
             agent.rewind_state = None;
-            app.show_toast(&format!("Undo failed: {error}"));
+            app.show_toast(&format!("Rewind failed: {error}"));
             vec![]
         }
         TaskResult::RewindPreviewComplete {

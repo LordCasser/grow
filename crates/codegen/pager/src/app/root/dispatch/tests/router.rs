@@ -30,6 +30,66 @@ fn update_restart_intent_survives_terminal_teardown() {
             if session_id.0.as_ref() == "test-session"
     )));
 }
+
+#[test]
+fn screen_mode_relaunch_transports_a_pending_control_in_an_inactive_session() {
+    let mut app = test_app_with_agent();
+    let inactive_id = AgentId(1);
+    let mut inactive = AgentView::new(
+        make_test_agent_session(&app, inactive_id, "inactive-session"),
+        ScrollbackState::new(),
+    );
+    inactive
+        .session
+        .enqueue_control(crate::app::session::PendingSessionControl::Agent {
+            agent_name: "coder".into(),
+        });
+    app.agents.insert(inactive_id, inactive);
+
+    let effects = dispatch(Action::RelaunchInScreenMode { minimal: true }, &mut app);
+
+    assert!(matches!(effects.last(), Some(Effect::Quit)));
+    let relaunch = app.relaunch.as_ref().expect("relaunch");
+    assert!(
+        relaunch
+            .control_handoffs
+            .iter()
+            .any(|handoff| handoff.session_id == "inactive-session" && handoff.agent.is_some())
+    );
+}
+
+#[test]
+fn screen_mode_relaunch_transports_a_pending_control_in_a_child_session() {
+    let mut app = test_app_with_agent();
+    let child_sid = "child-session";
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(0), child_sid),
+        ScrollbackState::new(),
+    );
+    child
+        .session
+        .enqueue_control(crate::app::session::PendingSessionControl::Model {
+            model_id: acp::ModelId::new("provider/model"),
+            effort: None,
+            effort_patch: false,
+        });
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_views
+        .insert(child_sid.into(), Box::new(child));
+
+    let effects = dispatch(Action::RelaunchInScreenMode { minimal: false }, &mut app);
+
+    assert!(matches!(effects.last(), Some(Effect::Quit)));
+    let relaunch = app.relaunch.as_ref().expect("relaunch");
+    assert!(
+        relaunch
+            .control_handoffs
+            .iter()
+            .any(|handoff| handoff.session_id == child_sid && handoff.sampling.is_some())
+    );
+}
 #[test]
 fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     use crate::app::agent_view::PromptInputMode;
@@ -844,23 +904,19 @@ fn model_and_agent_switches_target_the_visible_subagent_session() {
         },
         &mut app,
     );
-    let model_token = match model_effects.as_slice() {
+    match model_effects.as_slice() {
         [
             Effect::SwitchModel {
                 agent_id,
                 session_id,
-                control_token,
                 model_id: selected,
                 ..
             },
         ] if *agent_id == root_id
             && session_id.0.as_ref() == child_sid
-            && selected == &model_id =>
-        {
-            *control_token
-        }
+            && selected == &model_id => {}
         other => panic!("expected child model control, got {other:?}"),
-    };
+    }
     let root = app.agents.get(&root_id).unwrap();
     assert!(!root.session.model_switch_pending());
     assert!(
@@ -876,27 +932,15 @@ fn model_and_agent_switches_target_the_visible_subagent_session() {
         &mut app,
     );
     assert!(
-        agent_effects.is_empty(),
-        "the child Agent control must wait behind its model control"
+        matches!(
+            agent_effects.as_slice(),
+            [Effect::SwitchAgent { agent_id, session_id, agent_name, .. }]
+                if *agent_id == root_id
+                    && session_id.0.as_ref() == child_sid
+                    && agent_name == "reviewer"
+        ),
+        "Sampling and Agent are independent latest-wins domains"
     );
-    let agent_effects = dispatch(
-        Action::TaskComplete(TaskResult::SwitchModelComplete {
-            agent_id: root_id,
-            session_id: acp::SessionId::new(child_sid),
-            control_token: model_token,
-            model_id,
-            effort: None,
-            result: Ok(()),
-        }),
-        &mut app,
-    );
-    assert!(matches!(
-        agent_effects.as_slice(),
-        [Effect::SwitchAgent { agent_id, session_id, agent_name, .. }]
-            if *agent_id == root_id
-                && session_id.0.as_ref() == child_sid
-                && agent_name == "reviewer"
-    ));
     let root = app.agents.get(&root_id).unwrap();
     assert!(root.session.agent_switch_target().is_none());
     assert_eq!(
@@ -956,19 +1000,19 @@ fn test_helper_agent_uses_generation_zero() {
     assert!(!app.agents[&id].session.model_switch_pending());
 }
 #[test]
-fn slash_exit_dispatches_quit() {
+fn slash_quit_dispatches_quit() {
     let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SendPrompt("/exit".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/quit".into()), &mut app);
     assert!(
         effects.last().is_some_and(|e| matches!(e, Effect::Quit)),
         "expected Quit as last effect, got: {effects:?}"
     );
 }
 #[test]
-fn slash_quit_alias_dispatches_quit() {
+fn removed_slash_exit_does_not_dispatch_quit() {
     let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SendPrompt("/quit".into()), &mut app);
-    assert!(effects.last().is_some_and(|e| matches!(e, Effect::Quit)));
+    let effects = dispatch(Action::SendPrompt("/exit".into()), &mut app);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::Quit)));
 }
 #[test]
 fn slash_new_does_not_cancel_running_turn() {
@@ -1106,7 +1150,7 @@ fn non_goal_acp_bootstrap_command_uses_command_plane_while_idle() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(
         &effects[0],
-        Effect::ExecuteSlashCommand { command, .. } if command == "/flush"
+        Effect::ExecuteSlashCommand { request, .. } if request.command == "/flush"
     ));
 }
 
@@ -1134,7 +1178,8 @@ fn goal_command_uses_control_plane_while_idle_without_user_echo() {
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::ExecuteSlashCommand { command, .. }] if command == "/goal budget 4096"
+        [Effect::ExecuteSlashCommand { request, .. }]
+            if request.command == "/goal budget 4096"
     ));
     assert_eq!(app.agents[&id].scrollback.len(), before);
     assert_eq!(app.agents[&id].session.queue_len(), 0);
@@ -1206,9 +1251,9 @@ fn acp_bootstrap_command_uses_control_plane_while_running() {
         effects.as_slice(),
         [Effect::ExecuteSlashCommand {
             session_id,
-            command,
+            request,
             ..
-        }] if session_id.0.as_ref() == "sess-1" && command == "/goal status"
+        }] if session_id.0.as_ref() == "sess-1" && request.command == "/goal status"
     ));
     assert_eq!(
         app.agents[&id].scrollback.len(),
@@ -1278,9 +1323,10 @@ fn acp_command_colliding_with_builtin_skipped_in_autocomplete() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![
         acp::AvailableCommand::new(
-            "exit".to_string(),
-            "ACP exit (should be skipped)".to_string(),
+            "quit".to_string(),
+            "ACP quit (should be skipped)".to_string(),
         ),
+        acp::AvailableCommand::new("exit".to_string(), "ACP exit".to_string()),
         acp::AvailableCommand::new("flush".to_string(), "Flush memory".to_string()),
     ];
     dispatch(Action::NewSession, &mut app);
@@ -1294,8 +1340,13 @@ fn acp_command_colliding_with_builtin_skipped_in_autocomplete() {
         );
     }
     let registry = app.agents[&id].prompt.slash_controller.registry();
-    let exit_cmd = registry.get("exit").unwrap();
-    assert_eq!(exit_cmd.description(), "Quit the application");
+    let quit_cmd = registry.get("quit").unwrap();
+    assert_eq!(quit_cmd.description(), "Quit the application");
+    assert_eq!(
+        registry.get("exit").unwrap().description(),
+        "ACP exit",
+        "a removed builtin alias must not reserve an extension command name"
+    );
     assert!(registry.get("flush").is_some());
 }
 #[test]
@@ -1349,7 +1400,7 @@ fn acp_command_with_args_preserves_args_on_idle_turn_path() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(
         &effects[0],
-        Effect::ExecuteSlashCommand { command, .. } if command == "/search find bugs"
+        Effect::ExecuteSlashCommand { request, .. } if request.command == "/search find bugs"
     ));
 }
 #[test]
@@ -1894,7 +1945,7 @@ fn switch_to_agent_surfaces_launch_block_notice_once() {
         .scrollback
         .iter_entries()
         .filter_map(|(_, e)| match &e.block {
-            crate::scrollback::block::RenderBlock::System(s) => Some(s.text.as_str()),
+            crate::scrollback::block::RenderBlock::Notice(s) => Some(s.text.as_str()),
             _ => None,
         })
         .collect();
@@ -2364,7 +2415,7 @@ fn system_texts(app: &AppView, id: AgentId) -> Vec<String> {
         .scrollback
         .iter_entries()
         .filter_map(|(_, e)| match &e.block {
-            crate::scrollback::block::RenderBlock::System(s) => Some(s.text.clone()),
+            crate::scrollback::block::RenderBlock::Notice(s) => Some(s.text.clone()),
             _ => None,
         })
         .collect()

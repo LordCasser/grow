@@ -2,6 +2,7 @@
 //! arms, and the free helpers only the loop consumes.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use futures_util::FutureExt as _;
 
 /// Returns the authoritative mode only when the manager accepted a real
 /// transition. Callers pass the post-clamp read-back, never the request.
@@ -10,6 +11,437 @@ pub(super) fn permission_mode_change(
     actual: ::diagnostics::enums::PermissionMode,
 ) -> Option<::diagnostics::enums::PermissionMode> {
     (was != actual).then_some(actual)
+}
+
+async fn join_control_worker(
+    label: &str,
+    mut handle: Option<tokio::task::JoinHandle<Result<(), String>>>,
+) -> Result<(), String> {
+    let Some(handle) = handle.as_mut() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut *handle).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(error)) => Err(format!("{label} control worker join failed: {error}")),
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            Err(format!("{label} control worker did not stop within 5s"))
+        }
+    }
+}
+
+async fn quiesce_control_workers(session: &SessionActor) -> Result<(), String> {
+    let mut step = session.step_control_worker.take();
+    let mut behavior = session.behavior_control_worker.take();
+    let (step_result, behavior_result) = tokio::join!(
+        join_control_worker("Sampling/Agent", step.take()),
+        join_control_worker("Behavior", behavior.take()),
+    );
+    let mut errors = Vec::new();
+    if let Err(error) = step_result {
+        errors.push(error);
+    }
+    if let Err(error) = behavior_result {
+        errors.push(error);
+    }
+    let state = session.state.lock().await;
+    if matches!(state.foreground, ForegroundState::ApplyingControl)
+        || state.behavior_control_worker_active
+        || state.applying_step_control.is_some()
+        || state.applying_behavior_control.is_some()
+    {
+        errors.push("control worker stopped without releasing actor ownership".to_string());
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(())
+}
+
+struct GracefulShutdown {
+    reason: &'static str,
+}
+
+pub(super) async fn latch_termination_and_cancel_controls(
+    session: &SessionActor,
+    requested: TerminationState,
+) -> Result<(), String> {
+    let _gate = session.step_control_gate.lock().await;
+    let pending_behavior = {
+        let mut state = session.state.lock().await;
+        state.termination.request(requested);
+        if matches!(requested, TerminationState::Graceful)
+            && matches!(state.termination, TerminationState::Fatal)
+        {
+            return Err("session already crossed a fatal persistence boundary".to_string());
+        }
+        state.pending_step_controls.cancel_for_shutdown();
+        state.pending_behavior_control.take()
+    };
+    if let Some(pending) = pending_behavior {
+        let _ = pending.responds_to.send(Err(
+            acp::Error::internal_error().data("session is shutting down")
+        ));
+    }
+    // Workflow is another Session-owned admission surface. Latch it in the
+    // same termination transition so a fatal/graceful teardown cannot leave
+    // its detached ingress accepting a queued envelope while other owners
+    // are being drained.
+    session.workflow_manager.lock().await.close_admission();
+    session.workflow_service_shutdown.cancel();
+    session.idle_arbiter.notify_waiters();
+    Ok(())
+}
+
+/// Cancel every queued owner except the exact foreground turn still settling.
+/// Shutdown cannot drop a `session/prompt` responder, and it cannot use FIFO
+/// position as a proxy for foreground ownership.
+async fn reject_queued_inputs_for_shutdown(session: &SessionActor) {
+    let removed = {
+        let mut state = session.state.lock().await;
+        state.pending_manual_compact = None;
+        let running = state.running_prompt_id().map(str::to_owned);
+        let mut kept = std::collections::VecDeque::new();
+        let mut removed = Vec::new();
+        for input in std::mem::take(&mut state.pending_inputs) {
+            if running.as_deref() == Some(input.prompt_id.as_str()) {
+                kept.push_back(input);
+            } else {
+                removed.push(input);
+            }
+        }
+        state.pending_inputs = kept;
+        session.broadcast_queue_changed(&state);
+        removed
+    };
+    for input in removed {
+        SessionActor::respond_removed_prompt(input.respond_to);
+    }
+}
+
+/// Cancel every non-Workflow Task child and keep the root Goal accounting
+/// ingress alive until those child SessionActors have reached their terminal.
+/// The public Session is already termination-latched, so unrelated commands
+/// are rejected by dropping their responders; only immutable usage facts are
+/// allowed to cross this drain boundary.
+pub(super) async fn cancel_and_drain_session_subagents(
+    session: &SessionActor,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Result<(), String> {
+    let Some(event_tx) = session.tool_context.subagent_event_tx.clone() else {
+        return Ok(());
+    };
+    use tools::implementations::grow_build::task::backend::ChannelBackend;
+    use tools::implementations::grow_build::task::types::SubagentCancelOutcome;
+    let backend = ChannelBackend::for_session(event_tx, session.session_id_string());
+    let (respond_to, mut drained) = tokio::sync::oneshot::channel();
+    if !backend.request_cancel_parent_session(respond_to) {
+        return Ok(());
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                outcome = &mut drained => {
+                    return match outcome.unwrap_or(SubagentCancelOutcome::NotFound) {
+                        SubagentCancelOutcome::Cancelled
+                        | SubagentCancelOutcome::AlreadyFinished { .. }
+                        | SubagentCancelOutcome::NotFound => Ok(()),
+                    };
+                }
+                command = cmd_rx.recv() => {
+                    let Some(command) = command else {
+                        let _ = (&mut drained).await;
+                        return Ok(());
+                    };
+                    let _control = session.step_control_gate.lock().await;
+                    let result = match command {
+                        SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to } => {
+                            let result = session.apply_captured_goal_usage(&goal_id, tokens).await;
+                            let _ = respond_to.send(result.clone());
+                            result.map(|_| ())
+                        }
+                        SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
+                            let result = session.apply_captured_goal_usage_incomplete(&goal_id).await;
+                            let _ = respond_to.send(result.clone());
+                            result.map(|_| ())
+                        }
+                        SessionCommand::SettleGoalUsageAttempt { attempt_id, respond_to } => {
+                            let result = session.settle_claimed_goal_usage_attempt(&attempt_id).await;
+                            let _ = respond_to.send(result.clone());
+                            result.map(|_| ())
+                        }
+                        _ => Ok(()),
+                    };
+                    result?;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out draining non-Workflow subagent sessions".to_string())?
+}
+
+async fn begin_graceful_shutdown(
+    session: &std::sync::Arc<SessionActor>,
+    replay_buffer: &mut ReplayBuffer,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Result<(), String> {
+    session.session_activities.close_admission();
+    session.sideband_cancel.cancel();
+    session
+        .user_input_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    stop_session_background_services(session, false)
+        .await
+        .map_err(|error| format!("background service shutdown failed: {error}"))?;
+    session
+        .goal_drive
+        .abort_and_join()
+        .await
+        .map_err(|error| format!("Goal drive shutdown failed: {error}"))?;
+    session
+        .deferred_prefix
+        .abort_and_join()
+        .await
+        .map_err(|error| format!("prefix preparation shutdown failed: {error}"))?;
+    session
+        .restored_plan_approval
+        .abort_and_join()
+        .await
+        .map_err(|error| format!("restored Plan approval shutdown failed: {error}"))?;
+    quiesce_control_workers(session).await?;
+    if let Some(notification) = replay_buffer.flush() {
+        session.emit_buffered(notification).await;
+    }
+    reject_queued_inputs_for_shutdown(session).await;
+    session
+        .cancel_running_task(true, true, false, Some("shutdown".to_owned()))
+        .await
+        .map_err(|error| format!("shutdown foreground cancellation failed: {error:?}"))?;
+    shutdown_sampler(session).await?;
+    cancel_and_drain_session_subagents(session, cmd_rx).await?;
+    cmd_rx.close();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.session_activities.wait_idle(),
+    )
+    .await
+    .map_err(|_| "timed out draining session auxiliary work".to_string())?;
+    // A config command admitted immediately before the latch may have
+    // completed MCP initialization after the first service stop. Revoke the
+    // resulting ingress once more after every finite command owner has joined.
+    stop_session_background_services(session, false)
+        .await
+        .map_err(|error| {
+            format!("background service shutdown failed after owner drain: {error}")
+        })?;
+    Ok(())
+}
+
+async fn graceful_shutdown_ready(session: &SessionActor) -> bool {
+    let state = session.state.lock().await;
+    matches!(state.termination, TerminationState::Graceful)
+        && state.foreground.is_idle()
+        && state.pending_inputs.is_empty()
+        && state.pending_manual_compact.is_none()
+        && state.pending_step_controls.is_empty()
+        && state.pending_behavior_control.is_none()
+        && state.applying_step_control.is_none()
+        && state.applying_behavior_control.is_none()
+        && !state.behavior_control_worker_active
+        && session.session_activities.is_idle()
+        && !session
+            .memory
+            .is_flushing
+            .load(std::sync::atomic::Ordering::Acquire)
+        && !session
+            .memory
+            .is_dreaming
+            .load(std::sync::atomic::Ordering::Acquire)
+}
+
+async fn finish_graceful_shutdown(
+    session: &SessionActor,
+    replay_buffer: &mut ReplayBuffer,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    shutdown: GracefulShutdown,
+) {
+    let permission_audit_error = stop_permission_manager_and_drain_audit(session).await.err();
+    if let Err(run_ids) = shutdown_workflows(session).await {
+        tracing::error!(
+            ?run_ids,
+            "Workflow owners did not drain; withholding Goal close and final persistence frontier"
+        );
+        session.fail_stop_sideband_admission().await;
+        session.sideband_cancel.cancel();
+        session.finalizer_sideband_cancel.cancel();
+        session.sideband_repair_cancel.cancel();
+        session.durable_ui_cancel.cancel();
+        session.signals_handle.shutdown();
+        cleanup_session_scratch(session);
+        return;
+    }
+    if let Some(notification) = replay_buffer.flush() {
+        session.emit_buffered(notification).await;
+    }
+    session.drop_pending_synthetic_items().await;
+
+    // SessionEnd is admitted only after every foreground/control owner has
+    // reached its terminal. Hooks and memory are therefore the final normal
+    // producers before the persistence barrier.
+    let envelope = session.fire_hook(
+        ::hooks::event::HookEventName::SessionEnd,
+        None,
+        ::hooks::event::HookPayload::SessionEnd {
+            reason: shutdown.reason.to_string(),
+            turn_count: None,
+            tool_call_count: None,
+        },
+    );
+    if let Some(registry) = session.hooks.registry.borrow().clone() {
+        let ctx = session.hook_run_ctx();
+        let results = ::hooks::dispatcher::dispatch_non_blocking(
+            &registry,
+            ::hooks::event::HookEventName::SessionEnd,
+            &envelope,
+            &ctx,
+        )
+        .await;
+        session
+            .send_hook_execution("session_end", None, None, &results)
+            .await;
+    }
+    session.dispatch_session_end_stop(shutdown.reason).await;
+
+    let mut session_end_result = "disabled";
+    let mut total_chunks_at_end = 0usize;
+    if !session.startup_hints.is_subagent {
+        if let Some(storage) = session.memory.storage() {
+            let conversation = session.chat_state_handle.get_conversation().await;
+            let result = crate::session::memory::hooks::on_session_end(
+                &storage,
+                &conversation,
+                &session.session_info.id.0,
+                session.memory.save_on_end,
+            );
+            session_end_result = match &result {
+                crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
+                crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
+                crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
+            };
+            total_chunks_at_end = storage.total_chunk_count();
+            let telem = session.memory.diagnostics_snapshot();
+            tracing::info!(
+                target: ::diagnostics::memory_log::TARGET,
+                reason = shutdown.reason,
+                result = ?result,
+                tool_searches = telem.tool_search_count,
+                injection_searches = telem.injection_count,
+                recovery_searches = telem.compaction_recovery_count,
+                "MEMORY_SESSION_END: session summary saved"
+            );
+            if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
+                session
+                    .reindex_and_embed(std::path::Path::new(path_str), "session")
+                    .await;
+                session
+                    .send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
+                        path: path_str.clone(),
+                    })
+                    .await;
+            }
+        }
+    } else {
+        tracing::debug!(
+            target: ::diagnostics::memory_log::TARGET,
+            "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
+        );
+    }
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        session.maybe_run_dream(true),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("SessionEnd memory dream timed out; revoking finalizer Sideband work");
+        session.finalizer_sideband_cancel.cancel();
+        session.sideband_repair_cancel.cancel();
+    }
+    // A Sideband owner can transfer its terminal lease to Drop recovery. Wait
+    // for that exact nested owner before closing Goal accounting or crossing
+    // the final persistence barrier.
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.session_activities.wait_idle(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("SessionEnd auxiliary drain timed out; revoking Sideband persistence epoch");
+        session.fail_stop_sideband_admission().await;
+        session.finalizer_sideband_cancel.cancel();
+        session.sideband_repair_cancel.cancel();
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.session_activities.wait_idle(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::error!(
+                "SessionEnd auxiliary owners remained live after revocation; withholding Goal close and final persistence frontier"
+            );
+            session.sideband_cancel.cancel();
+            session.durable_ui_cancel.cancel();
+            session.signals_handle.shutdown();
+            cleanup_session_scratch(session);
+            return;
+        }
+    }
+    let telem = session.memory.diagnostics_snapshot();
+    session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+    if let Some(signals) = session.signals_handle().snapshot().await {
+        ::diagnostics::session_ctx::log_event(::diagnostics::events::SessionEnded {
+            duration_secs: session.session_start.elapsed().as_secs(),
+            turn_count: signals.turn_count as u64,
+            tool_call_count: signals.tool_call_count as u64,
+            compaction_count: signals.compaction_count as u64,
+            model_id: session.current_catalog_model_id(),
+        });
+    }
+    if !session.startup_hints.is_subagent {
+        session.checkpoint_running_task_notifications().await;
+    }
+    // Goal usage covers every provider call admitted while the Goal was
+    // active, including Workflow children and the session-end memory/dream
+    // producers above. Close and claim that window only after every such
+    // owner has drained, immediately before the final persistence barrier.
+    if let Err(error) = session.settle_goal_usage_for_shutdown().await {
+        tracing::error!(%error, "failed to settle Goal usage at shutdown");
+        terminate_failed_timeline_writer(session, cmd_rx).await;
+        return;
+    }
+    session.checkpoint_goal_before_shutdown().await;
+    if let Some(error) = permission_audit_error {
+        tracing::error!(
+            %error,
+            "permission audit did not reach durability; withholding final persistence frontier"
+        );
+        session.fail_stop_sideband_admission().await;
+        session.sideband_cancel.cancel();
+        session.finalizer_sideband_cancel.cancel();
+        session.sideband_repair_cancel.cancel();
+        session.durable_ui_cancel.cancel();
+        session.signals_handle.shutdown();
+        cleanup_session_scratch(session);
+        return;
+    }
+    final_session_persistence_flush(session).await;
+    session.signals_handle.shutdown();
+    cleanup_session_scratch(session);
 }
 #[cfg(test)]
 mod permission_mode_change_tests {
@@ -32,6 +464,109 @@ mod permission_mode_change_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shutdown_queue_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_rejection_keeps_the_settling_owner_and_resolves_queued_prompts() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let (settling, mut settling_rx) =
+                    crate::session::actor::tests::support::user_item_with_rx(
+                        "settling-owner",
+                        "test-client",
+                    );
+                let (queued, queued_rx) = crate::session::actor::tests::support::user_item_with_rx(
+                    "queued-during-settlement",
+                    "test-client",
+                );
+
+                {
+                    let mut state = actor.state.lock().await;
+                    state.foreground = ForegroundState::Settling {
+                        prompt_id: "settling-owner".into(),
+                        origin: crate::session::PromptOrigin::User,
+                        turn_kind: crate::session::TurnKind::User,
+                    };
+                    state.pending_inputs.push_back(settling);
+                    state.pending_inputs.push_back(queued);
+                }
+
+                reject_queued_inputs_for_shutdown(&actor).await;
+
+                let state = actor.state.lock().await;
+                assert_eq!(state.pending_inputs.len(), 1);
+                assert_eq!(
+                    state
+                        .pending_inputs
+                        .front()
+                        .map(|item| item.prompt_id.as_str()),
+                    Some("settling-owner")
+                );
+                drop(state);
+
+                let result = queued_rx
+                    .await
+                    .expect("shutdown must resolve queued prompt RPC");
+                let result = result.expect("removed queued prompt is not a turn failure");
+                assert!(matches!(
+                    result.completion_kind,
+                    crate::session::commands::PromptCompletionKind::RemovedFromQueue
+                ));
+                assert!(
+                    matches!(
+                        settling_rx.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "the exact settling owner must remain unresolved for its terminal owner"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejection_removes_all_queued_prompts_when_compaction_owns_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let (first, first_rx) = crate::session::actor::tests::support::user_item_with_rx(
+                    "queued-before-compaction",
+                    "test-client",
+                );
+                let (second, second_rx) = crate::session::actor::tests::support::user_item_with_rx(
+                    "queued-after-compaction",
+                    "test-client",
+                );
+                {
+                    let mut state = actor.state.lock().await;
+                    state.foreground = ForegroundState::Compaction;
+                    state.pending_inputs.push_back(first);
+                    state.pending_inputs.push_back(second);
+                }
+
+                reject_queued_inputs_for_shutdown(&actor).await;
+
+                assert!(actor.state.lock().await.pending_inputs.is_empty());
+                for receiver in [first_rx, second_rx] {
+                    let result = receiver
+                        .await
+                        .expect("shutdown must resolve every queued prompt RPC")
+                        .expect("removed queued prompt is not a turn failure");
+                    assert!(matches!(
+                        result.completion_kind,
+                        crate::session::commands::PromptCompletionKind::RemovedFromQueue
+                    ));
+                }
+            })
+            .await;
+    }
+}
+
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -56,31 +591,35 @@ pub(super) async fn run_session(
             )));
             loop {
                 interval.tick().await;
-                let _ =
-                    event_tx_for_flush_timer.send(SessionEvent::FlushReplay { respond_to: None });
+                if event_tx_for_flush_timer
+                    .send(SessionEvent::FlushReplay { respond_to: None })
+                    .is_err()
+                {
+                    break;
+                }
             }
         });
     }
-    let _workflow_watch = crate::config::watcher::ProjectDiscoveryWatcher::start(
+    if let Some((mut watcher, mut changes)) = crate::config::watcher::ProjectDiscoveryWatcher::start(
         std::path::Path::new(session.session_info.cwd.as_str()),
-    )
-    .map(|(mut watcher, mut changes)| {
-        let session = session.clone();
-        tokio::task::spawn_local(async move {
+    ) {
+        let watch_session = session.clone();
+        let handle = tokio::task::spawn_local(async move {
             while let Some(change) = changes.recv().await {
                 watcher.refresh_new_dirs();
                 match change {
                     crate::config::watcher::DiscoveryChange::Skills => {
-                        session.reload_skills_from_disk().await;
+                        watch_session.reload_skills_from_disk().await;
                     }
                     crate::config::watcher::DiscoveryChange::Workflows => {
-                        session.send_available_commands_update().await;
+                        watch_session.send_available_commands_update().await;
                     }
                 }
             }
-        })
-    });
-    let _fs_watch: Option<fs_watch::FsWatchHandle> = if fs_watch_caps.needs_watcher() {
+        });
+        session.project_discovery_worker.arm(handle);
+    }
+    let fs_watch_handle = if fs_watch_caps.needs_watcher() {
         let deps = fs_watch::FsWatchDeps::from_session(
             &session,
             fs_notify_config.clone(),
@@ -96,9 +635,15 @@ pub(super) async fn run_session(
         tracing::debug!("fs-notify: skipped (no consumers)");
         None
     };
+    session.fs_watch_handle.replace(fs_watch_handle);
     {
         let s = session.clone();
-        tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
+        if let Some(activity) = session.session_activities.try_start("git_branch_notice") {
+            tokio::task::spawn_local(async move {
+                let _activity = activity;
+                s.maybe_notify_git_branch().await;
+            });
+        }
     }
     let liveness_watchers_enabled = {
         let user_cfg = crate::config::load_effective_config().ok();
@@ -139,7 +684,7 @@ pub(super) async fn run_session(
             } else {
                 None
             };
-        tokio::task::spawn_local(async move {
+        let handle = tokio::task::spawn_local(async move {
             crate::session::mcp_dispatcher::run_dispatcher(
                 dispatcher_session_id,
                 event_rx,
@@ -151,18 +696,22 @@ pub(super) async fn run_session(
             )
             .await;
         });
+        session.mcp_dispatcher_worker.arm(handle);
     }
     let session_for_mcp = session.clone();
     let completion_tx_for_mcp = completion_tx.clone();
-    tokio::task::spawn_local(async move {
-        session_for_mcp.ensure_mcp_tools_initialized().await;
-        SessionActor::maybe_start_running_task(
-            session_for_mcp.clone(),
-            completion_tx_for_mcp.clone(),
-        )
-        .await;
-        SessionActor::maybe_drain_notifications(session_for_mcp, completion_tx_for_mcp).await;
-    });
+    if let Some(activity) = session.session_activities.try_start("mcp_initialization") {
+        tokio::task::spawn_local(async move {
+            let _activity = activity;
+            session_for_mcp.ensure_mcp_tools_initialized().await;
+            SessionActor::maybe_start_running_task(
+                session_for_mcp.clone(),
+                completion_tx_for_mcp.clone(),
+            )
+            .await;
+            SessionActor::maybe_drain_notifications(session_for_mcp, completion_tx_for_mcp).await;
+        });
+    }
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
@@ -175,11 +724,23 @@ pub(super) async fn run_session(
         None => tokio::time::sleep(std::time::Duration::MAX),
     };
     tokio::pin!(dream_check_sleep);
-    loop {
+    let mut pending_shutdown: Option<GracefulShutdown> = None;
+    let shutdown = loop {
+        if pending_shutdown.is_some() && graceful_shutdown_ready(&session).await {
+            break pending_shutdown
+                .take()
+                .expect("checked graceful shutdown request");
+        }
         tokio::select! {
             biased;
+            _ = session.session_activities.changed(), if pending_shutdown.is_some() => {
+                // A finite detached owner reached its terminal. The readiness
+                // predicate at the top of the loop decides whether this was
+                // the final owner; no new work is admitted during shutdown.
+            }
             // Idle flush timer fired — run background flush.
             _ = &mut idle_flush_sleep, if session.idle_flush_timeout.is_some()
+                && pending_shutdown.is_none()
                 && session.memory.is_enabled()
                 && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed) => {
                 // Skip if no new messages since last idle flush
@@ -191,13 +752,19 @@ pub(super) async fn run_session(
                         "MEMORY_IDLE_FLUSH: timer fired (conversation {last_len} → {current_len})");
                     session.last_idle_flush_conversation_len
                         .store(current_len, std::sync::atomic::Ordering::Relaxed);
+                    let activity = session
+                        .session_activities
+                        .try_start("memory_idle_flush")
+                        .expect("memory timer cannot fire after activity admission closes");
                     tokio::task::spawn_local({
                         let session = session.clone();
                         async move {
+                            let _activity = activity;
                             if !session.run_memory_flush("interval", None).await {
                                 tracing::info!(target: ::diagnostics::memory_log::TARGET,
                                     "MEMORY_IDLE_FLUSH: skipped — another flush already in progress");
                             }
+                            session.idle_arbiter.notify_one();
                         }
                     });
                 } else {
@@ -211,13 +778,20 @@ pub(super) async fn run_session(
             }
             // Dream check timer — periodically run dream consolidation.
             _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
+                && pending_shutdown.is_none()
                 && session.memory.is_enabled() => {
                 tracing::debug!(target: ::diagnostics::memory_log::TARGET,
                     "MEMORY_DREAM_CHECK: timer fired");
+                let activity = session
+                    .session_activities
+                    .try_start("memory_dream_check")
+                    .expect("dream timer cannot fire after activity admission closes");
                 tokio::task::spawn_local({
                     let session = session.clone();
                     async move {
-                        session.maybe_run_dream().await;
+                        let _activity = activity;
+                        session.maybe_run_dream(false).await;
+                        session.idle_arbiter.notify_one();
                     }
                 });
                 if let Some(timeout) = session.dream_check_timeout {
@@ -282,7 +856,7 @@ pub(super) async fn run_session(
                         tracing::error!(
                             "closing session because the Timeline writer actor stopped"
                         );
-                        terminate_failed_timeline_writer(&session).await;
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                         return;
                     }
                 }
@@ -303,7 +877,14 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionEvent::ForegroundWake => {
-                            if session.state.lock().await.foreground.regular().is_some() {
+                            let (terminating, regular) = {
+                                let state = session.state.lock().await;
+                                (!state.termination.is_open(), state.foreground.regular().is_some())
+                            };
+                            if terminating {
+                                // Teardown continues to service flush and
+                                // completion events, but never admits new work.
+                            } else if regular {
                                 session.drain_deferred_completions().await;
                             } else {
                                 SessionActor::maybe_drain_notifications(
@@ -311,6 +892,35 @@ pub(super) async fn run_session(
                                     completion_tx.clone(),
                                 )
                                 .await;
+                            }
+                        }
+                        SessionEvent::ManualCompactionFinished { failure } => {
+                            let (should_resume, fatal) = {
+                                let mut state = session.state.lock().await;
+                                if matches!(state.foreground, ForegroundState::Compaction) {
+                                    state.foreground = ForegroundState::Idle;
+                                } else {
+                                    tracing::warn!(
+                                        "manual compaction completion arrived without foreground ownership"
+                                    );
+                                }
+                                if failure.is_some() {
+                                    state.termination.request(TerminationState::Fatal);
+                                }
+                                (state.termination.is_open(), failure.is_some())
+                            };
+                            if fatal {
+                                tracing::error!(
+                                    message = failure.as_deref().unwrap_or("manual compaction failed"),
+                                    "closing session after manual compaction owner failure"
+                                );
+                                cmd_rx.close();
+                                terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                                return;
+                            }
+                            if should_resume {
+                                arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
+                                session.emit_session_idle_if_idle().await;
                             }
                         }
                         SessionEvent::FlushReplay { respond_to } => {
@@ -323,26 +933,61 @@ pub(super) async fn run_session(
                                 let _ = tx.send(());
                             }
                         }
+                        SessionEvent::ControlWorkerFailed { message } => {
+                            tracing::error!(%message, "closing session after control worker failure");
+                            cmd_rx.close();
+                            let _ = latch_termination_and_cancel_controls(
+                                &session,
+                                TerminationState::Fatal,
+                            )
+                            .await;
+                            if let Err(error) = quiesce_control_workers(&session).await {
+                                tracing::error!(%error, "failed to quiesce all control workers after fatal control failure");
+                            }
+                            if let Some(notification) = replay_buffer.flush() {
+                                session.emit_buffered(notification).await;
+                            }
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
+                        }
                     }
                 }
             }
             maybe_completion = completion_rx.recv() => {
                 let Some((prompt_id, result)) = maybe_completion else {
-                    // Channel closed.
-                    session.goal_drive.cancel();
-                    if let Err(error) = session.settle_goal_usage_for_shutdown().await {
-                        tracing::error!(%error, "failed to settle Goal usage after completion channel closure");
-                        terminate_failed_timeline_writer(&session).await;
+                    if !session.state.lock().await.foreground.is_idle() {
+                        tracing::error!(
+                            "completion channel closed while a foreground owner was still active"
+                        );
+                        let _ = latch_termination_and_cancel_controls(
+                            &session,
+                            TerminationState::Fatal,
+                        )
+                        .await;
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                         return;
                     }
-                    stop_permission_manager_and_drain_audit(&session).await;
-                    shutdown_workflows(&session).await;
-                    if !session.startup_hints.is_subagent {
-                        session.checkpoint_running_task_notifications().await;
+                    if let Err(error) = latch_termination_and_cancel_controls(
+                        &session,
+                        TerminationState::Graceful,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to accept shutdown after completion channel closure");
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                        return;
                     }
-                    final_session_persistence_flush(&session).await;
-                    cleanup_session_scratch(&session);
-                    return;
+                    if let Err(error) =
+                        begin_graceful_shutdown(&session, &mut replay_buffer, &mut cmd_rx).await
+                    {
+                        tracing::error!(%error, "failed to begin shutdown after completion channel closure");
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                        return;
+                    }
+                    pending_shutdown = Some(GracefulShutdown {
+                        reason: "completion_channel_closed",
+                    });
+                    continue;
                 };
                 // Flush any buffered turn deltas before `handle_completion`
                 // emits the durable `TurnCompleted`, so the terminal lands
@@ -359,11 +1004,7 @@ pub(super) async fn run_session(
                 // Goal stage remains perfectly healthy.
                 let completed_origin = {
                     let state = session.state.lock().await;
-                    state
-                        .foreground
-                        .regular()
-                        .filter(|task| task.prompt_id == prompt_id)
-                        .map(|task| task.origin.clone())
+                    state.foreground.identity(&prompt_id).map(|(origin, _)| origin)
                 };
                 if result
                     .as_ref()
@@ -375,7 +1016,7 @@ pub(super) async fn run_session(
                         "closing session after fatal Timeline turn-boundary failure"
                     );
                     session.handle_fatal_completion(prompt_id, result).await;
-                    terminate_failed_timeline_writer(&session).await;
+                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                     return;
                 }
                 let (_turn_succeeded, suppress_goal_continuation, goal_stop) =
@@ -387,15 +1028,18 @@ pub(super) async fn run_session(
                 if let Some(message) = goal_stop {
                     session.apply_goal_stop_after_turn(&prompt_id, message).await;
                 }
+                if pending_shutdown.is_some() {
+                    // The producer epilogue and its exact prompt responder are
+                    // now settled. Teardown owns the idle boundary, so queued
+                    // work is rejected instead of being promoted.
+                    reject_queued_inputs_for_shutdown(&session).await;
+                    continue;
+                }
                 // Catalog watcher snapshots admitted during the turn must win
                 // the newly released idle boundary before any queued prompt,
                 // compaction, notification, or Goal continuation samples.
                 session.apply_pending_step_controls_if_idle().await;
-                if !maybe_start_pending_manual_compaction(
-                    session.clone(),
-                    completion_tx.clone(),
-                )
-                .await
+                if !maybe_start_pending_manual_compaction(session.clone()).await
                 {
                     SessionActor::maybe_start_running_task(
                         session.clone(),
@@ -426,125 +1070,47 @@ pub(super) async fn run_session(
                 // classifier idle-waits.
                 {
                     let s = session.clone();
-                    tokio::task::spawn_local(async move {
-                        s.maybe_fire_laziness_check().await;
-                    });
+                    if let Some(activity) = session
+                        .session_activities
+                        .try_start("laziness_classifier")
+                    {
+                        tokio::task::spawn_local(async move {
+                            let _activity = activity;
+                            s.maybe_fire_laziness_check().await;
+                        });
+                    }
                 }
                 if session.chat_state_handle.is_closed() {
                     tracing::error!(
                         "closing session because the Timeline writer mailbox is unavailable"
                     );
-                    terminate_failed_timeline_writer(&session).await;
+                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                     return;
                 }
             }
-            maybe_cmd = cmd_rx.recv() => {
+            maybe_cmd = cmd_rx.recv(), if pending_shutdown.is_none() => {
                 let Some(cmd) = maybe_cmd else {
-                    session.goal_drive.cancel();
-                    if let Err(error) = session.settle_goal_usage_for_shutdown().await {
-                        tracing::error!(%error, "failed to settle Goal usage after command channel closure");
-                        terminate_failed_timeline_writer(&session).await;
+                    if let Err(error) = latch_termination_and_cancel_controls(
+                        &session,
+                        TerminationState::Graceful,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to accept shutdown after command channel closure");
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                         return;
                     }
-                    stop_permission_manager_and_drain_audit(&session).await;
-                    // ── session_end hook (channel-closed path) ────
-                    // Fires BEFORE memory auto-save per plan contract.
-                    let envelope = session.fire_hook(
-                        ::hooks::event::HookEventName::SessionEnd,
-                        None,
-                        ::hooks::event::HookPayload::SessionEnd {
-                            reason: "channel_closed".to_string(),
-                            turn_count: None,
-                            tool_call_count: None,
-                        },
-                    );
-                    if let Some(registry) = session.hooks.registry.borrow().clone() {
-                        let ctx = session.hook_run_ctx();
-                        let results = ::hooks::dispatcher::dispatch_non_blocking(
-                            &registry,
-                            ::hooks::event::HookEventName::SessionEnd,
-                            &envelope,
-                            &ctx,
-                        )
-                        .await;
-                        session.send_hook_execution("session_end", None, None, &results).await;
-                    }
-                    session.dispatch_session_end_stop("channel_closed").await;
-                    // Channel closed -- run memory session-end hook.
-                    let mut session_end_result = "disabled";
-                    let mut total_chunks_at_end = 0usize;
-                    if !session.startup_hints.is_subagent {
-                        if let Some(storage) = session.memory.storage() {
-                            let conversation = session.chat_state_handle.get_conversation().await;
-                            let result = crate::session::memory::hooks::on_session_end(
-                                &storage,
-                                &conversation,
-                                &session.session_info.id.0,
-                                session.memory.save_on_end,
-                            );
-                            session_end_result = match &result {
-                                crate::session::memory::hooks::SessionEndResult::Written(_) => {
-                                    "written"
-                                }
-                                crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
-                            };
-                            total_chunks_at_end = storage.total_chunk_count();
-                            let telem = session.memory.diagnostics_snapshot();
-                            tracing::info!(
-                                target: ::diagnostics::memory_log::TARGET,
-                                result = ?result,
-                                tool_searches = telem.tool_search_count,
-                                injection_searches = telem.injection_count,
-                                recovery_searches = telem.compaction_recovery_count,
-                                "MEMORY_SESSION_END: channel closed, session summary saved"
-                            );
-                            if let crate::session::memory::hooks::SessionEndResult::Written(
-                                ref path_str,
-                            ) = result
-                            {
-                                session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
-                                    path: path_str.clone(),
-                                }).await;
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            target: ::diagnostics::memory_log::TARGET,
-                            "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                        );
-                    }
-                    // Dream: attempt consolidation at session end
-                    session.maybe_run_dream().await;
-                    // Structured diagnostics after dream so counters are populated
-                    let telem = session.memory.diagnostics_snapshot();
-                    session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
-                    if let Some(notification) = replay_buffer.flush() {
-                        session.emit_buffered(notification).await;
-                    }
+                    if let Err(error) =
+                        begin_graceful_shutdown(&session, &mut replay_buffer, &mut cmd_rx).await
                     {
-                        let model_id = session.current_catalog_model_id();
-                        if let Some(signals) = session.signals_handle().snapshot().await {
-                            ::diagnostics::session_ctx::log_event(
-                                ::diagnostics::events::SessionEnded {
-                                    duration_secs: session.session_start.elapsed().as_secs(),
-                                    turn_count: signals.turn_count as u64,
-                                    tool_call_count: signals.tool_call_count as u64,
-                                    compaction_count: signals.compaction_count as u64,
-                                    model_id,
-                                },
-                            );
-                        }
+                        tracing::error!(%error, "failed to begin shutdown after command channel closure");
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                        return;
                     }
-                    shutdown_workflows(&session).await;
-                    if !session.startup_hints.is_subagent {
-                        session.checkpoint_running_task_notifications().await;
-                    }
-                    final_session_persistence_flush(&session).await;
-                    session.signals_handle.shutdown();
-                    cleanup_session_scratch(&session);
-                    return;
+                    pending_shutdown = Some(GracefulShutdown {
+                        reason: "channel_closed",
+                    });
+                    continue;
                 };
 
                 match cmd {
@@ -568,9 +1134,10 @@ pub(super) async fn run_session(
                         if matches!(&result, Ok(true)) {
                             let s = session.clone();
                             let completion_tx = completion_tx.clone();
-                            tokio::task::spawn_local(async move {
+                            let handle = tokio::task::spawn_local(async move {
                                 s.resume_plan_approval(completion_tx).await;
                             });
+                            session.restored_plan_approval.arm(handle);
                         }
                         let _ = respond_to.send(result.map(|_| ()));
                     }
@@ -589,7 +1156,7 @@ pub(super) async fn run_session(
                                 %error,
                                 "closing session after deferred bootstrap persistence failure"
                             );
-                            terminate_failed_timeline_writer(&session).await;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
                         // Clear suppression -- user is re-engaging
@@ -637,11 +1204,7 @@ pub(super) async fn run_session(
                         session
                             .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, respond_to, persist_ack)
                             .await;
-                        if !maybe_start_pending_manual_compaction(
-                            session.clone(),
-                            completion_tx.clone(),
-                        )
-                        .await
+                        if !maybe_start_pending_manual_compaction(session.clone()).await
                         {
                             SessionActor::maybe_start_running_task(
                                 session.clone(),
@@ -650,9 +1213,9 @@ pub(super) async fn run_session(
                             .await;
                         }
                     }
-                    SessionCommand::ExecuteSlashCommand { command, respond_to } => {
+                    SessionCommand::ExecuteSlashCommand { invocation, respond_to } => {
                         let result = session
-                            .execute_out_of_band_slash_command(command)
+                            .execute_out_of_band_slash_command(invocation)
                             .await;
                         if let Ok(Some(control)) = result.as_ref() {
                             // Preserve steering that reached the interjection
@@ -662,16 +1225,12 @@ pub(super) async fn run_session(
                                 .await
                             {
                                 let _ = respond_to.send(Err(format!("{error:?}")));
-                                terminate_failed_timeline_writer(&session).await;
+                                terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                                 return;
                             }
                         }
                         session.apply_pending_step_controls_if_idle().await;
-                        if !maybe_start_pending_manual_compaction(
-                            session.clone(),
-                            completion_tx.clone(),
-                        )
-                        .await
+                        if !maybe_start_pending_manual_compaction(session.clone()).await
                         {
                             SessionActor::maybe_start_running_task(
                                 session.clone(),
@@ -778,19 +1337,63 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(admission);
                         }
                     }
-                    SessionCommand::BehaviorChange { session_mode, responds_to } => {
-                        let outcome = session.request_behavior_change(session_mode).await;
-                        if outcome.is_err() {
-                            let _ = responds_to.send(outcome);
-                            terminate_failed_timeline_writer(&session).await;
-                            return;
+                    SessionCommand::BehaviorChange { session_mode, intent, responds_to } => {
+                        if session
+                            .admit_behavior_selection(session_mode, intent, responds_to)
+                            .await
+                        {
+                            let worker = session.clone();
+                            let completion_tx = completion_tx.clone();
+                            let handle = tokio::task::spawn_local(async move {
+                                let drained = std::panic::AssertUnwindSafe(
+                                    worker.clone().drain_behavior_selections(completion_tx),
+                                )
+                                .catch_unwind()
+                                .await;
+                                let failure = match drained {
+                                    Ok(Ok(())) => return Ok(()),
+                                    Ok(Err(())) => {
+                                        "Behavior control worker crossed a fatal persistence boundary"
+                                            .to_string()
+                                    }
+                                    Err(payload) => {
+                                        let panic = payload
+                                            .downcast_ref::<&str>()
+                                            .copied()
+                                            .or_else(|| {
+                                                payload
+                                                    .downcast_ref::<String>()
+                                                    .map(String::as_str)
+                                            })
+                                            .unwrap_or("non-string panic payload");
+                                        format!("Behavior control worker panicked: {panic}")
+                                    }
+                                };
+                                {
+                                    let mut state = worker.state.lock().await;
+                                    state.termination.request(TerminationState::Fatal);
+                                    state.behavior_control_worker_active = false;
+                                    state.applying_behavior_control = None;
+                                    if state.behavior_control_foreground_claimed
+                                        && matches!(
+                                            state.foreground,
+                                            ForegroundState::ApplyingControl
+                                        )
+                                    {
+                                        state.foreground = ForegroundState::Idle;
+                                    }
+                                    state.behavior_control_foreground_claimed = false;
+                                }
+                                worker.idle_arbiter.notify_waiters();
+                                let _ = worker.event_tx.send(
+                                    SessionEvent::ControlWorkerFailed {
+                                        message: failure.clone(),
+                                    },
+                                );
+                                Err(failure)
+                            });
+                            session.behavior_control_worker.arm(handle);
                         }
-                        super::idle_arbitration::arbitrate_idle_wake(
-                            session.clone(),
-                            completion_tx.clone(),
-                        )
-                        .await;
-                        let _ = responds_to.send(outcome);
                     }
                     SessionCommand::GoalControl { command } => {
                         session.handle_goal_command(command).await;
@@ -814,8 +1417,9 @@ pub(super) async fn run_session(
                         }
                         let fatal = result.is_err();
                         let _ = respond_to.send(result);
+                        drop(_control);
                         if fatal {
-                            terminate_failed_timeline_writer(&session).await;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
                     }
@@ -826,8 +1430,9 @@ pub(super) async fn run_session(
                             .await;
                         let fatal = result.is_err();
                         let _ = respond_to.send(result);
+                        drop(_control);
                         if fatal {
-                            terminate_failed_timeline_writer(&session).await;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
                     }
@@ -849,16 +1454,33 @@ pub(super) async fn run_session(
                         }
                         let fatal = result.is_err();
                         let _ = respond_to.send(result);
+                        drop(_control);
                         if fatal {
-                            terminate_failed_timeline_writer(&session).await;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
                     }
-                    SessionCommand::SetSessionModel { route, catalog, responds_to } => {
+                    SessionCommand::SetSessionModel { route, catalog, intent, responds_to } => {
                         session
                             .admit_session_model_selection(
                                 route,
                                 catalog,
+                                intent,
+                                responds_to,
+                            )
+                            .await;
+                    }
+                    SessionCommand::PatchSessionEffort {
+                        effort,
+                        authority,
+                        intent,
+                        responds_to,
+                    } => {
+                        session
+                            .admit_session_effort_patch(
+                                effort,
+                                authority,
+                                intent,
                                 responds_to,
                             )
                             .await;
@@ -871,8 +1493,12 @@ pub(super) async fn run_session(
                             .admit_model_catalog_reload(catalog, responds_to)
                             .await;
                     }
-                    SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
-                        session.admit_agent_selection(definition, responds_to).await;
+                    SessionCommand::RebuildAgentForDefinition { definition, intent, responds_to } => {
+                        session.admit_agent_selection(definition, intent, responds_to).await;
+                    }
+                    SessionCommand::PublishControlState { respond_to } => {
+                        session.publish_control_state_snapshot().await;
+                        let _ = respond_to.send(());
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {
                         let model = session.current_catalog_model_id();
@@ -1039,7 +1665,7 @@ pub(super) async fn run_session(
 
                         if let Err(error) = cancel_result {
                             tracing::error!(?error, "closing session after fatal cancel boundary failure");
-                            terminate_failed_timeline_writer(&session).await;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
 
@@ -1062,11 +1688,7 @@ pub(super) async fn run_session(
                         // Manual compaction admitted during the cancelled
                         // turn owns the next foreground slot; otherwise
                         // promote the queued prompt normally.
-                        if !maybe_start_pending_manual_compaction(
-                            session.clone(),
-                            completion_tx.clone(),
-                        )
-                        .await
+                        if !maybe_start_pending_manual_compaction(session.clone()).await
                         {
                             SessionActor::maybe_start_running_task(
                                 session.clone(),
@@ -1091,11 +1713,7 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::CompactSession { user_context, respond_to } => {
                         session
-                            .admit_manual_compaction(
-                                user_context,
-                                completion_tx.clone(),
-                                Some(respond_to),
-                            )
+                            .admit_manual_compaction(user_context, Some(respond_to))
                             .await;
                     }
                     SessionCommand::ReloadPlugins { registry } => {
@@ -1129,7 +1747,12 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::RefreshSkillBaseline => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("refresh_skill_baseline")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let cwd = s.tool_context.cwd.as_path().to_string_lossy();
                             let skills_config = crate::util::config::load_config().await.skills;
                             let pr = s.plugin_registry.read().clone();
@@ -1149,7 +1772,12 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::FlushMemory { respond_to } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("memory_flush_command")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             if s.memory.is_enabled() {
                                 let did_flush = s.run_memory_flush("user_requested", None).await;
                                 let _ = respond_to.send(Ok(did_flush));
@@ -1204,7 +1832,8 @@ pub(super) async fn run_session(
                                 session_id = %session.session_info.id,
                                 "rewind transaction is incomplete; stopping the actor for recovery"
                             );
-                            break;
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
                         }
                     }
                     SessionCommand::RepairHistory { dry_run, respond_to } => {
@@ -1400,7 +2029,12 @@ pub(super) async fn run_session(
                         }
 
                         let session_for_mcp = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("update_mcp_servers")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             session_for_mcp.ensure_mcp_tools_initialized().await;
                             let _ = respond_to.send(Ok(()));
                         });
@@ -1486,7 +2120,12 @@ pub(super) async fn run_session(
                         let session_for_mcp = session.clone();
                         let sname = server_name.clone();
                         let session_cwd = session.session_info.cwd.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("toggle_mcp_server")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             session_for_mcp.ensure_mcp_tools_initialized().await;
                             if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
                                 &sname,
@@ -1585,7 +2224,12 @@ pub(super) async fn run_session(
                         let notifications = session.notifications.gateway.clone();
                         let session_id = session.session_info.id.0.clone();
                         let server_for_persist = server_name.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("toggle_mcp_tool")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             if let Err(e) = crate::util::config::save_mcp_disabled_tools(
                                 &server_for_persist,
                                 &disabled_vec,
@@ -1638,7 +2282,12 @@ pub(super) async fn run_session(
                     SessionCommand::GetMcpStatus { respond_to } => {
                         let mcp_state = session.mcp_state.clone();
                         let tool_bridge = session.agent.borrow().tool_bridge().clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("get_mcp_status")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let snapshot = crate::extensions::mcp::build_mcp_status(
                                 &mcp_state,
                                 &tool_bridge,
@@ -1648,7 +2297,12 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::CallMcpTool { server_name, server_url, tool_name, arguments, respond_to } => {
                         let mcp_state = session.mcp_state.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("call_mcp_tool")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = crate::extensions::mcp::call_mcp_tool(
                                 &mcp_state,
                                 &server_name,
@@ -1661,7 +2315,12 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::ReadMcpResource { server_name, uri, respond_to } => {
                         let mcp_state = session.mcp_state.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("read_mcp_resource")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = crate::extensions::mcp::read_mcp_resource(
                                 &mcp_state,
                                 &server_name,
@@ -1700,7 +2359,12 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::ReloadSkills => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("reload_skills")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             s.reload_skills_from_disk().await;
                         });
                     }
@@ -1731,34 +2395,59 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::SideQuestion { question, respond_to } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("side_question")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = s.handle_side_question(&question).await;
                             let _ = respond_to.send(result);
                         });
                     }
                     SessionCommand::Recap { auto } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("recap")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             s.handle_recap(auto).await;
                         });
                     }
                     SessionCommand::AISuggest { prefix, cwd, model_override, respond_to } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("ai_suggest")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = s.handle_ai_suggest(&prefix, &cwd, model_override.as_deref()).await;
                             let _ = respond_to.send(result);
                         });
                     }
                     SessionCommand::SuggestPrompt { model_override, respond_to } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("suggest_prompt")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = s.handle_suggest_prompt(model_override.as_deref()).await;
                             let _ = respond_to.send(result);
                         });
                     }
                     SessionCommand::RewriteMemoryNote { raw_text, context_summary, respond_to } => {
                         let s = session.clone();
+                        let activity = session
+                            .session_activities
+                            .try_start("rewrite_memory_note")
+                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
+                            let _activity = activity;
                             let result = s.handle_rewrite_memory_note(&raw_text, &context_summary).await;
                             let _ = respond_to.send(result);
                         });
@@ -1814,6 +2503,15 @@ pub(super) async fn run_session(
                         }
                         let _ = respond_to.send(admission);
                     }
+                    SessionCommand::WorkflowTerminalFailure { run_id, error } => {
+                        tracing::error!(
+                            %run_id,
+                            %error,
+                            "Workflow terminal persistence crossed the session fatal sink"
+                        );
+                        terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                        return;
+                    }
                     SessionCommand::TakeTurnMessages { respond_to } => {
                         let result = session.chat_state_handle.take_turn_messages().await;
                         let _ = respond_to.send(result);
@@ -1828,11 +2526,10 @@ pub(super) async fn run_session(
                         let is_shutdown = matches!(&command, SessionCommand::Shutdown);
                         let mut unload_respond_to = None;
                         if let SessionCommand::UnloadIfIdle { respond_to } = command {
-                            // This decision and mailbox close are performed in
-                            // one actor turn. Commands already ahead of this one
-                            // have been applied; commands behind it are ordered
-                            // after the unload request and are rejected once the
-                            // receiver is closed.
+                            // This decision and the termination latch are
+                            // performed in one actor turn. The mailbox remains
+                            // physically open only for descendant Goal usage
+                            // settlement, then closes after child drain.
                             let goal_status = session.goal_tracker.lock().status();
                             let has_parked_plan_approval =
                                 crate::session::pending_interaction::has_parked_plan_approval(
@@ -1858,163 +2555,47 @@ pub(super) async fn run_session(
                                 let _ = respond_to.send(false);
                                 continue;
                             }
-                            cmd_rx.close();
                             unload_respond_to = Some(respond_to);
                         }
-                        if is_shutdown {
-                            session.goal_drive.cancel();
-                            // Preserve the same stream-before-terminal order as
-                            // explicit Cancel. Shutdown is an actor mailbox
-                            // command too, so only this loop can flush its
-                            // replay buffer before `cancel_running_task`
-                            // commits the durable turn terminal.
-                            if let Some(notification) = replay_buffer.flush() {
-                                session.emit_buffered(notification).await;
-                            }
-                        }
-                        if is_shutdown
-                            && let Err(error) = session
-                                .cancel_running_task(
-                                    true,
-                                    true,
-                                    false,
-                                    Some("shutdown".to_owned()),
-                                )
-                                .await
+                        if let Err(error) = latch_termination_and_cancel_controls(
+                            &session,
+                            TerminationState::Graceful,
+                        )
+                        .await
                         {
-                            tracing::error!(
-                                ?error,
-                                "closing session after shutdown turn terminal failed"
-                            );
-                            terminate_failed_timeline_writer(&session).await;
-                            return;
-                        }
-                        if let Err(error) = session.settle_goal_usage_for_shutdown().await {
-                            tracing::error!(%error, "failed to settle Goal usage at shutdown");
-                            if let Some(respond_to) = unload_respond_to {
+                            tracing::error!(%error, "failed to accept graceful session shutdown");
+                            if let Some(respond_to) = unload_respond_to.take() {
                                 let _ = respond_to.send(false);
                             }
-                            terminate_failed_timeline_writer(&session).await;
+                                terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
-                        if let Some(respond_to) = unload_respond_to {
+                        // `UnloadIfIdle` acknowledges the atomic admission
+                        // decision, not completion of hooks/memory/persistence
+                        // teardown. The leader can now remove the closed
+                        // SessionHandle while retaining the SessionThread that
+                        // supervises the bounded drain.
+                        if let Some(respond_to) = unload_respond_to.take() {
                             let _ = respond_to.send(true);
                         }
-                        stop_permission_manager_and_drain_audit(&session).await;
-                        shutdown_workflows(&session).await;
-                        // Flush the actor-owned replay buffer so any
-                        // streamed chunks still pending at shutdown
-                        // (e.g. reasoning text from a sampler stream
-                        // racing with a CLI exit / harness teardown)
-                        // are committed to updates.jsonl before the
-                        // local session directory is finalized. Mirrors the same flush in the
-                        // Cancel, CopyFile, and FlushComplete arms.
-                        if let Some(notification) = replay_buffer.flush() {
-                            session.emit_buffered(notification).await;
+                        if let Err(error) =
+                            begin_graceful_shutdown(&session, &mut replay_buffer, &mut cmd_rx).await
+                        {
+                            tracing::error!(%error, "failed to begin graceful session shutdown");
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
                         }
-                        // Drop any queued synthetic auto-wake prompts and pending
-                        // notifications before running hooks. Without this, a
-                        // synthetic prompt that slipped through the per-tool-result
-                        // sweep could still be accepted into Timeline by a later
-                        // path, producing a trailing
-                        // `<system-reminder>` with no assistant reply. Placed
-                        // BEFORE hook dispatch so the cleanup runs even if hooks
-                        // abort.
-                        session.drop_pending_synthetic_items().await;
-
-                        // ── session_end hook (shutdown path) ────────
-                        // Fires BEFORE memory auto-save per plan contract.
-                        let envelope = session.fire_hook(
-                            ::hooks::event::HookEventName::SessionEnd,
-                            None,
-                            ::hooks::event::HookPayload::SessionEnd {
-                                reason: "shutdown".to_string(),
-                                turn_count: None,
-                                tool_call_count: None,
-                            },
-                        );
-                        if let Some(registry) = session.hooks.registry.borrow().clone() {
-                            let ctx = session.hook_run_ctx();
-                            let results = ::hooks::dispatcher::dispatch_non_blocking(
-                                &registry,
-                                ::hooks::event::HookEventName::SessionEnd,
-                                &envelope,
-                                &ctx,
-                            )
-                            .await;
-                            session.send_hook_execution("session_end", None, None, &results).await;
-                        }
-                        session.dispatch_session_end_stop("shutdown").await;
-                        // Memory: save session summary before shutdown
-                        let mut session_end_result = "disabled";
-                        let mut total_chunks_at_end = 0usize;
-                        if !session.startup_hints.is_subagent {
-                            if let Some(storage) = session.memory.storage() {
-                                let conversation = session.chat_state_handle.get_conversation().await;
-                                let result = crate::session::memory::hooks::on_session_end(
-                                    &storage,
-                                    &conversation,
-                                    &session.session_info.id.0,
-                                    session.memory.save_on_end,
-                                );
-                                session_end_result = match &result {
-                                    crate::session::memory::hooks::SessionEndResult::Written(_) => {
-                                        "written"
-                                    }
-                                    crate::session::memory::hooks::SessionEndResult::Skipped => {
-                                        "skipped"
-                                    }
-                                    crate::session::memory::hooks::SessionEndResult::Failed(_) => {
-                                        "failed"
-                                    }
-                                };
-                                total_chunks_at_end = storage.total_chunk_count();
-                                let telem = session.memory.diagnostics_snapshot();
-                                tracing::info!(
-                                    target: ::diagnostics::memory_log::TARGET,
-                                    result = ?result,
-                                    tool_searches = telem.tool_search_count,
-                                    injection_searches = telem.injection_count,
-                                    recovery_searches = telem.compaction_recovery_count,
-                                    "MEMORY_SESSION_END: session summary saved"
-                                );
-                                // Reindex + embed the written file so it's searchable next session
-                                if let crate::session::memory::hooks::SessionEndResult::Written(
-                                    ref path_str,
-                                ) = result
-                                {
-                                    session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                    session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
-                                        path: path_str.clone(),
-                                    }).await;
-                                }
-                            }
-                        } else {
-                            tracing::debug!(
-                                target: ::diagnostics::memory_log::TARGET,
-                                "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                            );
-                        }
-                        // Dream: attempt consolidation at session end
-                        session.maybe_run_dream().await;
-                        // Structured diagnostics after dream so counters are populated
-                        let telem = session.memory.diagnostics_snapshot();
-                        session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
-                        if !session.startup_hints.is_subagent {
-                            session.checkpoint_running_task_notifications().await;
-                        }
-                        final_session_persistence_flush(&session).await;
-                        session.signals_handle.shutdown();
-                        // Clean up scratch directory (pre-edit file copies).
-                        cleanup_session_scratch(&session);
-                        return;
+                        pending_shutdown = Some(GracefulShutdown {
+                            reason: if is_shutdown { "shutdown" } else { "idle_unload" },
+                        });
+                        continue;
                     }
                 }
                 if session.chat_state_handle.is_closed() {
                     tracing::error!(
                         "closing session because the Timeline writer mailbox is unavailable"
                     );
-                    terminate_failed_timeline_writer(&session).await;
+                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                     return;
                 }
             }
@@ -2023,11 +2604,12 @@ pub(super) async fn run_session(
                     tracing::error!(
                         "closing session because the Timeline writer mailbox is unavailable"
                     );
-                    terminate_failed_timeline_writer(&session).await;
+                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                     return;
                 }
                 arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
             }
         }
-    }
+    };
+    finish_graceful_shutdown(&session, &mut replay_buffer, &mut cmd_rx, shutdown).await;
 }

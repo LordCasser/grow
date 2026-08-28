@@ -491,7 +491,7 @@ pub(in crate::app::root::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView
             if let Some(agent) = app.agents.get_mut(&id) {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(msg.to_string()));
+                    .push_block(RenderBlock::notice(msg.to_string()));
             }
         }
         ActiveView::AgentDashboard => {

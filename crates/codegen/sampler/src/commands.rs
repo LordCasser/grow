@@ -17,6 +17,9 @@ use crate::types::RequestId;
 /// Large payloads (`ConversationRequest`, `SamplerConfig`) are boxed so
 /// every command stays cheap to copy through the mpsc channel.
 pub(crate) enum SamplerCommand {
+    /// Close admission, cancel all active requests, and stop the actor.
+    Shutdown,
+
     /// Submit a new sampling request. Fire-and-forget — results come via
     /// events. When `completion_tx` is set the per-request task also
     /// signals that channel for `submit_and_collect` callers.

@@ -720,7 +720,6 @@ impl SessionActor {
         )
         .await;
         debug_assert!(self.behavior.lock().approval_pending());
-        let approval_guard = AwaitingApprovalGuard::new(self);
         let resp = {
             let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
                 self.pending_interactions.clone(),
@@ -734,7 +733,6 @@ impl SessionActor {
         let raw = match resp {
             Ok(raw) => raw,
             Err(err) => {
-                approval_guard.preserve_for_resume();
                 return Err(err);
             }
         };
@@ -745,7 +743,6 @@ impl SessionActor {
                     feedback: None,
                 }
             });
-        approval_guard.resolve();
         Ok(parsed)
     }
     /// Leave plan mode (approved/abandoned) and tell the client to show the

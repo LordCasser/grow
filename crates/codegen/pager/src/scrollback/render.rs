@@ -638,6 +638,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                         max_y,
                         entry_row_layout.content.x,
                         content_line_offset,
+                        cwd,
                         media_paths,
                         &mut result.link_overlay,
                     );
@@ -931,13 +932,15 @@ pub(crate) fn map_hyperlinks_to_overlay(
     max_screen_y: u16,
     content_x: u16,
     content_line_offset: usize,
+    cwd: Option<&std::path::Path>,
     media_paths: &[std::path::PathBuf],
     overlay: &mut LinkOverlay,
 ) {
-    // Build mapping: pre-wrap line index → vec of (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap).
+    // Build mapping: pre-wrap line index → vec of
+    // (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap, screen_prefix).
     // A joiner of None means a new pre-wrap line starts.
-    let mut pre_wrap_segments: Vec<Vec<(usize, usize, usize)>> = Vec::new();
-    let mut current_segments: Vec<(usize, usize, usize)> = Vec::new();
+    let mut pre_wrap_segments: Vec<Vec<(usize, usize, usize, usize)>> = Vec::new();
+    let mut current_segments: Vec<(usize, usize, usize, usize)> = Vec::new();
     let mut cumulative_col: usize = 0;
 
     for (wrapped_idx, line) in block_output.lines.iter().enumerate() {
@@ -952,9 +955,23 @@ pub(crate) fn map_hyperlinks_to_overlay(
         if let Some(ref joiner) = line.joiner {
             cumulative_col += unicode_width::UnicodeWidthStr::width(joiner.as_str());
         }
-        let line_width = line.content.width();
-        current_segments.push((wrapped_idx, cumulative_col, cumulative_col + line_width));
-        cumulative_col += line_width;
+        // Blockquote continuation rows re-inject `│ ` as visual chrome. It is
+        // excluded from selection and did not exist at this position in the
+        // pre-wrap source, so it must not advance source columns. It still
+        // shifts the clickable screen range to the right.
+        let screen_prefix = if line.joiner.is_some() {
+            selectable_cols_usize(&line.content, &line.selectable).map_or(0, |cols| cols.start)
+        } else {
+            0
+        };
+        let source_width = line.content.width().saturating_sub(screen_prefix);
+        current_segments.push((
+            wrapped_idx,
+            cumulative_col,
+            cumulative_col + source_width,
+            screen_prefix,
+        ));
+        cumulative_col += source_width;
     }
     if !current_segments.is_empty() {
         pre_wrap_segments.push(current_segments);
@@ -968,9 +985,14 @@ pub(crate) fn map_hyperlinks_to_overlay(
     for h in hyperlinks {
         let target = if crate::app::link_opener::is_safe_to_open(&h.url, scheme_filter) {
             crate::render::osc8::LinkTarget::Url(Arc::from(h.url.as_str()))
-        } else if let Some(file_target) =
-            crate::render::osc8::local_link_to_file_target(&h.url, media_paths)
-        {
+        } else if let Some(file_target) = match h.provenance {
+            markdown::HyperlinkProvenance::Explicit => {
+                crate::render::osc8::explicit_local_link_to_file_target(&h.url, cwd, media_paths)
+            }
+            markdown::HyperlinkProvenance::Inferred => {
+                crate::render::osc8::local_link_to_file_target(&h.url, cwd, media_paths)
+            }
+        } {
             file_target
         } else {
             continue;
@@ -980,7 +1002,7 @@ pub(crate) fn map_hyperlinks_to_overlay(
             continue;
         }
         let segments = &pre_wrap_segments[adjusted_line];
-        for &(wrapped_idx, seg_col_start, seg_col_end) in segments {
+        for &(wrapped_idx, seg_col_start, seg_col_end, screen_prefix) in segments {
             // Check if hyperlink's column range overlaps this wrapped segment.
             let overlap_start = h.column_range.start.max(seg_col_start);
             let overlap_end = h.column_range.end.min(seg_col_end);
@@ -998,8 +1020,8 @@ pub(crate) fn map_hyperlinks_to_overlay(
                 continue;
             }
 
-            let local_col_start = (overlap_start - seg_col_start) as u16;
-            let local_col_end = (overlap_end - seg_col_start) as u16;
+            let local_col_start = (screen_prefix + overlap_start - seg_col_start) as u16;
+            let local_col_end = (screen_prefix + overlap_end - seg_col_start) as u16;
 
             overlay.push(OverlayLink {
                 screen_row,
@@ -1768,9 +1790,9 @@ mod tests {
 
     /// A subagent lifecycle row folds into the verb group: the collapsed
     /// header renders the aggregated label, and expanding the group reveals
-    /// the subagent's own row with its live ` — activity` suffix intact.
+    /// the immutable subagent-start row.
     #[test]
-    fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
+    fn rendered_verb_group_folds_subagent_start_row() {
         use crate::scrollback::ScrollbackState;
         use crate::scrollback::blocks::SubagentBlock;
 
@@ -1778,10 +1800,9 @@ mod tests {
         crate::appearance::cache::set_show_thinking_blocks(false);
         let mut state = ScrollbackState::new();
         state.push_block(RenderBlock::read("a.rs", None));
-        let mut block = SubagentBlock::started(
+        let block = SubagentBlock::started(
             "task", "child-A", "explore", None, /*is_background=*/ false,
         );
-        block.activity_label = Some("Thinking".to_string());
         state.push_block(RenderBlock::Subagent(block));
         let viewport = Rect::new(0, 0, 80, 10);
         state.prepare_layout(viewport.width, viewport.height);
@@ -1817,7 +1838,7 @@ mod tests {
             "header must aggregate tool and subagent members: {header_row:?}"
         );
 
-        // Expanded: the subagent member surfaces with its live suffix.
+        // Expanded: the immutable subagent-start member surfaces.
         state.set_selected(Some(0));
         assert!(state.toggle_group_expansion());
         state.prepare_layout(viewport.width, viewport.height);
@@ -1849,8 +1870,8 @@ mod tests {
         assert!(
             member_rows
                 .iter()
-                .any(|r| r.contains("Subagent") && r.contains("\u{2014} Thinking")),
-            "expanded member row must keep the activity suffix: {member_rows:?}"
+                .any(|r| r.contains("Subagent") && r.contains("task")),
+            "expanded member row must render the start fact: {member_rows:?}"
         );
     }
 
@@ -2363,6 +2384,7 @@ mod tests {
             column_range: cols,
             url: url.to_string(),
             id,
+            provenance: markdown::HyperlinkProvenance::Explicit,
         }
     }
 
@@ -2371,7 +2393,7 @@ mod tests {
         let output = make_block_output(&[("hello world", None)]);
         let links = [make_hyperlink(0, 0..5, "https://a.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 10, 20, 4, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 10, 20, 4, 0, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2446,6 +2468,66 @@ mod tests {
     }
 
     #[test]
+    fn overlay_compact_file_link_opens_complete_absolute_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir
+            .path()
+            .join("%2FUsers%2Fexample%2Fa-long-session-directory-for-compact-link-testing")
+            .join("workflows/wf_123/scratch/report.md");
+        std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+        std::fs::write(&report, b"report").unwrap();
+        let destination = url::Url::from_file_path(&report).unwrap();
+        let markdown = format!("Full report: [{}](<{}>)\n", report.display(), destination);
+
+        let mut entries = vec![make_markdown_entry(&markdown)];
+        if let RenderBlock::AgentMessage(block) = &mut entries[0].block {
+            block.finish();
+        }
+        let viewport = Rect::new(0, 0, 100, 10);
+        let result = render_with_scratch(&entries, viewport, 0, None);
+        let group = url_overlay_group(&result, destination.as_str());
+
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].col_end - group[0].col_start, 9);
+        assert_eq!(
+            group[0].target,
+            crate::render::osc8::LinkTarget::File(Arc::from(report.as_path()))
+        );
+    }
+
+    #[test]
+    fn overlay_compact_relative_project_link_uses_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let relative =
+            "docs/architecture/a-very-long-directory-for-relative-link-testing/report.md";
+        let report = dir.path().join(relative);
+        std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+        std::fs::write(&report, b"report").unwrap();
+        let markdown = format!("Full report: [{relative}]({relative})\n");
+
+        let mut entries = vec![make_markdown_entry(&markdown)];
+        if let RenderBlock::AgentMessage(block) = &mut entries[0].block {
+            block.finish();
+        }
+        let (result, _) = render_with_scratch_and_buffer_with_cwd(
+            &entries,
+            Rect::new(0, 0, 100, 10),
+            0,
+            None,
+            Some(dir.path()),
+        );
+        let destination = url::Url::from_file_path(&report).unwrap();
+        let group = url_overlay_group(&result, destination.as_str());
+
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].col_end - group[0].col_start, 9);
+        assert_eq!(
+            group[0].target,
+            crate::render::osc8::LinkTarget::File(Arc::from(report.as_path()))
+        );
+    }
+
+    #[test]
     fn overlay_word_wrap_splits_link() {
         // Pre-wrap line "hello world" (11 chars) wrapped into two segments:
         // wrapped line 0: "hello" (5 chars, joiner=None  → new pre-wrap line)
@@ -2455,7 +2537,7 @@ mod tests {
         // Link spans the full pre-wrap line: cols 0..11
         let links = [make_hyperlink(0, 0..11, "https://b.com", 2)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 2);
         // First segment: cols 0..5 on screen row 0
@@ -2477,6 +2559,34 @@ mod tests {
     }
 
     #[test]
+    fn overlay_soft_wrap_excludes_repeated_quote_prefix_from_source_columns() {
+        use crate::scrollback::types::Selectable;
+        use ratatui::text::Span;
+
+        let mut first =
+            BlockLine::styled(RatatuiLine::from(vec![Span::raw("│ "), Span::raw("ab")]));
+        first.selectable = Selectable::Spans(1..2);
+        let mut second =
+            BlockLine::styled(RatatuiLine::from(vec![Span::raw("│ "), Span::raw("cd")]));
+        second.selectable = Selectable::Spans(1..2);
+        second.joiner = Some(String::new());
+        let output = BlockOutput {
+            lines: vec![first, second],
+        };
+        // Pre-wrap text is `│ abcd`: the quote prefix exists once in source,
+        // while the second visual row repeats it only as decoration.
+        let links = [make_hyperlink(0, 2..6, "https://b.com", 2)];
+        let mut overlay = LinkOverlay::new();
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
+
+        assert_eq!(overlay.links().len(), 2);
+        assert_eq!(overlay.links()[0].col_start, 2);
+        assert_eq!(overlay.links()[0].col_end, 4);
+        assert_eq!(overlay.links()[1].col_start, 2);
+        assert_eq!(overlay.links()[1].col_end, 4);
+    }
+
+    #[test]
     fn overlay_content_skip_hides_scrolled_lines() {
         let output = make_block_output(&[("line0", None), ("line1", None), ("line2", None)]);
         // Link on line 0 (scrolled off), link on line 2 (visible)
@@ -2486,7 +2596,7 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // content_skip=2 means first 2 wrapped lines are above viewport
-        map_hyperlinks_to_overlay(&links, &output, 2, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 2, 0, 10, 0, 0, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2507,7 +2617,7 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // max_screen_y=2 → only rows 0..2 are visible (screen_y 0 and 1)
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2530,7 +2640,7 @@ mod tests {
         let links = [make_hyperlink(0, 0..4, "https://body.com", 1)];
         let mut overlay = LinkOverlay::new();
         // content_line_offset=2 shifts line_index by 2
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 2, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 2, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(overlay.links()[0].screen_row, 2);
@@ -2544,7 +2654,7 @@ mod tests {
         // line_index=0, but offset=5 pushes adjusted_line=5 past pre_wrap_segments
         let links = [make_hyperlink(0, 0..4, "https://x.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 5, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 5, None, &[], &mut overlay);
 
         assert!(overlay.is_empty());
     }
@@ -2555,7 +2665,7 @@ mod tests {
         let output = make_block_output(&[("abcdef", None)]);
         let links = [make_hyperlink(0, 3..8, "https://partial.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 5, 10, 2, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 5, 10, 2, 0, None, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2569,7 +2679,7 @@ mod tests {
         let output = make_block_output(&[("text", None)]);
         let links: &[markdown::HyperlinkTarget] = &[];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(links, &output, 0, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
 
         assert!(overlay.is_empty());
     }
@@ -2614,21 +2724,26 @@ mod tests {
     }
 
     #[test]
-    fn markdown_wrapped_session_media_path_fully_linkified() {
-        // Regression: tool prose whose long session path soft-wraps
-        // across rows. The whole path must be clickable (one overlay region
-        // per row, all pointing at the full file:// URL) — not just the
-        // leading path fragment on the first row.
-        let path = "/Users/alice/.grow/sessions/%2FUsers%2Falice%2Fcode%2Fgrow/\
-                    019e0000-0000-7000-8000-000000000001/images/1.jpg";
+    fn markdown_session_media_path_uses_basename_with_full_link_target() {
+        // Long local references are presentation-compacted, but the semantic
+        // target must retain the complete absolute path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(
+            "sessions/a-very-long-encoded-workspace/\
+             019e0000-0000-7000-8000-000000000001/images/1.jpg",
+        );
+        std::fs::create_dir_all(path.parent().expect("image parent")).expect("create image dir");
+        std::fs::write(&path, b"image").expect("create image fixture");
+        let path = path.to_string_lossy();
         let entries = vec![make_markdown_entry(&format!(
             "Image generated and saved to {path}\n"
         ))];
-        // Narrow viewport so the path wraps across several rows.
+        // A narrow viewport must still fit the compact filename without
+        // leaking or truncating the semantic target.
         let viewport = Rect::new(0, 0, 40, 20);
         let result = render_with_scratch(&entries, viewport, 0, None);
 
-        let expected_url = url::Url::from_file_path(path).unwrap();
+        let expected_url = url::Url::from_file_path(path.as_ref()).unwrap();
         let path_links: Vec<_> = result
             .link_overlay
             .links()
@@ -2639,9 +2754,10 @@ mod tests {
                     .is_some_and(|url| url.as_ref() == expected_url.as_str())
             })
             .collect();
-        assert!(
-            path_links.len() >= 2,
-            "wrapped path should yield one overlay region per visual row, got: {:?}",
+        assert_eq!(
+            path_links.len(),
+            1,
+            "compact path should yield one basename overlay, got: {:?}",
             result
                 .link_overlay
                 .links()
@@ -2656,15 +2772,37 @@ mod tests {
                 ))
                 .collect::<Vec<_>>()
         );
-        // Regions land on consecutive distinct rows.
-        let mut rows: Vec<u16> = path_links.iter().map(|l| l.screen_row).collect();
-        rows.dedup();
         assert_eq!(
-            rows.len(),
-            path_links.len(),
-            "each visual row gets one region"
+            path_links[0].col_end - path_links[0].col_start,
+            "1.jpg".len() as u16,
+            "clickable cells must cover the displayed basename"
         );
-        assert!(rows.windows(2).all(|w| w[1] == w[0] + 1));
+    }
+
+    #[test]
+    fn inferred_missing_path_is_not_promoted_to_an_explicit_file_link() {
+        let path = "/tmp/grow-missing-session/a-very-long-workflow-output/report.md";
+        let entries = vec![make_markdown_entry(&format!("Report: {path}\n"))];
+        let result = render_with_scratch(&entries, Rect::new(0, 0, 80, 10), 0, None);
+
+        assert!(
+            result.link_overlay.is_empty(),
+            "an inferred path must retain the conservative existence check"
+        );
+    }
+
+    #[test]
+    fn explicit_missing_anchored_path_preserves_its_declared_target() {
+        let path = "/tmp/grow-future-session/a-very-long-workflow-output/report.md";
+        let entries = vec![make_markdown_entry(&format!("[report.md]({path})\n"))];
+        let result = render_with_scratch(&entries, Rect::new(0, 0, 80, 10), 0, None);
+
+        let links = result.link_overlay.links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target,
+            crate::render::osc8::LinkTarget::File(Arc::from(std::path::Path::new(path)))
+        );
     }
 
     #[test]
@@ -4015,48 +4153,27 @@ mod tests {
         }
     }
 
-    /// Regression test for the bug where a markdown link `[text](url)`
-    /// rendered in pretty mode loses the OSC 8 wrapper (and the terminal's
-    /// auto-styling) on every wrapped row of the URL portion EXCEPT the
-    /// first.  Every wrapped row covering URL bytes must receive its own
-    /// `OverlayLink` so the entire URL is clickable and styled.
+    /// A long markdown destination stays semantic while pretty mode only
+    /// paints the explicit label. If that label wraps, every fragment remains
+    /// clickable and all fragments retain the complete destination.
     #[test]
-    fn overlay_pretty_link_url_wraps_across_rows() {
-        // Long URL with hyphens that force HyphenSplitter to wrap mid-URL.
-        // Synthetic long hyphenated URL (length/shape match wrap regression needs).
+    fn overlay_pretty_long_link_compacts_destination_and_wraps_label() {
         let url = "https://example.com/d/seg-00-wrap-seg-01-wrap-seg-02-wrap-seg-03-wrap-seg-04-wrap-seg-05-wrap-seg-06-wrap-seg-07-wrap-seg-08-wrap-seg-09-wrap-seg-10";
-        let markdown = format!("[Example Dashboard -- Long Title For Wrap]({url})\n");
+        let label = "Example Dashboard -- Long Title For Wrap";
+        let markdown = format!("[{label}]({url})\n");
         let entries = vec![make_markdown_entry(&markdown)];
 
-        // Picked so the rendered link `text (url)` wraps multiple times.
         let viewport = Rect::new(0, 0, 50, 20);
         let result = render_with_scratch(&entries, viewport, 0, None);
 
-        // The pre-wrap line is ~185 cells wide and per-block content area
-        // is ~35 cells (viewport - timestamp reservation - layout chrome).
-        // The link text takes row 0 (33 cells), then the URL portion
-        // wraps onto exactly 5 continuation rows.  This is a plain
-        // paragraph (no `subsequent_indent`), so the combined fragment
-        // widths must equal the URL's display width — a strong
-        // invariant that would fail under any row drop or off-by-N
-        // column-tracking regression.
         let group = url_overlay_group(&result, url);
-        assert_eq!(
-            group.len(),
-            5,
-            "expected the URL to wrap onto exactly 5 rows; got {} fragments: {:?}",
-            group.len(),
-            group
-                .iter()
-                .map(|o| (o.screen_row, o.col_start, o.col_end))
-                .collect::<Vec<_>>(),
-        );
+        assert!(group.len() >= 2, "the long label should wrap: {group:?}");
         assert_consecutive_rows(&group);
         let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
         assert_eq!(
             combined_width as usize,
-            url.len(),
-            "combined fragment widths must equal URL display width; got fragments: {:?}",
+            label.len() - 1,
+            "only the label should be painted (the wrap consumes one space); got fragments: {:?}",
             group
                 .iter()
                 .map(|o| (o.screen_row, o.col_start, o.col_end))
@@ -4064,13 +4181,9 @@ mod tests {
         );
     }
 
-    /// Short-ish URL inside prose, wrapping onto multiple rows (no
-    /// blockquote/list indent involvement).  For paragraph wrapping
-    /// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined
-    /// width exactly equals the URL's display width — the strongest
-    /// invariant we can pin for the non-indented case.
+    /// A compact label for a long destination occupies only its own cells.
     #[test]
-    fn overlay_pretty_link_url_wraps_multi_row_paragraph() {
+    fn overlay_pretty_long_link_uses_short_label_in_paragraph() {
         let url = "https://example.com/some/long/path/that/will/wrap/once-and-twice";
         let markdown = format!("See [docs]({url}) for more.\n");
         let entries = vec![make_markdown_entry(&markdown)];
@@ -4079,28 +4192,9 @@ mod tests {
         let result = render_with_scratch(&entries, viewport, 0, None);
 
         let group = url_overlay_group(&result, url);
-        assert!(
-            group.len() >= 2,
-            "URL should wrap onto multiple rows; got {:?}",
-            group
-                .iter()
-                .map(|o| (o.screen_row, o.col_start, o.col_end))
-                .collect::<Vec<_>>(),
-        );
-        assert_consecutive_rows(&group);
-        // The combined width of all fragments must equal the URL's
-        // display width (URLs are pure ASCII → display width == byte len).
-        // Any silently-dropped middle row would make this sum unequal.
+        assert_eq!(group.len(), 1);
         let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
-        assert_eq!(
-            combined_width as usize,
-            url.len(),
-            "combined fragment widths must equal URL display width; got fragments: {:?}",
-            group
-                .iter()
-                .map(|o| (o.screen_row, o.col_start, o.col_end))
-                .collect::<Vec<_>>(),
-        );
+        assert_eq!(combined_width as usize, "docs".len());
     }
 
     /// CJK link text: column tracking must be display-width aware.  If
@@ -4114,59 +4208,27 @@ mod tests {
     fn overlay_pretty_link_url_with_cjk_text() {
         use unicode_width::UnicodeWidthStr;
         let url = "https://example.com/very-long-path-with-many-hyphens/foo/bar/baz/qux";
-        let markdown = format!("[日本語のリンク テキスト]({url})\n");
+        let label = "日本語のリンク テキスト";
+        let markdown = format!("[{label}]({url})\n");
         let entries = vec![make_markdown_entry(&markdown)];
 
         let viewport = Rect::new(0, 0, 40, 10);
         let result = render_with_scratch(&entries, viewport, 0, None);
 
         let group = url_overlay_group(&result, url);
-        assert!(
-            group.len() >= 2,
-            "CJK link text with wrapping URL should produce at least 2 overlay rows",
-        );
+        assert!(!group.is_empty());
         assert_consecutive_rows(&group);
-
-        // Combined fragment widths must equal the URL's display width.
-        // For pure-ASCII URLs that's `url.len()`.  A byte-vs-cell
-        // regression in CJK column tracking would propagate as a wrong
-        // pre-wrap column for the URL HyperlinkTarget, which in turn
-        // would clip or shift one of the fragments — making the sum
-        // unequal.
         let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
         assert_eq!(
             combined_width as usize,
-            UnicodeWidthStr::width(url),
-            "combined fragment widths must equal URL display width",
+            UnicodeWidthStr::width(label),
+            "combined fragment widths must equal the compact CJK label width",
         );
     }
 
-    /// Long URL inside a blockquote.  The OverlayLink for the URL must
-    /// cover continuation rows so OSC 8 is present on every wrapped row.
-    ///
-    /// KNOWN-BUG: the current
-    /// `map_hyperlinks_to_overlay` accumulates `cumulative_col` using
-    /// `line.content.width()`, which INCLUDES the `│ ` indent injected
-    /// by `word_wrap_line_with_joiners` on continuation rows.  Two
-    /// consequences for blockquote/list URL wraps:
-    ///   (a) Cosmetic: the OverlayLink on continuation rows starts at
-    ///       `content_x` (covering the `│ ` indent), so the indent
-    ///       characters are OSC 8 wrapped and inherit the terminal's
-    ///       auto-styling (underline/colour).
-    ///   (b) Functional: because `cumulative_col` over-counts by
-    ///       `indent_width` cells per continuation row, the last
-    ///       `indent_width` cells of the URL on each continuation row
-    ///       are NOT covered by an OverlayLink — those trailing chars
-    ///       are not clickable.  With N continuation rows the
-    ///       unclickable tail accumulates to `N * indent_width` cells.
-    /// The original PR's invariant (OSC 8 present on every wrapped row
-    /// of the URL) IS satisfied.  This test pins that invariant; once
-    /// the bug is fixed (needs `BlockLine` to carry `subsequent_indent`
-    /// width), tighten the assertions to `col_start == content_x +
-    /// indent_width` on continuation rows and pin
-    /// `sum(fragment_widths) == url.display_width()`.
+    /// Blockquote chrome must not change the compact label's target or width.
     #[test]
-    fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
+    fn overlay_pretty_long_link_in_blockquote_stays_compact() {
         let url = "https://example.com/blockquote/path/with/many/hyphens-and-segments-here";
         let markdown = format!("> See [docs]({url}) for more.\n");
         let entries = vec![make_markdown_entry(&markdown)];
@@ -4176,15 +4238,8 @@ mod tests {
         let content_x = result.selection_model.content_area.x;
 
         let group = url_overlay_group(&result, url);
-        assert!(
-            group.len() >= 2,
-            "blockquote URL should wrap; got fragments: {:?}",
-            group
-                .iter()
-                .map(|o| (o.screen_row, o.col_start, o.col_end))
-                .collect::<Vec<_>>(),
-        );
-        assert_consecutive_rows(&group);
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].col_end - group[0].col_start, 4);
 
         // All fragments must be inside the viewport content area.
         for frag in &group {
@@ -4199,14 +4254,9 @@ mod tests {
         }
     }
 
-    /// Long URL inside a list item.  Same OSC-coverage invariant as the
-    /// blockquote test above; see that test for the rationale and the
-    /// description of the related indent-inclusion
-    /// bug (both the cosmetic indent-over-styling AND the functional
-    /// "last `indent_width` cells of URL not clickable on continuation
-    /// rows" symptoms apply here too).
+    /// List chrome must not change the compact label's target or width.
     #[test]
-    fn overlay_pretty_link_url_in_list_wraps_correctly() {
+    fn overlay_pretty_long_link_in_list_stays_compact() {
         let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
         let markdown = format!("- See [docs]({url}) for more.\n");
         let entries = vec![make_markdown_entry(&markdown)];
@@ -4216,15 +4266,8 @@ mod tests {
         let content_x = result.selection_model.content_area.x;
 
         let group = url_overlay_group(&result, url);
-        assert!(
-            group.len() >= 2,
-            "list URL should wrap; got fragments: {:?}",
-            group
-                .iter()
-                .map(|o| (o.screen_row, o.col_start, o.col_end))
-                .collect::<Vec<_>>(),
-        );
-        assert_consecutive_rows(&group);
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].col_end - group[0].col_start, 4);
 
         for frag in &group {
             assert!(
@@ -4238,10 +4281,9 @@ mod tests {
         }
     }
 
-    /// Width changes trigger `set_max_table_width` resets inside
-    /// `MarkdownContent::ensure_wrapped`.  URL hyperlinks must survive
-    /// every step of a narrow→narrower→wider→narrow sequence (production
-    /// terminal pane drags fire many such transitions).
+    /// Width changes trigger markdown re-renders. A compact label must keep its
+    /// full target through a narrow→wider→narrow sequence without expanding
+    /// the destination back into visible prose.
     #[test]
     fn overlay_url_hyperlinks_survive_width_change() {
         let url = "https://example.com/long/url/path/with/many/segments-and-hyphens";
@@ -4250,59 +4292,11 @@ mod tests {
         if let RenderBlock::AgentMessage(b) = &mut entries[0].block {
             b.finish();
         }
-        // Exercise multiple width transitions: a wide viewport where
-        // the URL fits on one row, a narrow viewport where it must
-        // wrap onto multiple rows, and back-and-forth between them.
-        // The URL must remain present at every step.
-        //
-        // The "wide" threshold (120) is chosen so the per-block content
-        // area exceeds the URL's display width + leading "link (" prefix
-        // even after the 10-cell timestamp reservation and ~4 cells of
-        // layout chrome.  The "narrow" widths (30, 50) force wrapping.
         for width in [120u16, 50, 30, 50, 120, 30] {
             let result = render_with_scratch(&entries, Rect::new(0, 0, width, 10), 0, None);
             let group = url_overlay_group(&result, url);
-            if width >= 120 {
-                // Wide enough: URL fits on a single row.
-                assert_eq!(
-                    group.len(),
-                    1,
-                    "URL at width={width} should fit on one row; got: {:?}",
-                    group
-                        .iter()
-                        .map(|o| (o.screen_row, o.col_start, o.col_end))
-                        .collect::<Vec<_>>(),
-                );
-                assert_eq!(
-                    (group[0].col_end - group[0].col_start) as usize,
-                    url.len(),
-                    "single-row URL fragment width must equal URL display width",
-                );
-            } else {
-                // Narrow: URL must wrap onto consecutive rows, with
-                // combined fragment widths summing to the URL width.
-                assert!(
-                    group.len() >= 2,
-                    "URL at width={width} should wrap onto multiple rows; got: {:?}",
-                    group
-                        .iter()
-                        .map(|o| (o.screen_row, o.col_start, o.col_end))
-                        .collect::<Vec<_>>(),
-                );
-                assert_consecutive_rows(&group);
-                let combined_width: u32 =
-                    group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
-                assert_eq!(
-                    combined_width as usize,
-                    url.len(),
-                    "URL at width={width}: combined fragment widths must equal \
-                     URL display width; got fragments: {:?}",
-                    group
-                        .iter()
-                        .map(|o| (o.screen_row, o.col_start, o.col_end))
-                        .collect::<Vec<_>>(),
-                );
-            }
+            assert_eq!(group.len(), 1, "width={width}: {group:?}");
+            assert_eq!(group[0].col_end - group[0].col_start, 4);
         }
     }
 
@@ -4330,11 +4324,9 @@ mod tests {
         );
     }
 
-    /// Two markdown links on the same pre-wrap line, both with URLs long
-    /// enough to wrap their `(url)` suffixes; each URL must produce its
-    /// own id-group and the id-groups must be distinct (no merging).
+    /// Two compact links on one line keep distinct ids and complete targets.
     #[test]
-    fn overlay_pretty_two_wrapping_links_distinct_ids() {
+    fn overlay_pretty_two_compact_links_have_distinct_ids() {
         let url_a = "https://aaa.example/with-many-segments/and-more-hyphens/foo/bar/baz";
         let url_b = "https://bbb.example/another-set-of-segments/and-more-hyphens/qux/quux";
         let markdown = format!("See [link-a]({url_a}) and [link-b]({url_b}) end.\n");
@@ -4352,19 +4344,11 @@ mod tests {
             id_a, id_b,
             "two distinct URLs must produce distinct OSC 8 ids",
         );
-        assert!(group_a.len() >= 2, "URL A should wrap onto multiple rows");
-        assert!(group_b.len() >= 2, "URL B should wrap onto multiple rows");
-        // Wrapped fragments must land on strictly consecutive rows
-        // (no silently-dropped middle row).
-        assert_consecutive_rows(&group_a);
-        assert_consecutive_rows(&group_b);
+        assert_eq!(group_a.len(), 1);
+        assert_eq!(group_b.len(), 1);
+        assert_eq!(group_a[0].col_end - group_a[0].col_start, 6);
+        assert_eq!(group_b[0].col_end - group_b[0].col_start, 6);
 
-        // The full set of OverlayLink ids referencing either URL must
-        // have at least 4 distinct entries: parser link-text id for "link-a",
-        // url_scan id for `(url_a)`, parser link-text id for "link-b", and
-        // url_scan id for `(url_b)`.  A regression where any two of these
-        // collide (e.g. parser hyperlink IDs not advanced past url_scan IDs
-        // across paragraphs) would silently merge OSC 8 hyperlinks.
         let ids: std::collections::HashSet<u32> = result
             .link_overlay
             .links()
@@ -4377,9 +4361,8 @@ mod tests {
             .filter_map(|l| l.id)
             .collect();
         assert!(
-            ids.len() >= 4,
-            "expected at least 4 distinct OSC 8 ids across the two links' \
-             parser + url_scan groups; got {} distinct ids: {:?}",
+            ids.len() == 2,
+            "expected one distinct OSC 8 id per compact link; got {} ids: {:?}",
             ids.len(),
             ids,
         );

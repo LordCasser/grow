@@ -21,13 +21,23 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp;
 use agent_client_protocol::Client as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::session::persistence::list_summaries;
 use crate::session::storage::jsonl::JsonlStorageAdapter;
 use crate::session::{ExtMethodResult, SessionCommand};
+
+/// Wire request for the Shell-owned slash-command plane.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteCommandRequest {
+    pub session_id: String,
+    pub command: String,
+    pub description: String,
+    pub invocation_id: String,
+}
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -194,9 +204,10 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     // Tear down any live actor first (cancel turn/subagents/bg tasks,
     // process-scope kill, flush). Then wipe history so shutdown cannot
     // rewrite the session directory after delete.
-    if agent.sessions.borrow().contains_key(&session_id) {
-        agent.teardown_live_session_before_delete(&session_id).await;
-    }
+    let _delete_lifecycle = agent
+        .teardown_live_session_before_delete(&session_id)
+        .await
+        .map_err(|error| acp::Error::internal_error().data(error))?;
 
     // Local delete: disk + FTS eviction.
     // Mirrored by the `grow sessions delete <id>` CLI path.
@@ -415,7 +426,11 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // is deliberately outside the global lock: a busy foreground may defer its
     // own adoption, but must not freeze unrelated sessions.
     let reload_targets = agent.live_control_session_handles();
-    let mut failed_sessions = Vec::<(acp::SessionId, String)>::new();
+    let mut failed_sessions = Vec::<(
+        acp::SessionId,
+        tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+        String,
+    )>::new();
     let mut convergence = Vec::new();
     for (session_id, handle) in reload_targets {
         let cmd_tx = handle.cmd_tx.clone();
@@ -431,6 +446,7 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         {
             failed_sessions.push((
                 session_id.clone(),
+                cmd_tx,
                 format!(
                     "session {} rejected the catalog reload command",
                     session_id.0
@@ -438,11 +454,11 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
             ));
             continue;
         }
-        convergence.push((session_id, response));
+        convergence.push((session_id, cmd_tx, response));
     }
     drop(catalog_transaction);
 
-    for (session_id, response) in convergence {
+    for (session_id, actor, response) in convergence {
         match response.await.unwrap_or_else(|_| {
             Err(acp::Error::internal_error().data(format!(
                 "session {} dropped the catalog reload acknowledgement",
@@ -450,7 +466,7 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
             )))
         }) {
             Ok(()) => {}
-            Err(error) => failed_sessions.push((session_id, format!("{error:?}"))),
+            Err(error) => failed_sessions.push((session_id, actor, format!("{error:?}"))),
         }
     }
     // A session that cannot durably adopt the published catalog is no longer
@@ -458,27 +474,42 @@ async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // memory. A newer publication supersedes this result and owns convergence,
     // so an older handler must never evict against that newer generation.
     let generation_is_current = agent.models_manager.catalog_revision() == published_revision;
-    if generation_is_current {
-        for (session_id, error) in &failed_sessions {
+    let evicted = if generation_is_current {
+        let mut evicted = 0usize;
+        for (session_id, actor, error) in &failed_sessions {
             tracing::error!(
                 session_id = %session_id.0,
                 catalog_revision = published_revision,
                 %error,
                 "evicting session that could not converge on the reloaded model catalog"
             );
-            agent.evict_catalog_diverged_session(session_id);
+            match agent
+                .evict_catalog_diverged_session(session_id, actor, published_revision)
+                .await
+            {
+                Ok(true) => evicted += 1,
+                Ok(false) => {}
+                Err(shutdown_error) => {
+                    tracing::error!(
+                        session_id = %session_id.0,
+                        %shutdown_error,
+                        "catalog-diverged session writer is still shutting down"
+                    );
+                }
+            }
         }
+        evicted
     } else if !failed_sessions.is_empty() {
         tracing::info!(
             catalog_revision = published_revision,
             failures = failed_sessions.len(),
             "ignoring convergence failures from a superseded model catalog"
         );
-    }
+        0
+    } else {
+        0
+    };
     let count = agent.models_manager.models().len();
-    let evicted = generation_is_current
-        .then_some(failed_sessions.len())
-        .unwrap_or(0);
     tracing::info!(count, evicted, "model list reloaded from config.toml");
     ExtMethodResult::success(serde_json::json!({ "models": count, "evictedSessions": evicted }))
         .to_ext_response()
@@ -520,13 +551,6 @@ async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
 // commands/list
 
 async fn handle_command_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ExecuteCommandRequest {
-        session_id: String,
-        command: String,
-    }
-
     let request: ExecuteCommandRequest = parse_params(args)?;
     let session_id = acp::SessionId::new(Arc::from(request.session_id.as_str()));
     let Some(handle) = agent.session_handle_waiting_for_load(&session_id).await else {
@@ -534,7 +558,11 @@ async fn handle_command_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> Ext
             .data(format!("unknown session id: {}", request.session_id)));
     };
     handle
-        .execute_slash_command(request.command)
+        .execute_slash_command(crate::session::HostCommandInvocation {
+            command: request.command,
+            description: request.description,
+            invocation_id: request.invocation_id,
+        })
         .await
         .map_err(|message| acp::Error::invalid_request().data(message))?;
     to_raw_response(&serde_json::json!({ "status": "executed" }))

@@ -17,8 +17,7 @@ details such as notification focus tracking and sandbox profile conflicts.
 A report can contain issues or recommendations and still exit successfully.
 `grow doctor --json` reports the same color capability when piped.
 
-`/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases for
-`/doctor`.
+Use `/doctor` for terminal diagnostics and fixes.
 
 When Doctor finds an explicit unhealthy tmux setting, `/doctor fix` lists the
 available automatic fixes. Apply one named fix at a time, for example

@@ -10,10 +10,6 @@ impl SlashCommand for UsageCommand {
         "usage"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["cost"]
-    }
-
     fn description(&self) -> &str {
         "View usage"
     }

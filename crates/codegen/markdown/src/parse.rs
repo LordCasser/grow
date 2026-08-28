@@ -9,18 +9,272 @@
 use std::ops::Range;
 
 use anstyle::Style;
+use linkify::{LinkFinder, LinkKind};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::text::{Line, Span};
 
 use crate::buffers::{
-    CodeBlockMeta, Highlight, LinkTarget, MarkdownBuffers, Replace, StyledCell, TableHyperlink,
-    TableReplace, TableState, Transform, floor_char_boundary, unicode_display_width,
+    CodeBlockMeta, Highlight, HyperlinkProvenance, LinkTarget, MarkdownBuffers, Replace,
+    StyledCell, TableHyperlink, TableReplace, TableState, Transform, floor_char_boundary,
+    unicode_display_width,
 };
 use crate::checkpoint::CheckpointKind;
 use crate::latex;
 use crate::open_fence_highlighter::OpenFenceHighlighter;
 use crate::style::{MarkdownStyle, TableBorders};
 use crate::syntax::{Syntect, syntax_highlight_raw};
+
+/// Destinations wider than this are useful as link targets, not as terminal
+/// prose. Pretty mode keeps the complete destination in `LinkTarget` while
+/// presenting the last parseable component (or an explicit short label).
+const COMPACT_REFERENCE_MIN_WIDTH: usize = 48;
+
+fn is_windows_drive_reference(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+}
+
+fn is_anchored_local_reference(value: &str) -> bool {
+    value.starts_with(['/', '\\'])
+        || value.starts_with("~/")
+        || value.starts_with(r"~\")
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || is_windows_drive_reference(value)
+}
+
+fn is_local_reference(value: &str) -> bool {
+    let value = value.trim();
+    if value.to_ascii_lowercase().starts_with("file://") {
+        return true;
+    }
+    if is_anchored_local_reference(value) {
+        return true;
+    }
+    !value.contains("://") && value.contains(['/', '\\'])
+}
+
+fn reference_display_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.contains(['\n', '\r', '*', '`', '[', ']'])
+        || unicode_display_width(value) < COMPACT_REFERENCE_MIN_WIDTH
+    {
+        return None;
+    }
+
+    let lower = value.to_ascii_lowercase();
+    let name = if lower.starts_with("file://") {
+        url::Url::parse(value).ok().and_then(|url| {
+            url.to_file_path().ok().and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+        })
+    } else if is_local_reference(value) {
+        // Local paths must win over generic URL parsing. `url` accepts a
+        // Windows drive letter as a scheme (`C:\\...` => scheme `c`), which
+        // otherwise makes a valid native path impossible to compact.
+        value
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .find(|component| !component.is_empty())
+            .map(str::to_owned)
+    } else if let Ok(url) = url::Url::parse(value) {
+        match url.scheme() {
+            "http" | "https" => url
+                .path_segments()
+                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+                .map(str::to_owned)
+                .or_else(|| url.host_str().map(str::to_owned)),
+            _ => None,
+        }
+    } else {
+        None
+    }?;
+
+    (!name.is_empty() && name != value).then_some(name)
+}
+
+fn inline_reference_display_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let unambiguous_url = url::Url::parse(value)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https" | "file"));
+    let unambiguous_path = is_anchored_local_reference(value);
+    if unambiguous_url || unambiguous_path {
+        reference_display_name(value)
+    } else {
+        None
+    }
+}
+
+/// Compact an explicit Markdown label only when the label itself is an
+/// unambiguous reference. A slash in human prose is not enough: authors often
+/// use it as punctuation in descriptive labels, and an explicit label is the
+/// presentation contract unless it is clearly a path or self-labelled URL.
+fn structural_reference_display_name(label: &str, destination: &str) -> Option<String> {
+    let decoded = html_escape::decode_html_entities(label);
+    let label = decoded.trim();
+    let destination = destination.trim();
+    let self_label = label == destination;
+    let explicit_url = url::Url::parse(label)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https" | "file"));
+    let anchored_path = is_anchored_local_reference(label);
+    let strong_relative_path = !label.chars().any(char::is_whitespace)
+        && !label.contains("://")
+        && label.contains(['/', '\\']);
+
+    (self_label || explicit_url || anchored_path || strong_relative_path)
+        .then(|| reference_display_name(label))
+        .flatten()
+}
+
+/// Establish the single ordering/ownership invariant consumed by both text
+/// rendering and source-to-hyperlink projection. Parser events are not
+/// guaranteed to arrive in source order (a prose scan can discover a later
+/// URL before an earlier HTML entity), so insertion order is not authoritative.
+///
+/// For overlap, the widest transform at the earliest source position owns the
+/// bytes. This lets a whole compact reference replace its internal entity
+/// transforms exactly once. Partial overlaps are parser defects; fail loudly
+/// in debug builds and deterministically keep the earlier owner in release.
+fn normalize_transforms(transforms: &mut Vec<Transform>) {
+    transforms.sort_by(|left, right| {
+        left.range
+            .start
+            .cmp(&right.range.start)
+            .then_with(|| right.range.end.cmp(&left.range.end))
+    });
+
+    let mut normalized: Vec<Transform> = Vec::with_capacity(transforms.len());
+    for transform in transforms.drain(..) {
+        let Some(owner) = normalized.last() else {
+            normalized.push(transform);
+            continue;
+        };
+        if transform.range.start >= owner.range.end {
+            normalized.push(transform);
+            continue;
+        }
+
+        let contained = transform.range.end <= owner.range.end;
+        debug_assert!(
+            contained,
+            "partially overlapping markdown transforms: owner={:?}, rejected={:?}",
+            owner.range, transform.range
+        );
+        debug_assert!(
+            owner.force == transform.force || (!owner.force && !transform.force),
+            "overlapping force and pretty markdown transforms are not composable: owner={:?}, rejected={:?}",
+            owner.range,
+            transform.range
+        );
+    }
+    *transforms = normalized;
+}
+
+fn trim_reference_token(token: &str) -> (usize, &str) {
+    let trimmed_start = token.trim_start_matches(['(', '[', '{', '<', '"', '\'']);
+    let start = token.len() - trimmed_start.len();
+    let value = trimmed_start
+        .trim_end_matches([')', ']', '}', '>', ',', '.', ';', ':', '!', '?', '"', '\'']);
+    (start, value)
+}
+
+/// Find long, unambiguous references embedded directly in prose. Explicit
+/// markdown links have their own structural path; this covers bare web URLs
+/// and anchored local paths without teaching the pager to mutate text after
+/// wrapping (which would invalidate selection and hyperlink coordinates).
+fn prose_reference_candidates(text: &str, base: usize) -> Vec<(Range<usize>, String, String)> {
+    let mut candidates = Vec::new();
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url]);
+
+    for link in finder.links(text) {
+        let raw = link.as_str();
+        let target = html_escape::decode_html_entities(raw).into_owned();
+        if let Some(display) = reference_display_name(&target) {
+            candidates.push(((base + link.start())..(base + link.end()), target, display));
+        }
+    }
+
+    let mut cursor = 0usize;
+    for token in text.split_whitespace() {
+        let token_start = text[cursor..]
+            .find(token)
+            .map(|offset| cursor + offset)
+            .expect("split token belongs to source text");
+        cursor = token_start + token.len();
+
+        // A quoted path containing spaces is handled as one unit below. Do not
+        // compact only its first/last whitespace-delimited fragment.
+        if (token.starts_with('"') && !token.ends_with('"'))
+            || (token.starts_with('\'') && !token.ends_with('\''))
+        {
+            continue;
+        }
+        let (trimmed_start, value) = trim_reference_token(token);
+        if value.contains("://") || !is_anchored_local_reference(value) {
+            continue;
+        }
+        let Some(display) = reference_display_name(value) else {
+            continue;
+        };
+        let start = base + token_start + trimmed_start;
+        let range = start..(start + value.len());
+        if candidates
+            .iter()
+            .any(|(existing, _, _)| existing.start < range.end && range.start < existing.end)
+        {
+            continue;
+        }
+        candidates.push((range, value.to_string(), display));
+    }
+
+    // Quoting gives paths containing spaces an unambiguous boundary.
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if !matches!(quote, b'\'' | b'"') {
+            i += 1;
+            continue;
+        }
+        let Some(close_rel) = bytes[i + 1..].iter().position(|byte| *byte == quote) else {
+            break;
+        };
+        let close = i + 1 + close_rel;
+        let value = &text[i + 1..close];
+        if is_anchored_local_reference(value)
+            && let Some(display) = reference_display_name(value)
+        {
+            let range = (base + i + 1)..(base + close);
+            if !candidates
+                .iter()
+                .any(|(existing, _, _)| existing.start < range.end && range.start < existing.end)
+            {
+                candidates.push((range, value.to_string(), display));
+            }
+        }
+        i = close + 1;
+    }
+
+    candidates.sort_by_key(|(range, _, _)| range.start);
+    candidates
+}
+
+fn should_hide_link_destination(dest: &str) -> bool {
+    let dest = dest.trim();
+    let compactable_web_url = url::Url::parse(dest.trim())
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+    (is_local_reference(dest) || compactable_web_url)
+        && unicode_display_width(dest) >= COMPACT_REFERENCE_MIN_WIDTH
+}
 
 /// Trait for converting anstyle to ratatui style.
 trait StyleInto<T> {
@@ -491,6 +745,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             self.on_event(event, range);
         }
 
+        normalize_transforms(&mut self.buffers.transforms);
+
         ParsedMarkdown::new(
             self.text,
             self.ms,
@@ -580,7 +836,32 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             Event::Text(text) => {
                 // Capture text into table cell if we're inside a table
                 if let Some(ref mut state) = self.table_state {
-                    state.push_text(&text);
+                    if let Some((destination, _, _)) = state.cell_link.as_ref() {
+                        let display_text = structural_reference_display_name(&text, destination);
+                        state.push_text(display_text.as_deref().unwrap_or(&text));
+                    } else {
+                        // Table cells bypass paragraph transforms because the
+                        // table renderer replaces the whole source range. Feed
+                        // bare long references through the table's existing
+                        // CellSpan/TableHyperlink path so the display can stay
+                        // compact without losing the complete destination.
+                        let candidates = prose_reference_candidates(&text, 0);
+                        let mut cursor = 0usize;
+                        for (source_range, target, display_name) in candidates {
+                            if cursor < source_range.start {
+                                state.push_text(&text[cursor..source_range.start]);
+                            }
+                            state.cell_link =
+                                Some((target, self.link_id_counter, HyperlinkProvenance::Inferred));
+                            self.link_id_counter += 1;
+                            state.push_text(&display_name);
+                            state.cell_link = None;
+                            cursor = source_range.end;
+                        }
+                        if cursor < text.len() {
+                            state.push_text(&text[cursor..]);
+                        }
+                    }
                 }
 
                 // Record the enclosing fenced block's raw byte range and its
@@ -653,6 +934,13 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         self.push_highlight(None, &range);
                     }
                     if self.table_state.is_none() {
+                        let inside_structural_link = self
+                            .tag_stack
+                            .iter()
+                            .any(|tag| matches!(tag, Tag::Link { .. } | Tag::Image { .. }));
+                        if !inside_structural_link {
+                            self.scan_long_prose_references(&range);
+                        }
                         self.scan_inline_html_entities(&range);
                     }
                 }
@@ -662,7 +950,10 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
-                    state.push_text(&code);
+                    let display_text = state.cell_link.as_ref().and_then(|(destination, _, _)| {
+                        structural_reference_display_name(&code, destination)
+                    });
+                    state.push_text(display_text.as_deref().unwrap_or(&code));
                     state.cell_code = prev_code;
                 }
                 self.style_inline_code_span(&code, &range);
@@ -1096,7 +1387,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 if let Some(ref mut state) = self.table_state {
                     let id = self.link_id_counter;
                     self.link_id_counter += 1;
-                    state.cell_link = Some((dest_url.to_string(), id));
+                    state.cell_link =
+                        Some((dest_url.to_string(), id, HyperlinkProvenance::Explicit));
                     self.tag_stack.push(tag);
                     return;
                 }
@@ -1168,25 +1460,82 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         to: "".to_string(),
                         force: false,
                     });
-                    self.buffers.transforms.push(Transform {
-                        range: bracket_abs..bracket_abs + 2,
-                        to: " (".to_string(),
-                        force: false,
-                    });
+                    let has_visible_label = self.text[text_start..text_end]
+                        .chars()
+                        .any(|ch| !ch.is_whitespace());
+                    let hide_destination =
+                        has_visible_label && should_hide_link_destination(dest_url);
+                    if let Some(display_name) = structural_reference_display_name(
+                        &self.text[text_start..text_end],
+                        dest_url,
+                    ) {
+                        self.buffers.transforms.push(Transform {
+                            range: text_start..text_end,
+                            to: display_name,
+                            force: false,
+                        });
+                    }
+                    if hide_destination {
+                        self.buffers.transforms.push(Transform {
+                            range: bracket_abs..range.end,
+                            to: "".to_string(),
+                            force: false,
+                        });
+                    } else {
+                        self.buffers.transforms.push(Transform {
+                            range: bracket_abs..bracket_abs + 2,
+                            to: " (".to_string(),
+                            force: false,
+                        });
+                    }
                     if text_end > text_start {
                         self.buffers.link_targets.push(LinkTarget {
                             source_range: text_start..text_end,
                             url: dest_url.to_string(),
                             id: self.link_id_counter,
+                            provenance: HyperlinkProvenance::Explicit,
                         });
                         self.link_id_counter += 1;
                     }
                     None
+                } else if let Some(url_rel) = url_rel_opt
+                    && tag_str.starts_with('<')
+                    && tag_str.ends_with('>')
+                    && let Some(display_name) = reference_display_name(dest_url)
+                {
+                    // CommonMark autolinks have no `](` delimiter. Compact the
+                    // visible URL itself while preserving its exact semantic
+                    // target; raw mode still shows the complete `<...>` form.
+                    let url_range = (range.start + url_rel.start)..(range.start + url_rel.end);
+                    self.buffers.transforms.push(Transform {
+                        range: range.start..url_range.start,
+                        to: String::new(),
+                        force: false,
+                    });
+                    self.buffers.transforms.push(Transform {
+                        range: url_range.clone(),
+                        to: display_name,
+                        force: false,
+                    });
+                    self.buffers.transforms.push(Transform {
+                        range: url_range.end..range.end,
+                        to: String::new(),
+                        force: false,
+                    });
+                    self.buffers.link_targets.push(LinkTarget {
+                        source_range: url_range,
+                        url: dest_url.to_string(),
+                        id: self.link_id_counter,
+                        provenance: HyperlinkProvenance::Explicit,
+                    });
+                    self.link_id_counter += 1;
+                    Some(self.ms.link_text)
                 } else {
                     self.buffers.link_targets.push(LinkTarget {
                         source_range: range.clone(),
                         url: dest_url.to_string(),
                         id: self.link_id_counter,
+                        provenance: HyperlinkProvenance::Explicit,
                     });
                     self.link_id_counter += 1;
                     Some(self.ms.link_outer)
@@ -1400,6 +1749,22 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             }
             // Inner code
             self.push_highlight(Some(self.ms.inline_code_inner), &absolute_inner);
+            if self.table_state.is_none()
+                && let Some(display_name) = inline_reference_display_name(code)
+            {
+                self.buffers.transforms.push(Transform {
+                    range: absolute_inner.clone(),
+                    to: display_name,
+                    force: false,
+                });
+                self.buffers.link_targets.push(LinkTarget {
+                    source_range: absolute_inner.clone(),
+                    url: code.to_string(),
+                    id: self.link_id_counter,
+                    provenance: HyperlinkProvenance::Inferred,
+                });
+                self.link_id_counter += 1;
+            }
             // Right delimiter
             if range.end > absolute_inner.end {
                 self.push_highlight(
@@ -1409,6 +1774,25 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             }
         } else {
             self.push_highlight(Some(self.ms.inline_code_inner), range);
+        }
+    }
+
+    fn scan_long_prose_references(&mut self, range: &Range<usize>) {
+        let candidates = prose_reference_candidates(&self.text[range.clone()], range.start);
+        for (source_range, target, display_name) in candidates {
+            self.push_highlight(Some(self.ms.link_text), &source_range);
+            self.buffers.transforms.push(Transform {
+                range: source_range.clone(),
+                to: display_name,
+                force: false,
+            });
+            self.buffers.link_targets.push(LinkTarget {
+                source_range,
+                url: target,
+                id: self.link_id_counter,
+                provenance: HyperlinkProvenance::Inferred,
+            });
+            self.link_id_counter += 1;
         }
     }
 
@@ -1949,7 +2333,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                             if cell_span.code {
                                 style = self.ms.inline_code_inner.style_into();
                             }
-                            if let Some((url, id)) = &cell_span.link {
+                            if let Some((url, id, provenance)) = &cell_span.link {
                                 // Apply link styling additively (preserves
                                 // bold/italic if combined).  link_text style
                                 // typically adds underline + accent color so
@@ -1965,6 +2349,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                                     column_range: display_col..(display_col + slice_width),
                                     url: url.clone(),
                                     id: *id,
+                                    provenance: *provenance,
                                 });
                             }
                             let slice_width = unicode_display_width(slice);

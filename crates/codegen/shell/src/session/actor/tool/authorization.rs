@@ -2,55 +2,6 @@
 
 use super::*;
 
-/// Keeps the persisted approval transport flag tied to the exact submitted
-/// Plan snapshot while the [`SessionActor::request_plan_approval`] await is
-/// live. A resolved decision clears it only through the matching phase CAS;
-/// a dropped request rejects the same snapshot so a newer submission cannot
-/// be stranded or changed by an old waiter.
-///
-/// It is deliberately preserved on the client-disconnect
-/// (quit) path: there the approval is genuinely still pending, so the bit must
-/// stay `true` on disk for the next resume to re-park it.
-/// `BehaviorState` writes are immediate (no debounce), so writing `false` here
-/// would race the quit and lose the gate.
-pub(super) struct AwaitingApprovalGuard<'a> {
-    actor: &'a SessionActor,
-    expected: crate::session::behavior::BehaviorSnapshot,
-    armed: bool,
-}
-impl AwaitingApprovalGuard<'_> {
-    pub(super) fn new(actor: &SessionActor) -> AwaitingApprovalGuard<'_> {
-        let expected = actor.behavior.lock().snapshot();
-        AwaitingApprovalGuard {
-            actor,
-            expected,
-            armed: true,
-        }
-    }
-
-    /// A decision arrived. The caller still owns the phase transition and the
-    /// pending bit remains set until that transition's CAS succeeds.
-    pub(super) fn resolve(mut self) {
-        self.armed = false;
-    }
-
-    /// Keep the approval durable so reconnect can re-park it.
-    pub(super) fn preserve_for_resume(mut self) {
-        self.armed = false;
-    }
-}
-impl Drop for AwaitingApprovalGuard<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let mut controller = self.actor.behavior.lock();
-        if controller.reject_submitted_plan_if(&self.expected) {
-            drop(controller);
-            self.actor.record_control_snapshot();
-        }
-    }
-}
 pub(super) fn is_plan_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
     matches!(kind, Some(tools::types::tool::ToolKind::PlanControl))
 }

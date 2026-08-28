@@ -101,8 +101,19 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motio
     full_view::pump_transcript(app);
     welcome::maybe_commit_welcome(app, terminal);
     plan::maybe_commit_plan(app);
+    // Tail display policy is part of layout input, not a side effect of the
+    // later commit. Stamp it before measuring the viewport so the first live
+    // frame and the committed frame have identical height.
+    commit::prepare_live_tail_display(app);
     overlay::sync_viewport(app, terminal, frame);
-    commit::commit_active(app, terminal, frame);
+    if commit::commit_active(app, terminal, frame) {
+        // The pre-commit layout optimistically sized to the predicted
+        // post-commit frontier. A terminal write failure leaves that entry
+        // uncommitted; remeasure once from the recorded actual frontier so it
+        // remains visible in the live region instead of disappearing for a
+        // frame (or forever under a persistent writer failure).
+        overlay::sync_viewport(app, terminal, frame);
+    }
     commit::expand_pending(app, terminal, frame);
     live::draw_live(app, terminal, frame);
 }

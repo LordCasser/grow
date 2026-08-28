@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+static MEMORY_GC_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use tools::util::grow_home::grow_home;
 
 /// Scope for a memory write operation.
@@ -444,14 +446,22 @@ impl MemoryStorage {
     /// Remove orphaned workspace directories under the memory root.
     ///
     /// Deletion criteria (tiered):
-    /// 1. `tmp*` dirs: remove empty ones unconditionally; remove non-empty
-    ///    ones older than 7 days.
-    /// 2. Other workspaces with no session files: remove if older than
+    /// 1. `tmp*` dirs with no durable content: remove after 7 days.
+    /// 2. Other workspaces with no durable content: remove if older than
     ///    `max_age_days`.
     /// 3. Non-empty non-tmp workspaces: never touched.
     ///
     /// Returns the number of directories removed.
     pub fn gc(&self, max_age_days: u64) -> std::io::Result<usize> {
+        // A flat root is itself the workspace authority; its children are not
+        // hashed peer workspaces and must never be interpreted as GC targets.
+        if self.workspace_dir == self.global_dir {
+            return Ok(0);
+        }
+        let _gc_guard = MEMORY_GC_GATE.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("MEMORY_GC: recovering poisoned process-wide GC gate");
+            poisoned.into_inner()
+        });
         let entries = match std::fs::read_dir(&self.global_dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -476,11 +486,8 @@ impl MemoryStorage {
             let is_tmp = name.starts_with("tmp");
             let empty = is_empty_workspace(&path);
 
-            let should_remove = if is_tmp {
-                empty || is_older_than(&path, 7)
-            } else {
-                empty && is_older_than(&path, max_age_days)
-            };
+            let should_remove =
+                empty && is_older_than(&path, if is_tmp { 7 } else { max_age_days });
 
             if should_remove {
                 match std::fs::remove_dir_all(&path) {
@@ -508,17 +515,28 @@ impl MemoryStorage {
     }
 }
 
-/// A workspace directory is "empty" if its `sessions/` subdirectory either
-/// does not exist or contains no entries.
+/// A workspace directory is "empty" only when it contains no durable memory
+/// content. An absent/empty `sessions/` directory is insufficient: a live
+/// workspace may intentionally contain only `MEMORY.md` or its SQLite index.
 fn is_empty_workspace(dir: &Path) -> bool {
-    let sessions = dir.join("sessions");
-    if !sessions.is_dir() {
-        return true;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() == "sessions" && entry.path().is_dir() {
+            match std::fs::read_dir(entry.path()) {
+                Ok(mut sessions) => {
+                    if sessions.next().is_none() {
+                        continue;
+                    }
+                    return false;
+                }
+                Err(_) => return false,
+            }
+        }
+        return false;
     }
-    match std::fs::read_dir(&sessions) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => true,
-    }
+    true
 }
 
 /// Returns `true` if `dir`'s mtime is older than `days` days ago.
@@ -1588,14 +1606,16 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_empty_tmp_removed_unconditionally() {
+    fn test_gc_old_empty_tmp_removed() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
         let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir);
 
         // Create an empty tmp dir (no sessions subdir)
-        std::fs::create_dir_all(global_dir.join("tmp-abc12345")).unwrap();
+        let stale = global_dir.join("tmp-abc12345");
+        std::fs::create_dir_all(&stale).unwrap();
+        set_dir_mtime_days_ago(&stale, 8);
 
         let removed = storage.gc(30).unwrap();
         assert_eq!(removed, 1);
@@ -1621,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_nonempty_tmp_old_removed() {
+    fn test_gc_nonempty_tmp_old_kept_without_an_external_lease() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
@@ -1635,8 +1655,8 @@ mod tests {
         set_dir_mtime_days_ago(&tmp_ws, 8);
 
         let removed = storage.gc(30).unwrap();
-        assert_eq!(removed, 1);
-        assert!(!tmp_ws.exists());
+        assert_eq!(removed, 0);
+        assert!(tmp_ws.exists());
     }
 
     #[test]
@@ -1725,9 +1745,13 @@ mod tests {
         let workspace_dir = global_dir.join("current-ws");
         let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir);
 
-        // 2 empty tmp dirs (removed unconditionally)
-        std::fs::create_dir_all(global_dir.join("tmp-one-12345678")).unwrap();
-        std::fs::create_dir_all(global_dir.join("tmp-two-12345678")).unwrap();
+        // 2 stale empty tmp dirs (removed after the safety age)
+        let tmp_one = global_dir.join("tmp-one-12345678");
+        let tmp_two = global_dir.join("tmp-two-12345678");
+        std::fs::create_dir_all(&tmp_one).unwrap();
+        std::fs::create_dir_all(&tmp_two).unwrap();
+        set_dir_mtime_days_ago(&tmp_one, 8);
+        set_dir_mtime_days_ago(&tmp_two, 8);
 
         // 1 empty old workspace (removed)
         let old = global_dir.join("old-ws-12345678");
@@ -1745,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_workspace_with_memory_md_but_no_sessions_is_empty() {
+    fn test_gc_workspace_with_memory_md_but_no_sessions_is_preserved() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
@@ -1759,11 +1783,21 @@ mod tests {
         set_dir_mtime_days_ago(&ws, 31);
 
         let removed = storage.gc(30).unwrap();
-        assert_eq!(
-            removed, 1,
-            "workspace with MEMORY.md but no sessions is empty"
-        );
-        assert!(!ws.exists());
+        assert_eq!(removed, 0);
+        assert!(ws.exists(), "durable workspace memory must survive GC");
+    }
+
+    #[test]
+    fn test_gc_flat_root_is_never_interpreted_as_a_workspace_collection() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("flat-memory");
+        let storage = MemoryStorage::new_flat(tmp.path(), &root);
+        let child = root.join("old-looking-directory");
+        std::fs::create_dir_all(&child).unwrap();
+        set_dir_mtime_days_ago(&child, 60);
+
+        assert_eq!(storage.gc(1).unwrap(), 0);
+        assert!(child.exists());
     }
 
     #[test]

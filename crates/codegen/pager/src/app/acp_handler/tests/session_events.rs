@@ -4,6 +4,314 @@
     // ── apply_session_event ────────────────────────────────────────────
 
     #[test]
+    fn command_notices_without_event_ids_do_not_deduplicate_by_correlation() {
+        let mut app = make_app_with_agent("s1");
+        let update = GrowSessionUpdate::UiNotice(
+            shell::extensions::notification::UiNotice {
+                correlation_id: "invoke-1".into(),
+                category: shell::extensions::notification::UiNoticeCategory::Command,
+                subject: Some("/workflow demo".into()),
+                description: Some("Run a workflow".into()),
+                message: "Workflow launch failed".into(),
+                tone: shell::extensions::notification::UiNoticeTone::Error,
+                details: Some("Reason: invalid definition. Fix it and retry.".into()),
+            },
+        );
+        assert!(handle(
+            make_ext_session_notification("s1", update.clone()),
+            &mut app,
+        ));
+        let before = app.agents[&AgentId(0)].scrollback.len();
+        assert!(handle(
+            make_ext_session_notification("s1", update),
+            &mut app,
+        ));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            before + 1,
+            "correlation groups notices but is not immutable event identity"
+        );
+        let entry = agent.scrollback.entries_mut().last().expect("command notice");
+        match &entry.block {
+            RenderBlock::Notice(notice) => {
+                assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Error);
+                assert_eq!(
+                    notice.category,
+                    crate::scrollback::blocks::NoticeCategory::Command
+                );
+                assert_eq!(notice.event_id, None);
+            }
+            other => panic!("expected command Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_notice_keeps_its_category_and_recovery_details() {
+        let mut app = make_app_with_agent("s1");
+        let update = GrowSessionUpdate::UiNotice(
+            shell::extensions::notification::UiNotice {
+                correlation_id: "goal-stop-1".into(),
+                category: shell::extensions::notification::UiNoticeCategory::Lifecycle,
+                subject: Some("goal".into()),
+                description: None,
+                message: "Goal stopped due to turn error".into(),
+                tone: shell::extensions::notification::UiNoticeTone::Warning,
+                details: Some("Recovery: use /goal restart.".into()),
+            },
+        );
+        assert!(handle(make_ext_session_notification("s1", update), &mut app));
+        let entry = app.agents.get_mut(&AgentId(0)).unwrap()
+            .scrollback.entries_mut().last().expect("lifecycle notice");
+        match &entry.block {
+            RenderBlock::Notice(notice) => {
+                assert_eq!(notice.category, crate::scrollback::blocks::NoticeCategory::Lifecycle);
+                assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Warning);
+                assert!(notice.details.as_deref().is_some_and(|details|
+                    details.contains("Recovery: use /goal restart.")));
+            }
+            other => panic!("expected lifecycle Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_projection_keeps_transients_live_and_commits_only_latest_terminal() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("s1");
+        let update = |revision, phase, target: &str, message: Option<&str>| {
+            GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Sampling,
+                revision,
+                intent: None,
+                snapshot: revision == 1,
+                receipt_only: false,
+                phase,
+                current: ControlTarget::Sampling {
+                    model_id: "provider/old".into(),
+                    reasoning_effort: None,
+                },
+                desired: Some(ControlTarget::Sampling {
+                    model_id: target.into(),
+                    reasoning_effort: Some("high".into()),
+                }),
+                message: message.map(str::to_owned),
+            })
+        };
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                update(1, ControlPhase::Pending, "provider/first", None),
+            ),
+            &mut app,
+        ));
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                update(2, ControlPhase::Pending, "provider/final", None),
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].scrollback.len(),
+            0,
+            "Pending replacement must remain live status only"
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].session.control_status(100).as_deref(),
+            Some("model→final (high)")
+        );
+
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                update(
+                    2,
+                    ControlPhase::Applied,
+                    "provider/final",
+                    Some("Sampling switched to provider/final (high)"),
+                ),
+            ),
+            &mut app,
+        ));
+        let committed = app.agents[&AgentId(0)].scrollback.len();
+        assert_eq!(committed, 1);
+        assert_eq!(app.agents[&AgentId(0)].session.control_status(100), None);
+        assert!(
+            !handle(
+                make_ext_session_notification(
+                    "s1",
+                    update(
+                        1,
+                        ControlPhase::Applied,
+                        "provider/first",
+                        Some("stale terminal"),
+                    ),
+                ),
+                &mut app,
+            ),
+            "stale terminal projection must be ignored"
+        );
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), committed);
+    }
+
+    #[test]
+    fn recovered_receipt_does_not_obscure_a_newer_live_target() {
+        use crate::app::session::PendingSessionControl;
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("s1");
+        let old_token = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .enqueue_control(PendingSessionControl::Agent {
+                agent_name: "old-target".into(),
+            })
+            .expect("local control")
+            .0;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .rearm_controls_for_reconnect();
+
+        let target = |name: &str| ControlTarget::Agent {
+            agent_name: name.into(),
+        };
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-new".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 1,
+                    intent: Some(shell::session::ControlIntent {
+                        client_id: "other-client".into(),
+                        generation: 0,
+                        sequence: 1,
+                    }),
+                    snapshot: true,
+                    receipt_only: false,
+                    phase: ControlPhase::Pending,
+                    current: target("builder"),
+                    desired: Some(target("new-target")),
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
+
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-new".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 2,
+                    intent: Some(old_token.shell_intent()),
+                    snapshot: false,
+                    receipt_only: true,
+                    phase: ControlPhase::Applied,
+                    current: target("builder"),
+                    desired: Some(target("old-target")),
+                    message: Some("Agent switched to old-target".into()),
+                }),
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)].session.control_status(100).as_deref(),
+            Some("agent→new-target"),
+            "a historical receipt must not replace the live desired projection"
+        );
+
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-new".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 1,
+                    intent: Some(shell::session::ControlIntent {
+                        client_id: "other-client".into(),
+                        generation: 0,
+                        sequence: 1,
+                    }),
+                    snapshot: false,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: target("new-target"),
+                    desired: Some(target("new-target")),
+                    message: Some("Agent switched to new-target".into()),
+                }),
+            ),
+            &mut app,
+        ));
+        assert_eq!(app.agents[&AgentId(0)].session.control_status(100), None);
+        assert_eq!(
+            app.agents[&AgentId(0)].scrollback.len(),
+            2,
+            "both immutable terminal facts remain visible exactly once"
+        );
+    }
+
+    #[test]
+    fn cross_epoch_control_terminals_replay_once_and_retired_epoch_stays_retired() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let terminal = |epoch: &str, revision, agent_name: &str| {
+            GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                epoch: epoch.into(),
+                domain: ControlDomain::Agent,
+                revision,
+                intent: None,
+                snapshot: revision == 7 || revision == 1,
+                receipt_only: false,
+                phase: ControlPhase::Applied,
+                current: ControlTarget::Agent {
+                    agent_name: agent_name.into(),
+                },
+                desired: None,
+                message: Some(format!("Agent switched to {agent_name}")),
+            })
+        };
+        let mut app = make_app_with_agent("s1");
+
+        for update in [
+            terminal("old", 7, "old-agent"),
+            terminal("old", 7, "old-agent"),
+            terminal("new", 1, "new-agent"),
+            terminal("new", 1, "new-agent"),
+        ] {
+            handle(make_ext_session_notification("s1", update), &mut app);
+        }
+        assert_eq!(
+            app.agents[&AgentId(0)].scrollback.len(),
+            2,
+            "each epoch's immutable terminal is visible exactly once"
+        );
+
+        handle(
+            make_ext_session_notification("s1", terminal("old", 8, "late-old-agent")),
+            &mut app,
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].scrollback.len(),
+            2,
+            "a retired epoch cannot append a late terminal"
+        );
+    }
+
+    #[test]
     fn apply_compaction_started_sets_activity() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -79,7 +387,7 @@
         assert_eq!(scrollback.len(), before + 1);
         let entry = scrollback.entries_mut().last().expect("entry pushed");
         match &entry.block {
-            RenderBlock::System(b) => {
+            RenderBlock::Notice(b) => {
                 assert!(b.text.contains(&notes[0]));
                 assert!(b.text.contains(&notes[1]));
                 assert!(
@@ -120,7 +428,7 @@
         assert!(agent.toast.is_none(), "warning must not be transient");
         let entry = agent.scrollback.entries_mut().last().expect("block pushed");
         match &entry.block {
-            RenderBlock::System(b) => assert_eq!(b.text, msg),
+            RenderBlock::Notice(b) => assert_eq!(b.text, msg),
             other => panic!("expected System block, got {other:?}"),
         }
     }
@@ -501,7 +809,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent);
+        let changed = handle_child_session_notification(update, child_sid, None, &mut agent);
         assert!(changed);
 
         let info = agent.session.subagent_sessions.get(child_sid).unwrap();
@@ -541,7 +849,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, &mut agent);
+        let _ = handle_child_session_notification(update, child_sid, None, &mut agent);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -560,7 +868,8 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        let changed = handle_child_session_notification(update, "unknown-child", &mut agent);
+        let changed =
+            handle_child_session_notification(update, "unknown-child", None, &mut agent);
         assert!(!changed);
     }
 
@@ -579,7 +888,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent);
+        let changed = handle_child_session_notification(update, child_sid, None, &mut agent);
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
@@ -592,8 +901,88 @@
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = GrowSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", &mut agent);
+        let changed = handle_child_session_notification(update, "child-1", None, &mut agent);
         assert!(!changed);
+    }
+
+    #[test]
+    fn child_command_notice_preserves_tone_and_durable_event_identity() {
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-command";
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent(Some(child_sid))));
+
+        let update = GrowSessionUpdate::UiNotice(
+            shell::extensions::notification::UiNotice {
+                correlation_id: "invoke-child".into(),
+                category: shell::extensions::notification::UiNoticeCategory::Command,
+                subject: Some("/workflow child".into()),
+                description: Some("Run a child workflow".into()),
+                message: "Child workflow failed".into(),
+                tone: shell::extensions::notification::UiNoticeTone::Error,
+                details: Some("Reason: invalid definition. Fix it and retry.".into()),
+            },
+        );
+        assert!(handle_child_session_notification(
+            update,
+            child_sid,
+            Some("event-child-command".into()),
+            &mut agent,
+        ));
+
+        let child = agent.subagent_views.get_mut(child_sid).unwrap();
+        let entry = child.scrollback.entries_mut().last().expect("command notice");
+        match &entry.block {
+            RenderBlock::Notice(notice) => {
+                assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Error);
+                assert_eq!(notice.event_id.as_deref(), Some("event-child-command"));
+            }
+            other => panic!("expected child command Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_control_terminal_preserves_durable_event_identity() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-control";
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent(Some(child_sid))));
+        let update = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+            epoch: "epoch-a".into(),
+            domain: ControlDomain::Agent,
+            revision: 7,
+            intent: None,
+            snapshot: true,
+            receipt_only: false,
+            phase: ControlPhase::Applied,
+            current: ControlTarget::Agent {
+                agent_name: "reviewer".into(),
+            },
+            desired: None,
+            message: Some("Agent switched to reviewer".into()),
+        });
+
+        assert!(handle_child_session_notification(
+            update,
+            child_sid,
+            Some("event-child-control".into()),
+            &mut agent,
+        ));
+        let child = agent.subagent_views.get_mut(child_sid).unwrap();
+        let entry = child.scrollback.entries_mut().last().expect("control notice");
+        match &entry.block {
+            RenderBlock::Notice(notice) => {
+                assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Success);
+                assert_eq!(notice.event_id.as_deref(), Some("event-child-control"));
+            }
+            other => panic!("expected child control Notice, got {other:?}"),
+        }
     }
 
     // ── apply_retry_state ─────────────────────────────────────────────

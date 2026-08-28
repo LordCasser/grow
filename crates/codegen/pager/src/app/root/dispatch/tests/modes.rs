@@ -524,7 +524,7 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST);
 
@@ -542,7 +542,7 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST);
 
@@ -555,7 +555,7 @@ fn set_always_approve_mode_on_under_plan_uses_plan_aware_toast() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(
         toast,
@@ -588,7 +588,7 @@ fn set_permission_mode_always_approve_under_plan_uses_plan_aware_toast() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST);
 }
@@ -1122,7 +1122,7 @@ fn set_always_approve_mode_toast_format() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(
         toast,
@@ -1133,7 +1133,7 @@ fn set_always_approve_mode_toast_format() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, "\u{2713} Permission mode: Ask");
 }

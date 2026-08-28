@@ -240,7 +240,7 @@ fn report_config_failure(app: &mut AppView, message: &str) {
         && let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        let block = RenderBlock::system(message.to_owned());
+        let block = RenderBlock::notice(message.to_owned());
         if let Some(child_sid) = agent.active_subagent.clone()
             && let Some(child) = agent.subagent_views.get_mut(&child_sid)
         {
@@ -333,7 +333,7 @@ pub(crate) fn report_prompt_failure(app: &mut AppView, agent_id: AgentId, messag
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent
             .scrollback
-            .push_block(RenderBlock::system(message.to_owned()));
+            .push_block(RenderBlock::notice(message.to_owned()));
     }
 }
 

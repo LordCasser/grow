@@ -421,7 +421,12 @@ pub async fn auto_restart_stdio(
 
         record_attempted(&server, attempt);
 
-        match actions.respawn_stdio(&server).await {
+        let respawn = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            result = actions.respawn_stdio(&server) => result,
+        };
+        match respawn {
             Ok(()) => {
                 tracing::info!(
                     server = %server,
@@ -561,7 +566,12 @@ async fn http_recovery_loop(
         }
 
         record_http_recovery_attempted(&server);
-        match actions.reset_http_client(&server).await {
+        let recovery = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            result = actions.reset_http_client(&server) => result,
+        };
+        match recovery {
             Ok(()) => {
                 tracing::info!(
                     server = %server,

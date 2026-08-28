@@ -1,7 +1,9 @@
 //! `/effort` — set reasoning effort on the current model without re-picking it.
 //!
-//! Thin wrapper over `Action::SwitchModel` with the session's current model
-//! id and the chosen effort (same wire path as `/model <name> <effort>`).
+//! Emits an effort-only Sampling patch. The current model is retained only as
+//! a local validation/display hint; Shell composes the patch with its newest
+//! desired Sampling target so concurrent clients cannot resurrect an old
+//! model.
 
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
@@ -71,10 +73,7 @@ impl SlashCommand for EffortCommand {
 
         // Same gate-first policy as the CLI (`--reasoning-effort`) and headless.
         match ctx.models.resolve_effort_for_model(&model_id, trimmed) {
-            Ok(effort) => CommandResult::Action(Action::SwitchModel {
-                model_id,
-                effort: Some(effort),
-            }),
+            Ok(effort) => CommandResult::Action(Action::PatchEffort { model_id, effort }),
             Err(err) => CommandResult::Error(err.message()),
         }
     }
@@ -164,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_level_dispatches_switch_model_on_current() {
+    fn valid_level_dispatches_effort_patch_on_current() {
         let mut state = ModelState::default();
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id.clone(), info);
@@ -172,11 +171,11 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "high");
         match result {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::PatchEffort { model_id, effort }) => {
                 assert_eq!(model_id, id);
-                assert_eq!(effort, Some(ReasoningEffort::High));
+                assert_eq!(effort, ReasoningEffort::High);
             }
-            other => panic!("expected SwitchModel with effort, got {other:?}"),
+            other => panic!("expected PatchEffort, got {other:?}"),
         }
     }
 
@@ -233,11 +232,11 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "none");
         match result {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::PatchEffort { model_id, effort }) => {
                 assert_eq!(model_id, id);
-                assert_eq!(effort, Some(ReasoningEffort::None));
+                assert_eq!(effort, ReasoningEffort::None);
             }
-            other => panic!("expected SwitchModel with none, got {other:?}"),
+            other => panic!("expected PatchEffort with none, got {other:?}"),
         }
     }
 
@@ -257,11 +256,11 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         // The rendered row inserts the id; `/effort deep` must send `xhigh`.
         match EffortCommand.run(&mut ctx, "deep") {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::PatchEffort { model_id, effort }) => {
                 assert_eq!(model_id, id);
-                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
+                assert_eq!(effort, ReasoningEffort::Xhigh);
             }
-            other => panic!("expected SwitchModel with remapped effort, got {other:?}"),
+            other => panic!("expected PatchEffort with remapped effort, got {other:?}"),
         }
     }
 

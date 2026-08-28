@@ -2,7 +2,57 @@
 //! Co-located `#[path]`-style child of `mvp_agent` (`use super::*`) so the `impl`
 //! block keeps access to `MvpAgent`'s private fields.
 use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionThreadExit {
+    Absent,
+    Clean,
+    Panicked,
+}
+impl SessionThreadExit {
+    pub(crate) fn from_join(result: std::thread::Result<()>) -> Self {
+        if result.is_ok() {
+            Self::Clean
+        } else {
+            Self::Panicked
+        }
+    }
+}
+
 impl MvpAgent {
+    /// Serialize the complete lifecycle transaction for one SessionId. Loads
+    /// hold this across restore/replay/spawn/publication; destructive paths
+    /// hold it through writer drain and terminal removal.
+    pub(crate) async fn lock_session_lifecycle(
+        &self,
+        id: &acp::SessionId,
+    ) -> SessionLifecycleGuard<'_> {
+        let gate = {
+            let mut gates = self.session_lifecycle_gates.borrow_mut();
+            if let Some(gate) = gates.get(id).and_then(std::sync::Weak::upgrade) {
+                gate
+            } else {
+                let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(id.clone(), std::sync::Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let weak = std::sync::Arc::downgrade(&gate);
+        let guard = gate.lock_owned().await;
+        SessionLifecycleGuard {
+            agent: self,
+            session_id: id.clone(),
+            gate: weak,
+            _guard: guard,
+        }
+    }
+
+    pub(crate) fn has_live_or_draining_session(&self, id: &acp::SessionId) -> bool {
+        self.sessions.borrow().contains_key(id)
+            || self.session_threads.borrow().contains_key(id)
+            || self.active_child_sessions.borrow().contains_key(id)
+    }
+
     /// Ask a live session actor to shut down.
     pub(crate) fn request_session_shutdown(&self, id: &acp::SessionId) {
         if let Some(handle) = self.sessions.borrow().get(id) {
@@ -12,33 +62,72 @@ impl MvpAgent {
     /// Fail closed when a resident cannot durably adopt the one published
     /// model catalog. Its on-disk Timeline remains resumable; only the
     /// divergent in-memory actor is retired.
-    pub(crate) fn evict_catalog_diverged_session(&self, id: &acp::SessionId) {
+    pub(crate) async fn evict_catalog_diverged_session(
+        &self,
+        id: &acp::SessionId,
+        expected_actor: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+        expected_catalog_revision: u64,
+    ) -> Result<bool, String> {
+        let _lifecycle = self.lock_session_lifecycle(id).await;
+        // Revalidate the catalog generation inside the same transaction as
+        // actor-incarnation removal. A newer publication can converge the same
+        // actor after an older reload handler's outer check.
+        let catalog_transaction = self.model_reload_lock.lock().await;
+        if self.models_manager.catalog_revision() != expected_catalog_revision {
+            tracing::info!(
+                session_id = %id.0,
+                expected_catalog_revision,
+                current_catalog_revision = self.models_manager.catalog_revision(),
+                "ignoring convergence failure from a superseded model catalog"
+            );
+            return Ok(false);
+        }
+        let Some(current) = self.control_session_handle(id) else {
+            return Ok(false);
+        };
+        if !current.cmd_tx.same_channel(expected_actor) {
+            tracing::info!(
+                session_id = %id.0,
+                "ignoring catalog convergence failure from a stale actor incarnation"
+            );
+            return Ok(false);
+        }
         if let Some(handle) = self.active_child_sessions.borrow_mut().remove(id) {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
-            return;
+        } else {
+            self.request_session_shutdown(id);
+            self.take_session(id);
         }
-        self.request_session_shutdown(id);
+        drop(catalog_transaction);
+        let _ = self.drain_old_session_thread(id).await?;
         self.remove_session_terminal(id, SessionLiveState::DeadFailed);
+        Ok(true)
     }
-    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
-        let Some(handle) = self.sessions.borrow().get(id).cloned() else {
-            return;
-        };
-        let _ = handle.cmd_tx.send(SessionCommand::Cancel {
-            cancel_subagents: true,
-            kill_background_tasks: true,
-            rewind_if_pristine: false,
-            pause_goal: false,
-            trigger: Some("session_delete".into()),
-        });
-        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
-        drop(handle);
-        let thread = self.session_threads.borrow_mut().remove(id);
-        self.remove_session_terminal(id, SessionLiveState::Completed);
-        if let Some(thread) = thread {
-            self.session_threads.borrow_mut().insert(id.clone(), thread);
-            self.drain_old_session_thread(id).await;
+    pub(crate) async fn teardown_live_session_before_delete(
+        &self,
+        id: &acp::SessionId,
+    ) -> Result<SessionLifecycleGuard<'_>, String> {
+        let lifecycle = self.lock_session_lifecycle(id).await;
+        if let Some(handle) = self.sessions.borrow().get(id).cloned() {
+            let _ = handle.cmd_tx.send(SessionCommand::Cancel {
+                cancel_subagents: true,
+                kill_background_tasks: true,
+                rewind_if_pristine: false,
+                pause_goal: false,
+                trigger: Some("session_delete".into()),
+            });
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+            drop(handle);
+            self.take_session(id);
         }
+        let exit = self.drain_old_session_thread(id).await?;
+        let final_state = if exit == SessionThreadExit::Panicked {
+            SessionLiveState::DeadFailed
+        } else {
+            SessionLiveState::Completed
+        };
+        self.remove_session_terminal(id, final_state);
+        Ok(lifecycle)
     }
     /// The funnel for a handle leaving `self.sessions` (the spawn-path insert
     /// reaps any displaced handle the same way): reaps its child-process tree
@@ -94,8 +183,24 @@ impl MvpAgent {
             .clone()
     }
     /// Close a session in response to an explicit terminal close.
-    pub(crate) fn close_session_explicit(&self, id: &acp::SessionId) {
-        self.remove_session_terminal(id, SessionLiveState::Completed);
+    pub(crate) async fn close_session_explicit(
+        &self,
+        id: &acp::SessionId,
+    ) -> Result<bool, String> {
+        let _lifecycle = self.lock_session_lifecycle(id).await;
+        if !self.has_live_or_draining_session(id) {
+            return Ok(false);
+        }
+        self.request_session_shutdown(id);
+        self.take_session(id);
+        let exit = self.drain_old_session_thread(id).await?;
+        let final_state = if exit == SessionThreadExit::Panicked {
+            SessionLiveState::DeadFailed
+        } else {
+            SessionLiveState::Completed
+        };
+        self.remove_session_terminal(id, final_state);
+        Ok(true)
     }
     /// Record the coarse lifecycle state for a session.
     pub(super) fn set_session_live_state(&self, id: &acp::SessionId, state: SessionLiveState) {
@@ -324,7 +429,7 @@ impl MvpAgent {
     /// clean exit from a panic on its own, which is exactly why the residency
     /// check is required. Runs both opportunistically and from the join-handle
     /// supervisor (`ensure_session_supervisor`).
-    pub(super) fn sweep_dead_sessions(&self) {
+    pub(super) async fn sweep_dead_sessions(&self) {
         let dead: Vec<acp::SessionId> = self
             .session_threads
             .borrow()
@@ -332,22 +437,39 @@ impl MvpAgent {
             .filter(|(_, t)| t.is_finished())
             .map(|(id, _)| id.clone())
             .collect();
-        for id in dead {
-            if self.sessions.borrow().contains_key(&id) {
+        let sweeps = dead.into_iter().map(|id| async move {
+            let _lifecycle = self.lock_session_lifecycle(&id).await;
+            if !self
+                .session_threads
+                .borrow()
+                .get(&id)
+                .is_some_and(crate::session::SessionThread::is_finished)
+            {
+                return;
+            }
+            let was_resident = self.sessions.borrow().contains_key(&id);
+            let exit = self
+                .session_threads
+                .borrow_mut()
+                .remove(&id)
+                .map(|thread| SessionThreadExit::from_join(thread.join()))
+                .unwrap_or(SessionThreadExit::Absent);
+            if was_resident || exit == SessionThreadExit::Panicked {
                 tracing::warn!(
                     session_id = %id.0,
-                    "Resident session actor exited unexpectedly; reaping as DeadFailed"
+                    ?exit,
+                    "Session actor exited unexpectedly; reaping as DeadFailed"
                 );
                 self.reap_dead_session(&id);
             } else {
-                self.session_threads.borrow_mut().remove(&id);
                 self.session_live_state.borrow_mut().remove(&id);
                 tracing::debug!(
                     session_id = %id.0,
                     "Reaped finished thread for non-resident session (clean exit)"
                 );
             }
-        }
+        });
+        futures::future::join_all(sweeps).await;
     }
     /// Start the join-handle supervisor. **Idempotent.**
     ///
@@ -375,9 +497,10 @@ impl MvpAgent {
         tokio::task::spawn_local(async move {
             loop {
                 tokio::time::sleep(SESSION_SUPERVISOR_TICK).await;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    agent_ref.get().sweep_dead_sessions();
-                }));
+                let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    agent_ref.get().sweep_dead_sessions(),
+                ))
+                .await;
                 if result.is_err() {
                     tracing::error!("session supervisor sweep panicked; continuing supervision");
                 }

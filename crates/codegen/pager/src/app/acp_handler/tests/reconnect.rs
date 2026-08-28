@@ -159,19 +159,19 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             agent.session.last_seen_event_id = Some("sess-rc-3".into());
             agent.begin_session_reload(1);
             assert!(agent.session.loading_replay);
             assert_eq!(
                 agent.scrollback.len(),
-                1,
-                "staging starts with only the reload placeholder; old content is stashed"
+                0,
+                "transient reload status must not enter the committed transcript"
             );
-            assert!(scrollback_has_system_text(
-                agent,
-                "Reloading session after reconnect"
-            ));
+            assert_eq!(
+                agent.session.live_status(100).as_deref(),
+                Some("Reloading session after reconnect…")
+            );
         }
 
         assert!(!handle(
@@ -223,7 +223,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             agent.session.last_seen_event_id = Some("sess-rc-3".into());
             agent.session.last_applied_event_seq = Some(3);
             agent.session.last_applied_grow_event_seq = Some(5);
@@ -279,7 +279,7 @@
             "the Grow highwater reverts with the transcript — left at 30 it would \
              dedup-drop the next reload's re-delivery of the discarded blocks"
         );
-        let next = agent.scrollback.push_block(RenderBlock::system("after"));
+        let next = agent.scrollback.push_block(RenderBlock::notice("after"));
         assert!(
             next.value() > staged_max_id.value(),
             "the restored stash must not reuse ids the discarded staging allocated"
@@ -297,7 +297,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             // A turn was in flight at disconnect: its entry is still running.
             agent.scrollback.set_last_running(true);
             agent.session.last_seen_event_id = Some("sess-rc-3".into());
@@ -358,7 +358,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             agent.begin_session_reload(1);
         }
         assert!(!handle(
@@ -374,8 +374,12 @@
             agent.begin_session_reload(2);
             assert_eq!(
                 agent.scrollback.len(),
-                1,
-                "gen-1 partial replay is discarded; gen-2 staging holds only the placeholder"
+                0,
+                "gen-1 partial replay is discarded; transient gen-2 status stays outside scrollback"
+            );
+            assert_eq!(
+                agent.session.live_status(100).as_deref(),
+                Some("Reloading session after reconnect…")
             );
             // Finalizing the dead gen-1 window is rejected.
             assert!(!agent.finish_session_reload(1, true));
@@ -391,9 +395,8 @@
     }
 
     /// A reconnect that interrupts an in-flight fresh-view load closes out
-    /// the load's batch and placeholder before stashing — neither may leak
-    /// into the stash (an unbalanced batch would defer rebuilds forever; the
-    /// placeholder would linger mid-transcript on a failure restore).
+    /// the load batch before stashing. Live loading feedback is replaceable
+    /// state and can never leak into the restored transcript.
     #[test]
     fn reload_window_supersedes_interrupted_fresh_view_load() {
         let mut app = make_app_with_agent("sess-rc");
@@ -402,20 +405,21 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
-            // In-flight fresh-view load: open batch + placeholder + replay flag.
+                .push_block(RenderBlock::notice("pre-outage content"));
+            // In-flight fresh-view load: open batch + live status + replay flag.
             agent.scrollback.begin_batch();
-            let pid = agent
-                .scrollback
-                .push_block(RenderBlock::system("Loading session sess-rc..."));
-            agent.loading_placeholder_id = Some(pid);
+            agent.session.set_live_feedback(
+                "session-load",
+                crate::scrollback::blocks::NoticeTone::Progress,
+                "Loading session sess-rc\u{2026}",
+            );
             agent.session.loading_replay = true;
 
             agent.begin_session_reload(1);
             assert_eq!(
                 agent.scrollback.len(),
-                1,
-                "staging holds only the reload placeholder"
+                0,
+                "transient loading state never enters the staging transcript"
             );
         }
 
@@ -426,11 +430,7 @@
             "no batch leaked into the stash"
         );
         assert!(scrollback_has_system_text(agent, "pre-outage content"));
-        assert!(
-            !scrollback_has_system_text(agent, "Loading session sess-rc"),
-            "the interrupted load's placeholder was removed before stashing"
-        );
-        assert!(agent.loading_placeholder_id.is_none());
+        assert!(agent.session.live_status(100).is_none());
     }
 
     /// An applied Plan update advances the reconnect cursor like any other
@@ -734,7 +734,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("live content"));
+                .push_block(RenderBlock::notice("live content"));
         }
 
         assert!(
@@ -842,7 +842,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             agent.begin_session_reload(1);
         }
         assert!(handle_ext_notification(
@@ -867,6 +867,59 @@
         );
     }
 
+    /// A historical replay arriving after a live update in the same reload
+    /// window must not move the reconnect cursor back to the replay's older
+    /// event. Event IDs reset across resume generations, so this is explicitly
+    /// an arrival-source rule rather than a numeric/string max.
+    #[test]
+    fn replay_after_live_update_does_not_regress_reconnect_cursor() {
+        fn grow_model_switch_with_replay(
+            session_id: &str,
+            event_id: &str,
+            is_replay: bool,
+        ) -> acp::ExtNotification {
+            let payload = SessionNotification {
+                session_id: acp::SessionId::new(session_id),
+                update: GrowSessionUpdate::ModelAutoSwitched {
+                    previous_model_id: "m-old".into(),
+                    new_model_id: "m-new".into(),
+                    reason: "gone".into(),
+                },
+                meta: Some(serde_json::json!({
+                    "eventId": event_id,
+                    "isReplay": is_replay,
+                })),
+            };
+            acp::ExtNotification::new(
+                "grow/session/update",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+            )
+        }
+
+        let mut app = make_app_with_agent("sess-cursor-race");
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+
+        assert!(handle_ext_notification(
+            &grow_model_switch_with_replay("sess-cursor-race", "sess-cursor-race-20", false),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&id].session.last_seen_event_id.as_deref(),
+            Some("sess-cursor-race-20")
+        );
+
+        assert!(handle_ext_notification(
+            &grow_model_switch_with_replay("sess-cursor-race", "sess-cursor-race-7", true),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&id].session.last_seen_event_id.as_deref(),
+            Some("sess-cursor-race-20"),
+            "an older replay must not overwrite a live cursor"
+        );
+    }
+
     /// Characterization (leader-relaunch orphan rows): a reconnect reload whose
     /// replay contains `SubagentSpawned` with NO `SubagentFinished` (the
     /// subagent died with the old leader, or is still running on the surviving
@@ -885,7 +938,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent
                 .scrollback
-                .push_block(RenderBlock::system("pre-outage content"));
+                .push_block(RenderBlock::notice("pre-outage content"));
             agent.begin_session_reload(1);
         }
 

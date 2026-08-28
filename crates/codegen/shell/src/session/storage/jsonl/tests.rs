@@ -2530,6 +2530,17 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
             "grow",
             crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
             goal.snapshot().cloned(),
+        )
+        .with_applied_control(
+            crate::extensions::notification::ControlDomain::Behavior,
+            crate::extensions::notification::ControlTarget::Behavior {
+                behavior_id: "goal".into(),
+            },
+            Some(crate::session::ControlIntent {
+                client_id: "parent-client".into(),
+                generation: 3,
+                sequence: 10,
+            }),
         ),
     )
     .await;
@@ -2546,10 +2557,70 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         .control_snapshot
         .expect("fork keeps non-runtime control metadata");
     assert!(forked.goal.is_none());
+    assert!(
+        forked.applied_control.is_none(),
+        "forked sessions must not inherit parent idempotency receipts"
+    );
     assert_eq!(
         forked.behavior.state,
         crate::session::behavior::BehaviorState::Normal
     );
+}
+
+#[tokio::test]
+async fn fork_drops_parent_control_projection_receipts() {
+    use crate::extensions::notification::{
+        ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("src-control-receipt"),
+        cwd: "/src".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("tgt-control-receipt"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let target = ControlTarget::Agent {
+        agent_name: "coder".into(),
+    };
+    let update = GrowSessionNotification {
+        session_id: source_info.id.clone(),
+        update: GrowSessionUpdateType::ControlStateUpdate(ControlStateUpdate {
+            epoch: "parent-epoch".into(),
+            domain: ControlDomain::Agent,
+            revision: 10,
+            intent: Some(crate::session::ControlIntent {
+                client_id: "pager-a".into(),
+                generation: 1,
+                sequence: 10,
+            }),
+            snapshot: false,
+            receipt_only: false,
+            phase: ControlPhase::Applied,
+            current: target.clone(),
+            desired: Some(target),
+            message: None,
+        }),
+        meta: None,
+    };
+    adapter
+        .append_update(&source_info, &SessionUpdate::Grow(Box::new(update)))
+        .await
+        .unwrap();
+
+    let copied = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(copied.updates_copied, 0);
+    let child = adapter.load_session(&target_info).await.unwrap();
+    assert!(child.updates.is_empty());
 }
 
 #[tokio::test]
@@ -3501,6 +3572,7 @@ async fn model_change_repairs_selection_summary_from_timeline() {
                 "new-endpoint",
             ),
             "user_selection",
+            None,
         ))
         .unwrap();
     adapter.append_timeline_event(&info, &event).await.unwrap();
@@ -3580,6 +3652,7 @@ fn model_change_fold_rejects_transport_discontinuity() {
             &old_route,
             &current_route,
             "user_selection",
+            None,
         ))
         .unwrap();
     timeline
@@ -3593,6 +3666,7 @@ fn model_change_fold_rejects_transport_discontinuity() {
             &forged_route,
             &next_route,
             "catalog_reload",
+            None,
         ))
         .unwrap();
 
@@ -3600,6 +3674,48 @@ fn model_change_fold_rejects_transport_discontinuity() {
         .expect_err("a route transition must continue the exact durable transport");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("does not continue"));
+}
+
+#[test]
+fn model_change_folds_its_atomic_sampling_receipt() {
+    let model = acp::ModelId::new("catalog/current");
+    let route = sampling_types::ModelImageInputKey::new(
+        "wire-model",
+        "responses",
+        "endpoint",
+    );
+    let intent = crate::session::ControlIntent {
+        client_id: "pager-a".into(),
+        generation: 2,
+        sequence: 7,
+    };
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(crate::session::persistence::model_change_event(
+            &model,
+            &model,
+            None,
+            None,
+            "wire-model",
+            "wire-model",
+            &route,
+            &route,
+            "user_selection",
+            Some(&intent),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        crate::session::persistence::durable_model_control_receipts(timeline.events()).unwrap(),
+        vec![crate::session::control::DurableControlReceipt {
+            domain: crate::extensions::notification::ControlDomain::Sampling,
+            intent,
+            target: crate::extensions::notification::ControlTarget::Sampling {
+                model_id: "catalog/current".into(),
+                reasoning_effort: None,
+            },
+        }]
+    );
 }
 
 #[tokio::test]

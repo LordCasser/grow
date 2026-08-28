@@ -28,7 +28,7 @@ impl SlashCommand for ShortcutsCommand {
 mod tests {
     use super::*;
     #[test]
-    fn shortcuts_has_no_aliases() {
-        assert!(ShortcutsCommand.aliases().is_empty());
+    fn shortcuts_has_canonical_name() {
+        assert_eq!(ShortcutsCommand.name(), "shortcuts");
     }
 }

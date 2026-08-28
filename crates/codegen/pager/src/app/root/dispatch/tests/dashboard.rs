@@ -224,7 +224,7 @@ fn dashboard_toggle_worktree_outside_git_repo_is_noop_with_toast() {
         "worktree mode must stay off outside a git repo",
     );
     assert!(
-        d.error_toast.is_some(),
+        d.feedback.is_some(),
         "a toast must explain why the toggle is unavailable",
     );
 }
@@ -1001,14 +1001,20 @@ fn dashboard_slash_model_stages_pending_model() {
         Some("grow-4.5"),
         "staging must update the snapshot's current selection",
     );
-    let expected = format!(
-        "{} grow-4.5 set for next session",
-        crate::glyphs::check_mark()
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().feedback.as_deref(),
+        Some("grow-4.5 set for next session"),
+        "the session-less dashboard must explain that the choice is staged",
     );
     assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
-        Some(expected.as_str()),
-        "the session-less dashboard must explain that the choice is staged",
+        app.dashboard
+            .as_ref()
+            .unwrap()
+            .feedback
+            .as_ref()
+            .unwrap()
+            .tone,
+        crate::scrollback::blocks::NoticeTone::Success,
     );
 }
 
@@ -1039,11 +1045,10 @@ fn dashboard_slash_effort_reports_next_session_staging() {
         .as_ref()
         .expect("effort selection must stage the current model");
     assert_eq!(pending.effort, Some(ReasoningEffort::High));
-    let expected = format!(
-        "{} reasoning-model (high effort) set for next session",
-        crate::glyphs::check_mark()
+    assert_eq!(
+        dashboard.feedback.as_deref(),
+        Some("reasoning-model (high effort) set for next session")
     );
-    assert_eq!(dashboard.error_toast.as_deref(), Some(expected.as_str()));
 }
 
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -1062,20 +1067,16 @@ fn dashboard_unknown_slash_never_spawns_model_input() {
     assert_eq!(dashboard.dispatch.text(), "");
     assert!(
         dashboard
-            .error_toast
+            .feedback
             .as_deref()
             .is_some_and(|toast| toast.contains("Unknown command"))
     );
 }
 
-/// A slash command that fails (`CommandResult::Error`) surfaces on
-/// the dashboard with the `✗` error prefix — command error strings
-/// carry no glyph of their own, and the feedback badge paints the
-/// toast verbatim in a neutral colour, so without the prefix an
-/// error would be indistinguishable from a success message.
+/// A slash command failure keeps its plain message and carries Error tone.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_slash_command_error_gets_error_glyph_prefix() {
+fn dashboard_slash_command_error_uses_error_tone() {
     let mut app = test_app();
     seed_model(&mut app, "grow-4.5", "Grow 4.5");
     open_dashboard(&mut app);
@@ -1086,15 +1087,12 @@ fn dashboard_slash_command_error_gets_error_glyph_prefix() {
         .dashboard
         .as_ref()
         .unwrap()
-        .error_toast
-        .as_deref()
+        .feedback
+        .as_ref()
         .expect("a failed slash command must set the feedback toast");
+    assert_eq!(toast.tone, crate::scrollback::blocks::NoticeTone::Error);
     assert!(
-        toast.starts_with(crate::glyphs::ballot_x()),
-        "command errors must carry the ✗ prefix, got: {toast:?}",
-    );
-    assert!(
-        toast.contains("nonexistent"),
+        toast.message.contains("nonexistent"),
         "the command's own message must be preserved, got: {toast:?}",
     );
 }
@@ -1213,10 +1211,6 @@ fn dashboard_slash_sessions_alias_is_removed() {
 fn dashboard_does_not_advertise_or_dispatch_doctor() {
     let mut app = three_agent_app();
     open_dashboard(&mut app);
-    let expected = format!(
-        "{} /doctor only works in a session",
-        crate::glyphs::ballot_x()
-    );
     for name in [
         "doctor",
         "terminal-setup",
@@ -1236,7 +1230,12 @@ fn dashboard_does_not_advertise_or_dispatch_doctor() {
         assert_eq!(app.agents.len(), 3, "must not add an agent");
         let dashboard = app.dashboard.as_ref().unwrap();
         assert_eq!(dashboard.dispatch.text(), "");
-        assert_eq!(dashboard.error_toast.as_deref(), Some(expected.as_str()));
+        let expected = if name == "doctor" {
+            "/doctor only works in a session".to_string()
+        } else {
+            format!("Unknown command: /{name}")
+        };
+        assert_eq!(dashboard.feedback.as_deref(), Some(expected.as_str()));
     }
 }
 /// Session-scoped Action builtins must not spawn an agent whose first
@@ -1255,7 +1254,7 @@ fn dashboard_slash_fork_does_not_spawn() {
         .dashboard
         .as_ref()
         .unwrap()
-        .error_toast
+        .feedback
         .as_deref()
         .expect("error toast for not-offered session command");
     assert!(
@@ -1279,7 +1278,7 @@ fn dashboard_slash_compact_does_not_spawn() {
         .dashboard
         .as_ref()
         .unwrap()
-        .error_toast
+        .feedback
         .as_deref()
         .expect("error toast for not-offered session command");
     assert!(
@@ -1435,9 +1434,9 @@ fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
         "pinned always-approve must spawn the agent in Normal"
     );
     assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
-        Some(format!("{} {POLICY_WARNING}", crate::glyphs::ballot_x()).as_str()),
-        "warning must land on the dashboard error slot when the view stays on the dashboard",
+        app.dashboard.as_ref().unwrap().feedback.as_deref(),
+        Some(POLICY_WARNING),
+        "warning must land on the dashboard feedback slot when the view stays on the dashboard",
     );
 }
 /// A freshly dispatched agent (queued prompt, session not yet created)
@@ -1644,10 +1643,7 @@ fn dashboard_dispatch_single_char_creates_session() {
         "single-char prompt must create a session"
     );
     let d = app.dashboard.as_ref().unwrap();
-    assert!(
-        d.error_toast.is_none(),
-        "no error toast for a non-empty prompt"
-    );
+    assert!(d.feedback.is_none(), "no feedback for a non-empty prompt");
 }
 /// A normal prompt creates a session.
 ///
@@ -1681,8 +1677,8 @@ fn dashboard_dispatch_empty_prompt_rejected() {
     let _ = dispatch_dashboard_dispatch(&mut app, "   ".into(), false);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.error_toast.is_some(),
-        "empty prompt must set the error toast"
+        d.feedback.is_some(),
+        "empty prompt must set warning feedback"
     );
     assert!(
         app.agents.is_empty(),
@@ -2483,8 +2479,8 @@ fn dashboard_overlay_stop_closes_session_and_returns_to_dashboard() {
         "close must unregister the session from the leader roster",
     );
     assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
-        Some(format!("{} Session closed", crate::glyphs::check_mark()).as_str()),
+        app.dashboard.as_ref().unwrap().feedback.as_deref(),
+        Some("Session closed"),
     );
 }
 /// Overlay stop on the ONLY session: the close is refused (same
@@ -2513,7 +2509,7 @@ fn dashboard_overlay_stop_only_session_refused_lands_on_dashboard() {
         app.dashboard
             .as_ref()
             .unwrap()
-            .error_toast
+            .feedback
             .as_deref()
             .is_some_and(|t| t.contains("Cannot close")),
         "the refusal toast must surface on the dashboard",
@@ -3429,7 +3425,7 @@ fn dashboard_commit_rename_empty_does_not_emit_effect() {
 /// Rename on subagent row toasts and refuses.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_begin_rename_on_subagent_row_sets_error_toast() {
+fn dashboard_begin_rename_on_subagent_row_sets_warning_feedback() {
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
@@ -3441,7 +3437,7 @@ fn dashboard_begin_rename_on_subagent_row_sets_error_toast() {
     dispatch_dashboard_begin_rename(&mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.rename.is_none());
-    assert!(d.error_toast.is_some());
+    assert!(d.feedback.is_some());
 }
 /// Dispatch text + filter survive a close
 /// and reopen of the dashboard. The contract is
@@ -3614,7 +3610,7 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     assert!(!app.agents.contains_key(last_id));
     assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(prev));
 }
-/// First Ctrl+X must NOT plant an `error_toast`. The
+/// First Ctrl+X must NOT plant transient feedback. The
 /// dispatch-input placeholder is reserved for the user's typing
 /// target — the footer's `ShortcutsBar::with_pending` already
 /// surfaces the "press Ctrl+X again to close this session"
@@ -3623,7 +3619,7 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
 /// confused the user (the prompt one stole visual weight).
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_stop_does_not_plant_error_toast() {
+fn dashboard_stop_does_not_plant_feedback() {
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
     let _ = dispatch_new_session_inner(&mut app, None);
@@ -3639,11 +3635,11 @@ fn dashboard_stop_does_not_plant_error_toast() {
         "first Ctrl+X on an idle row must arm delete_confirm (footer reads from this)",
     );
     assert!(
-        d.error_toast.is_none(),
-        "first Ctrl+X must NOT set error_toast — the footer hint is the \
+        d.feedback.is_none(),
+        "first Ctrl+X must NOT set feedback — the footer hint is the \
              canonical surface; toast in the dispatch input is duplication. \
              Got: {:?}",
-        d.error_toast,
+        d.feedback,
     );
 }
 /// `DashboardOpenShortcutsHelp` builds the modal state on
@@ -4070,7 +4066,7 @@ fn dashboard_stop_busy_roster_toasts_without_arming() {
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.delete_confirm.is_none());
     assert_eq!(
-        d.error_toast.as_deref(),
+        d.feedback.as_deref(),
         Some("Stop the session before deleting"),
     );
 }
@@ -4156,7 +4152,7 @@ fn dashboard_stop_bg_work_row_stops_without_arming() {
     );
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.delete_confirm.is_none(), "must not arm delete");
-    assert!(d.error_toast.is_none(), "stopped work, so no toast");
+    assert!(d.feedback.is_none(), "stopped work, so no feedback");
 }
 /// A row that's `Working` only because of a queued (unsent) prompt: Ctrl+X
 /// drops the queue (local, no effect) rather than toasting, and never arms
@@ -4191,7 +4187,7 @@ fn dashboard_stop_queued_prompt_row_drops_queue_without_arming() {
     );
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.delete_confirm.is_none(), "must not arm delete");
-    assert!(d.error_toast.is_none(), "dropped the queue, so no toast");
+    assert!(d.feedback.is_none(), "dropped the queue, so no feedback");
 }
 /// The `y` / second-`[✗]` confirm re-checks deletability: a row that
 /// became busy between arming and confirming must not be deleted.
@@ -4222,7 +4218,7 @@ fn dashboard_delete_confirm_rechecks_settled_row() {
         "a row that went busy between gestures must not delete, got {effects:?}",
     );
     assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        app.dashboard.as_ref().unwrap().feedback.as_deref(),
         Some("Stop the session before deleting"),
     );
 }
@@ -4248,7 +4244,7 @@ fn dashboard_delete_top_level_without_session_id_toasts() {
         "a row without a session id must not delete, got {effects:?}",
     );
     assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        app.dashboard.as_ref().unwrap().feedback.as_deref(),
         Some("No session history to delete"),
     );
 }
@@ -4321,7 +4317,7 @@ fn dashboard_permission_select_drops_stale_request() {
     assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.peek.is_none(), "peek must be closed");
-    assert!(d.error_toast.is_some(), "toast must surface the mismatch");
+    assert!(d.feedback.is_some(), "feedback must surface the mismatch");
 }
 /// Missing row — toasts, closes peek, returns no effects.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -4354,7 +4350,7 @@ fn dashboard_permission_select_for_missing_row_clears_peek() {
     assert!(effects.is_empty());
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.peek.is_none());
-    assert!(d.error_toast.is_some());
+    assert!(d.feedback.is_some());
 }
 /// Peek reply to an IDLE agent sends immediately: the prompt drains
 /// (one `SendPrompt` effect), the turn starts, and the reply draft
@@ -4665,7 +4661,7 @@ fn dashboard_peek_reply_to_subagent_toasts() {
     );
     assert!(effects.is_empty());
     assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
-    assert!(app.dashboard.as_ref().unwrap().error_toast.is_some());
+    assert!(app.dashboard.as_ref().unwrap().feedback.is_some());
 }
 /// Peek "No, type to add feedback" path: resolves the front
 /// permission with the `RejectOnce` option and attaches the typed
@@ -4915,9 +4911,12 @@ fn dashboard_question_answer_refuses_subagent_rows() {
     let toast = app
         .dashboard
         .as_ref()
-        .and_then(|d| d.error_toast.clone())
-        .expect("the refusal should surface an error toast");
-    assert!(toast.contains("Open the subagent"), "got: {toast}");
+        .and_then(|d| d.feedback.as_ref())
+        .expect("the refusal should surface error feedback");
+    assert!(
+        toast.message.contains("Open the subagent"),
+        "got: {toast:?}"
+    );
 }
 /// The peek panel auto-opens when a row is selected (replacing the
 /// new-session input) and closes when the selection clears (e.g. the

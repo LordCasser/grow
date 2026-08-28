@@ -1398,6 +1398,10 @@ impl From<FinishReason> for StopReason {
             FinishReason::Length => StopReason::Length,
             FinishReason::ToolCalls | FinishReason::FunctionCall => StopReason::ToolCalls,
             FinishReason::ContentFilter => StopReason::ContentFilter,
+            // OpenAI-compatible providers may extend the wire value set. The
+            // Chat Completions adapter preserves that value separately and
+            // upgrades this to ToolCalls after assembling any calls.
+            FinishReason::Unknown(_) => StopReason::Stop,
         }
     }
 }
@@ -1496,7 +1500,9 @@ pub struct ConversationResponse {
     /// not carry one (OAI Chat Completions / Responses).
     pub message_id: Option<String>,
     /// Verbatim wire stop reason before it collapses into [`StopReason`]
-    /// (e.g. `end_turn`, `tool_use`, `pause_turn`); `None` when unreported.
+    /// (e.g. `end_turn`, `tool_use`, `pause_turn`). Chat Completions records
+    /// provider extensions here when they require normalization; known OpenAI
+    /// reasons remain omitted. `None` when unreported.
     pub raw_stop_reason: Option<String>,
     /// The provider's matched stop sequence (Messages API
     /// `message_delta.stop_sequence`), present only when the model stopped on a
@@ -7577,6 +7583,10 @@ mod tests {
         assert_eq!(
             StopReason::from(FinishReason::ContentFilter),
             StopReason::ContentFilter
+        );
+        assert_eq!(
+            StopReason::from(FinishReason::Unknown("unexpected_state".into())),
+            StopReason::Stop
         );
     }
 

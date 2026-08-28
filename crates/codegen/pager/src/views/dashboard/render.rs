@@ -17,6 +17,7 @@ use super::state::{
 use crate::app::agent_view::AgentView;
 use crate::app::session::AgentId;
 use crate::render::line_utils::{truncate_line, truncate_str};
+use crate::scrollback::blocks::UiFeedback;
 use crate::theme::Theme;
 use crate::util::format_time_ago;
 
@@ -2835,25 +2836,16 @@ fn render_empty_state(buf: &mut Buffer, area: Rect, theme: &Theme, loading: bool
 /// agent` (`None`) and `Reply to {label}` (`Some`) so the
 /// chrome reflects what Enter will do: dispatch a new session vs.
 /// enqueue / send a prompt to the currently-selected agent.
-/// Paint a short right-aligned feedback badge onto the dispatch box's
-/// **top border** (e.g. `✗ Session no longer exists`, `✓ Theme: Grow
-/// Day`), in a neutral accent colour. The message is painted VERBATIM:
-/// it already carries its own status glyph — errors are built via
-/// [`DashboardState::set_error_toast`] (`✗`), while successes / info
-/// arrive from the `show_toast` builders (`✓` / `⚠`). The badge
-/// therefore neither prepends a glyph nor forces a colour; doing so
-/// previously produced a doubled `✗ ✓ …` and painted non-errors (like
-/// "Session closed") red. The glyph, not the colour, conveys severity —
-/// mirroring the per-agent toast in [`crate::app::agent_view`]. The
-/// badge ends one column before the right corner (`╮`) and is truncated
-/// to fit. No-op when there's no toast or the box is too narrow.
+/// Paint the latest typed dashboard feedback onto the dispatch box's top
+/// border. Tone owns colour; message text stays free of presentation glyphs.
+/// The badge ends one column before the right corner and is truncated to fit.
 fn paint_dispatch_feedback_badge(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
-    error_toast: Option<&str>,
+    feedback: Option<&UiFeedback>,
 ) {
-    let Some(err) = error_toast else {
+    let Some(feedback) = feedback else {
         return;
     };
     // Leave room for the two rounded corners plus a little breathing
@@ -2863,10 +2855,7 @@ fn paint_dispatch_feedback_badge(
     if max_w < 6 {
         return;
     }
-    // Leading/trailing spaces pad the chip away from the surrounding
-    // border glyphs. No glyph is prepended — the message already owns
-    // one (see the doc comment).
-    let label = format!(" {err} ");
+    let label = format!(" {} ", feedback.message);
     let trunc = truncate_str(&label, max_w as usize);
     let label_w = UnicodeWidthStr::width(trunc.as_str()) as u16;
     // Right-align so the badge ends one column before the `╮` corner.
@@ -2876,7 +2865,7 @@ fn paint_dispatch_feedback_badge(
         area.y,
         &trunc,
         Style::default()
-            .fg(theme.accent_user)
+            .fg(feedback.tone.color(theme))
             .bg(theme.bg_base)
             .add_modifier(Modifier::BOLD),
     );
@@ -3003,7 +2992,7 @@ fn render_dispatch(
         // Surface dispatch-validation feedback (e.g. "Too short") as a
         // right-aligned badge on the box's top border so it stays
         // visible even while the rejected text is still in the input.
-        paint_dispatch_feedback_badge(buf, area, theme, state.error_toast.as_deref());
+        paint_dispatch_feedback_badge(buf, area, theme, state.feedback.as_ref());
         // Bottom-right model + mode indicator, painted through the shared
         // prompt info-line renderer so its style, spacing, and position match
         // the chat prompt's info line exactly. Always shows the model the next
@@ -6192,7 +6181,7 @@ mod tests {
         // Unfocus the input so the placeholder assertion below stays
         // meaningful (placeholder only paints while unfocused).
         state.list_focused = true;
-        state.error_toast = Some("Too short — describe the task (4+ chars)".to_string());
+        state.set_error("Too short — describe the task (4+ chars)");
         let _ = render_dispatch(&mut buf, Rect::new(0, 0, 80, 3), &theme, &mut state, None);
 
         // Toast text lands on the TOP border row (y == 0).
@@ -6216,37 +6205,32 @@ mod tests {
         );
     }
 
-    /// The badge paints the toast VERBATIM in the neutral accent colour:
-    /// a message that already carries its own glyph (as the `show_toast`
-    /// builders produce, e.g. `✓ Theme: …`) keeps that single glyph — no
-    /// `✗` is prepended (regression guard for the `✗ ✓ …` doubling) — and
-    /// it is NOT painted in the error red.
+    /// The badge paints plain message text using the typed feedback tone.
     #[test]
-    fn feedback_badge_renders_verbatim_in_neutral_color() {
+    fn feedback_badge_renders_success_tone_without_glyph_inference() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        let check = crate::glyphs::check_mark();
-        state.error_toast = Some(format!("{check} Theme: Grow Day"));
+        state.set_success("Theme: Grow Day");
         let _ = render_dispatch(&mut buf, Rect::new(0, 0, 80, 3), &theme, &mut state, None);
 
         let top_row: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(
-            top_row.contains(&format!("{check} Theme: Grow Day")),
-            "badge must paint the message verbatim, got: {top_row:?}",
+            top_row.contains("Theme: Grow Day"),
+            "badge must paint the plain message, got: {top_row:?}",
         );
         assert!(
             !top_row.contains(crate::glyphs::ballot_x()),
-            "badge must not prepend a ✗ to a message that already has a glyph, got: {top_row:?}",
+            "badge must not infer presentation glyphs from the message, got: {top_row:?}",
         );
-        // Neutral colour — accent_user, never the error red.
+        // Typed success colour — never the error red or neutral accent.
         let cx = (0..80)
-            .find(|&x| buf[(x, 0)].symbol() == check)
-            .expect("the ✓ glyph must be painted");
+            .find(|&x| buf[(x, 0)].symbol() == "T")
+            .expect("the message must be painted");
         assert_eq!(
             buf[(cx, 0)].fg,
-            theme.accent_user,
-            "badge must paint in the neutral accent_user colour (not the error red)",
+            theme.accent_success,
+            "badge must paint in the success colour",
         );
     }
 

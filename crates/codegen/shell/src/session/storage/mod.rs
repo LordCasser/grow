@@ -3401,6 +3401,24 @@ fn open_replay_updates_reader(
     )?))
 }
 
+fn open_replay_updates_reader_in(
+    directory: &ContainedDirectory,
+) -> std::io::Result<Option<CommittedJsonlLines>> {
+    let file = match directory
+        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(CommittedJsonlLines::from_open_file_at(
+        file,
+        directory.display_path().join(UPDATES_FILE),
+        "session updates ledger",
+        0,
+    )?))
+}
+
 /// Whether a replay stream forwarded any update. Gates the caller's
 /// post-replay memory purge: `Empty` means nothing was reclaimable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3461,6 +3479,40 @@ pub fn stream_replay_grow_notifications_at<
     mut f: F,
 ) -> std::io::Result<ReplayEmission> {
     let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
+        return Ok(ReplayEmission::Empty);
+    };
+    let lines = read_committed_jsonl_text_lines_from_reader(reader)?;
+    let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
+    let mut emitted = false;
+    for line in live {
+        match SessionUpdateEnvelope::from_str(line) {
+            Ok(SessionUpdate::Grow(notification)) => {
+                emitted = true;
+                f(*notification);
+            }
+            Ok(SessionUpdate::Acp(_)) => {}
+            Err(error) => {
+                tracing::debug!(?error, "skipping unparseable Grow replay line");
+            }
+        }
+    }
+    Ok(if emitted {
+        ReplayEmission::Emitted
+    } else {
+        ReplayEmission::Empty
+    })
+}
+
+/// Fold Grow-only durable facts while constructing a SessionActor from its
+/// already pinned directory. This avoids ambient path resolution and lets
+/// actor state recover protocol receipts before accepting reconnect traffic.
+pub(crate) fn stream_replay_grow_notifications_in<
+    F: FnMut(crate::extensions::notification::SessionNotification),
+>(
+    directory: &ContainedDirectory,
+    mut f: F,
+) -> std::io::Result<ReplayEmission> {
+    let Some(reader) = open_replay_updates_reader_in(directory)? else {
         return Ok(ReplayEmission::Empty);
     };
     let lines = read_committed_jsonl_text_lines_from_reader(reader)?;

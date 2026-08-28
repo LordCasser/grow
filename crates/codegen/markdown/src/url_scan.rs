@@ -69,6 +69,7 @@ pub(crate) fn detect_plain_urls_with_offset(
                         column_range: col_start..col_end,
                         url,
                         id: current_id,
+                        provenance: crate::HyperlinkProvenance::Inferred,
                     });
                     current_id += 1;
                 }

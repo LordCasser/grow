@@ -1,6 +1,339 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use futures_util::FutureExt as _;
+
+/// A user-facing desired-state request is not complete until its immutable
+/// terminal UI projection is durable. Keeping the responder beside the
+/// application result prevents an RPC success/error from overtaking that
+/// projection and becoming unrecoverable after a process crash.
+enum PendingControlSettlement {
+    Sampling {
+        respond_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        >,
+        result: Result<acp::ModelId, acp::Error>,
+        intent: Option<crate::session::ControlIntent>,
+    },
+    Agent {
+        respond_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<()>, acp::Error>,
+        >,
+        result: Result<bool, acp::Error>,
+        intent: Option<crate::session::ControlIntent>,
+    },
+}
+
+impl PendingControlSettlement {
+    fn settle_fatal(self) {
+        match self {
+            Self::Sampling {
+                respond_to, result, ..
+            } => {
+                let _ =
+                    respond_to
+                        .send(result.map(|model_id| {
+                            crate::session::DesiredStateOutcome::Applied(model_id)
+                        }));
+            }
+            Self::Agent {
+                respond_to, result, ..
+            } => {
+                let _ = respond_to
+                    .send(result.map(|_| crate::session::DesiredStateOutcome::Applied(())));
+            }
+        }
+    }
+
+    fn control_intent(
+        &self,
+    ) -> (
+        crate::extensions::notification::ControlDomain,
+        Option<&crate::session::ControlIntent>,
+    ) {
+        match self {
+            Self::Sampling { intent, .. } => (
+                crate::extensions::notification::ControlDomain::Sampling,
+                intent.as_ref(),
+            ),
+            Self::Agent { intent, .. } => (
+                crate::extensions::notification::ControlDomain::Agent,
+                intent.as_ref(),
+            ),
+        }
+    }
+
+    fn terminal_result(&self) -> Result<(), String> {
+        match self {
+            Self::Sampling { result, .. } => {
+                result.as_ref().map(|_| ()).map_err(ToString::to_string)
+            }
+            Self::Agent { result, .. } => result.as_ref().map(|_| ()).map_err(ToString::to_string),
+        }
+    }
+
+    fn settle(self, terminal_append: Result<(), crate::session::persistence::DurableAppendError>) {
+        let terminal_error = terminal_append.err().map(|error| {
+            acp::Error::internal_error().data(format!(
+                "control state changed, but its terminal UI event was not durably recorded: {error}"
+            ))
+        });
+        match self {
+            Self::Sampling {
+                respond_to, result, ..
+            } => {
+                let response = if let Some(error) = terminal_error {
+                    Err(error)
+                } else {
+                    result
+                        .map(|model_id| crate::session::DesiredStateOutcome::Applied(model_id))
+                        .map_err(crate::session::mark_control_terminal_published)
+                };
+                let _ = respond_to.send(response);
+            }
+            Self::Agent {
+                respond_to, result, ..
+            } => {
+                let response = if let Some(error) = terminal_error {
+                    Err(error)
+                } else {
+                    result
+                        .map(|_| crate::session::DesiredStateOutcome::Applied(()))
+                        .map_err(crate::session::mark_control_terminal_published)
+                };
+                let _ = respond_to.send(response);
+            }
+        }
+    }
+}
+
 impl SessionActor {
+    fn current_control_target(
+        &self,
+        domain: crate::extensions::notification::ControlDomain,
+    ) -> crate::extensions::notification::ControlTarget {
+        use crate::extensions::notification::ControlTarget;
+        match domain {
+            crate::extensions::notification::ControlDomain::Sampling => {
+                let route = self.model_route.snapshot();
+                ControlTarget::Sampling {
+                    model_id: route.model_id.0.to_string(),
+                    reasoning_effort: route
+                        .sampling_config
+                        .reasoning_effort
+                        .map(|effort| effort.to_string()),
+                }
+            }
+            crate::extensions::notification::ControlDomain::Agent => ControlTarget::Agent {
+                agent_name: self.agent.borrow().definition().selector_identity(),
+            },
+            crate::extensions::notification::ControlDomain::Behavior => ControlTarget::Behavior {
+                behavior_id: self.behavior.lock().behavior().as_id().to_owned(),
+            },
+        }
+    }
+
+    pub(super) async fn publish_control_projection(
+        &self,
+        projection: &StepControlProjection,
+        phase: crate::extensions::notification::ControlPhase,
+        message: Option<String>,
+        durable: bool,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        let domain = projection.target.domain();
+        let update = GrowSessionUpdate::ControlStateUpdate(
+            crate::extensions::notification::ControlStateUpdate {
+                epoch: self.control_epoch.clone(),
+                domain,
+                revision: projection.revision,
+                intent: projection.intent.clone(),
+                snapshot: false,
+                receipt_only: false,
+                phase,
+                current: self.current_control_target(domain),
+                desired: Some(projection.target.clone()),
+                message,
+            },
+        );
+        if durable {
+            self.send_grow_passive_notification(update.clone(), update)
+                .await
+        } else {
+            self.send_transient_grow_notification(update).await;
+            Ok(())
+        }
+    }
+
+    pub(super) async fn recover_missing_terminal_projection(
+        &self,
+        domain: crate::extensions::notification::ControlDomain,
+        intent: &crate::session::ControlIntent,
+        terminal: &ControlIntentTerminal,
+        revision: u64,
+    ) -> Result<(), acp::Error> {
+        if terminal.ui_terminal_durable {
+            return Ok(());
+        }
+        let message = terminal.message.clone().or_else(|| {
+            (terminal.phase == crate::extensions::notification::ControlPhase::Applied)
+                .then(|| Self::control_terminal_message(&terminal.target, &Ok(())))
+        });
+        let update = GrowSessionUpdate::ControlStateUpdate(
+            crate::extensions::notification::ControlStateUpdate {
+                epoch: self.control_epoch.clone(),
+                domain,
+                revision,
+                intent: Some(intent.clone()),
+                snapshot: false,
+                receipt_only: true,
+                phase: terminal.phase,
+                current: self.current_control_target(domain),
+                desired: Some(terminal.target.clone()),
+                message,
+            },
+        );
+        self.send_grow_passive_notification(update.clone(), update)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "the applied control was recovered, but its terminal UI event could not be repaired: {error}"
+                ))
+            })?;
+        self.state
+            .lock()
+            .await
+            .mark_control_terminal_ui_durable(domain, intent);
+        Ok(())
+    }
+
+    pub(super) fn control_terminal_message(
+        target: &crate::extensions::notification::ControlTarget,
+        result: &Result<(), String>,
+    ) -> String {
+        use crate::extensions::notification::ControlTarget;
+        let label = match target {
+            ControlTarget::Sampling {
+                model_id,
+                reasoning_effort,
+            } => match reasoning_effort {
+                Some(effort) => format!("Sampling switched to {model_id} ({effort})"),
+                None => format!("Sampling switched to {model_id}"),
+            },
+            ControlTarget::Agent { agent_name } => format!("Agent switched to {agent_name}"),
+            ControlTarget::Behavior { behavior_id } => {
+                format!("Behavior switched to {behavior_id}")
+            }
+        };
+        match result {
+            Ok(()) => label,
+            Err(error) => format!("{label} failed: {error}"),
+        }
+    }
+
+    /// Re-publish the current desired-state projection after a client load or
+    /// TUI renderer restart. Pending state is reconstructed from actor state,
+    /// never from Pager memory or replayed transient rows.
+    pub(super) async fn publish_control_state_snapshot(&self) {
+        use crate::extensions::notification::{ControlDomain, ControlPhase, ControlStateUpdate};
+        let snapshots = {
+            let admission = self.state.lock().await;
+            [ControlDomain::Sampling, ControlDomain::Agent]
+                .into_iter()
+                .map(|domain| {
+                    let pending = admission.pending_step_controls.domain_projection(domain);
+                    let applying = admission
+                        .applying_step_control
+                        .as_ref()
+                        .filter(|projection| projection.target.domain() == domain)
+                        .cloned();
+                    let (projection, phase) = match (pending, applying) {
+                        (Some(pending), Some(applying))
+                            if applying.revision >= pending.revision =>
+                        {
+                            (Some(applying), ControlPhase::Applying)
+                        }
+                        (Some(pending), _) => (Some(pending), ControlPhase::Pending),
+                        (None, Some(applying)) => (Some(applying), ControlPhase::Applying),
+                        (None, None) => (None, ControlPhase::Applied),
+                    };
+                    (
+                        domain,
+                        projection
+                            .as_ref()
+                            .map_or(admission.pending_step_controls.revision(domain), |p| {
+                                p.revision
+                            }),
+                        phase,
+                        projection,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (domain, revision, phase, projection) in snapshots {
+            self.send_transient_grow_notification(GrowSessionUpdate::ControlStateUpdate(
+                ControlStateUpdate {
+                    epoch: self.control_epoch.clone(),
+                    domain,
+                    revision,
+                    intent: projection
+                        .as_ref()
+                        .and_then(|projection| projection.intent.clone()),
+                    snapshot: true,
+                    receipt_only: false,
+                    phase,
+                    current: self.current_control_target(domain),
+                    desired: projection.map(|projection| projection.target),
+                    message: None,
+                },
+            ))
+            .await;
+        }
+        let (behavior_revision, behavior_phase, behavior_projection) =
+            {
+                let admission = self.state.lock().await;
+                let pending = admission.pending_behavior_control.as_ref().map(|pending| {
+                    StepControlProjection {
+                        revision: pending.revision,
+                        target: crate::extensions::notification::ControlTarget::Behavior {
+                            behavior_id: pending.session_mode.0.to_string(),
+                        },
+                        intent: pending.intent.clone(),
+                    }
+                });
+                let applying = admission.applying_behavior_control.clone();
+                let (projection, phase) = match (pending, applying) {
+                    (Some(pending), Some(applying)) if applying.revision >= pending.revision => {
+                        (Some(applying), ControlPhase::Applying)
+                    }
+                    (Some(pending), _) => (Some(pending), ControlPhase::Pending),
+                    (None, Some(applying)) => (Some(applying), ControlPhase::Applying),
+                    (None, None) => (None, ControlPhase::Applied),
+                };
+                (
+                    projection
+                        .as_ref()
+                        .map_or(admission.behavior_control_revision, |p| p.revision),
+                    phase,
+                    projection,
+                )
+            };
+        self.send_transient_grow_notification(GrowSessionUpdate::ControlStateUpdate(
+            ControlStateUpdate {
+                epoch: self.control_epoch.clone(),
+                domain: ControlDomain::Behavior,
+                revision: behavior_revision,
+                intent: behavior_projection
+                    .as_ref()
+                    .and_then(|projection| projection.intent.clone()),
+                snapshot: true,
+                receipt_only: false,
+                phase: behavior_phase,
+                current: self.current_control_target(ControlDomain::Behavior),
+                desired: behavior_projection.map(|projection| projection.target),
+                message: None,
+            },
+        ))
+        .await;
+    }
     #[cfg(test)]
     pub(super) fn selection_route_for_test(
         model_id: acp::ModelId,
@@ -77,6 +410,7 @@ impl SessionActor {
         model_id: &acp::ModelId,
         sampling_config: &sampler::SamplerConfig,
         reason: &str,
+        control_intent: Option<&crate::session::ControlIntent>,
     ) -> std::io::Result<()> {
         let previous_route = self.model_route.snapshot();
         let previous_model_id = previous_route.model_id;
@@ -95,7 +429,8 @@ impl SessionActor {
             &sampling_config.base_url,
             &sampling_config.query_params,
         );
-        if previous_model_id != *model_id
+        if control_intent.is_some()
+            || previous_model_id != *model_id
             || previous_reasoning_effort != sampling_config.reasoning_effort
             || previous_provider_model != sampling_config.model
             || previous_transport_key != transport_key
@@ -111,6 +446,7 @@ impl SessionActor {
                     &previous_transport_key,
                     &transport_key,
                     reason,
+                    control_intent,
                 ))
                 .await
                 .map_err(std::io::Error::other)?;
@@ -151,12 +487,13 @@ impl SessionActor {
                 self.agent_profile.subagent_filter(),
             )
             .map_err(|error| acp::Error::invalid_request().data(error))?;
-        self.commit_model_change(&model_id, &sampling_config, "catalog_reload")
+        self.commit_model_change(&model_id, &sampling_config, "catalog_reload", None)
             .await
             .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "catalog reload model transition was not durable: {error}"
-                ))
+                crate::session::commands::fatal_turn_boundary_error(
+                    "catalog reload model control",
+                    format!("catalog reload model transition was not durable: {error}"),
+                )
             })?;
         // These actor-local knobs participate in the same mailbox snapshot as
         // the provider route. Setting them before the first await prevents a
@@ -266,39 +603,54 @@ impl SessionActor {
     /// model, Agent or Goal selection is an ordering barrier in the unified
     /// step-control queue.
     pub(super) async fn admit_model_catalog_reload(
-        &self,
+        self: &std::sync::Arc<Self>,
         catalog: std::sync::Arc<crate::agent::models::PublishedModelCatalog>,
         responds_to: tokio::sync::oneshot::Sender<Result<(), acp::Error>>,
     ) {
+        let gate = self.step_control_gate.lock().await;
         let mut admission = self.state.lock().await;
-        if !admission.foreground.is_idle()
-            && let Some(PendingStepControl::ModelReload(pending)) =
-                admission.pending_step_controls.back_mut()
-        {
-            pending.catalog = catalog;
-            pending.responders.push(responds_to);
+        if !admission.termination.is_open() {
+            let _ = responds_to.send(Err(
+                acp::Error::internal_error().data("session is shutting down")
+            ));
             return;
         }
         admission
             .pending_step_controls
-            .push_back(PendingStepControl::ModelReload(PendingModelReload {
-                catalog,
-                responders: vec![responds_to],
-            }));
+            .admit_model_reload(catalog, responds_to);
         let should_drain = admission.foreground.is_idle();
         if should_drain {
             admission.foreground = ForegroundState::ApplyingControl;
         }
         drop(admission);
+        drop(gate);
         if should_drain {
-            self.drain_claimed_pending_step_controls().await;
+            self.spawn_claimed_pending_step_control_drain();
         }
     }
 
-    /// Apply every accepted selection before any idle consumer can admit the
-    /// next prompt, compaction, notification, or Goal continuation.
-    pub(super) async fn apply_pending_step_controls_if_idle(&self) {
-        self.drain_pending_step_controls().await;
+    /// Claim and asynchronously apply every accepted selection before any
+    /// idle consumer can admit the next prompt, compaction, notification, or
+    /// Goal continuation. The worker owns `ApplyingControl`, so the actor
+    /// mailbox remains free to accept a newer desired revision while an Agent
+    /// rebuild or MCP/workspace preparation is still in flight.
+    pub(super) async fn apply_pending_step_controls_if_idle(self: &std::sync::Arc<Self>) {
+        let should_drain = {
+            let _gate = self.step_control_gate.lock().await;
+            let mut admission = self.state.lock().await;
+            if !admission.termination.is_open()
+                || !admission.foreground.is_idle()
+                || admission.pending_step_controls.is_empty()
+            {
+                false
+            } else {
+                admission.foreground = ForegroundState::ApplyingControl;
+                true
+            }
+        };
+        if should_drain {
+            self.spawn_claimed_pending_step_control_drain();
+        }
     }
 
     async fn apply_user_model_selection(
@@ -306,7 +658,8 @@ impl SessionActor {
         workflow_admission: &mut crate::session::workflow::manager::WorkflowManager,
         route: crate::agent::models::PublishedSessionRoute,
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
-    ) -> Result<acp::ModelId, acp::Error> {
+        control_intent: Option<&crate::session::ControlIntent>,
+    ) -> Result<(acp::ModelId, bool), acp::Error> {
         let crate::agent::models::PublishedSessionRoute {
             model_id,
             sampling_config,
@@ -315,37 +668,79 @@ impl SessionActor {
             max_retries,
             auto_compact_threshold_percent,
         } = route;
-        let mut workflow_default_sampler = sampling_config.clone();
-        workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout.as_secs());
-        workflow_default_sampler.max_retries = Some(max_retries);
-        workflow_default_sampler.doom_loop_recovery = self.doom_loop_recovery;
-        let alpha_test_key = self
-            .chat_state_handle
-            .get_credentials()
-            .await
-            .alpha_test_key;
-        let next_run_route = if let Some(route) = &self.startup_hints.workflow_runtime_route {
-            route.clone()
-        } else {
-            let catalog = catalog.ok_or_else(|| {
-                acp::Error::invalid_request()
-                    .data("ordinary model selection is missing its catalog authority")
-            })?;
-            crate::session::workflow::tracker::WorkflowRuntimeRoute::capture_from_catalog(
-                model_id.0.to_string(),
-                workflow_default_sampler,
-                catalog.as_ref(),
-                alpha_test_key,
-                self.agent_profile.subagent_filter(),
+        let previous_route = self.model_route.snapshot();
+        let previous_transport = sampling_types::model_image_input_key_from_parts(
+            &previous_route.sampling_config.model,
+            &previous_route.sampling_config.api_backend,
+            &previous_route.sampling_config.base_url,
+            &previous_route.sampling_config.query_params,
+        );
+        let next_transport = sampling_types::model_image_input_key_from_parts(
+            &sampling_config.model,
+            &sampling_config.api_backend,
+            &sampling_config.base_url,
+            &sampling_config.query_params,
+        );
+        let sampling_epoch_changed = previous_route.model_id != model_id
+            || previous_route.sampling_config.model != sampling_config.model
+            || previous_route.sampling_config.reasoning_effort != sampling_config.reasoning_effort
+            || previous_transport != next_transport;
+        // Stage every fallible derivative before publishing the authoritative
+        // ModelChanged fact. After that durable commit, live activation must
+        // be an infallible swap; returning Rejected would otherwise disagree
+        // with replay and the control receipt.
+        let next_run_route = if sampling_epoch_changed {
+            let mut workflow_default_sampler = sampling_config.clone();
+            workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout.as_secs());
+            workflow_default_sampler.max_retries = Some(max_retries);
+            workflow_default_sampler.doom_loop_recovery = self.doom_loop_recovery;
+            let alpha_test_key = self
+                .chat_state_handle
+                .get_credentials()
+                .await
+                .alpha_test_key;
+            Some(
+                if let Some(route) = &self.startup_hints.workflow_runtime_route {
+                    route.clone()
+                } else {
+                    let catalog = catalog.as_ref().ok_or_else(|| {
+                        acp::Error::invalid_request()
+                            .data("ordinary model selection is missing its catalog authority")
+                    })?;
+                    crate::session::workflow::tracker::WorkflowRuntimeRoute::capture_from_catalog(
+                        model_id.0.to_string(),
+                        workflow_default_sampler,
+                        catalog.as_ref(),
+                        alpha_test_key,
+                        self.agent_profile.subagent_filter(),
+                    )
+                    .map_err(|error| acp::Error::invalid_request().data(error))?
+                },
             )
-            .map_err(|error| acp::Error::invalid_request().data(error))?
+        } else {
+            None
         };
-        self.commit_model_change(&model_id, &sampling_config, "user_selection")
-            .await
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("model change was not durably recorded: {error}"))
-            })?;
+        self.commit_model_change(
+            &model_id,
+            &sampling_config,
+            "user_selection",
+            control_intent,
+        )
+        .await
+        .map_err(|error| {
+            crate::session::commands::fatal_turn_boundary_error(
+                "model control",
+                format!("model change was not durably recorded: {error}"),
+            )
+        })?;
+        // A desired-state request still receives its durable control receipt,
+        // but an identical Sampling epoch is not a model reload. In particular,
+        // do not replace live credentials or invalidate provider/compaction
+        // memoization merely because the client selected the current target.
+        if !sampling_epoch_changed {
+            return Ok((model_id, false));
+        }
+        let next_run_route = next_run_route.expect("changed Sampling route was staged");
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -431,42 +826,402 @@ impl SessionActor {
             ),
         )
         .await;
-        Ok(model_id)
+        Ok((model_id, sampling_epoch_changed))
     }
-    /// Admit a user model/effort selection without mutating the active step.
-    /// The response completes after the selection is durably applied at the
-    /// next step boundary (or immediately while the session is idle).
-    pub(super) async fn admit_session_model_selection(
+
+    async fn begin_sampling_intent<'a>(
         &self,
+        mut admission: tokio::sync::MutexGuard<'a, AdmissionState>,
+        gate: &mut Option<tokio::sync::MutexGuard<'_, ()>>,
+        intent: &Option<crate::session::ControlIntent>,
+        responds_to: &mut Option<
+            tokio::sync::oneshot::Sender<
+                Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            >,
+        >,
+    ) -> Option<tokio::sync::MutexGuard<'a, AdmissionState>> {
+        if !admission.termination.is_open() {
+            let _ = responds_to
+                .take()
+                .expect("Sampling responder is available")
+                .send(Err(
+                    acp::Error::internal_error().data("session is shutting down")
+                ));
+            return None;
+        }
+        match admission.admit_control_intent(
+            crate::extensions::notification::ControlDomain::Sampling,
+            intent.as_ref(),
+        ) {
+            ControlIntentAdmission::New => Some(admission),
+            ControlIntentAdmission::DuplicateInFlight => {
+                let _ = responds_to
+                    .take()
+                    .expect("Sampling responder is available")
+                    .send(Ok(crate::session::DesiredStateOutcome::InFlight));
+                None
+            }
+            ControlIntentAdmission::Older => {
+                let _ = responds_to
+                    .take()
+                    .expect("Sampling responder is available")
+                    .send(Ok(crate::session::DesiredStateOutcome::Superseded));
+                None
+            }
+            ControlIntentAdmission::ExactTerminal(terminal) => {
+                let revision = (!terminal.ui_terminal_durable).then(|| {
+                    admission
+                        .pending_step_controls
+                        .reserve_terminal_replay_revision(
+                            crate::extensions::notification::ControlDomain::Sampling,
+                        )
+                });
+                drop(admission);
+                // Terminal UI repair is derived from an already-authoritative
+                // durable receipt. It must not hold the Step admission gate
+                // across an exact append retry, or Stop/Shutdown cannot enter.
+                drop(gate.take());
+                let response =
+                    if let (Some(intent), Some(revision)) = (intent.as_ref(), revision) {
+                        self.recover_missing_terminal_projection(
+                            crate::extensions::notification::ControlDomain::Sampling,
+                            intent,
+                            &terminal,
+                            revision,
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    }
+                    .and_then(|()| match terminal.phase {
+                        crate::extensions::notification::ControlPhase::Applied => {
+                            let crate::extensions::notification::ControlTarget::Sampling {
+                                model_id,
+                                ..
+                            } = terminal.target
+                            else {
+                                return Err(acp::Error::internal_error()
+                                    .data("persisted Sampling receipt has a non-Sampling target"));
+                            };
+                            Ok(crate::session::DesiredStateOutcome::Applied(
+                                acp::ModelId::new(model_id),
+                            ))
+                        }
+                        crate::extensions::notification::ControlPhase::Rejected => Err(
+                            acp::Error::invalid_request().data(terminal.message.unwrap_or_else(
+                                || "the Sampling request was previously rejected".to_string(),
+                            )),
+                        ),
+                        crate::extensions::notification::ControlPhase::Superseded => {
+                            Ok(crate::session::DesiredStateOutcome::Superseded)
+                        }
+                        crate::extensions::notification::ControlPhase::Pending
+                        | crate::extensions::notification::ControlPhase::Applying => {
+                            Err(acp::Error::internal_error()
+                                .data("persisted Sampling receipt is not terminal"))
+                        }
+                    });
+                let _ = responds_to
+                    .take()
+                    .expect("Sampling responder is available")
+                    .send(response);
+                None
+            }
+        }
+    }
+
+    async fn finish_sampling_admission_locked(
+        self: &std::sync::Arc<Self>,
+        gate: tokio::sync::MutexGuard<'_, ()>,
+        mut admission: tokio::sync::MutexGuard<'_, AdmissionState>,
         route: crate::agent::models::PublishedSessionRoute,
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
-        responds_to: tokio::sync::oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        >,
     ) {
-        let mut admission = self.state.lock().await;
-        admission
+        let (revision, superseded) =
+            admission
+                .pending_step_controls
+                .admit_sampling(route, catalog, intent, responds_to);
+        let projection = admission
             .pending_step_controls
-            .push_back(PendingStepControl::ModelSelection(PendingModelSelection {
-                route,
-                catalog,
-                responds_to,
-            }));
+            .domain_projection(crate::extensions::notification::ControlDomain::Sampling)
+            .expect("admitted Sampling target has a projection");
+        debug_assert_eq!(projection.revision, revision);
         let should_drain = admission.foreground.is_idle();
         if should_drain {
             admission.foreground = ForegroundState::ApplyingControl;
         }
         drop(admission);
-        if should_drain {
-            self.drain_claimed_pending_step_controls().await;
+        if let Some((revision, superseded)) = superseded {
+            let projection = StepControlProjection {
+                revision,
+                target: crate::extensions::notification::ControlTarget::Sampling {
+                    model_id: superseded.route.model_id.0.to_string(),
+                    reasoning_effort: superseded
+                        .route
+                        .sampling_config
+                        .reasoning_effort
+                        .map(|effort| effort.to_string()),
+                },
+                intent: superseded.intent.clone(),
+            };
+            self.state.lock().await.mark_control_intent_terminal(
+                crate::extensions::notification::ControlDomain::Sampling,
+                superseded.intent.as_ref(),
+                ControlIntentTerminal {
+                    phase: crate::extensions::notification::ControlPhase::Superseded,
+                    target: projection.target.clone(),
+                    message: None,
+                    // Superseded desired state is intentionally UI-silent;
+                    // the new Pending projection replaces it in place.
+                    ui_terminal_durable: true,
+                },
+            );
+            let _ = superseded
+                .respond_to
+                .send(Ok(crate::session::DesiredStateOutcome::Superseded));
         }
+        let _ = self
+            .publish_control_projection(
+                &projection,
+                crate::extensions::notification::ControlPhase::Pending,
+                None,
+                false,
+            )
+            .await;
+        drop(gate);
+        if should_drain {
+            self.spawn_claimed_pending_step_control_drain();
+        }
+    }
+
+    /// Compose an effort-only request with the newest actor-owned Sampling
+    /// model. Intent admission, desired-model lookup, route resolution and
+    /// slot replacement share one step gate, so the request cannot miss the
+    /// boundary at which it was admitted.
+    pub(super) async fn admit_session_effort_patch(
+        self: &std::sync::Arc<Self>,
+        effort: sampling_types::ReasoningEffort,
+        authority: crate::session::SessionEffortAuthority,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        >,
+    ) {
+        let mut gate = Some(self.step_control_gate.lock().await);
+        let mut responds_to = Some(responds_to);
+        let Some(mut admission) = self
+            .begin_sampling_intent(
+                self.state.lock().await,
+                &mut gate,
+                &intent,
+                &mut responds_to,
+            )
+            .await
+        else {
+            return;
+        };
+        let model_id = admission
+            .pending_step_controls
+            .desired_sampling_model_id()
+            .unwrap_or_else(|| acp::ModelId::new(self.current_catalog_model_id()));
+        let resolved = match authority {
+            crate::session::SessionEffortAuthority::Catalog {
+                catalog,
+                origin_client,
+            } => {
+                let offered = catalog
+                    .model_reasoning_efforts(model_id.0.as_ref())
+                    .iter()
+                    .any(|option| option.value == effort);
+                if !offered {
+                    Err(acp::Error::invalid_params().data(format!(
+                        "model '{}' does not admit '{}' reasoning effort for this session",
+                        model_id.0, effort
+                    )))
+                } else {
+                    catalog
+                        .resolve_session_route(&model_id, Some(effort))
+                        .filter(|route| route.model_id == model_id)
+                        .map(|mut route| {
+                            route.sampling_config.origin_client = origin_client;
+                            (route, Some(catalog))
+                        })
+                        .ok_or_else(|| {
+                            acp::Error::invalid_params()
+                                .data(format!("model '{}' is not routable", model_id.0))
+                        })
+                }
+            }
+            crate::session::SessionEffortAuthority::Workflow {
+                route,
+                models_manager,
+            } => {
+                if !route.supports_reasoning_effort(model_id.0.as_ref(), effort) {
+                    Err(acp::Error::invalid_params().data(format!(
+                        "model '{}' does not admit '{}' reasoning effort for this Workflow Run",
+                        model_id.0, effort
+                    )))
+                } else {
+                    route
+                        .session_route_for(model_id.0.as_ref(), &models_manager, None)
+                        .map(|mut resolved| {
+                            resolved.sampling_config.reasoning_effort = Some(effort);
+                            (resolved, None)
+                        })
+                        .map_err(|error| acp::Error::invalid_params().data(error))
+                }
+            }
+        };
+        match resolved {
+            Ok((route, catalog)) => {
+                self.finish_sampling_admission_locked(
+                    gate.take().expect("Sampling admission gate is available"),
+                    admission,
+                    route,
+                    catalog,
+                    intent,
+                    responds_to.take().expect("Sampling responder is available"),
+                )
+                .await;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                admission.mark_control_intent_terminal(
+                    crate::extensions::notification::ControlDomain::Sampling,
+                    intent.as_ref(),
+                    ControlIntentTerminal {
+                        phase: crate::extensions::notification::ControlPhase::Rejected,
+                        target: crate::extensions::notification::ControlTarget::Sampling {
+                            model_id: model_id.0.to_string(),
+                            reasoning_effort: Some(effort.to_string()),
+                        },
+                        message: Some(message),
+                        ui_terminal_durable: false,
+                    },
+                );
+                let _ = responds_to
+                    .take()
+                    .expect("Sampling responder is available")
+                    .send(Err(error));
+            }
+        }
+    }
+
+    /// Admit a user model/effort selection without mutating the active step.
+    /// The response completes after the selection is durably applied at the
+    /// next step boundary (or immediately while the session is idle).
+    pub(super) async fn admit_session_model_selection(
+        self: &std::sync::Arc<Self>,
+        route: crate::agent::models::PublishedSessionRoute,
+        catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        >,
+    ) {
+        let mut gate = Some(self.step_control_gate.lock().await);
+        let mut responds_to = Some(responds_to);
+        let Some(admission) = self
+            .begin_sampling_intent(
+                self.state.lock().await,
+                &mut gate,
+                &intent,
+                &mut responds_to,
+            )
+            .await
+        else {
+            return;
+        };
+        self.finish_sampling_admission_locked(
+            gate.take().expect("Sampling admission gate is available"),
+            admission,
+            route,
+            catalog,
+            intent,
+            responds_to.take().expect("Sampling responder is available"),
+        )
+        .await;
     }
 
     /// Admit an Agent profile selection under the same step boundary as
     /// model/effort changes.
     pub(super) async fn admit_agent_selection(
-        &self,
+        self: &std::sync::Arc<Self>,
         definition: agent::AgentDefinition,
-        responds_to: tokio::sync::oneshot::Sender<Result<(), acp::Error>>,
+        intent: Option<crate::session::ControlIntent>,
+        responds_to: tokio::sync::oneshot::Sender<
+            Result<crate::session::DesiredStateOutcome<()>, acp::Error>,
+        >,
     ) {
+        let gate = self.step_control_gate.lock().await;
+        let mut admission = self.state.lock().await;
+        if !admission.termination.is_open() {
+            let _ = responds_to.send(Err(
+                acp::Error::internal_error().data("session is shutting down")
+            ));
+            return;
+        }
+        match admission.admit_control_intent(
+            crate::extensions::notification::ControlDomain::Agent,
+            intent.as_ref(),
+        ) {
+            ControlIntentAdmission::New => {}
+            ControlIntentAdmission::DuplicateInFlight => {
+                let _ = responds_to.send(Ok(crate::session::DesiredStateOutcome::InFlight));
+                return;
+            }
+            ControlIntentAdmission::Older => {
+                let _ = responds_to.send(Ok(crate::session::DesiredStateOutcome::Superseded));
+                return;
+            }
+            ControlIntentAdmission::ExactTerminal(terminal) => {
+                let revision = (!terminal.ui_terminal_durable).then(|| {
+                    admission
+                        .pending_step_controls
+                        .reserve_terminal_replay_revision(
+                            crate::extensions::notification::ControlDomain::Agent,
+                        )
+                });
+                drop(admission);
+                drop(gate);
+                let response =
+                    if let (Some(intent), Some(revision)) = (intent.as_ref(), revision) {
+                        self.recover_missing_terminal_projection(
+                            crate::extensions::notification::ControlDomain::Agent,
+                            intent,
+                            &terminal,
+                            revision,
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    }
+                    .and_then(|()| match terminal.phase {
+                        crate::extensions::notification::ControlPhase::Applied => {
+                            Ok(crate::session::DesiredStateOutcome::Applied(()))
+                        }
+                        crate::extensions::notification::ControlPhase::Rejected => Err(
+                            acp::Error::invalid_request().data(terminal.message.unwrap_or_else(
+                                || "the Agent request was previously rejected".to_string(),
+                            )),
+                        ),
+                        crate::extensions::notification::ControlPhase::Superseded => {
+                            Ok(crate::session::DesiredStateOutcome::Superseded)
+                        }
+                        crate::extensions::notification::ControlPhase::Pending
+                        | crate::extensions::notification::ControlPhase::Applying => {
+                            Err(acp::Error::internal_error()
+                                .data("persisted Agent receipt is not terminal"))
+                        }
+                    });
+                let _ = responds_to.send(response);
+                return;
+            }
+        }
         let preparation =
             if !self.startup_hints.is_subagent && !definition.is_primary_agent_eligible() {
                 let issues = definition
@@ -475,10 +1230,13 @@ impl SessionActor {
                     .map(|issue| issue.message())
                     .collect::<Vec<_>>()
                     .join(", ");
-                AgentPreparation::ready(Err(acp::Error::invalid_request().data(format!(
-                    "Agent `{}` cannot own a primary session: {issues}",
-                    definition.selector_identity()
-                ))))
+                AgentPreparation::ready(
+                    definition.selector_identity(),
+                    Err(acp::Error::invalid_request().data(format!(
+                        "Agent `{}` cannot own a primary session: {issues}",
+                        definition.selector_identity()
+                    ))),
+                )
             } else {
                 AgentPreparation::start(
                     self.rebuild_spec.clone(),
@@ -486,20 +1244,55 @@ impl SessionActor {
                     self.session_id_string(),
                 )
             };
-        let mut admission = self.state.lock().await;
-        admission
+        let (revision, superseded) =
+            admission
+                .pending_step_controls
+                .admit_agent(preparation, intent, responds_to);
+        let projection = admission
             .pending_step_controls
-            .push_back(PendingStepControl::AgentSelection(PendingAgentSelection {
-                preparation,
-                responds_to,
-            }));
+            .domain_projection(crate::extensions::notification::ControlDomain::Agent)
+            .expect("admitted Agent target has a projection");
+        debug_assert_eq!(projection.revision, revision);
         let should_drain = admission.foreground.is_idle();
         if should_drain {
             admission.foreground = ForegroundState::ApplyingControl;
         }
         drop(admission);
+        if let Some((revision, superseded)) = superseded {
+            let projection = StepControlProjection {
+                revision,
+                target: crate::extensions::notification::ControlTarget::Agent {
+                    agent_name: superseded.preparation.target_name().to_owned(),
+                },
+                intent: superseded.intent.clone(),
+            };
+            self.state.lock().await.mark_control_intent_terminal(
+                crate::extensions::notification::ControlDomain::Agent,
+                superseded.intent.as_ref(),
+                ControlIntentTerminal {
+                    phase: crate::extensions::notification::ControlPhase::Superseded,
+                    target: projection.target.clone(),
+                    message: None,
+                    // Superseded desired state is intentionally UI-silent;
+                    // the new Pending projection replaces it in place.
+                    ui_terminal_durable: true,
+                },
+            );
+            let _ = superseded
+                .respond_to
+                .send(Ok(crate::session::DesiredStateOutcome::Superseded));
+        }
+        let _ = self
+            .publish_control_projection(
+                &projection,
+                crate::extensions::notification::ControlPhase::Pending,
+                None,
+                false,
+            )
+            .await;
+        drop(gate);
         if should_drain {
-            self.drain_claimed_pending_step_controls().await;
+            self.spawn_claimed_pending_step_control_drain();
         }
     }
 
@@ -514,7 +1307,11 @@ impl SessionActor {
         goal_id: String,
         mutation: PendingGoalDefinitionMutation,
     ) -> Result<Option<bool>, String> {
+        let gate = self.step_control_gate.lock().await;
         let mut admission = self.state.lock().await;
+        if !admission.termination.is_open() {
+            return Err("session is shutting down".to_string());
+        }
         let should_drain = admission.foreground.is_idle();
         let (responds_to, applied) = if should_drain {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -524,17 +1321,16 @@ impl SessionActor {
         };
         admission
             .pending_step_controls
-            .push_back(PendingStepControl::GoalDefinition(
-                PendingGoalDefinitionControl {
-                    goal_id,
-                    mutation,
-                    responds_to,
-                },
-            ));
+            .admit_goal_definition(PendingGoalDefinitionControl {
+                goal_id,
+                mutation,
+                responds_to,
+            });
         if should_drain {
             admission.foreground = ForegroundState::ApplyingControl;
         }
         drop(admission);
+        drop(gate);
         if should_drain {
             self.drain_claimed_pending_step_controls().await;
         }
@@ -547,37 +1343,59 @@ impl SessionActor {
         }
     }
 
-    /// Apply every model/Agent/Goal control accepted during the completed step
-    /// in FIFO order. The foreground remains owned by the same turn, so
+    /// Apply the surviving Sampling/Agent targets and ordered lifecycle
+    /// controls accepted during the completed step. The foreground remains
+    /// owned by the same turn, so
     /// prompts, compaction, notification drains and Goal continuations stay
     /// fenced.
     /// Cancellation serializes on `step_control_gate` and therefore cannot
     /// tear a durable transition away from its live-state swap.
-    pub(super) async fn apply_pending_controls_at_step_boundary(&self) -> (bool, bool, bool) {
+    pub(super) async fn apply_pending_controls_at_step_boundary(
+        &self,
+        mut boundary: StepControlBoundary,
+    ) -> (bool, bool, bool) {
         let mut model_changed = false;
         let mut agent_changed = false;
         let mut behavior_changed = false;
         loop {
-            let preparation = {
-                let admission = self.state.lock().await;
+            let (key, preparation, projection) = {
+                let mut admission = self.state.lock().await;
                 if !matches!(&admission.foreground, ForegroundState::RegularTurn(_)) {
                     return (model_changed, agent_changed, behavior_changed);
                 }
-                match admission.pending_step_controls.front() {
-                    Some(PendingStepControl::AgentSelection(pending)) => {
-                        Some(std::rc::Rc::clone(&pending.preparation))
-                    }
-                    _ => None,
-                }
+                let Some(key) = admission
+                    .pending_step_controls
+                    .next_key_at_boundary(boundary)
+                else {
+                    return (model_changed, agent_changed, behavior_changed);
+                };
+                let preparation = admission.pending_step_controls.agent_preparation(key);
+                let projection = admission.pending_step_controls.projection(key);
+                admission.applying_step_control = projection.clone();
+                (key, preparation, projection)
             };
+            if let Some(projection) = &projection {
+                let _ = self
+                    .publish_control_projection(
+                        projection,
+                        crate::extensions::notification::ControlPhase::Applying,
+                        None,
+                        false,
+                    )
+                    .await;
+            }
             let workspace_binding = if let Some(preparation) = preparation {
                 // Filesystem/plugin/skill discovery is deliberately outside
                 // the cancellation-critical step gate. If Stop aborts this
                 // turn while preparation is pending, the queue retains the
                 // result and the idle control drain applies it exactly once.
-                preparation.wait_ready().await;
-                if preparation.has_agent() {
-                    self.prepare_agent_workspace_binding().await.map(Some)
+                if !preparation.wait_ready().await {
+                    Ok(None)
+                } else if preparation.has_agent() {
+                    tokio::select! {
+                        binding = self.prepare_agent_workspace_binding() => binding.map(Some),
+                        () = preparation.wait_superseded() => Ok(None),
+                    }
                 } else {
                     Ok(None)
                 }
@@ -588,12 +1406,24 @@ impl SessionActor {
             let control = {
                 let mut admission = self.state.lock().await;
                 if !matches!(&admission.foreground, ForegroundState::RegularTurn(_)) {
+                    if admission.applying_step_control.as_ref() == projection.as_ref() {
+                        admission.applying_step_control = None;
+                    }
                     return (model_changed, agent_changed, behavior_changed);
                 }
-                admission.pending_step_controls.pop_front()
+                let control = admission.pending_step_controls.take(key);
+                if control.is_none()
+                    && admission.applying_step_control.as_ref() == projection.as_ref()
+                {
+                    admission.applying_step_control = None;
+                }
+                control
             };
             let Some(control) = control else {
-                return (model_changed, agent_changed, behavior_changed);
+                // The desired Agent/Sampling revision changed while an older
+                // Agent preparation was in flight. Discard the stale result
+                // and resolve the new authoritative target instead.
+                continue;
             };
             let (
                 applied_model,
@@ -601,16 +1431,103 @@ impl SessionActor {
                 applied_behavior,
                 retired_goal_owner,
                 deferred_error,
+                mut terminal_settlement,
+                fatal_error,
             ) = self.apply_pending_control(control, workspace_binding).await;
+            // The control was atomically claimed under `state` immediately
+            // before application. Admission itself does not wait on this gate:
+            // a later desired revision is accepted while the durable commit is
+            // in flight and remains the sole target for the following Step.
+            boundary.close_domain(key);
+            {
+                let mut admission = self.state.lock().await;
+                if admission.applying_step_control.as_ref() == projection.as_ref() {
+                    admission.applying_step_control = None;
+                }
+            }
+            if let Some(error) = fatal_error {
+                self.state
+                    .lock()
+                    .await
+                    .termination
+                    .request(TerminationState::Fatal);
+                drop(_gate);
+                if let Some(settlement) = terminal_settlement.take() {
+                    settlement.settle_fatal();
+                }
+                let _ = self.event_tx.send(SessionEvent::ControlWorkerFailed {
+                    message: format!("control Timeline commit failed: {error}"),
+                });
+                return (model_changed, agent_changed, behavior_changed);
+            }
+            if let (Some(projection), Some(settlement)) =
+                (&projection, terminal_settlement.as_ref())
+            {
+                let result = settlement.terminal_result();
+                let phase = if result.is_ok() {
+                    crate::extensions::notification::ControlPhase::Applied
+                } else {
+                    crate::extensions::notification::ControlPhase::Rejected
+                };
+                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let (domain, intent) = settlement.control_intent();
+                // The Timeline transition and live route are authoritative at
+                // this point. Publish that terminal fact before releasing the
+                // Step gate so Stop cannot strand an applied intent as
+                // `InFlight`. The append-only UI projection is independently
+                // repairable from this receipt after reconnect/retry.
+                self.state.lock().await.mark_control_intent_terminal(
+                    domain,
+                    intent,
+                    ControlIntentTerminal {
+                        phase,
+                        target: projection.target.clone(),
+                        message,
+                        ui_terminal_durable: false,
+                    },
+                );
+            }
+            // An uncertain UI acknowledgement must not prevent Stop/Shutdown
+            // from entering its boundary. The terminal receipt above makes a
+            // missing append recoverable without replaying the control.
             drop(_gate);
+            if let (Some(projection), Some(settlement)) =
+                (&projection, terminal_settlement.as_ref())
+            {
+                let result = settlement.terminal_result();
+                let phase = if result.is_ok() {
+                    crate::extensions::notification::ControlPhase::Applied
+                } else {
+                    crate::extensions::notification::ControlPhase::Rejected
+                };
+                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let terminal_append = self
+                    .publish_control_projection(projection, phase, message.clone(), true)
+                    .await;
+                let (domain, intent) = settlement.control_intent();
+                if terminal_append.is_ok()
+                    && let Some(intent) = intent
+                {
+                    self.state
+                        .lock()
+                        .await
+                        .mark_control_terminal_ui_durable(domain, intent);
+                }
+                if let Some(settlement) = terminal_settlement {
+                    settlement.settle(terminal_append);
+                }
+            }
             if let Some((goal_id, definition_revision)) = retired_goal_owner {
                 self.cancel_goal_owned_work(&goal_id, definition_revision)
                     .await;
             }
             if let Some(error) = deferred_error {
-                self.send_host_turn_slash_command_output(&format!(
-                    "A scheduled Goal definition change failed at the step boundary: {error}"
-                ))
+                self.send_host_turn_slash_command_error(
+                    "Scheduled Goal update was rejected",
+                    format!(
+                        "Reason: {error}\nRecovery: inspect /goal status, correct the definition, and retry."
+                    ),
+                )
                 .await;
             }
             model_changed |= applied_model;
@@ -619,11 +1536,58 @@ impl SessionActor {
         }
     }
 
+    /// Close one causal Step and freeze the exact control-admission horizon
+    /// it is allowed to consume. A later request can supersede a preparation
+    /// that has not committed yet, but a request admitted after a successful
+    /// commit remains pending for the following Step instead of triggering a
+    /// second transition in the same `StepEnded → StepStarted` interval.
+    pub(super) async fn end_step_control_boundary(
+        &self,
+        outcome: &str,
+    ) -> Option<StepControlBoundary> {
+        let _gate = self.step_control_gate.lock().await;
+        if !self.events.end_step(outcome) {
+            return None;
+        }
+        Some(self.state.lock().await.pending_step_controls.boundary())
+    }
+
+    /// Freeze the control horizon for the first sampling Step of a turn.
+    ///
+    /// A newly admitted turn has a durable `TurnStarted` but no active Step
+    /// yet, so there is no predecessor to end. Controls accepted while the
+    /// turn was being prepared must still govern its first provider request.
+    /// This is intentionally distinct from [`Self::end_step_control_boundary`]:
+    /// after any Step has started, a missing active Step is a causal error and
+    /// must not be mistaken for another initial boundary.
+    pub(super) async fn initial_step_control_boundary(
+        &self,
+        prompt_id: &str,
+    ) -> Option<StepControlBoundary> {
+        let _gate = self.step_control_gate.lock().await;
+        if self.events.has_active_step() || self.events.next_step_index() != 0 {
+            return None;
+        }
+        let admission = self.state.lock().await;
+        if !admission.can_continue_regular_turn(prompt_id) {
+            return None;
+        }
+        Some(admission.pending_step_controls.boundary())
+    }
+
     async fn apply_pending_control(
         &self,
         control: PendingStepControl,
         workspace_binding: Result<Option<workspace::PreparedLocalSessionBind>, acp::Error>,
-    ) -> (bool, bool, bool, Option<(String, u64)>, Option<String>) {
+    ) -> (
+        bool,
+        bool,
+        bool,
+        Option<(String, u64)>,
+        Option<String>,
+        Option<PendingControlSettlement>,
+        Option<acp::Error>,
+    ) {
         match control {
             PendingStepControl::ModelReload(pending) => {
                 let mut workflow_admission = self.workflow_manager.lock().await;
@@ -634,6 +1598,11 @@ impl SessionActor {
                     )
                     .await;
                 let applied = result.is_ok();
+                let fatal = result
+                    .as_ref()
+                    .err()
+                    .filter(|error| crate::session::commands::is_fatal_turn_boundary_error(error))
+                    .cloned();
                 for respond_to in pending.responders {
                     let response = match &result {
                         Ok(()) => Ok(()),
@@ -641,7 +1610,7 @@ impl SessionActor {
                     };
                     let _ = respond_to.send(response);
                 }
-                (applied, false, false, None, None)
+                (applied, false, false, None, None, None, fatal)
             }
             PendingStepControl::ModelSelection(pending) => {
                 let mut workflow_admission = self.workflow_manager.lock().await;
@@ -650,24 +1619,61 @@ impl SessionActor {
                         &mut workflow_admission,
                         pending.route,
                         pending.catalog,
+                        pending.intent.as_ref(),
                     )
                     .await;
-                let applied = result.is_ok();
-                let _ = pending.responds_to.send(result);
-                (applied, false, false, None, None)
+                let changed = result
+                    .as_ref()
+                    .map(|(_, changed)| *changed)
+                    .unwrap_or(false);
+                let fatal = result
+                    .as_ref()
+                    .err()
+                    .filter(|error| crate::session::commands::is_fatal_turn_boundary_error(error))
+                    .cloned();
+                (
+                    changed,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some(PendingControlSettlement::Sampling {
+                        respond_to: pending.respond_to,
+                        result: result.map(|(model_id, _)| model_id),
+                        intent: pending.intent,
+                    }),
+                    fatal,
+                )
             }
             PendingStepControl::AgentSelection(pending) => {
                 let result = match (pending.preparation.take(), workspace_binding) {
                     (Ok(agent), Ok(Some(binding))) => {
-                        self.apply_prepared_agent(agent, binding).await
+                        self.apply_prepared_agent(agent, binding, pending.intent.as_ref())
+                            .await
                     }
                     (Ok(_), Ok(None)) => Err(acp::Error::internal_error()
                         .data("Agent activation was not given a prepared workspace binding")),
                     (Ok(_), Err(error)) | (Err(error), _) => Err(error),
                 };
                 let applied = result.as_ref().is_ok_and(|applied| *applied);
-                let _ = pending.responds_to.send(result.map(|_| ()));
-                (false, applied, false, None, None)
+                let fatal = result
+                    .as_ref()
+                    .err()
+                    .filter(|error| crate::session::commands::is_fatal_turn_boundary_error(error))
+                    .cloned();
+                (
+                    false,
+                    applied,
+                    false,
+                    None,
+                    None,
+                    Some(PendingControlSettlement::Agent {
+                        respond_to: pending.respond_to,
+                        result,
+                        intent: pending.intent,
+                    }),
+                    fatal,
+                )
             }
             PendingStepControl::GoalDefinition(pending) => {
                 let result = self.apply_pending_goal_definition_control(&pending).await;
@@ -677,13 +1683,33 @@ impl SessionActor {
                     }
                     Err(_) => (None, false),
                 };
+                let fatal = result
+                    .as_ref()
+                    .err()
+                    .filter(|error| crate::session::commands::is_fatal_turn_boundary_error(error))
+                    .cloned();
                 let deferred_error = result
                     .as_ref()
                     .err()
-                    .cloned()
+                    .map(|error| {
+                        error
+                            .data
+                            .as_ref()
+                            .and_then(|data| {
+                                data.as_str().or_else(|| {
+                                    data.get("message").and_then(serde_json::Value::as_str)
+                                })
+                            })
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| error.to_string())
+                    })
                     .filter(|_| pending.responds_to.as_ref().is_none());
                 if let Some(respond_to) = pending.responds_to {
-                    let _ = respond_to.send(result.map(|(changed, _, _)| changed));
+                    let _ = respond_to.send(
+                        result
+                            .map(|(changed, _, _)| changed)
+                            .map_err(|error| error.to_string()),
+                    );
                 }
                 (
                     false,
@@ -691,21 +1717,52 @@ impl SessionActor {
                     behavior_changed,
                     retired_goal_owner,
                     deferred_error,
+                    None,
+                    fatal,
                 )
             }
         }
     }
 
-    async fn drain_pending_step_controls(&self) {
-        {
-            let _gate = self.step_control_gate.lock().await;
-            let mut admission = self.state.lock().await;
-            if !admission.foreground.is_idle() || admission.pending_step_controls.is_empty() {
-                return;
+    fn spawn_claimed_pending_step_control_drain(self: &std::sync::Arc<Self>) {
+        let session = std::sync::Arc::clone(self);
+        let handle = tokio::task::spawn_local(async move {
+            let result =
+                std::panic::AssertUnwindSafe(session.drain_claimed_pending_step_controls())
+                    .catch_unwind()
+                    .await
+                    .map_err(|payload| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("non-string panic payload")
+                            .to_string()
+                    });
+            // Re-enter the single idle arbiter after releasing the foreground
+            // fence. It will promote queued prompts/compaction/notifications
+            // in their normal priority order, or schedule Goal continuation.
+            session.idle_arbiter.notify_waiters();
+            match result {
+                Ok(()) => Ok(()),
+                Err(panic) => {
+                    let message = format!("Sampling/Agent control worker panicked: {panic}");
+                    {
+                        let mut state = session.state.lock().await;
+                        state.termination.request(TerminationState::Fatal);
+                        state.applying_step_control = None;
+                        if matches!(state.foreground, ForegroundState::ApplyingControl) {
+                            state.foreground = ForegroundState::Idle;
+                        }
+                    }
+                    let _ = session.event_tx.send(SessionEvent::ControlWorkerFailed {
+                        message: message.clone(),
+                    });
+                    Err(message)
+                }
             }
-            admission.foreground = ForegroundState::ApplyingControl;
-        }
-        self.drain_claimed_pending_step_controls().await;
+        });
+        self.step_control_worker.arm(handle);
     }
 
     /// Drain a queue whose caller atomically changed idle foreground ownership
@@ -714,19 +1771,38 @@ impl SessionActor {
     /// otherwise claim the old route.
     async fn drain_claimed_pending_step_controls(&self) {
         loop {
-            let preparation = {
-                let admission = self.state.lock().await;
-                match admission.pending_step_controls.front() {
-                    Some(PendingStepControl::AgentSelection(pending)) => {
-                        Some(std::rc::Rc::clone(&pending.preparation))
+            let (key, preparation, projection) = {
+                let mut admission = self.state.lock().await;
+                let Some(key) = admission.pending_step_controls.next_key() else {
+                    if matches!(admission.foreground, ForegroundState::ApplyingControl) {
+                        admission.foreground = ForegroundState::Idle;
                     }
-                    _ => None,
-                }
+                    admission.applying_step_control = None;
+                    return;
+                };
+                let preparation = admission.pending_step_controls.agent_preparation(key);
+                let projection = admission.pending_step_controls.projection(key);
+                admission.applying_step_control = projection.clone();
+                (key, preparation, projection)
             };
+            if let Some(projection) = &projection {
+                let _ = self
+                    .publish_control_projection(
+                        projection,
+                        crate::extensions::notification::ControlPhase::Applying,
+                        None,
+                        false,
+                    )
+                    .await;
+            }
             let workspace_binding = if let Some(preparation) = preparation {
-                preparation.wait_ready().await;
-                if preparation.has_agent() {
-                    self.prepare_agent_workspace_binding().await.map(Some)
+                if !preparation.wait_ready().await {
+                    Ok(None)
+                } else if preparation.has_agent() {
+                    tokio::select! {
+                        binding = self.prepare_agent_workspace_binding() => binding.map(Some),
+                        () = preparation.wait_superseded() => Ok(None),
+                    }
                 } else {
                     Ok(None)
                 }
@@ -735,29 +1811,134 @@ impl SessionActor {
             };
             let _gate = self.step_control_gate.lock().await;
             let mut admission = self.state.lock().await;
+            if !admission.termination.is_open() {
+                admission.pending_step_controls.cancel_for_shutdown();
+                admission.applying_step_control = None;
+                if matches!(admission.foreground, ForegroundState::ApplyingControl) {
+                    admission.foreground = ForegroundState::Idle;
+                }
+                return;
+            }
             debug_assert!(matches!(
                 admission.foreground,
                 ForegroundState::ApplyingControl
             ));
-            let Some(control) = admission.pending_step_controls.pop_front() else {
-                admission.foreground = ForegroundState::Idle;
-                return;
+            let Some(control) = admission.pending_step_controls.take(key) else {
+                // A newer desired revision replaced the prepared target.
+                if admission.applying_step_control.as_ref() == projection.as_ref() {
+                    admission.applying_step_control = None;
+                }
+                drop(admission);
+                drop(_gate);
+                continue;
             };
             drop(admission);
-            let (_, _, _, retired_goal_owner, deferred_error) =
+            let (_, _, _, retired_goal_owner, deferred_error, mut terminal_settlement, fatal_error) =
                 self.apply_pending_control(control, workspace_binding).await;
+            {
+                let mut admission = self.state.lock().await;
+                if admission.applying_step_control.as_ref() == projection.as_ref() {
+                    admission.applying_step_control = None;
+                }
+            }
+            if let Some(error) = fatal_error {
+                self.state
+                    .lock()
+                    .await
+                    .termination
+                    .request(TerminationState::Fatal);
+                drop(_gate);
+                if let Some(settlement) = terminal_settlement.take() {
+                    settlement.settle_fatal();
+                }
+                let _ = self.event_tx.send(SessionEvent::ControlWorkerFailed {
+                    message: format!("control Timeline commit failed: {error}"),
+                });
+                return;
+            }
+            if let (Some(projection), Some(settlement)) =
+                (&projection, terminal_settlement.as_ref())
+            {
+                let result = settlement.terminal_result();
+                let phase = if result.is_ok() {
+                    crate::extensions::notification::ControlPhase::Applied
+                } else {
+                    crate::extensions::notification::ControlPhase::Rejected
+                };
+                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let (domain, intent) = settlement.control_intent();
+                self.state.lock().await.mark_control_intent_terminal(
+                    domain,
+                    intent,
+                    ControlIntentTerminal {
+                        phase,
+                        target: projection.target.clone(),
+                        message,
+                        ui_terminal_durable: false,
+                    },
+                );
+            }
+            // The authoritative receipt is visible before the cancellation
+            // gate opens; UI persistence may now happen without blocking Stop.
             drop(_gate);
+            if let (Some(projection), Some(settlement)) =
+                (&projection, terminal_settlement.as_ref())
+            {
+                let result = settlement.terminal_result();
+                let phase = if result.is_ok() {
+                    crate::extensions::notification::ControlPhase::Applied
+                } else {
+                    crate::extensions::notification::ControlPhase::Rejected
+                };
+                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let terminal_append = self
+                    .publish_control_projection(projection, phase, message.clone(), true)
+                    .await;
+                let (domain, intent) = settlement.control_intent();
+                if terminal_append.is_ok()
+                    && let Some(intent) = intent
+                {
+                    self.state
+                        .lock()
+                        .await
+                        .mark_control_terminal_ui_durable(domain, intent);
+                }
+                if let Some(settlement) = terminal_settlement {
+                    settlement.settle(terminal_append);
+                }
+            }
             if let Some((goal_id, definition_revision)) = retired_goal_owner {
                 self.cancel_goal_owned_work(&goal_id, definition_revision)
                     .await;
             }
             if let Some(error) = deferred_error {
-                self.send_host_turn_slash_command_output(&format!(
-                    "A scheduled Goal definition change failed at the step boundary: {error}"
-                ))
+                self.send_host_turn_slash_command_error(
+                    "Scheduled Goal update was rejected",
+                    format!(
+                        "Reason: {error}\nRecovery: inspect /goal status, correct the definition, and retry."
+                    ),
+                )
                 .await;
             }
         }
+    }
+
+    /// Stop only controls that have not entered their durable commit section.
+    /// Taking the step gate waits for an already-claimed commit to finish, but
+    /// can cancel Agent preparation and queued desired state immediately.
+    pub(super) async fn cancel_uncommitted_controls_for_shutdown(&self) {
+        let _gate = self.step_control_gate.lock().await;
+        let pending_behavior = {
+            let mut state = self.state.lock().await;
+            state.pending_step_controls.cancel_for_shutdown();
+            state.pending_behavior_control.take()
+        };
+        if let Some(pending) = pending_behavior {
+            let _ = pending.responds_to.send(Err(
+                acp::Error::internal_error().data("session is shutting down")
+            ));
+        }
+        self.idle_arbiter.notify_waiters();
     }
 
     /// Apply an admitted Agent selection while the caller owns the idle
@@ -804,7 +1985,7 @@ impl SessionActor {
                 ))
             })?;
         let workspace_binding = self.prepare_agent_workspace_binding().await?;
-        self.apply_prepared_agent(new_agent, workspace_binding)
+        self.apply_prepared_agent(new_agent, workspace_binding, None)
             .await
     }
 
@@ -832,6 +2013,7 @@ impl SessionActor {
         &self,
         mut new_agent: agent::Agent,
         workspace_binding: workspace::PreparedLocalSessionBind,
+        control_intent: Option<&crate::session::ControlIntent>,
     ) -> Result<bool, acp::Error> {
         let definition = new_agent.definition();
         let new_agent_name = definition.selector_identity();
@@ -871,6 +2053,23 @@ impl SessionActor {
             // An exact match is an acknowledgement, not a second AgentRole
             // fact or harness replacement; same-name changed definitions fall
             // through and rebuild exactly once.
+            if let Some(intent) = control_intent {
+                let _transaction = self.goal_transaction_gate.lock().await;
+                self.persist_applied_control_receipt_durably(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    crate::extensions::notification::ControlTarget::Agent {
+                        agent_name: new_agent_name.clone(),
+                    },
+                    intent.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "Agent control",
+                        format!("Agent acknowledgement was not durably recorded: {error}"),
+                    )
+                })?;
+            }
             self.forward_grow_notification(self.build_grow_notification(
                 GrowSessionUpdate::AgentChanged {
                     agent_name: new_agent_name,
@@ -881,6 +2080,16 @@ impl SessionActor {
             return Ok(false);
         }
         let candidate_bridge = new_agent.tool_bridge().clone();
+        // Agent construction may have started before a same-boundary Sampling
+        // revision committed. Rebind model-derived tool limits at activation
+        // so the new harness cannot retain the previous context window.
+        candidate_bridge
+            .set_context_window_tokens(
+                self.rebuild_spec
+                    .context_window_tokens
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await;
         if let Some(goal_context) = current_goal_context {
             candidate_bridge.update_resource(goal_context).await;
         }
@@ -959,16 +2168,30 @@ impl SessionActor {
                     "rebuilt Agent resources could not be staged for the session domain: {error}"
                 ))
             })?;
-        self.persist_agent_transition_durably(
-            &new_agent_name,
-            new_agent.role_prompt(),
-            candidate_capability_catalog.as_deref(),
-        )
-        .await
-        .map_err(|error| {
-            acp::Error::internal_error().data(format!(
-                "rebuilt agent role was not durably recorded: {error}"
-            ))
+        let persistence = {
+            let _transaction = self.goal_transaction_gate.lock().await;
+            if let Some(intent) = control_intent {
+                self.persist_agent_transition_for_control_durably(
+                    &new_agent_name,
+                    new_agent.role_prompt(),
+                    candidate_capability_catalog.as_deref(),
+                    intent.clone(),
+                )
+                .await
+            } else {
+                self.persist_agent_transition_durably(
+                    &new_agent_name,
+                    new_agent.role_prompt(),
+                    candidate_capability_catalog.as_deref(),
+                )
+                .await
+            }
+        };
+        persistence.map_err(|error| {
+            crate::session::commands::fatal_turn_boundary_error(
+                "Agent control",
+                format!("rebuilt agent role was not durably recorded: {error}"),
+            )
         })?;
         resource_activation.commit().await;
         if let Some(capabilities) = &self.subagent_capabilities {
@@ -1059,6 +2282,265 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::events::Event;
+
+    #[tokio::test]
+    async fn applied_control_receipt_is_terminal_before_ui_repair() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                let intent = crate::session::ControlIntent {
+                    client_id: "control-client".into(),
+                    generation: 7,
+                    sequence: 11,
+                };
+                let target = crate::extensions::notification::ControlTarget::Agent {
+                    agent_name: "coder".into(),
+                };
+                let mut state = actor.state.lock().await;
+                assert!(matches!(
+                    state.admit_control_intent(
+                        crate::extensions::notification::ControlDomain::Agent,
+                        Some(&intent),
+                    ),
+                    ControlIntentAdmission::New
+                ));
+                state.mark_control_intent_terminal(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    Some(&intent),
+                    ControlIntentTerminal {
+                        phase: crate::extensions::notification::ControlPhase::Applied,
+                        target: target.clone(),
+                        message: Some("Agent switched to coder".into()),
+                        ui_terminal_durable: false,
+                    },
+                );
+                let ControlIntentAdmission::ExactTerminal(terminal) = state.admit_control_intent(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    Some(&intent),
+                ) else {
+                    panic!("an applied control must not remain classified as in-flight");
+                };
+                assert_eq!(terminal.target, target);
+                assert!(!terminal.ui_terminal_durable);
+
+                state.mark_control_terminal_ui_durable(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    &intent,
+                );
+                let ControlIntentAdmission::ExactTerminal(terminal) = state.admit_control_intent(
+                    crate::extensions::notification::ControlDomain::Agent,
+                    Some(&intent),
+                ) else {
+                    panic!("the repaired terminal receipt must remain exactly replayable");
+                };
+                assert!(terminal.ui_terminal_durable);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn identical_sampling_application_preserves_runtime_state() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                let current = actor.model_route.snapshot();
+                let image_model = Some("provider/vision".to_owned());
+                *actor.image_description_model.write() = image_model.clone();
+                actor
+                    .compactions_remaining
+                    .set(Some(sampling_types::CompactionsRemaining::Fixed(4)));
+                actor
+                    .compaction_at_tokens
+                    .set(Some(sampling_types::CompactionAtTokens::Fixed(1234)));
+                actor.compaction.previous_model.set(Some(
+                    crate::session::compaction_config::PreviousModelInfo {
+                        model_slug: "previous-wire-model".to_owned(),
+                        context_window: 16_000,
+                    },
+                ));
+                actor.compaction.auto_compact_suppressed.store(
+                    crate::session::compaction_config::SUPPRESS_STICKY,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                actor.model_auth_memo.replace(Some(ModelAuthMemo {
+                    catalog_model_id: current.model_id.0.to_string(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::Byok,
+                        auth_scheme: sampler::AuthScheme::default(),
+                    },
+                    provider: None,
+                }));
+                let mut credentials = actor.chat_state_handle.get_credentials().await;
+                credentials.api_key = Some("runtime-auth-sentinel".to_owned());
+                actor.chat_state_handle.update_credentials(credentials);
+
+                let route = crate::agent::models::PublishedSessionRoute {
+                    model_id: current.model_id.clone(),
+                    sampling_config: current.sampling_config.clone(),
+                    image_description_model: image_model,
+                    inference_idle_timeout: actor.inference_idle_timeout.get(),
+                    max_retries: actor.max_retries.get(),
+                    auto_compact_threshold_percent: actor.compaction.threshold_percent.get(),
+                };
+                let catalog = SessionActor::published_catalog_for_test(
+                    current.model_id.clone(),
+                    current.sampling_config,
+                    actor.image_description_model.read().clone(),
+                    actor.inference_idle_timeout.get(),
+                    actor.max_retries.get(),
+                    actor.compaction.threshold_percent.get(),
+                );
+                let mut workflow_admission = actor.workflow_manager.lock().await;
+                let (_, sampling_epoch_changed) = actor
+                    .apply_user_model_selection(&mut workflow_admission, route, Some(catalog), None)
+                    .await
+                    .expect("identical sampling route must apply");
+                drop(workflow_admission);
+
+                assert!(!sampling_epoch_changed);
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .get_credentials()
+                        .await
+                        .api_key
+                        .as_deref(),
+                    Some("runtime-auth-sentinel")
+                );
+                assert!(actor.model_auth_memo.borrow().is_some());
+                assert_eq!(
+                    actor.compactions_remaining.get(),
+                    Some(sampling_types::CompactionsRemaining::Fixed(4))
+                );
+                assert_eq!(
+                    actor.compaction_at_tokens.get(),
+                    Some(sampling_types::CompactionAtTokens::Fixed(1234))
+                );
+                assert_eq!(
+                    actor.image_description_model.read().as_deref(),
+                    Some("provider/vision")
+                );
+                assert_eq!(
+                    actor
+                        .compaction
+                        .auto_compact_suppressed
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    crate::session::compaction_config::SUPPRESS_STICKY
+                );
+                assert_eq!(
+                    actor
+                        .compaction
+                        .previous_model
+                        .take()
+                        .expect("no-op must retain previous model state")
+                        .model_slug,
+                    "previous-wire-model"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn effort_patch_uses_newest_actor_desired_model_not_stale_client_hint() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let actor = std::sync::Arc::new(
+                    super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+
+                let mut selected = crate::agent::config::ModelEntry::baseline("new-wire-model");
+                selected.info.reasoning_efforts = vec![sampling_types::ReasoningEffortOption {
+                    id: "high".to_owned(),
+                    value: sampling_types::ReasoningEffort::High,
+                    label: "High".to_owned(),
+                    description: None,
+                    default: true,
+                }];
+                let mut catalog_config = crate::agent::config::Config::default();
+                catalog_config.image_description_model = None;
+                let manager = crate::agent::models::ModelsManager::new(
+                    indexmap::IndexMap::from([("provider/new".to_owned(), selected)]),
+                    acp::ModelId::new("provider/new"),
+                    catalog_config,
+                );
+                let catalog = std::sync::Arc::new(manager.published_catalog());
+                let mut selected_config = sampler::SamplerConfig::default();
+                selected_config.model = "new-wire-model".to_owned();
+                let selected_route = SessionActor::selection_route_for_test(
+                    acp::ModelId::new("provider/new"),
+                    selected_config,
+                    85,
+                );
+                let (selection_tx, selection_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(
+                        selected_route,
+                        Some(std::sync::Arc::clone(&catalog)),
+                        None,
+                        selection_tx,
+                    )
+                    .await;
+
+                // The caller may still display a stale old-model hint, but
+                // the actor's pending desired route is authoritative.
+                let (effort_tx, mut effort_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_effort_patch(
+                        sampling_types::ReasoningEffort::High,
+                        crate::session::SessionEffortAuthority::Catalog {
+                            catalog: std::sync::Arc::clone(&catalog),
+                            origin_client: None,
+                        },
+                        None,
+                        effort_tx,
+                    )
+                    .await;
+                assert!(matches!(
+                    selection_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded
+                ));
+                assert!(matches!(
+                    effort_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active step boundary must exist");
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (true, false, false)
+                );
+                assert!(matches!(
+                    effort_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(model)
+                        if model.0.as_ref() == "provider/new"
+                ));
+                let applied = actor.model_route.snapshot();
+                assert_eq!(applied.model_id.0.as_ref(), "provider/new");
+                assert_eq!(
+                    applied.sampling_config.reasoning_effort,
+                    Some(sampling_types::ReasoningEffort::High)
+                );
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn stale_credential_refresh_cannot_cross_route_revision() {
@@ -1068,14 +2550,16 @@ mod tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
                 tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
-                let actor = super::super::tests::support::create_test_actor(
-                    0,
-                    256_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
+                let actor = std::sync::Arc::new(
+                    super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
                 let old_route = actor.model_route.snapshot();
                 let previous_key = actor.chat_state_handle.get_credentials().await.api_key;
                 actor.model_route.replace(
@@ -1115,14 +2599,16 @@ mod tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
                 tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
-                let actor = super::super::tests::support::create_test_actor(
-                    0,
-                    256_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
+                let actor = std::sync::Arc::new(
+                    super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
                 let mut route = actor.model_route.snapshot().sampling_config;
                 route.auth_scheme = sampler::AuthScheme::XApiKey;
                 route.bearer_resolver = Some(std::sync::Arc::new(EmptyBearerResolver));
@@ -1170,6 +2656,355 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_sampling_desired_state_supersedes_intermediate_request() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                actor.state.lock().await.foreground = ForegroundState::Compaction;
+
+                let mut first = actor.model_route.snapshot().sampling_config;
+                first.model = "first-wire".into();
+                let first_catalog = SessionActor::published_catalog_for_test(
+                    acp::ModelId::new("provider/first"),
+                    first.clone(),
+                    None,
+                    std::time::Duration::from_secs(60),
+                    3,
+                    80,
+                );
+                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(
+                        SessionActor::selection_route_for_test(
+                            acp::ModelId::new("provider/first"),
+                            first,
+                            80,
+                        ),
+                        Some(first_catalog),
+                        None,
+                        first_tx,
+                    )
+                    .await;
+
+                let mut final_route = actor.model_route.snapshot().sampling_config;
+                final_route.model = "final-wire".into();
+                let final_catalog = SessionActor::published_catalog_for_test(
+                    acp::ModelId::new("provider/final"),
+                    final_route.clone(),
+                    None,
+                    std::time::Duration::from_secs(90),
+                    4,
+                    70,
+                );
+                let (final_tx, mut final_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(
+                        SessionActor::selection_route_for_test(
+                            acp::ModelId::new("provider/final"),
+                            final_route,
+                            70,
+                        ),
+                        Some(final_catalog),
+                        None,
+                        final_tx,
+                    )
+                    .await;
+
+                assert_eq!(
+                    first_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded
+                );
+                assert!(matches!(
+                    final_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                actor.state.lock().await.foreground = ForegroundState::Idle;
+                actor.apply_pending_step_controls_if_idle().await;
+                assert!(matches!(
+                    final_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(model)
+                        if model.0.as_ref() == "provider/final"
+                ));
+                assert_eq!(
+                    actor.model_route.snapshot().model_id.0.as_ref(),
+                    "provider/final"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn busy_agent_desired_state_discards_stale_preparation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                actor.state.lock().await.foreground = ForegroundState::Compaction;
+
+                let mut first = agent::AgentDefinition::default_grow_build();
+                first.name = "first-agent".into();
+                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+                actor.admit_agent_selection(first, None, first_tx).await;
+
+                let mut final_agent = agent::AgentDefinition::default_grow_build();
+                final_agent.name = "final-agent".into();
+                let (final_tx, mut final_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_agent_selection(final_agent, None, final_tx)
+                    .await;
+
+                assert_eq!(
+                    first_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded
+                );
+                assert!(matches!(
+                    final_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+                actor.state.lock().await.foreground = ForegroundState::Idle;
+                actor.apply_pending_step_controls_if_idle().await;
+                assert_eq!(
+                    final_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
+                assert_eq!(actor.agent.borrow().name(), "final-agent");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn idle_agent_desired_state_remains_supersedable_while_worker_applies() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+
+                let mut first = agent::AgentDefinition::default_grow_build();
+                first.name = "idle-first-agent".into();
+                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+                actor.admit_agent_selection(first, None, first_tx).await;
+
+                let mut final_agent = agent::AgentDefinition::default_grow_build();
+                final_agent.name = "idle-final-agent".into();
+                let (final_tx, final_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_agent_selection(final_agent, None, final_tx)
+                    .await;
+
+                assert_eq!(
+                    first_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded,
+                    "the actor mailbox must remain free to replace an idle Agent target"
+                );
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), final_rx)
+                        .await
+                        .expect("idle control worker must finish")
+                        .unwrap()
+                        .unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
+                assert_eq!(actor.agent.borrow().name(), "idle-final-agent");
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if actor.state.lock().await.foreground.is_idle() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("idle control worker must release its foreground fence");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn step_boundary_retargets_a_sampling_revision_superseded_before_commit() {
+        let mut controls = PendingStepControls::default();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        controls.admit_sampling(
+            SessionActor::selection_route_for_test(
+                acp::ModelId::new("provider/first"),
+                sampler::SamplerConfig::default(),
+                85,
+            ),
+            None,
+            None,
+            first_tx,
+        );
+        let boundary = controls.boundary();
+
+        let (next_tx, _next_rx) = tokio::sync::oneshot::channel();
+        let (_, superseded) = controls.admit_sampling(
+            SessionActor::selection_route_for_test(
+                acp::ModelId::new("provider/next"),
+                sampler::SamplerConfig::default(),
+                85,
+            ),
+            None,
+            None,
+            next_tx,
+        );
+
+        assert!(
+            superseded.is_some(),
+            "the previous desired target is retired"
+        );
+        drop(first_rx);
+        assert!(matches!(
+            controls.next_key_at_boundary(boundary),
+            Some(PendingStepControlKey::Sampling { revision: 2, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn step_boundary_defers_a_control_domain_first_admitted_after_step_ended() {
+        let mut controls = PendingStepControls::default();
+        let boundary = controls.boundary();
+        let (next_tx, _next_rx) = tokio::sync::oneshot::channel();
+        controls.admit_sampling(
+            SessionActor::selection_route_for_test(
+                acp::ModelId::new("provider/next"),
+                sampler::SamplerConfig::default(),
+                85,
+            ),
+            None,
+            None,
+            next_tx,
+        );
+
+        assert!(
+            controls.next_key_at_boundary(boundary).is_none(),
+            "a domain first admitted after StepEnded must wait for the next boundary"
+        );
+        assert!(controls.next_key().is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_admission_cannot_enter_the_boundary_after_step_ended_is_durable() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                let actor = std::sync::Arc::new(actor);
+                let gate = actor.step_control_gate.lock().await;
+                assert!(actor.events.end_step("continued"));
+
+                let mut definition = agent::AgentDefinition::default_grow_build();
+                definition.name = "next-boundary-agent".into();
+                let (responds_to, _response) = tokio::sync::oneshot::channel();
+                let admission = tokio::task::spawn_local({
+                    let actor = std::sync::Arc::clone(&actor);
+                    async move {
+                        actor
+                            .admit_agent_selection(definition, None, responds_to)
+                            .await;
+                    }
+                });
+                tokio::task::yield_now().await;
+
+                let boundary = actor.state.lock().await.pending_step_controls.boundary();
+                assert!(
+                    !boundary.agent_eligible,
+                    "an Agent request blocked behind the StepEnded gate belongs to the next Step"
+                );
+                drop(gate);
+                admission.await.unwrap();
+
+                let controls = &actor.state.lock().await.pending_step_controls;
+                assert!(controls.next_key_at_boundary(boundary).is_none());
+                assert!(matches!(
+                    controls.next_key(),
+                    Some(PendingStepControlKey::Agent { .. })
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn step_boundary_applies_latest_agent_when_claimed_preparation_is_superseded() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                let actor = std::sync::Arc::new(actor);
+
+                let stalled = std::rc::Rc::new(AgentPreparation {
+                    target_name: "stalled-agent".into(),
+                    result: std::cell::RefCell::new(None),
+                    superseded: std::cell::Cell::new(false),
+                    ready: tokio::sync::Notify::new(),
+                    abort: std::cell::RefCell::new(None),
+                });
+                let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .state
+                    .lock()
+                    .await
+                    .pending_step_controls
+                    .admit_agent(stalled, None, stalled_tx);
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active Step boundary");
+                let applying = {
+                    let actor = actor.clone();
+                    tokio::task::spawn_local(async move {
+                        actor
+                            .apply_pending_controls_at_step_boundary(boundary)
+                            .await
+                    })
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        let claimed = actor
+                            .state
+                            .lock()
+                            .await
+                            .applying_step_control
+                            .as_ref()
+                            .is_some_and(|projection| {
+                                matches!(
+                                    &projection.target,
+                                    crate::extensions::notification::ControlTarget::Agent {
+                                        agent_name
+                                    } if agent_name == "stalled-agent"
+                                )
+                            });
+                        if claimed {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the stale preparation must be claimed before replacement");
+
+                let mut latest = agent::AgentDefinition::default_grow_build();
+                latest.name = "latest-agent".into();
+                let (latest_tx, latest_rx) = tokio::sync::oneshot::channel();
+                actor.admit_agent_selection(latest, None, latest_tx).await;
+
+                assert_eq!(
+                    stalled_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Superseded
+                );
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), applying)
+                        .await
+                        .expect("replacement must wake the stale preparation wait")
+                        .unwrap(),
+                    (false, true, false)
+                );
+                assert_eq!(
+                    latest_rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
+                assert_eq!(actor.agent.borrow().name(), "latest-agent");
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn consecutive_busy_catalog_reloads_coalesce_to_latest_and_ack_all() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1177,14 +3012,16 @@ mod tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
                 tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
-                let actor = super::super::tests::support::create_test_actor(
-                    0,
-                    256_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
+                let actor = std::sync::Arc::new(
+                    super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
                 actor.state.lock().await.foreground = ForegroundState::Compaction;
 
                 let mut first = sampler::SamplerConfig::default();
@@ -1252,14 +3089,16 @@ mod tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
                 tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
-                let actor = super::super::tests::support::create_test_actor(
-                    0,
-                    256_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
+                let actor = std::sync::Arc::new(
+                    super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await,
+                );
                 actor.state.lock().await.foreground = ForegroundState::Compaction;
 
                 let mut first_reload = sampler::SamplerConfig::default();
@@ -1298,6 +3137,7 @@ mod tests {
                             80,
                         ),
                         Some(selection_catalog),
+                        None,
                         selection_tx,
                     )
                     .await;
@@ -1452,8 +3292,11 @@ mod tests {
                         matches!(event.kind, chat_state::TimelineEventKind::Messages(_))
                     })
                     .count();
+                let actor = std::sync::Arc::new(actor);
                 let (responds_to, response) = tokio::sync::oneshot::channel();
-                actor.admit_agent_selection(definition, responds_to).await;
+                actor
+                    .admit_agent_selection(definition, None, responds_to)
+                    .await;
                 response.await.unwrap().unwrap();
 
                 let surface = actor.chat_state_handle.get_conversation().await;
@@ -1540,7 +3383,7 @@ mod tests {
                     .count();
                 let (responds_to, response) = tokio::sync::oneshot::channel();
                 actor
-                    .admit_agent_selection(replay_definition, responds_to)
+                    .admit_agent_selection(replay_definition, None, responds_to)
                     .await;
                 response.await.unwrap().unwrap();
                 let control_count_after = actor
@@ -1587,8 +3430,11 @@ mod tests {
                 definition.name = "reviewer".into();
                 definition.subagents.deny = vec!["blocked-child".into()];
 
+                let actor = std::sync::Arc::new(actor);
                 let (responds_to, mut response) = tokio::sync::oneshot::channel();
-                actor.admit_agent_selection(definition, responds_to).await;
+                actor
+                    .admit_agent_selection(definition, None, responds_to)
+                    .await;
                 assert!(matches!(
                     response.try_recv(),
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -1599,9 +3445,14 @@ mod tests {
                 );
                 assert_ne!(actor.agent.borrow().name(), "reviewer");
 
-                assert!(actor.events.end_step("continued"));
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active model-switch step boundary");
                 assert_eq!(
-                    actor.apply_pending_controls_at_step_boundary().await,
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
                     (false, true, false)
                 );
                 response.await.unwrap().unwrap();
@@ -1662,6 +3513,23 @@ mod tests {
                     .select_behavior(tool_types::BehaviorId::Goal);
                 super::super::tests::support::begin_test_active_causal_turn(&actor).await;
                 let previous = actor.model_route.snapshot();
+                let agent_role_count_before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Control(control)
+                                if matches!(control.model_contexts.as_slice(), [context]
+                                    if context.layer
+                                        == chat_state::ControlContextLayer::AgentRole)
+                        )
+                    })
+                    .count();
+                let actor = std::sync::Arc::new(actor);
                 let (responds_to, mut response) = tokio::sync::oneshot::channel();
                 let mut selected_entry =
                     crate::agent::config::ModelEntry::baseline("next-wire-model");
@@ -1700,6 +3568,7 @@ mod tests {
                     .admit_session_model_selection(
                         selected_route,
                         Some(selection_catalog),
+                        None,
                         responds_to,
                     )
                     .await;
@@ -1707,7 +3576,7 @@ mod tests {
                 next_agent.name = "step-reviewer".into();
                 let (agent_responds_to, mut agent_response) = tokio::sync::oneshot::channel();
                 actor
-                    .admit_agent_selection(next_agent, agent_responds_to)
+                    .admit_agent_selection(next_agent, None, agent_responds_to)
                     .await;
 
                 assert!(matches!(
@@ -1722,13 +3591,25 @@ mod tests {
                 assert_eq!(during.revision, previous.revision);
                 assert_eq!(during.model_id, previous.model_id);
 
-                assert!(actor.events.end_step("continued"));
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active combined-control step boundary");
                 assert_eq!(
-                    actor.apply_pending_controls_at_step_boundary().await,
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
                     (true, true, false)
                 );
-                assert_eq!(response.await.unwrap().unwrap().0.as_ref(), "catalog/next");
-                agent_response.await.unwrap().unwrap();
+                assert!(matches!(
+                    response.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(model)
+                        if model.0.as_ref() == "catalog/next"
+                ));
+                assert_eq!(
+                    agent_response.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
                 let applied = actor.model_route.snapshot();
                 assert_eq!(applied.model_id.0.as_ref(), "catalog/next");
                 assert_eq!(
@@ -1751,6 +3632,9 @@ mod tests {
                     "a later Agent rebuild must use the newly committed model window"
                 );
                 assert_eq!(actor.agent.borrow().name(), "step-reviewer");
+                actor.events.emit(Event::LoopStarted {
+                    loop_index: actor.events.next_step_index(),
+                });
                 let events = actor.chat_state_handle.timeline_events().await.unwrap();
                 let step_ended = events
                     .iter()
@@ -1784,9 +3668,39 @@ mod tests {
                         )
                     })
                     .expect("Agent transition must be recorded");
+                let next_step_started = events
+                    .iter()
+                    .rposition(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Step(
+                                chat_state::StepEvent::Started { .. }
+                            )
+                        )
+                    })
+                    .expect("the next step must start after controls settle");
                 assert!(
-                    step_ended < model_changed_event && model_changed_event < agent_changed_event,
-                    "FIFO controls must follow StepEnded in their admitted order"
+                    step_ended < model_changed_event
+                        && model_changed_event < agent_changed_event
+                        && agent_changed_event < next_step_started,
+                    "causal order must be StepEnded → Sampling → Agent rebuild → StepStarted"
+                );
+                let agent_role_count_after = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Control(control)
+                                if matches!(control.model_contexts.as_slice(), [context]
+                                    if context.layer
+                                        == chat_state::ControlContextLayer::AgentRole)
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    agent_role_count_after,
+                    agent_role_count_before + 1,
+                    "one boundary may publish exactly one Agent-role reprojection"
                 );
                 let model_changed = std::iter::from_fn(|| gateway_rx.try_recv().ok()).any(|msg| {
                     let acp_transport::AcpClientMessage::ExtNotification(args) = msg else {

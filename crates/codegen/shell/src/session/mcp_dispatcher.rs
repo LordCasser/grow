@@ -205,6 +205,10 @@ impl ShutdownState {
     pub fn end_restart(&mut self, name: &str) {
         self.in_flight_restart.remove(name);
     }
+
+    pub fn has_in_flight_restarts(&self) -> bool {
+        !self.in_flight_restart.is_empty()
+    }
 }
 
 /// Shared reference to a [`ShutdownState`] used by both the
@@ -776,6 +780,23 @@ pub async fn run_dispatcher(
     // Channel closed → session shutting down. Cancel any in-flight
     // auto-restart backoff sleeps so they don't outlive the dispatcher.
     restart_cancel.cancel();
+    let drained = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .has_in_flight_restarts()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        tracing::warn!(%session_id, "timed out draining MCP auto-restart tasks");
+    }
 }
 
 #[cfg(test)]

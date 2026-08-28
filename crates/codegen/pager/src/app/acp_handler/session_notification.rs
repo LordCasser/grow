@@ -1,5 +1,82 @@
 use super::*;
+use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
 use shell::sampling::error::format_rate_limited_user_message;
+
+fn ui_notice_block(
+    notice: shell::extensions::notification::UiNotice,
+    event_id: Option<String>,
+) -> RenderBlock {
+    let tone = match notice.tone {
+        shell::extensions::notification::UiNoticeTone::Info => NoticeTone::Info,
+        shell::extensions::notification::UiNoticeTone::Success => NoticeTone::Success,
+        shell::extensions::notification::UiNoticeTone::Warning => NoticeTone::Warning,
+        shell::extensions::notification::UiNoticeTone::Error => NoticeTone::Error,
+    };
+    let category = match notice.category {
+        shell::extensions::notification::UiNoticeCategory::Command => NoticeCategory::Command,
+        shell::extensions::notification::UiNoticeCategory::Lifecycle => NoticeCategory::Lifecycle,
+    };
+    let mut metadata = Vec::new();
+    if let Some(subject) = notice.subject {
+        metadata.push(match category {
+            NoticeCategory::Command => format!("Command: {subject}"),
+            _ => format!("Subject: {subject}"),
+        });
+    }
+    if let Some(description) = notice.description {
+        metadata.push(description);
+    }
+    if let Some(details) = notice.details {
+        metadata.push(details);
+    }
+    let details = (!metadata.is_empty()).then(|| metadata.join("\n"));
+    match event_id {
+        Some(event_id) => {
+            RenderBlock::terminal_notice(event_id, tone, category, notice.message, details)
+        }
+        None => RenderBlock::typed_notice(tone, category, notice.message, details),
+    }
+}
+
+/// Merge the durable descriptor carried by a replayed spawn into an existing
+/// live entity. A reconnect replay is not a new spawn: replacing the whole
+/// `SubagentInfo` would erase a live/terminal status, counters, kill state and
+/// activity observed while the reload was in flight.
+fn merge_replayed_subagent(
+    existing: &mut crate::app::subagent::SubagentInfo,
+    incoming: crate::app::subagent::SubagentInfo,
+) {
+    existing.subagent_id = incoming.subagent_id;
+    existing.child_session_id = incoming.child_session_id;
+    existing.description = incoming.description;
+    existing.subagent_type = incoming.subagent_type;
+    if incoming.model.is_some() {
+        existing.model = incoming.model;
+    }
+    if incoming.context_source.is_some() {
+        existing.context_source = incoming.context_source;
+    }
+    if incoming.resumed_from.is_some() {
+        existing.resumed_from = incoming.resumed_from;
+    }
+    if incoming.capability_mode.is_some() {
+        existing.capability_mode = incoming.capability_mode;
+    }
+    if incoming.permission_mode.is_some() {
+        existing.permission_mode = incoming.permission_mode;
+    }
+    if incoming.effective_permission_mode.is_some() {
+        existing.effective_permission_mode = incoming.effective_permission_mode;
+    }
+    if incoming.workflow_run_id.is_some() {
+        existing.workflow_run_id = incoming.workflow_run_id;
+    }
+    existing.context_normalized = incoming.context_normalized;
+    if incoming.parent_prompt_id.is_some() {
+        existing.parent_prompt_id = incoming.parent_prompt_id;
+    }
+}
+
 /// Stash a live stop/stop_failure batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -99,7 +176,7 @@ pub(super) fn drop_unexpected_replay(
 /// promptId gate, unexpected replay) deliberately don't move it.
 pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut NotificationMeta) {
     if let Some(id) = meta.event_id.take() {
-        agent.session.last_seen_event_id = Some(id);
+        agent.advance_reconnect_cursor(id, meta.is_replay);
     }
 }
 /// Handle `grow/session_notification` and replay-path `grow/session/update`.
@@ -174,6 +251,15 @@ fn handle_session_notification_inner(
     };
     let parent_id = matched.agent_id();
     let is_active = is_matched_agent_active(app, parent_id);
+    let spawned_control_handoff = match &session_notif.update {
+        GrowSessionUpdate::SubagentSpawned {
+            child_session_id, ..
+        } => app
+            .screen_mode_control_handoffs
+            .get(child_session_id)
+            .cloned(),
+        _ => None,
+    };
     let agent = app
         .agents
         .get_mut(&parent_id)
@@ -196,6 +282,8 @@ fn handle_session_notification_inner(
             &session_notif.update,
             GrowSessionUpdate::ModelChanged { .. }
                 | GrowSessionUpdate::AgentChanged { .. }
+                | GrowSessionUpdate::ControlStateUpdate(_)
+                | GrowSessionUpdate::UiNotice(_)
                 | GrowSessionUpdate::InteractionResolved { .. }
                 | GrowSessionUpdate::AutoCompactStarted { .. }
                 | GrowSessionUpdate::AutoCompactCompleted { .. }
@@ -230,16 +318,35 @@ fn handle_session_notification_inner(
             );
             return false;
         }
-        let changed = handle_child_session_notification(session_notif.update, child_sid, agent);
+        let controls_pending_before = child.session.controls_pending();
+        let changed = handle_child_session_notification(
+            session_notif.update,
+            child_sid,
+            meta.event_id.clone(),
+            agent,
+        );
+        let control_resolved = controls_pending_before
+            && agent
+                .subagent_views
+                .get(child_sid)
+                .is_some_and(|child| !child.session.controls_pending());
+        let control_drain = control_resolved
+            .then(|| agent.subagent_views.get_mut(child_sid))
+            .flatten()
+            .map(|child| crate::app::root::dispatch::maybe_drain_queue(child));
         if handled && let Some(child) = agent.subagent_views.get_mut(child_sid) {
             if let Some(seq) = meta.event_seq {
                 child.session.last_applied_grow_event_seq = Some(seq);
             }
             if let Some(id) = meta.event_id {
-                child.session.last_seen_event_id = Some(id);
+                child.advance_reconnect_cursor(id, meta.is_replay);
             }
         }
-        return changed && is_active;
+        if let Some(drain) = control_drain {
+            crate::app::root::dispatch::note_peek_page_flip(app, parent_id, drain.page_flip_entry);
+            app.pending_effects.extend(drain.effects);
+        }
+        return (changed || control_resolved) && is_active;
     }
     let descendant_lifecycle_from_child =
         matches!(matched, SessionMatch::Child(_)) && descendant_lifecycle;
@@ -295,7 +402,17 @@ fn handle_session_notification_inner(
     let mut terminal_outcome: Option<super::super::agent_view::turn_completion::TerminalOutcome> =
         None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
+    let controls_pending_before = agent.session.controls_pending();
     let changed = match session_notif.update {
+        GrowSessionUpdate::UiNotice(output) => {
+            agent
+                .scrollback
+                .push_block(ui_notice_block(output, meta.event_id.clone()));
+            true
+        }
+        GrowSessionUpdate::ControlStateUpdate(update) => {
+            apply_control_state_update(agent, update, meta.event_id.clone())
+        }
         ref update @ (GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
         | GrowSessionUpdate::AutoCompactFailed { .. }
@@ -399,6 +516,18 @@ fn handle_session_notification_inner(
                 subagent_type = %subagent_type,
                 "Subagent spawned"
             );
+            if !meta.is_replay
+                && agent
+                    .session
+                    .subagent_sessions
+                    .contains_key(&child_session_id)
+            {
+                tracing::debug!(
+                    child_session_id = %child_session_id,
+                    "ignoring duplicate live SubagentSpawned lifecycle fact"
+                );
+                return false;
+            }
             let is_background = agent
                 .session
                 .tracker
@@ -411,48 +540,96 @@ fn handle_session_notification_inner(
                 Some(state) => crate::acp::model_state::ModelState::from(Some(state)),
                 None => agent.session.models.clone(),
             };
-            agent.session.subagent_sessions.insert(
-                child_session_id.clone(),
-                SubagentInfo {
-                    subagent_id: Arc::from(subagent_id),
-                    child_session_id: Arc::from(child_session_id.clone()),
-                    description: Arc::from(description.clone()),
-                    subagent_type: Arc::from(subagent_type.clone()),
-                    model: model.map(Arc::from),
-                    context_source: effective_context_source.map(Arc::from),
-                    resumed_from: resumed_from.map(Arc::from),
-                    capability_mode: capability_mode.map(Arc::from),
-                    permission_mode: permission_mode.clone().map(Arc::from),
-                    effective_permission_mode: effective_permission_mode.clone().map(Arc::from),
-                    workflow_run_id: workflow_run_id.clone().map(Arc::from),
-                    context_normalized,
-                    parent_prompt_id: parent_prompt_id.map(Arc::from),
-                    started_at: std::time::Instant::now(),
-                    last_progress_at: std::time::Instant::now(),
-                    finished: false,
-                    status: None,
-                    error: None,
-                    duration_ms: None,
-                    tool_calls: None,
-                    turns: None,
-                    turn_count: None,
-                    tool_call_count: None,
-                    tokens_used: None,
-                    context_window_tokens: None,
-                    context_usage_pct: None,
-                    tools_used: Vec::new(),
-                    error_count: None,
-                    activity_label: None,
-                    is_background,
-                    pending_kill: false,
-                    kill_requested_at: None,
-                    scrollback_entry_id: None,
-                    prompt: None,
-                    child_cwd: None,
-                    worktree_path: None,
-                    child_updates_replayed: false,
-                },
-            );
+            // A terminal event can arrive from the live stream before the
+            // replayed spawn that causally precedes it. Keep that terminal
+            // row as the entity's authoritative lifecycle fact so the later
+            // spawn cannot append a visually reversed Started row.
+            let replayed_terminal =
+                agent
+                    .scrollback
+                    .iter_entries()
+                    .find_map(|(entry_id, entry)| {
+                        let RenderBlock::Subagent(block) = &entry.block else {
+                            return None;
+                        };
+                        if block.child_session_id != child_session_id || block.is_running() {
+                            return None;
+                        }
+                        let (status, elapsed, error) = match &block.kind {
+                            crate::scrollback::blocks::SubagentBlockKind::Completed { elapsed } => {
+                                ("completed", *elapsed, None)
+                            }
+                            crate::scrollback::blocks::SubagentBlockKind::Failed {
+                                elapsed,
+                                error,
+                            } => ("failed", *elapsed, error.clone()),
+                            crate::scrollback::blocks::SubagentBlockKind::Cancelled { elapsed } => {
+                                ("cancelled", *elapsed, None)
+                            }
+                            crate::scrollback::blocks::SubagentBlockKind::Started => return None,
+                        };
+                        Some((entry_id, status.to_string(), elapsed, error))
+                    });
+            let incoming = SubagentInfo {
+                subagent_id: Arc::from(subagent_id),
+                child_session_id: Arc::from(child_session_id.clone()),
+                description: Arc::from(description.clone()),
+                subagent_type: Arc::from(subagent_type.clone()),
+                model: model.map(Arc::from),
+                context_source: effective_context_source.map(Arc::from),
+                resumed_from: resumed_from.map(Arc::from),
+                capability_mode: capability_mode.map(Arc::from),
+                permission_mode: permission_mode.clone().map(Arc::from),
+                effective_permission_mode: effective_permission_mode.clone().map(Arc::from),
+                workflow_run_id: workflow_run_id.clone().map(Arc::from),
+                context_normalized,
+                parent_prompt_id: parent_prompt_id.map(Arc::from),
+                started_at: std::time::Instant::now(),
+                last_progress_at: std::time::Instant::now(),
+                finished: false,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                prompt: None,
+                child_cwd: None,
+                worktree_path: None,
+                child_updates_replayed: false,
+            };
+            let existing_finished = agent
+                .session
+                .subagent_sessions
+                .get(&child_session_id)
+                .is_some_and(|info| info.finished);
+            let terminal_finished = existing_finished || replayed_terminal.is_some();
+            if meta.is_replay {
+                if let Some(existing) = agent.session.subagent_sessions.get_mut(&child_session_id) {
+                    merge_replayed_subagent(existing, incoming);
+                } else {
+                    agent
+                        .session
+                        .subagent_sessions
+                        .insert(child_session_id.clone(), incoming);
+                }
+            } else {
+                agent
+                    .session
+                    .subagent_sessions
+                    .insert(child_session_id.clone(), incoming);
+            }
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
             {
@@ -486,8 +663,19 @@ fn handle_session_notification_inner(
                 child_view
                     .session
                     .apply_agent_name(Some(subagent_type.clone()));
-                child_view.session.state = AgentState::TurnRunning;
+                child_view.session.state = if terminal_finished {
+                    AgentState::Idle
+                } else {
+                    AgentState::TurnRunning
+                };
                 child_view.session.set_worktree(effective_is_worktree);
+                if !child_view.session.controls_pending()
+                    && let Some(handoff) = spawned_control_handoff.clone()
+                {
+                    child_view
+                        .session
+                        .restore_screen_mode_control_handoff(handoff);
+                }
             } else {
                 let child_session = {
                     let mut session = AgentSession::new(
@@ -508,8 +696,15 @@ fn handle_session_notification_inner(
                     }
                     session.workflow_agent_names = workflow_agent_names;
                     session.apply_agent_name(Some(subagent_type.clone()));
-                    session.state = AgentState::TurnRunning;
+                    session.state = if terminal_finished {
+                        AgentState::Idle
+                    } else {
+                        AgentState::TurnRunning
+                    };
                     session.set_worktree(effective_is_worktree);
+                    if let Some(handoff) = spawned_control_handoff.clone() {
+                        session.restore_screen_mode_control_handoff(handoff);
+                    }
                     session
                 };
                 let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
@@ -539,7 +734,12 @@ fn handle_session_notification_inner(
                 child_view.set_session_recap_available(recap_visible);
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
             }
-            if !agent.session.loading_replay {
+            let child_updates_replayed = agent
+                .session
+                .subagent_sessions
+                .get(&child_session_id)
+                .is_some_and(|info| info.child_updates_replayed);
+            if !agent.session.loading_replay && !child_updates_replayed {
                 if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                     crate::app::subagent::replay_inherited_updates(child_view, &child_session_id);
                 }
@@ -548,21 +748,45 @@ fn handle_session_notification_inner(
                 }
             }
             if workflow_run_id.is_none() {
-                let block = crate::scrollback::blocks::SubagentBlock::started(
-                    &description,
-                    &child_session_id,
-                    &subagent_type,
-                    model_display,
-                    is_background,
-                );
-                let entry_id = agent.scrollback.push_block(RenderBlock::Subagent(block));
-                agent.scrollback.set_last_running(true);
-                if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
-                    info.scrollback_entry_id = Some(entry_id);
-                    info.is_background = is_background;
+                if let Some((entry_id, status, elapsed, error)) = replayed_terminal {
+                    if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
+                        info.finished = true;
+                        info.status = Some(Arc::from(status));
+                        info.error = error.map(Arc::from);
+                        info.duration_ms = Some(elapsed.as_millis() as u64);
+                        info.scrollback_entry_id = Some(entry_id);
+                        info.pending_kill = false;
+                        info.kill_requested_at = None;
+                    }
+                } else {
+                    let block = crate::scrollback::blocks::SubagentBlock::started(
+                        &description,
+                        &child_session_id,
+                        &subagent_type,
+                        model_display,
+                        is_background,
+                    )
+                    .with_event_id(meta.event_id.clone());
+                    let outcome = agent
+                        .scrollback
+                        .push_block_if_absent(RenderBlock::Subagent(block));
+                    if !outcome.inserted {
+                        tracing::debug!(
+                            child_session_id = %child_session_id,
+                            "reused replayed SubagentStarted row by immutable event id"
+                        );
+                    }
+                    if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
+                        info.scrollback_entry_id = Some(outcome.entry_id);
+                        if !meta.is_replay {
+                            info.is_background = is_background;
+                        }
+                    }
                 }
             } else if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
-                info.is_background = is_background;
+                if !meta.is_replay {
+                    info.is_background = is_background;
+                }
             }
             true
         }
@@ -625,61 +849,54 @@ fn handle_session_notification_inner(
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
             agent.clear_transport_interactions_for_session(&child_session_id);
             let info_ref = agent.session.subagent_sessions.get(&child_session_id);
-            let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
-            let is_background = info_ref.is_some_and(|s| s.is_background);
+            let already_finished = info_ref.is_some_and(|s| s.finished);
+            let is_workflow_child = info_ref.is_some_and(|s| s.workflow_run_id.is_some());
             let description = info_ref.map(|s| s.description.clone()).unwrap_or_default();
-            if let Some(eid) = entry_id {
-                agent.scrollback.finish_running(eid);
-            }
+            let subagent_type = info_ref
+                .map(|s| s.subagent_type.clone())
+                .unwrap_or_else(|| Arc::from("subagent"));
+            let model = info_ref
+                .and_then(|s| s.model.as_ref())
+                .map(|model| model.to_string());
             sync_subagent_activity(agent, &child_session_id, None);
-            if is_background {
+            if !already_finished && !is_workflow_child {
                 let block = match status.as_str() {
-                    "completed" => {
-                        RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::completed(
+                    "completed" => RenderBlock::Subagent(
+                        crate::scrollback::blocks::SubagentBlock::completed(
                             description.as_ref(),
                             child_session_id.as_str(),
                             elapsed_dur,
-                        ))
-                    }
-                    "cancelled" => {
-                        RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::cancelled(
+                        )
+                        .with_identity(subagent_type.as_ref(), model.clone())
+                        .with_event_id(meta.event_id.clone()),
+                    ),
+                    "cancelled" => RenderBlock::Subagent(
+                        crate::scrollback::blocks::SubagentBlock::cancelled(
                             description.as_ref(),
                             child_session_id.as_str(),
                             elapsed_dur,
-                        ))
-                    }
-                    _ => RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::failed(
-                        description.as_ref(),
-                        child_session_id.as_str(),
-                        elapsed_dur,
-                        error.clone(),
-                    )),
+                        )
+                        .with_identity(subagent_type.as_ref(), model.clone())
+                        .with_event_id(meta.event_id.clone()),
+                    ),
+                    _ => RenderBlock::Subagent(
+                        crate::scrollback::blocks::SubagentBlock::failed(
+                            description.as_ref(),
+                            child_session_id.as_str(),
+                            elapsed_dur,
+                            error.clone(),
+                        )
+                        .with_identity(subagent_type.as_ref(), model)
+                        .with_event_id(meta.event_id.clone()),
+                    ),
                 };
-                agent.scrollback.push_block(block);
-            } else if let Some(eid) = entry_id
-                && let Some(entry) = agent.scrollback.get_by_id_mut(eid)
-            {
-                if let RenderBlock::Subagent(ref mut sb) = entry.block {
-                    match status.as_str() {
-                        "completed" => {
-                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Completed {
-                                elapsed: elapsed_dur,
-                            };
-                        }
-                        "cancelled" => {
-                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Cancelled {
-                                elapsed: elapsed_dur,
-                            };
-                        }
-                        _ => {
-                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Failed {
-                                elapsed: elapsed_dur,
-                                error: error.clone(),
-                            };
-                        }
-                    }
+                let outcome = agent.scrollback.push_block_if_absent(block);
+                if !outcome.inserted {
+                    tracing::debug!(
+                        child_session_id = %child_session_id,
+                        "reused replayed SubagentFinished row by immutable event id"
+                    );
                 }
-                entry.invalidate_cache();
             }
             if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                 info.finished = true;
@@ -854,7 +1071,7 @@ fn handle_session_notification_inner(
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "Plugin updates installed: {details}"
                 )));
                 true
@@ -878,14 +1095,12 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::SessionRecapUnavailable => {
             if meta.is_replay {
                 false
-            } else if let Some(pending_id) = agent.pending_recap_entry.take() {
-                agent.scrollback.remove_entry(pending_id);
+            } else {
+                agent.session.clear_live_feedback("recap");
                 agent.show_toast(crate::app::root::dispatch::recap_unavailable_toast(
                     crate::app::root::dispatch::scrollback_has_user_messages(&agent.scrollback),
                 ));
                 true
-            } else {
-                false
             }
         }
         GrowSessionUpdate::ModelAutoSwitched {
@@ -944,9 +1159,13 @@ fn handle_session_notification_inner(
             None => return false,
         },
         GrowSessionUpdate::AgentChanged { agent_name } => {
-            if agent.session.controls_pending() {
-                agent.session.defer_authoritative_agent_change(agent_name);
-                false
+            if agent.session.agent_control_pending() {
+                if agent.session.resolve_agent_control(&agent_name) {
+                    agent.session.apply_agent_name(Some(agent_name))
+                } else {
+                    agent.session.defer_authoritative_agent_change(agent_name);
+                    false
+                }
             } else {
                 agent.session.apply_agent_name(Some(agent_name))
             }
@@ -1007,6 +1226,9 @@ fn handle_session_notification_inner(
             return false;
         }
     };
+    let control_resolved = controls_pending_before && !agent.session.controls_pending();
+    let control_drain =
+        control_resolved.then(|| crate::app::root::dispatch::maybe_drain_queue(agent));
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()
@@ -1034,7 +1256,7 @@ fn handle_session_notification_inner(
                     parent_view.session.last_applied_grow_event_seq = Some(seq);
                 }
                 if let Some(id) = meta.event_id {
-                    parent_view.session.last_seen_event_id = Some(id);
+                    parent_view.advance_reconnect_cursor(id, meta.is_replay);
                 }
             }
         } else {
@@ -1045,14 +1267,21 @@ fn handle_session_notification_inner(
                 agent.session.last_applied_grow_event_seq = Some(seq);
             }
             if let Some(id) = meta.event_id {
-                agent.session.last_seen_event_id = Some(id);
+                agent.advance_reconnect_cursor(id, meta.is_replay);
             }
         }
+    }
+    if let Some(drain) = control_drain {
+        crate::app::root::dispatch::note_peek_page_flip(app, parent_id, drain.page_flip_entry);
+        app.pending_effects.extend(drain.effects);
+    }
+    if let Some(handoff) = spawned_control_handoff {
+        app.screen_mode_control_handoffs.remove(&handoff.session_id);
     }
     if let Some(outcome) = terminal_outcome {
         return app.apply_terminal_outcome(outcome, parent_id, is_active);
     }
-    changed && is_active
+    (changed || control_resolved) && is_active
 }
 /// Handle an Grow session notification that targets a child (subagent) session.
 ///
@@ -1062,9 +1291,25 @@ fn handle_session_notification_inner(
 pub(super) fn handle_child_session_notification(
     update: GrowSessionUpdate,
     child_sid: &str,
+    event_id: Option<String>,
     agent: &mut AgentView,
 ) -> bool {
     let changed = match update {
+        GrowSessionUpdate::UiNotice(output) => {
+            agent
+                .subagent_views
+                .get_mut(child_sid)
+                .is_some_and(|child| {
+                    child
+                        .scrollback
+                        .push_block(ui_notice_block(output, event_id));
+                    true
+                })
+        }
+        GrowSessionUpdate::ControlStateUpdate(update) => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| apply_control_state_update(child, update, event_id)),
         GrowSessionUpdate::ModelChanged {
             model_id,
             reasoning_effort,
@@ -1077,9 +1322,13 @@ pub(super) fn handle_child_session_notification(
             .subagent_views
             .get_mut(child_sid)
             .is_some_and(|child| {
-                if child.session.controls_pending() {
-                    child.session.defer_authoritative_agent_change(agent_name);
-                    false
+                if child.session.agent_control_pending() {
+                    if child.session.resolve_agent_control(&agent_name) {
+                        child.session.apply_agent_name(Some(agent_name))
+                    } else {
+                        child.session.defer_authoritative_agent_change(agent_name);
+                        false
+                    }
                 } else {
                     child.session.apply_agent_name(Some(agent_name))
                 }
@@ -1167,25 +1416,120 @@ pub(crate) fn sync_child_control_projection(agent: &mut AgentView, child_sid: &s
     changed
 }
 
+fn apply_control_state_update(
+    agent: &mut AgentView,
+    update: shell::extensions::notification::ControlStateUpdate,
+    event_id: Option<String>,
+) -> bool {
+    use shell::extensions::notification::{ControlPhase, ControlTarget};
+    let phase = update.phase;
+    let epoch = update.epoch.clone();
+    let revision = update.revision;
+    let domain = update.domain;
+    let current = update.current.clone();
+    let desired = update.desired.clone();
+    let intent = update.intent.clone();
+    let receipt_only = update.receipt_only;
+    let terminal_message = update.message.clone();
+    let receipt_valid = current.domain() == domain
+        && desired
+            .as_ref()
+            .is_some_and(|target| target.domain() == domain)
+        && intent.is_some()
+        && matches!(
+            phase,
+            ControlPhase::Applied | ControlPhase::Rejected | ControlPhase::Superseded
+        );
+    let apply_outcome = if receipt_only {
+        if receipt_valid {
+            crate::app::session::ShellControlApplyOutcome::Accepted { changed: false }
+        } else {
+            crate::app::session::ShellControlApplyOutcome::Rejected
+        }
+    } else {
+        agent
+            .session
+            .apply_shell_control_state_outcome(update, agent.session.loading_replay)
+    };
+    if !apply_outcome.accepted() {
+        return false;
+    }
+    let intent_resolved = agent.session.resolve_reconnect_control_projection(
+        domain,
+        phase,
+        &current,
+        desired.as_ref(),
+        intent.as_ref(),
+    );
+    let state_changed = apply_outcome.changed() || intent_resolved;
+    if phase == ControlPhase::Superseded || terminal_message.is_none() {
+        return state_changed;
+    }
+    let terminal = matches!(phase, ControlPhase::Applied | ControlPhase::Rejected);
+    if !terminal {
+        return state_changed;
+    }
+    let target = desired.as_ref();
+    let details = (phase == ControlPhase::Rejected).then(|| match target {
+        Some(ControlTarget::Sampling { .. }) => {
+            "Choose another /model or /effort target and retry.".to_string()
+        }
+        Some(ControlTarget::Agent { .. }) => {
+            "Retry /agent after checking that the Agent is still available.".to_string()
+        }
+        Some(ControlTarget::Behavior { .. }) => {
+            "Resolve the reported ownership or confirmation condition, then select the Behavior again."
+                .to_string()
+        }
+        None => "Retry the control after the session returns to a stable boundary.".to_string(),
+    });
+    let tone = if phase == ControlPhase::Applied {
+        NoticeTone::Success
+    } else {
+        NoticeTone::Error
+    };
+    let fallback_domain = desired
+        .as_ref()
+        .map(|target| format!("{:?}", target.domain()).to_lowercase())
+        .unwrap_or_else(|| "unknown".to_string());
+    let before = agent.scrollback.len();
+    agent.scrollback.push_block(RenderBlock::terminal_notice(
+        event_id.unwrap_or_else(|| format!("control:{epoch}:{fallback_domain}:{revision}")),
+        tone,
+        NoticeCategory::Control,
+        terminal_message.expect("checked above"),
+        details,
+    ));
+    state_changed || agent.scrollback.len() != before
+}
+
 fn apply_model_changed(
     agent: &mut AgentView,
     session_id: &str,
     model_id: String,
     reasoning_effort: Option<String>,
 ) -> Option<bool> {
-    if agent.session.controls_pending() {
-        tracing::debug!(
-            session_id,
-            model_id = %model_id,
-            "deferring ModelChanged broadcast behind local control queue"
-        );
-        agent
-            .session
-            .defer_authoritative_model_change(model_id, reasoning_effort);
-        return Some(false);
-    }
     use shell::sampling::types::ReasoningEffort;
     let new_model_id = acp::ModelId::new(model_id.clone());
+    let effort = reasoning_effort
+        .as_deref()
+        .and_then(|value| value.parse::<ReasoningEffort>().ok());
+    if agent.session.sampling_control_pending() {
+        if !agent
+            .session
+            .resolve_sampling_control(&new_model_id, effort)
+        {
+            tracing::debug!(
+                session_id,
+                model_id = %model_id,
+                "deferring non-matching ModelChanged behind local Sampling intent"
+            );
+            agent
+                .session
+                .defer_authoritative_model_change(model_id, reasoning_effort);
+            return Some(false);
+        }
+    }
     if !agent.session.models.available.contains_key(&new_model_id) {
         tracing::warn!(
             session_id,
@@ -1197,9 +1541,6 @@ fn apply_model_changed(
             .defer_authoritative_model_change(model_id, reasoning_effort);
         return Some(false);
     }
-    let effort = reasoning_effort
-        .as_deref()
-        .and_then(|value| value.parse::<ReasoningEffort>().ok());
     agent.session.clear_deferred_authoritative_model_change();
     let previous_model = agent.session.models.current.clone();
     let previous_effort = agent.session.models.reasoning_effort;
@@ -1223,14 +1564,13 @@ fn apply_model_changed(
 }
 
 /// Apply the latest server-authoritative model and Agent states that arrived
-/// while this client had a local route control in flight. Call only after
-/// that session's serialized queue reaches `Drained`; otherwise a subsequent
-/// local control would be overwritten before its own RPC runs.
+/// while this client had a matching local control in flight. Each domain is
+/// released independently so an Agent preparation cannot delay a committed
+/// model update (or vice versa).
 pub(crate) fn apply_deferred_authoritative_controls(
     agent: &mut AgentView,
     session_id: &str,
 ) -> bool {
-    debug_assert!(!agent.session.controls_pending());
     let (model_change, agent_change) = agent.session.take_deferred_authoritative_controls();
     let model_changed = model_change
         .and_then(|(model_id, reasoning_effort)| {
@@ -1257,11 +1597,11 @@ pub(super) fn apply_session_event(
             }
             session.in_flight_prompt = None;
             session.set_compaction_activity(Some(TurnActivity::AutoCompacting));
-            scrollback.push_block(RenderBlock::session_event(
-                SessionEvent::CompactionStarted {
-                    percentage: *percentage,
-                },
-            ));
+            session.set_live_feedback(
+                "compaction",
+                crate::scrollback::blocks::NoticeTone::Progress,
+                format!("Compacting context ({percentage}%)\u{2026}"),
+            );
             true
         }
         GrowSessionUpdate::AutoCompactCompleted {
@@ -1272,6 +1612,7 @@ pub(super) fn apply_session_event(
         } => {
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
             session.set_compaction_activity(None);
+            session.clear_live_feedback("compaction");
             session.compact_held_prompt = None;
             if session.loading_replay {
                 scrollback.push_block(RenderBlock::session_event(
@@ -1289,6 +1630,7 @@ pub(super) fn apply_session_event(
         GrowSessionUpdate::AutoCompactFailed { error } => {
             tracing::error!(error = %error, "Auto-compaction failed");
             session.set_compaction_activity(None);
+            session.clear_live_feedback("compaction");
             scrollback.push_block(RenderBlock::session_event(SessionEvent::CompactionFailed {
                 error: error.clone(),
             }));
@@ -1297,6 +1639,7 @@ pub(super) fn apply_session_event(
         GrowSessionUpdate::AutoCompactCancelled { .. } => {
             tracing::info!("Auto-compact cancelled");
             session.set_compaction_activity(None);
+            session.clear_live_feedback("compaction");
             session.compact_held_prompt = None;
             scrollback.push_block(RenderBlock::session_event(
                 SessionEvent::CompactionCancelled,
@@ -1311,13 +1654,13 @@ pub(super) fn apply_session_event(
         GrowSessionUpdate::ImageDropped { notes } => {
             let message = notes.join("\n");
             tracing::info!("Image dropped: {message}");
-            scrollback.push_block(RenderBlock::system(message));
+            scrollback.push_block(RenderBlock::notice(message));
             true
         }
         GrowSessionUpdate::ImageProjected { notes } => {
             let message = notes.join("\n");
             tracing::info!("Image projected: {message}");
-            scrollback.push_block(RenderBlock::system(message));
+            scrollback.push_block(RenderBlock::notice(message));
             true
         }
         _ => false,
@@ -1337,7 +1680,7 @@ pub(super) fn scrollback_has_recent_compaction_failed(
                     return true;
                 }
             }
-            Some(RenderBlock::System(_)) => {}
+            Some(RenderBlock::Notice(_)) => {}
             _ => break,
         }
     }
@@ -1358,7 +1701,7 @@ pub(super) fn apply_image_compressed(
         tracing::warn!("Image re-encode fallback: {message}");
         agent
             .scrollback
-            .push_block(RenderBlock::system(message.to_owned()));
+            .push_block(RenderBlock::notice(message.to_owned()));
         return true;
     }
     tracing::info!("Image compressed: {message}");
@@ -1499,21 +1842,6 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
                     .unwrap_or(1);
                 agent.show_behavior_switch_warning(message, remaining_ms);
             }
-        } else if status == Some("rejected")
-            && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
-        {
-            if let Some(target) = agent.session.deferred_session_mode {
-                agent.show_toast_for(
-                    &format!(
-                        "{message} The prompt is still queued: retry {} or choose {} to send it now.",
-                        target.display_label(),
-                        mode.display_label()
-                    ),
-                    std::time::Duration::from_secs(6),
-                );
-            } else {
-                agent.show_toast_for(message, std::time::Duration::from_millis(990));
-            }
         }
     }
     let was_active = agent.session.plan_mode_active;
@@ -1533,7 +1861,7 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
 /// Whether this authoritative mode update completed a Behavior selection.
 /// Confirmation and rejection responses keep the Shell's selection unchanged
 /// and must not release locally-held prompts. Plain updates and explicit
-/// `applied` responses may release the ordinary FIFO after the new identity is
+/// `applied` responses may release the prompt queue after the new identity is
 /// installed by [`detect_plan_mode_change`].
 pub(crate) fn behavior_mode_update_resolution(
     update: &acp::SessionUpdate,
@@ -1572,7 +1900,7 @@ pub(crate) fn behavior_mode_update_resolution(
 
 /// The target named by an explicit rejected/confirmation outcome. Applied
 /// updates correlate through their current mode; terminal non-applied outcomes
-/// must name their target so a delayed older result cannot advance the FIFO.
+/// must name their target so a delayed older result cannot release admission.
 pub(crate) fn behavior_mode_update_target(
     update: &acp::SessionUpdate,
 ) -> Option<tools::types::BehaviorId> {

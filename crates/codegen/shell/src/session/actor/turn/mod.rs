@@ -298,6 +298,31 @@ impl SessionActor {
             self.idle_arbiter.notify_one();
         }
     }
+
+    /// Start a successor Step after its predecessor's boundary has already
+    /// been closed and all eligible controls have settled. Steering that races
+    /// final response settlement and completion recovery share this exact
+    /// admission path, so neither can sample without a causal `StepStarted`.
+    async fn start_step_after_control_boundary(
+        &self,
+        prompt_id: &str,
+        injected_context: Option<ConversationItem>,
+    ) -> bool {
+        let _boundary = self.step_control_gate.lock().await;
+        self.refresh_goal_step_resources().await;
+        let admission = self.state.lock().await;
+        if !admission.can_continue_regular_turn(prompt_id) || self.events.has_active_step() {
+            return false;
+        }
+        if let Some(item) = injected_context {
+            self.chat_state_handle.push_user_message(item);
+        }
+        self.emit_event(crate::session::events::Event::LoopStarted {
+            loop_index: self.events.next_step_index(),
+        });
+        true
+    }
+
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
     ///
     /// Agents with a `completion_requirement` in their definition require the model
@@ -317,29 +342,37 @@ impl SessionActor {
         req_id: &str,
         origin: super::super::PromptOrigin,
         json_schema: Option<serde_json::Value>,
+        step_already_started: bool,
     ) -> Result<TurnOutcome, acp::Error> {
         let mut result = self
-            .process_conversation_turn(req_id, &origin, json_schema.clone(), false)
+            .process_conversation_turn(req_id, &origin, json_schema.clone(), step_already_started)
             .await;
         let mut attempt = 0u32;
         let mut recovery_key = None;
         let mut delay_satisfied_for = None;
         let mut result_precedes_current_agent = false;
         loop {
-            if self.events.has_active_step() {
-                let outcome = match &result {
-                    Ok(TurnOutcome::Completed { .. }) => "completed",
-                    Ok(TurnOutcome::ControlBoundary { .. }) => "control_boundary",
-                    Ok(TurnOutcome::GoalSpendingStopped { .. }) => "goal_spending_stopped",
-                    Ok(TurnOutcome::Cancelled { .. }) => "cancelled",
-                    Ok(TurnOutcome::MaxTurnsReached { .. }) => "max_turns",
-                    Ok(TurnOutcome::StationarityEnded { .. }) => "stationarity",
-                    Err(_) => "error",
+            let outcome = match &result {
+                Ok(TurnOutcome::Completed { .. }) => "completed",
+                Ok(TurnOutcome::ControlBoundary { .. }) => "control_boundary",
+                Ok(TurnOutcome::GoalSpendingStopped { .. }) => "goal_spending_stopped",
+                Ok(TurnOutcome::Cancelled { .. }) => "cancelled",
+                Ok(TurnOutcome::MaxTurnsReached { .. }) => "max_turns",
+                Ok(TurnOutcome::StationarityEnded { .. }) => "stationarity",
+                Err(_) => "error",
+            };
+            let (agent_changed, behavior_changed) =
+                if let Some(boundary) = self.end_step_control_boundary(outcome).await {
+                    let (_, agent_changed, behavior_changed) =
+                        self.apply_pending_controls_at_step_boundary(boundary).await;
+                    (agent_changed, behavior_changed)
+                } else {
+                    // `process_conversation_turn` may already have closed its
+                    // final Step for a control/budget boundary. Never consume
+                    // controls admitted after that horizon without another
+                    // StepEnded fact.
+                    (false, false)
                 };
-                self.events.end_step(outcome);
-            }
-            let (_, agent_changed, behavior_changed) =
-                self.apply_pending_controls_at_step_boundary().await;
             result_precedes_current_agent |= agent_changed;
             // Completion recovery is a new model step just as surely as the
             // ordinary tool loop is.  Usage from the response above may have
@@ -394,8 +427,11 @@ impl SessionActor {
                 recovery_key = None;
                 delay_satisfied_for = None;
                 result_precedes_current_agent = false;
+                if !self.start_step_after_control_boundary(req_id, None).await {
+                    return result;
+                }
                 result = self
-                    .process_conversation_turn(req_id, &origin, json_schema.clone(), false)
+                    .process_conversation_turn(req_id, &origin, json_schema.clone(), true)
                     .await;
                 continue;
             }
@@ -498,37 +534,19 @@ impl SessionActor {
                 continue;
             }
 
-            let recovery_step_started = {
-                let _boundary = self.step_control_gate.lock().await;
-                self.refresh_goal_step_resources().await;
-                let admission = self.state.lock().await;
-                if !matches!(&admission.foreground, ForegroundState::RegularTurn(_)) {
-                    None
-                } else if admission.terminal_preemption_pending {
-                    None
-                } else if admission.pending_step_controls.is_empty() {
-                    // Requirement resolution above and this admission are
-                    // separated only by operations that do not apply Agent
-                    // state. Holding the route queue lock while appending the
-                    // reminder and StepStarted makes the contract belong to
-                    // this exact Agent epoch; later selections belong to the
-                    // newly active step.
-                    self.chat_state_handle
-                        .push_user_message(ConversationItem::auto_recovery(
-                            requirement.reminder.clone(),
-                        ));
-                    self.emit_event(crate::session::events::Event::LoopStarted {
-                        loop_index: self.events.next_step_index(),
-                    });
-                    Some(true)
-                } else {
-                    Some(false)
-                }
-            };
-            match recovery_step_started {
-                Some(true) => {}
-                Some(false) => continue,
-                None => return result,
+            // The preceding Step boundary already froze its admission horizon.
+            // Controls accepted afterwards intentionally stay pending for the
+            // recovery Step starting here.
+            let recovery_step_started = self
+                .start_step_after_control_boundary(
+                    req_id,
+                    Some(ConversationItem::auto_recovery(
+                        requirement.reminder.clone(),
+                    )),
+                )
+                .await;
+            if !recovery_step_started {
+                return result;
             }
             result = self
                 .process_conversation_turn(req_id, &origin, None, true)
@@ -852,158 +870,160 @@ impl SessionActor {
             let using_prestarted_step = std::mem::take(&mut step_already_started);
             let mut agent_changed_for_step = false;
             if !using_prestarted_step {
-                if self.events.has_active_step() {
-                    self.events.end_step("continued");
-                }
-                loop {
-                    let (model_changed, agent_changed, behavior_changed) =
-                        self.apply_pending_controls_at_step_boundary().await;
-                    // Every accepted definition/route control is now durable
-                    // and live. Fence the new Goal budget before any
-                    // model-switch compaction, forced compaction, recovery, or
-                    // next-step provider request can spend under it.
-                    if self
-                        .enforce_goal_spending_limit_for_prompt(Some(req_id))
-                        .await
-                    {
-                        let snapshot = self
-                            .finalize_turn_bookkeeping(
-                                req_id,
-                                conv_turn_start,
-                                &turn_span_totals,
-                                model_fingerprint.clone(),
-                            )
-                            .await;
-                        return Ok(TurnOutcome::GoalSpendingStopped {
-                            snapshot: Box::new(snapshot),
-                        });
-                    }
-                    if behavior_changed {
-                        let snapshot = self
-                            .finalize_turn_bookkeeping(
-                                req_id,
-                                conv_turn_start,
-                                &turn_span_totals,
-                                model_fingerprint.clone(),
-                            )
-                            .await;
-                        return Ok(TurnOutcome::ControlBoundary {
-                            snapshot: Box::new(snapshot),
-                        });
-                    }
-                    if model_changed {
-                        // A smaller model window must compact before the first
-                        // request that uses it, not at the next outer turn.
-                        self.maybe_compact_on_model_switch().await?;
-                        self.record_turn_model().await;
-                        auth_retry_schedule.reset();
-                        structured_output_retries = 0;
-                        image_projection_retries = 0;
-                        model_fingerprint = None;
-                    }
-                    if let Some(trigger_info) = pending_forced_compaction.take() {
-                        if let Err(e) = self.run_compact_only(trigger_info).await {
-                            tracing::error!(error = %e, "Between-step compaction failed");
-                            if Self::is_auth_compact_error(&e) {
-                                return Err(self.surface_compact_auth_failure(e).await);
-                            }
-                            return Err(e);
-                        }
-                    }
-                    if model_changed || agent_changed {
-                        identical_tool_calls = IdenticalToolCallRun::default();
-                        let span = tracing::Span::current();
-                        span.record("agent.name", self.agent.borrow().name());
-                        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
-                            span.record("model_id", self.current_catalog_model_id());
-                            span.record(
-                                "effort",
-                                cfg.reasoning_effort
-                                    .map(|effort| effort.as_str())
-                                    .unwrap_or("none"),
-                            );
-                        }
-                    }
-                    if agent_changed {
-                        // Completion requirements belong to the Agent epoch. A
-                        // similarly named tool called under the previous role
-                        // cannot satisfy the replacement Agent's contract.
-                        turn_tools_called.clear();
-                        structured_output_retries = 0;
-                        agent_changed_for_step = true;
-                    }
-                    if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
-                        let run_len = identical_tool_calls.run_len;
-                        let tool_name = identical_tool_calls.tool_name.clone();
-                        let true_noop = identical_tool_calls.is_true_noop_run;
-                        tracing::warn!(
-                            session_id = %self.session_info.id,
-                            tool_name = %tool_name,
-                            run_len,
-                            true_noop,
-                            "action stationarity: ending turn after repeated identical tool calls"
-                        );
-                        ::diagnostics::unified_log::warn(
-                            "shell.turn.action_stationarity_stop",
-                            Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!({
-                                "loop_index": loop_index,
-                                "tool_name": tool_name,
-                                "run_len": run_len,
-                                "true_noop": true_noop,
-                            })),
-                        );
-                        ::diagnostics::session_ctx::log_event(
-                            ::diagnostics::events::ActionStationarityStop {
-                                true_noop,
-                                run_len,
-                                tool_name: tool_name.clone(),
-                            },
-                        );
-                        let snapshot = self
-                            .finalize_turn_bookkeeping(
-                                req_id,
-                                conv_turn_start,
-                                &turn_span_totals,
-                                model_fingerprint.clone(),
-                            )
-                            .await;
-                        return Ok(TurnOutcome::StationarityEnded {
-                            snapshot: Box::new(snapshot),
-                        });
-                    }
-                    let boundary = {
-                        let _boundary = self.step_control_gate.lock().await;
-                        self.refresh_goal_step_resources().await;
-                        let admission = self.state.lock().await;
-                        if !matches!(&admission.foreground, ForegroundState::RegularTurn(_)) {
-                            None
-                        } else if admission.terminal_preemption_pending {
-                            None
-                        } else if admission.pending_step_controls.is_empty() {
-                            // Route admission and StepStarted share this lock. A
-                            // selection accepted after it is released therefore
-                            // belongs unambiguously to the newly active step.
-                            self.emit_event(crate::session::events::Event::LoopStarted {
-                                loop_index,
-                            });
-                            Some(true)
-                        } else {
-                            Some(false)
-                        }
+                let control_boundary =
+                    if self.events.next_step_index() == 0 && !self.events.has_active_step() {
+                        self.initial_step_control_boundary(req_id).await
+                    } else {
+                        self.end_step_control_boundary("continued").await
                     };
-                    match boundary {
-                        Some(true) => break,
-                        Some(false) => continue,
-                        None => {
-                            return Ok(TurnOutcome::Cancelled {
-                                category: None,
-                                context: Some(serde_json::json!({
-                                    "reason": "foreground ownership ended at the step boundary",
-                                })),
-                            });
+                let Some(control_boundary) = control_boundary else {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: None,
+                        context: Some(serde_json::json!({
+                            "reason": "the next Step could not establish its control boundary",
+                        })),
+                    });
+                };
+                let (model_changed, agent_changed, behavior_changed) = self
+                    .apply_pending_controls_at_step_boundary(control_boundary)
+                    .await;
+                // Every accepted definition/route control is now durable
+                // and live. Fence the new Goal budget before any
+                // model-switch compaction, forced compaction, recovery, or
+                // next-step provider request can spend under it.
+                if self
+                    .enforce_goal_spending_limit_for_prompt(Some(req_id))
+                    .await
+                {
+                    let snapshot = self
+                        .finalize_turn_bookkeeping(
+                            req_id,
+                            conv_turn_start,
+                            &turn_span_totals,
+                            model_fingerprint.clone(),
+                        )
+                        .await;
+                    return Ok(TurnOutcome::GoalSpendingStopped {
+                        snapshot: Box::new(snapshot),
+                    });
+                }
+                if behavior_changed {
+                    let snapshot = self
+                        .finalize_turn_bookkeeping(
+                            req_id,
+                            conv_turn_start,
+                            &turn_span_totals,
+                            model_fingerprint.clone(),
+                        )
+                        .await;
+                    return Ok(TurnOutcome::ControlBoundary {
+                        snapshot: Box::new(snapshot),
+                    });
+                }
+                if model_changed {
+                    // A smaller model window must compact before the first
+                    // request that uses it, not at the next outer turn.
+                    self.maybe_compact_on_model_switch().await?;
+                    self.record_turn_model().await;
+                    auth_retry_schedule.reset();
+                    structured_output_retries = 0;
+                    image_projection_retries = 0;
+                    model_fingerprint = None;
+                }
+                if let Some(trigger_info) = pending_forced_compaction.take() {
+                    if let Err(e) = self.run_compact_only(trigger_info).await {
+                        tracing::error!(error = %e, "Between-step compaction failed");
+                        if Self::is_auth_compact_error(&e) {
+                            return Err(self.surface_compact_auth_failure(e).await);
                         }
+                        return Err(e);
                     }
+                }
+                if model_changed || agent_changed {
+                    identical_tool_calls = IdenticalToolCallRun::default();
+                    let span = tracing::Span::current();
+                    span.record("agent.name", self.agent.borrow().name());
+                    if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+                        span.record("model_id", self.current_catalog_model_id());
+                        span.record(
+                            "effort",
+                            cfg.reasoning_effort
+                                .map(|effort| effort.as_str())
+                                .unwrap_or("none"),
+                        );
+                    }
+                }
+                if agent_changed {
+                    // Completion requirements belong to the Agent epoch. A
+                    // similarly named tool called under the previous role
+                    // cannot satisfy the replacement Agent's contract.
+                    turn_tools_called.clear();
+                    structured_output_retries = 0;
+                    agent_changed_for_step = true;
+                }
+                if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
+                    let run_len = identical_tool_calls.run_len;
+                    let tool_name = identical_tool_calls.tool_name.clone();
+                    let true_noop = identical_tool_calls.is_true_noop_run;
+                    tracing::warn!(
+                        session_id = %self.session_info.id,
+                        tool_name = %tool_name,
+                        run_len,
+                        true_noop,
+                        "action stationarity: ending turn after repeated identical tool calls"
+                    );
+                    ::diagnostics::unified_log::warn(
+                        "shell.turn.action_stationarity_stop",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "loop_index": loop_index,
+                            "tool_name": tool_name,
+                            "run_len": run_len,
+                            "true_noop": true_noop,
+                        })),
+                    );
+                    ::diagnostics::session_ctx::log_event(
+                        ::diagnostics::events::ActionStationarityStop {
+                            true_noop,
+                            run_len,
+                            tool_name: tool_name.clone(),
+                        },
+                    );
+                    let snapshot = self
+                        .finalize_turn_bookkeeping(
+                            req_id,
+                            conv_turn_start,
+                            &turn_span_totals,
+                            model_fingerprint.clone(),
+                        )
+                        .await;
+                    return Ok(TurnOutcome::StationarityEnded {
+                        snapshot: Box::new(snapshot),
+                    });
+                }
+                let step_started = {
+                    let _boundary = self.step_control_gate.lock().await;
+                    self.refresh_goal_step_resources().await;
+                    let admission = self.state.lock().await;
+                    if !admission.can_continue_regular_turn(req_id) {
+                        false
+                    } else {
+                        // The ended Step's immutable admission horizon was
+                        // captured before controls were applied. Requests
+                        // accepted afterwards remain pending for the Step
+                        // starting here, even if they arrived before this
+                        // append acquired the gate.
+                        self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
+                        true
+                    }
+                };
+                if !step_started {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: None,
+                        context: Some(serde_json::json!({
+                            "reason": "foreground ownership ended at the step boundary",
+                        })),
+                    });
                 }
             }
             loop_index += 1;
@@ -1195,6 +1215,19 @@ impl SessionActor {
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
                 .map_err(|message| acp::Error::internal_error().data(message))?;
+            let provider_admitted = {
+                let _boundary = self.step_control_gate.lock().await;
+                let admission = self.state.lock().await;
+                admission.can_continue_regular_turn(req_id) && self.events.has_active_step()
+            };
+            if !provider_admitted {
+                return Ok(TurnOutcome::Cancelled {
+                    category: None,
+                    context: Some(serde_json::json!({
+                        "reason": "provider admission closed before sampling",
+                    })),
+                });
+            }
             ::diagnostics::unified_log::info(
                 "shell.turn.inference_start",
                 Some(self.session_info.id.0.as_ref()),
@@ -1440,22 +1473,21 @@ impl SessionActor {
                 .await;
             }
             if turn_refused && response_is_empty {
-                let mut notice = "The model provider refused to generate a response \
-                     for this turn (content filter)."
-                    .to_string();
-                if let Some(explanation) = refusal_explanation.as_deref() {
-                    notice.push_str("\n\nProvider explanation: ");
-                    notice.push_str(explanation);
-                }
                 tracing::warn!(
                     has_explanation = refusal_explanation.is_some(),
-                    "model response was a provider refusal — emitting notice chunk"
+                    "model response was a provider refusal — emitting UI-only notice"
                 );
-                self.send_update(
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        acp::ContentBlock::Text(acp::TextContent::new(notice)),
-                    )),
-                    None,
+                self.send_lifecycle_notice(
+                    "provider",
+                    crate::extensions::notification::UiNoticeTone::Warning,
+                    "The model provider refused to generate a response for this turn.",
+                    Some(match refusal_explanation.as_deref() {
+                        Some(explanation) => format!(
+                            "Reason: content filter. Provider explanation: {explanation}\nRecovery: revise the prompt or switch to an appropriate model, then retry."
+                        ),
+                        None => "Reason: content filter.\nRecovery: revise the prompt or switch to an appropriate model, then retry."
+                            .to_string(),
+                    }),
                 )
                 .await;
             }
@@ -1807,6 +1839,130 @@ impl IdenticalToolCallRun {
         } else {
             MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
         }
+    }
+}
+#[cfg(test)]
+mod continuation_step_tests {
+    use super::*;
+    use crate::session::actor::tests::support::{begin_test_active_causal_turn, build_actor};
+
+    #[tokio::test]
+    async fn successor_sampling_step_is_started_after_an_already_closed_boundary() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                begin_test_active_causal_turn(&actor).await;
+                let boundary = actor
+                    .end_step_control_boundary("completed")
+                    .await
+                    .expect("the original Step ends");
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (false, false, false)
+                );
+                assert!(!actor.events.has_active_step());
+
+                assert!(
+                    actor
+                        .start_step_after_control_boundary("test-active-turn", None)
+                        .await
+                );
+                assert!(actor.events.has_active_step());
+
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("Timeline events");
+                let step_events = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Step(step) => Some(step),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(matches!(
+                    step_events.as_slice(),
+                    [
+                        chat_state::StepEvent::Started { .. },
+                        chat_state::StepEvent::Ended { .. },
+                        chat_state::StepEvent::Started { .. }
+                    ]
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn first_sampling_step_uses_an_initial_control_horizon_without_step_ended() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                actor.events.begin_turn();
+                actor
+                    .events
+                    .start_turn(crate::session::events::Event::TurnStarted {
+                        session_id: actor.session_id_string(),
+                        turn_number: 1,
+                        identity: chat_state::TurnIdentity {
+                            origin: "user".into(),
+                            turn_kind: "regular".into(),
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            stage_id: None,
+                        },
+                        model_id: "test".into(),
+                        permission_mode: actor.permissions.mode(),
+                        conversation_message_count: 0,
+                        prompt_index: Some(0),
+                        prompt_text: Some("hello".into()),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        session_relationship: crate::session::events::SessionRelationship::Primary,
+                        schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+                        redirect_kind: None,
+                    })
+                    .await
+                    .unwrap();
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    crate::session::actor::tests::support::running_task_stub("initial-step"),
+                );
+
+                let boundary = actor
+                    .initial_step_control_boundary("initial-step")
+                    .await
+                    .expect("a fresh turn has an initial control horizon");
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (false, false, false)
+                );
+                assert!(
+                    actor
+                        .start_step_after_control_boundary("initial-step", None)
+                        .await
+                );
+
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("Timeline events");
+                let step_events = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Step(step) => Some(step),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(matches!(
+                    step_events.as_slice(),
+                    [chat_state::StepEvent::Started { .. }]
+                ));
+            })
+            .await;
     }
 }
 #[cfg(test)]

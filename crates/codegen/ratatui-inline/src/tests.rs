@@ -440,4 +440,40 @@ mod links {
             "non-origin mapping: {out:?}"
         );
     }
+
+    #[test]
+    fn native_insert_keeps_cjk_display_cells_and_full_link_target() {
+        let mut terminal = Terminal::with_options(
+            RecordingBackend::default(),
+            TerminalOptions {
+                viewport: Viewport::Inline(3),
+            },
+        )
+        .unwrap();
+        terminal.backend_mut().buf.clear();
+        let target = "file:///very/long/session/workflow/scratch/report.md";
+
+        terminal
+            .insert_before_with_links(1, |buf, links| {
+                buf.set_string(0, 0, "世界 report.md", Style::default());
+                links.push(LinkSpan {
+                    row: 0,
+                    col_start: 0,
+                    col_end: 4,
+                    url: target.into(),
+                    id: Some(17),
+                });
+            })
+            .unwrap();
+
+        let out = String::from_utf8(terminal.backend().buf.clone()).unwrap();
+        assert!(
+            out.contains(&format!("\x1b]8;id=17;{target}\x07世界\x1b]8;;\x07")),
+            "native committed rows preserve wide glyphs and the full target: {out:?}"
+        );
+        assert!(
+            out.contains("report.md"),
+            "visible basename remains text: {out:?}"
+        );
+    }
 }

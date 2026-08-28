@@ -1,5 +1,134 @@
 use super::*;
 
+tokio::task_local! {
+    /// Presentation identity of the Shell-owned command currently executing.
+    /// Task-local scope avoids actor-global state leaking into unrelated
+    /// background notifications while keeping deep command handlers simple.
+    pub(super) static HOST_COMMAND_INVOCATION: crate::session::HostCommandInvocation;
+}
+
+#[cfg(test)]
+mod command_output_projection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn typed_command_notice_is_ui_only_and_preserves_tone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let before =
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+                actor.state.lock().await.rewindable = true;
+
+                actor
+                    .send_host_turn_slash_command_notice(
+                        crate::extensions::notification::UiNoticeTone::Error,
+                        "Workflow launch failed",
+                        Some("Reason: invalid definition. Fix the workflow and retry.".into()),
+                    )
+                    .await;
+
+                let after =
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+                assert_eq!(
+                    after, before,
+                    "UI command output must never become model context"
+                );
+                assert!(
+                    actor.state.lock().await.rewindable,
+                    "UI command output must not close the active rewind window"
+                );
+                let notification = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                    .find_map(|message| {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            return None;
+                        };
+                        (args.request.method.as_ref() == "grow/session_notification")
+                            .then(|| {
+                                serde_json::from_str::<
+                                    crate::extensions::notification::SessionNotification,
+                                >(args.request.params.get())
+                                .ok()
+                            })
+                            .flatten()
+                    })
+                    .expect("typed command notification");
+                assert!(matches!(
+                    notification.update,
+                    crate::extensions::notification::SessionUpdate::UiNotice(
+                        crate::extensions::notification::UiNotice {
+                            tone: crate::extensions::notification::UiNoticeTone::Error,
+                            category: crate::extensions::notification::UiNoticeCategory::Command,
+                            ..
+                        }
+                    )
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_notice_is_ui_only_and_never_masquerades_as_agent_output() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let before =
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+
+                actor
+                    .send_lifecycle_notice(
+                        "goal",
+                        crate::extensions::notification::UiNoticeTone::Warning,
+                        "Goal stopped due to turn error",
+                        Some("Recovery: use /goal restart.".into()),
+                    )
+                    .await;
+
+                let after =
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+                assert_eq!(after, before, "lifecycle Notice must not enter ChatState");
+                let messages =
+                    std::iter::from_fn(|| gateway_rx.try_recv().ok()).collect::<Vec<_>>();
+                assert!(
+                    !messages.iter().any(|message| matches!(
+                        message,
+                        acp_transport::AcpClientMessage::SessionNotification(args)
+                            if matches!(args.update, acp::SessionUpdate::AgentMessageChunk(_))
+                    )),
+                    "Shell lifecycle prose must never be emitted as AgentMessageChunk"
+                );
+                let notice = messages.into_iter().find_map(|message| {
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        return None;
+                    };
+                    (args.request.method.as_ref() == "grow/session_notification")
+                        .then(|| {
+                            serde_json::from_str::<
+                                crate::extensions::notification::SessionNotification,
+                            >(args.request.params.get())
+                            .ok()
+                        })
+                        .flatten()
+                });
+                assert!(matches!(
+                    notice.map(|notice| notice.update),
+                    Some(crate::extensions::notification::SessionUpdate::UiNotice(
+                        crate::extensions::notification::UiNotice {
+                            category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+                            tone: crate::extensions::notification::UiNoticeTone::Warning,
+                            ..
+                        }
+                    ))
+                ));
+            })
+            .await;
+    }
+}
+
 fn completed_goal_control_cancel_trigger(
     control: Option<&'static str>,
     before_goal: Option<(String, u64, crate::session::goal_tracker::GoalStatus)>,
@@ -41,9 +170,10 @@ pub(super) struct GoalControlCancellation {
 }
 
 impl SessionActor {
-    async fn queue_host_command(&self, command: String) {
+    async fn queue_host_command(&self, invocation: crate::session::HostCommandInvocation) {
         let prompt_id = format!("host-command-{}", uuid::Uuid::now_v7());
         let (respond_to, _) = tokio::sync::oneshot::channel();
+        let command = invocation.command.clone();
         self.state.lock().await.pending_inputs.push_back(InputItem {
             prompt_id,
             turn_kind: crate::session::TurnKind::Internal,
@@ -53,6 +183,7 @@ impl SessionActor {
             verbatim: true,
             json_schema: None,
             origin: crate::session::PromptOrigin::HostCommand,
+            host_command: Some(invocation),
             notification_ids: Vec::new(),
             respond_to,
             persist_ack: None,
@@ -69,9 +200,21 @@ impl SessionActor {
     /// non-invalidating controls leave the turn running.
     pub(super) async fn execute_out_of_band_slash_command(
         self: &Arc<Self>,
+        invocation: crate::session::HostCommandInvocation,
+    ) -> Result<Option<GoalControlCancellation>, String> {
+        let command = invocation.command.trim().to_string();
+        HOST_COMMAND_INVOCATION
+            .scope(
+                invocation,
+                self.execute_out_of_band_slash_command_inner(command),
+            )
+            .await
+    }
+
+    async fn execute_out_of_band_slash_command_inner(
+        self: &Arc<Self>,
         command: String,
     ) -> Result<Option<GoalControlCancellation>, String> {
-        let command = command.trim().to_string();
         if !command.starts_with('/') {
             return Err("Grow commands must start with '/'.".to_string());
         }
@@ -152,17 +295,24 @@ impl SessionActor {
                 }))
             }
             other => {
+                let invocation = HOST_COMMAND_INVOCATION.with(Clone::clone);
+                let invoked_name = invocation
+                    .command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_else(|| other.command_name())
+                    .trim_start_matches('/');
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
-                    command: other.command_name().to_string(),
+                    command: invoked_name.to_string(),
                     args_provided: other.args_provided(),
                 });
                 if self.state.lock().await.foreground.regular().is_some() {
                     Err(format!(
                         "/{} cannot run inside an active turn. It was not treated as model input.",
-                        other.command_name()
+                        invoked_name
                     ))
                 } else {
-                    self.queue_host_command(command).await;
+                    self.queue_host_command(invocation).await;
                     Ok(None)
                 }
             }
@@ -336,7 +486,7 @@ impl SessionActor {
             }
             BuiltinAction::HooksAdd { path } => {
                 if path.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /hooks add <path>\nProvide a path to a hook JSON file or directory under ~/.grow/.",
                     )
                     .await;
@@ -348,7 +498,7 @@ impl SessionActor {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::HookAdded { success: true },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_success(&format!(
                                 "Added hook path: {path}\n\
                                  Restart session to load hooks from this path."
                             ))
@@ -358,9 +508,12 @@ impl SessionActor {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::HookAdded { success: false },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
-                                "Failed to add hook path: {e}"
-                            ))
+                            self.send_host_turn_slash_command_error(
+                                "Hook path was not added",
+                                format!(
+                                    "Path: {path}\nReason: {e}\nCheck that the path is under ~/.grow and retry /hooks add {path}."
+                                ),
+                            )
                             .await;
                         }
                     }
@@ -369,7 +522,7 @@ impl SessionActor {
             }
             BuiltinAction::HooksRemove { path } => {
                 if path.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /hooks-remove <path>\nProvide the path to remove from hooks-paths.",
                     )
                     .await;
@@ -379,7 +532,7 @@ impl SessionActor {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::HookRemoved { success: true },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_success(&format!(
                                 "Removed hook path: {path}\nRestart session to stop loading hooks from this path."
                             ))
                             .await;
@@ -388,9 +541,12 @@ impl SessionActor {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::HookRemoved { success: false },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
-                                "Failed to remove hook path: {e}"
-                            ))
+                            self.send_host_turn_slash_command_error(
+                                "Hook path was not removed",
+                                format!(
+                                    "Path: {path}\nReason: {e}\nVerify the configured path and retry /hooks-remove {path}."
+                                ),
+                            )
                             .await;
                         }
                     }
@@ -398,12 +554,31 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::HooksUntrust => {
-                let msg = match Self::do_hooks_untrust_project(&self.session_info.cwd) {
-                    Ok((root, true)) => format!("Untrusted: {}.", root.display()),
-                    Ok((root, false)) => format!("Not currently trusted: {}", root.display()),
-                    Err(e) => e,
-                };
-                self.send_host_turn_slash_command_output(&msg).await;
+                match Self::do_hooks_untrust_project(&self.session_info.cwd) {
+                    Ok((root, true)) => {
+                        self.send_host_turn_slash_command_success(&format!(
+                            "Hook project untrusted: {}",
+                            root.display()
+                        ))
+                        .await;
+                    }
+                    Ok((root, false)) => {
+                        self.send_host_turn_slash_command_warning(&format!(
+                            "Hook project was not trusted: {}",
+                            root.display()
+                        ))
+                        .await;
+                    }
+                    Err(error) => {
+                        self.send_host_turn_slash_command_error(
+                            "Hook trust state was not changed",
+                            format!(
+                                "Reason: {error}\nResolve the configuration error and retry /hooks untrust."
+                            ),
+                        )
+                        .await;
+                    }
+                }
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsList => {
@@ -487,8 +662,9 @@ impl SessionActor {
                         ::diagnostics::session_ctx::log_event(
                             ::diagnostics::events::PluginReloaded { success: false },
                         );
-                        self.send_host_turn_slash_command_output(
-                            "No plugin registry handle available. Start a new session to discover plugins.",
+                        self.send_host_turn_slash_command_error(
+                            "Plugins could not be reloaded",
+                            "Reason: this session has no plugin registry handle. Start a new session, then retry /plugins reload.",
                         )
                         .await;
                     }
@@ -496,7 +672,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsTrust => {
-                self.send_host_turn_slash_command_output(
+                self.send_host_turn_slash_command_warning(
                     "Trust/untrust has been replaced by enable/disable. Use /plugins enable <id> instead.",
                 )
                 .await;
@@ -567,7 +743,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsAdd { path } => {
                 if path.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /plugins add <path>\n\
                          Provide the path to a plugin directory to add.",
                     )
@@ -591,7 +767,7 @@ impl SessionActor {
                                 },
                             );
                             let msg = format!("Added plugin path: {path_str}");
-                            self.send_host_turn_slash_command_output(&msg).await;
+                            self.send_host_turn_slash_command_success(&msg).await;
                             if let Some(ref handle) = self.plugin_registry_handle {
                                 let reload_msg = self.reload_plugins_impl(handle, false).await;
                                 self.send_host_turn_slash_command_output(&reload_msg).await;
@@ -604,9 +780,12 @@ impl SessionActor {
                                     success: false,
                                 },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
-                                "Failed to add plugin path: {e}"
-                            ))
+                            self.send_host_turn_slash_command_error(
+                                "Plugin path was not added",
+                                format!(
+                                    "Path: {path_str}\nReason: {e}\nVerify the directory and retry /plugins add {path}."
+                                ),
+                            )
                             .await;
                         }
                     }
@@ -615,7 +794,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsRemove { path } => {
                 if path.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /plugins remove <path>\n\
                          Provide the path to a plugin directory to remove.",
                     )
@@ -636,7 +815,7 @@ impl SessionActor {
                                 ::diagnostics::events::PluginRemoved { success: true },
                             );
                             let msg = format!("Removed plugin path: {path_str}");
-                            self.send_host_turn_slash_command_output(&msg).await;
+                            self.send_host_turn_slash_command_success(&msg).await;
                             if let Some(ref handle) = self.plugin_registry_handle {
                                 let reload_msg = self.reload_plugins_impl(handle, false).await;
                                 self.send_host_turn_slash_command_output(&reload_msg).await;
@@ -646,9 +825,12 @@ impl SessionActor {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::PluginRemoved { success: false },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
-                                "Failed to remove plugin path: {e}"
-                            ))
+                            self.send_host_turn_slash_command_error(
+                                "Plugin path was not removed",
+                                format!(
+                                    "Path: {path_str}\nReason: {e}\nVerify the configured path and retry /plugins remove {path}."
+                                ),
+                            )
                             .await;
                         }
                     }
@@ -657,7 +839,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsInstall { source, trust } => {
                 if source.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /plugins install <source>\n\
                          Source can be a git URL or local path.\n\
                          Examples:\n\
@@ -680,7 +862,7 @@ impl SessionActor {
                                 format!("local directory: {}", path.display())
                             }
                         };
-                        self.send_host_turn_slash_command_output(&format!(
+                        self.send_host_turn_slash_command_warning(&format!(
                             "About to install plugin from: {source_desc}\n\
                              \n\
                              This will clone/link the source and activate all executable surfaces:\n\
@@ -719,7 +901,7 @@ impl SessionActor {
                                     plugin_name = %outcome.plugin_names.join(","),
                                 )
                                 .in_scope(|| {});
-                                self.send_host_turn_slash_command_output(&format!(
+                                self.send_host_turn_slash_command_success(&format!(
                                     "Installed {} plugin(s) from {source}: {}\n\
                                      Run /plugins reload to activate.",
                                     outcome.plugin_names.len(),
@@ -749,9 +931,12 @@ impl SessionActor {
                                         error_category: Some(error_category),
                                     },
                                 );
-                                self.send_host_turn_slash_command_output(&format!(
-                                    "Failed to install plugin: {e}"
-                                ))
+                                self.send_host_turn_slash_command_error(
+                                    "Plugin installation failed",
+                                    format!(
+                                        "Source: {source}\nReason: {e}\nCorrect the source or permissions, then retry /plugins install {source} --trust."
+                                    ),
+                                )
                                 .await;
                             }
                         }
@@ -761,7 +946,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsUninstall { name, confirm } => {
                 if name.is_empty() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "Usage: /plugins uninstall <name>\n\
                          Provide the name of an installed plugin to remove.",
                     )
@@ -776,7 +961,7 @@ impl SessionActor {
                                     success: true,
                                 },
                             );
-                            self.send_host_turn_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_success(&format!(
                                 "Uninstalled repo \"{}\" ({} plugin(s): {})",
                                 outcome.repo_key,
                                 outcome.removed_plugins.len(),
@@ -790,7 +975,7 @@ impl SessionActor {
                             other_plugins,
                             total,
                         }) => {
-                            self.send_host_turn_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_warning(&format!(
                                 "Plugin \"{name}\" belongs to repo \"{repo_key}\" which also contains:\n\
                                  {}\n\
                                  \n\
@@ -805,7 +990,7 @@ impl SessionActor {
                             .await;
                         }
                         Err(UninstallError::NotFound { name }) => {
-                            self.send_host_turn_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_warning(&format!(
                                 "Plugin \"{name}\" not found in install registry.\n\
                                  Use /plugins list to see installed plugins."
                             ))
@@ -989,14 +1174,26 @@ impl SessionActor {
                 token_budget,
             } => {
                 if self.goal_tracker.lock().snapshot().is_some() {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "A Goal already exists. Use /goal edit <objective>, or /goal clear first.",
                     )
                     .await;
                     return ok_end_turn(0, None);
                 }
-                if let Err(message) = self.initialize_goal_runtime(&objective, token_budget).await {
-                    self.send_host_turn_slash_command_output(&message).await;
+                match self.initialize_goal_runtime(&objective, token_budget).await {
+                    Ok(()) => {
+                        self.send_host_turn_slash_command_success("Goal created and activated.")
+                            .await;
+                    }
+                    Err(error) => {
+                        self.send_host_turn_slash_command_error(
+                            "Goal was not created",
+                            format!(
+                                "Reason: {error}\nResolve the reported state conflict and retry /goal set."
+                            ),
+                        )
+                        .await;
+                    }
                 }
                 ok_end_turn(0, None)
             }
@@ -1005,13 +1202,13 @@ impl SessionActor {
                 token_budget,
             } => {
                 let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
-                    self.send_host_turn_slash_command_output(
+                    self.send_host_turn_slash_command_warning(
                         "No Goal can be edited. Use /goal set <objective>.",
                     )
                     .await;
                     return ok_end_turn(0, None);
                 };
-                let message = match self
+                match self
                     .admit_goal_definition_control(
                         goal.goal_id,
                         PendingGoalDefinitionMutation::Edit {
@@ -1021,12 +1218,17 @@ impl SessionActor {
                     )
                     .await
                 {
-                    Ok(None) => format!(
-                        "Goal edit scheduled for the next step boundary.\nObjective: {objective}"
-                    ),
+                    Ok(None) => {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Goal edit scheduled for the next step boundary.\nObjective: {objective}"
+                        ))
+                        .await;
+                    }
                     Ok(Some(false)) => {
-                        "Goal already has that objective and token budget; nothing changed."
-                            .to_string()
+                        self.send_host_turn_slash_command_output(
+                            "Goal already has that objective and token budget; nothing changed.",
+                        )
+                        .await;
                     }
                     Ok(Some(true)) => {
                         let active = self.goal_tracker.lock().status()
@@ -1036,33 +1238,52 @@ impl SessionActor {
                         } else {
                             "the Goal remains stopped; use /goal restart when ready"
                         };
-                        format!("Goal objective revised; {lifecycle}.\nObjective: {objective}")
+                        self.send_host_turn_slash_command_success(&format!(
+                            "Goal objective revised; {lifecycle}.\nObjective: {objective}"
+                        ))
+                        .await;
                     }
-                    Err(error) => format!("Goal edit was not applied: {error}"),
-                };
-                self.send_host_turn_slash_command_output(&message).await;
+                    Err(error) => {
+                        self.send_host_turn_slash_command_error(
+                            "Goal edit was not applied",
+                            format!(
+                                "Reason: {error}\nResolve the lifecycle conflict and retry /goal edit."
+                            ),
+                        )
+                        .await;
+                    }
+                }
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalEnter => {
                 use crate::session::behavior::BehaviorChangeOutcome;
-                let message = match self.request_goal_behavior_entry().await? {
+                match self.request_goal_behavior_entry().await? {
                     BehaviorChangeOutcome::Applied => {
-                        if self.goal_tracker.lock().snapshot().is_some() {
+                        let message = if self.goal_tracker.lock().snapshot().is_some() {
                             "Goal behavior selected. Use /goal status, /goal restart, or send additional context."
-                                .to_string()
                         } else {
                             "Goal behavior selected. Send the objective as your next message."
-                                .to_string()
-                        }
+                        };
+                        self.send_host_turn_slash_command_success(message).await;
                     }
-                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                    | BehaviorChangeOutcome::Rejected { message } => message,
-                };
-                self.send_host_turn_slash_command_output(&message).await;
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. } => {
+                        self.send_host_turn_slash_command_warning(&message).await;
+                    }
+                    BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_error(
+                            "Goal behavior was not selected",
+                            format!(
+                                "Reason: {message}\nResolve the active behavior ownership conflict and retry /goal."
+                            ),
+                        )
+                        .await;
+                    }
+                    BehaviorChangeOutcome::InFlight | BehaviorChangeOutcome::Superseded => {}
+                }
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalUsage => {
-                self.send_host_turn_slash_command_output(
+                self.send_host_turn_slash_command_warning(
                     "Usage: /goal set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens|unlimited> | status | pause | restart | clear",
                 )
                 .await;
@@ -1112,6 +1333,7 @@ impl SessionActor {
             BuiltinAction::GoalPause => {
                 use crate::session::goal_tracker::{GoalPauseReason, GoalStatus};
                 let boundary = self.step_control_gate.lock().await;
+                let transaction = self.goal_transaction_gate.lock().await;
                 let tokens_used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
                 let retired_goal_owner = previous
@@ -1146,6 +1368,7 @@ impl SessionActor {
                         return ok_end_turn(0, None);
                     }
                     self.arm_terminal_preemption_if_running().await;
+                    drop(transaction);
                     drop(boundary);
                     self.goal_notify_sender()
                         .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
@@ -1154,6 +1377,7 @@ impl SessionActor {
                             .await;
                     }
                 } else {
+                    drop(transaction);
                     drop(boundary);
                 }
                 self.send_host_turn_slash_command_output(msg).await;
@@ -1166,6 +1390,7 @@ impl SessionActor {
             }
             BuiltinAction::GoalClear => {
                 let boundary = self.step_control_gate.lock().await;
+                let transaction = self.goal_transaction_gate.lock().await;
                 let retired_goal_owner = self
                     .goal_tracker
                     .lock()
@@ -1184,9 +1409,11 @@ impl SessionActor {
                     self.persist_control_snapshot_durably(behavior, None).await
                 };
                 if persisted.is_err() {
+                    drop(transaction);
                     drop(boundary);
-                    self.send_host_turn_slash_command_output(
-                        "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
+                    self.send_host_turn_slash_command_error(
+                        "Goal was not cleared",
+                        "Reason: the control state could not be persisted. The Goal remains loaded; retry /goal clear.",
                     )
                     .await;
                     return ok_end_turn(0, None);
@@ -1194,24 +1421,10 @@ impl SessionActor {
                 self.arm_terminal_preemption_if_running().await;
                 if let Some((goal_id, _)) = retired_goal_owner.as_ref() {
                     let mut admission = self.state.lock().await;
-                    let mut retained =
-                        VecDeque::with_capacity(admission.pending_step_controls.len());
-                    while let Some(control) = admission.pending_step_controls.pop_front() {
-                        match control {
-                            PendingStepControl::GoalDefinition(pending)
-                                if pending.goal_id == *goal_id =>
-                            {
-                                if let Some(respond_to) = pending.responds_to {
-                                    let _ = respond_to.send(Err(
-                                        "The Goal was cleared before this scheduled definition change applied."
-                                            .to_string(),
-                                    ));
-                                }
-                            }
-                            control => retained.push_back(control),
-                        }
-                    }
-                    admission.pending_step_controls = retained;
+                    admission.pending_step_controls.cancel_goal_definitions(
+                        goal_id,
+                        "The Goal was cleared before this scheduled definition change applied.",
+                    );
                 }
                 self.goal_tracker.lock().clear();
                 self.sync_goal_usage_window();
@@ -1223,6 +1436,7 @@ impl SessionActor {
                         tools::types::BehaviorId::Normal.as_id(),
                     ));
                 }
+                drop(transaction);
                 drop(boundary);
                 if let Some((goal_id, definition_revision)) = retired_goal_owner {
                     self.cancel_goal_owned_work(&goal_id, definition_revision)
@@ -1231,7 +1445,7 @@ impl SessionActor {
                 self.send_available_commands_update().await;
                 self.send_grow_notification(crate::session::goal_notification::build_goal_cleared())
                     .await;
-                self.send_host_turn_slash_command_output("Goal cleared.")
+                self.send_host_turn_slash_command_success("Goal cleared.")
                     .await;
                 ok_end_turn(0, None)
             }

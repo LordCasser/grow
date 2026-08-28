@@ -313,7 +313,7 @@ pub(super) fn dispatch_dashboard_attach(
         DashboardRowId::TopLevel(agent_id) => {
             if !app.agents.contains_key(&agent_id) {
                 if let Some(d) = app.dashboard.as_mut() {
-                    d.set_error_toast("Session no longer exists");
+                    d.set_error("Session no longer exists");
                 }
                 return vec![];
             }
@@ -350,7 +350,7 @@ pub(super) fn dispatch_dashboard_attach(
                 .is_some_and(|a| a.session.subagent_sessions.contains_key(&child_session_id));
             if !alive {
                 if let Some(d) = app.dashboard.as_mut() {
-                    d.set_error_toast("Subagent no longer running");
+                    d.set_warning("Subagent no longer running");
                 }
                 return vec![];
             }
@@ -523,8 +523,8 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
         // "Session closed" toast the render path shows when an attached
         // agent disappears externally (`app/root/mod.rs`, AgentDashboard arm).
         // Don't clobber a refusal toast planted by the close path above.
-        if d.error_toast.is_none() {
-            d.error_toast = Some(format!("{} Session closed", crate::glyphs::check_mark()));
+        if d.feedback.is_none() {
+            d.set_success("Session closed");
         }
     }
     effects
@@ -544,7 +544,7 @@ pub(super) fn dispatch_dashboard_toggle_worktree(app: &mut AppView) -> Vec<Effec
             d.dispatch_worktree = !d.dispatch_worktree;
         } else {
             d.dispatch_worktree = false;
-            d.set_error_toast("Not a git repository — worktrees need one");
+            d.set_error("Not a git repository — worktrees need one");
         }
     }
     vec![]
@@ -576,7 +576,7 @@ fn open_dashboard_worktree_dialog(
         d.pending_worktree_attach = attach;
         d.worktree_dialog = Some(crate::app::root::NewWorktreeDialogState::new());
         d.dispatch.set_text("");
-        d.error_toast = None;
+        d.clear_feedback();
     }
     vec![]
 }
@@ -620,7 +620,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         // anything — a stray paste while the button is focused
         // (no typed Enter) shouldn't survive the view switch.
         d.dispatch.set_text("");
-        d.error_toast = None;
+        d.clear_feedback();
         d.filter = crate::views::dashboard::Filter::None;
         // Snap the cursor onto the new row so the overlay's `i/n`
         // indicator matches the active view, AND so the chrome's
@@ -807,7 +807,7 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
             } else if let Some(d) = app.dashboard.as_mut() {
                 // `/cd <bad path>` typed into the dispatch box (no picker
                 // open) — surface the error as a dashboard toast.
-                d.set_error_toast(&format!("Not a directory: {}", input.trim()));
+                d.set_error(format!("Not a directory: {}", input.trim()));
             }
             return vec![];
         }
@@ -855,7 +855,7 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
             // sessions run in (both keyed off `app.cwd`). Cheap: the walk
             // only spawns once the user actually types `@`.
             d.dispatch.file_search.retarget(&path);
-            d.error_toast = Some(format!("\u{2192} {display}"));
+            d.set_info(format!("Working directory: {display}"));
         }
     }
 
@@ -899,7 +899,7 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
             if let Some(p) = prompt {
                 d.dispatch.restore(p);
             }
-            d.set_error_toast("Not a git repository — can't create a worktree here");
+            d.set_error("Not a git repository — can't create a worktree here");
         }
         return vec![];
     }
@@ -1045,7 +1045,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     // slash-fallback callers.
     if trimmed.is_empty() {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Type a prompt to dispatch a session");
+            d.set_warning("Type a prompt to dispatch a session");
         }
         return vec![];
     }
@@ -1059,7 +1059,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     if text.len() > MAX_DISPATCH_BYTES {
         let chars = text.chars().count();
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast(&format!(
+            d.set_error(format!(
                 "Prompt too long ({chars} chars / {} bytes; max ~64 KiB)",
                 text.len()
             ));
@@ -1144,7 +1144,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     // would have already returned without effects.
     if let Some(d) = app.dashboard.as_mut() {
         d.dispatch.set_text("");
-        d.error_toast = None;
+        d.clear_feedback();
         d.filter = crate::views::dashboard::Filter::None;
     }
     if attach {
@@ -1176,7 +1176,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         if let Some(warning) = always_approve_enable_blocked(app, enabling)
             && let Some(d) = app.dashboard.as_mut()
         {
-            d.set_error_toast(warning);
+            d.set_warning(warning);
         }
     }
     effects
@@ -1188,12 +1188,10 @@ pub(super) fn dispatch_dashboard_dispatch(
 /// limited than the agent view's:
 ///
 ///   - Builtin commands that return `CommandResult::Action(...)` (e.g.
-///     `/agents`, `/exit`, `/theme`, `/settings`, `/help`, `/model`,
+///     `/agents`, `/quit`, `/theme`, `/settings`, `/help`, `/model`,
 ///     `/mcps`, `/plugin`, …) are dispatched identically to the agent path.
-///   - `CommandResult::Message` / `Error` surface as an `error_toast`
-///     on the dashboard (no scrollback to push into). `Error` strings
-///     get the `✗` prefix via `set_error_toast`; `Message` strings are
-///     stored verbatim (they carry their own glyph).
+///   - `CommandResult::Message` / `Error` surface through the dashboard's
+///     typed feedback slot (no scrollback to push into).
 ///   - `CommandResult::Handled` / `HandledNoOp` clear the input.
 ///   - ACP-advertised `CommandResult::HostCommand` values,
 ///     `CommandResult::QueueCommand`, and `InjectSkill` fall back to
@@ -1261,7 +1259,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         let Some(command) = reg.get(invocation.token).cloned() else {
             if let Some(dashboard) = app.dashboard.as_mut() {
                 dashboard.dispatch.set_text("");
-                dashboard.set_error_toast(&format!("Unknown command: /{}", invocation.token));
+                dashboard.set_error(format!("Unknown command: /{}", invocation.token));
             }
             return vec![];
         };
@@ -1279,7 +1277,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             let name = command.name();
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast(&format!("/{name} only works in a session"));
+                d.set_error(format!("/{name} only works in a session"));
             }
             return vec![];
         }
@@ -1334,27 +1332,21 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         CommandResult::Handled | CommandResult::HandledNoOp => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.error_toast = None;
+                d.clear_feedback();
             }
             vec![]
         }
         CommandResult::Error(msg) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                // Command errors are plain strings ("Unknown model: …",
-                // "Usage: /model <name> [effort]") with no glyph of their
-                // own — route through `set_error_toast` so the verbatim
-                // badge shows the `✗` error marker. `Message` results
-                // below stay verbatim: they carry their own glyph
-                // (e.g. `✓ Theme: …`).
-                d.set_error_toast(&msg);
+                d.set_error(msg);
             }
             vec![]
         }
         CommandResult::Message(msg) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.error_toast = Some(msg);
+                d.set_info(msg);
             }
             vec![]
         }
@@ -1374,6 +1366,10 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             stage_dashboard_model(app, model_id, effort);
             vec![]
         }
+        CommandResult::Action(Action::PatchEffort { model_id, effort }) => {
+            stage_dashboard_model(app, model_id, Some(effort));
+            vec![]
+        }
         // Bare selector commands reuse their normal suggestions in the
         // dashboard input. This surface has no AgentView-owned modal stack,
         // so opening the selector means entering the same Slash args phase.
@@ -1391,7 +1387,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 d.dispatch.set_text(&picker_input);
                 d.dispatch.set_cursor(picker_input.len());
                 d.dispatch.refresh_slash(&d.models);
-                d.error_toast = None;
+                d.clear_feedback();
             }
             vec![]
         }
@@ -1400,7 +1396,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         CommandResult::Action(Action::SetBehaviorMode(mode)) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.error_toast = None;
+                d.clear_feedback();
                 d.pending_behavior = mode;
                 d.dispatch.slash_controller.set_selection_context(
                     None,
@@ -1423,7 +1419,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 None => {
                     if let Some(d) = app.dashboard.as_mut() {
                         d.dispatch.set_text("");
-                        d.error_toast = None;
+                        d.clear_feedback();
                     }
                     vec![]
                 }
@@ -1434,7 +1430,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         CommandResult::Action(Action::ShowPlan) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast("No plan to show on the dashboard");
+                d.set_warning("No plan to show on the dashboard");
             }
             vec![]
         }
@@ -1444,7 +1440,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             {
                 if let Some(d) = app.dashboard.as_mut() {
                     d.dispatch.set_text("");
-                    d.set_error_toast(warning);
+                    d.set_warning(warning);
                 }
                 return vec![];
             }
@@ -1455,7 +1451,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             };
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.error_toast = None;
+                d.clear_feedback();
                 d.pending_permission = permission;
                 d.dispatch.slash_controller.set_selection_context(
                     None,
@@ -1471,14 +1467,14 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         CommandResult::Action(action) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.error_toast = None;
+                d.clear_feedback();
             }
             dispatch(action, app)
         }
         CommandResult::Doctor(_) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast("Open a session to run /doctor.");
+                d.set_warning("Open a session to run /doctor.");
             }
             vec![]
         }
@@ -1524,10 +1520,7 @@ fn stage_dashboard_model(
             Some(effort) => format!("{} ({effort} effort)", pending.display),
             None => pending.display.clone(),
         };
-        d.error_toast = Some(format!(
-            "{} {selection} set for next session",
-            crate::glyphs::check_mark()
-        ));
+        d.set_success(format!("{selection} set for next session"));
     }
 }
 
@@ -1606,7 +1599,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
     // peeks driven by their parent turn.
     let DashboardRowId::TopLevel(agent_id) = row else {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Can't reply to a subagent");
+            d.set_warning("Can't reply to a subagent");
         }
         return vec![];
     };
@@ -1614,7 +1607,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
     if !app.agents.contains_key(&agent_id) {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Session no longer exists");
+            d.set_error("Session no longer exists");
         }
         return vec![];
     }
@@ -1640,7 +1633,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             if let Some(d) = app.dashboard.as_mut() {
                 d.set_peek(None);
-                d.set_error_toast("Session no longer exists");
+                d.set_error("Session no longer exists");
             }
             return vec![];
         };
@@ -1663,7 +1656,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
     // stale error toast.
     if let Some(d) = app.dashboard.as_mut() {
         d.clear_peek_reply();
-        d.error_toast = None;
+        d.clear_feedback();
     }
 
     if attach {
@@ -1699,7 +1692,7 @@ pub(super) fn dispatch_dashboard_begin_rename(app: &mut AppView) {
     // Only top-level rows are renameable (subagents are tool-spawned
     // and have no user-visible name to rename).
     if sel.is_subagent() {
-        d.set_error_toast("Subagent rows can't be renamed");
+        d.set_warning("Subagent rows can't be renamed");
         return;
     }
     // The draft starts EMPTY (not prefilled with the current title):
@@ -2244,7 +2237,7 @@ pub(super) fn dispatch_dashboard_permission_select(
     let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error("Row no longer exists");
         }
         return vec![];
     };
@@ -2258,7 +2251,7 @@ pub(super) fn dispatch_dashboard_permission_select(
     let Some(permission_pos) = permission_pos else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Permission has changed — re-open peek");
+            d.set_warning("Permission has changed — re-open peek");
         }
         return vec![];
     };
@@ -2339,7 +2332,7 @@ pub(super) fn dispatch_dashboard_permission_followup(
     let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error("Row no longer exists");
         }
         return vec![];
     };
@@ -2351,7 +2344,7 @@ pub(super) fn dispatch_dashboard_permission_followup(
     let Some(permission_pos) = permission_pos else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Permission has changed — re-open peek");
+            d.set_warning("Permission has changed — re-open peek");
         }
         return vec![];
     };
@@ -2418,14 +2411,14 @@ pub(super) fn dispatch_dashboard_question_answer(
         // dispatch for a subagent row must not consume the child's parked
         // response (single answering entry = child fullscreen view).
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Open the subagent to answer");
+            d.set_warning("Open the subagent to answer");
         }
         return vec![];
     }
     let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error("Row no longer exists");
         }
         return vec![];
     };
@@ -2439,7 +2432,7 @@ pub(super) fn dispatch_dashboard_question_answer(
     if !question_matches {
         if let Some(dashboard) = app.dashboard.as_mut() {
             dashboard.set_peek(None);
-            dashboard.set_error_toast("Question has changed — re-open peek");
+            dashboard.set_warning("Question has changed — re-open peek");
         }
         return vec![];
     }

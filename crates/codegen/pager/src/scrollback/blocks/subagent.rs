@@ -3,13 +3,9 @@
 //! Similar to BgTaskBlock: always collapsed, animated bullet while running,
 //! colored bullet when done. Enter / Ctrl-F opens the subagent view.
 //!
-//! Two modes:
-//! - **Blocking** (sync): Single `Started` block. Blinks while running,
-//!   turns green/red when done. Text: `Subagent "description"`
-//! - **Background** (async): `Started` block stays forever (turns gray).
-//!   A separate `Completed`/`Failed` block is added when done.
-//!   Started text: `Subagent started: "description"`
-//!   Completed text: `Subagent completed in 43s: "description"`
+//! Started and terminal facts are always separate immutable rows. This is
+//! required by minimal mode, whose committed native scrollback cannot mutate
+//! an earlier row, and also gives retained mode the same replay semantics.
 
 use std::time::Duration;
 
@@ -48,6 +44,9 @@ pub enum SubagentBlockKind {
 /// Enter / Ctrl-F opens the subagent view.
 #[derive(Debug, Clone)]
 pub struct SubagentBlock {
+    /// Stable durable lifecycle identity used across live delivery, replay,
+    /// and Minimal's committed frontier.
+    pub event_id: Option<String>,
     /// Human-readable description of the task.
     pub description: String,
     /// Child session ID (for opening the subagent view).
@@ -60,13 +59,6 @@ pub struct SubagentBlock {
     pub is_background: bool,
     /// Lifecycle kind.
     pub kind: SubagentBlockKind,
-    /// Live activity label from the child session's turn tracker.
-    ///
-    /// Updated on each `SubagentProgress` tick while the subagent is running.
-    /// Shown inline in the collapsed scrollback line (e.g. "Thinking",
-    /// "Running: cargo build") so the user sees interactive progress without
-    /// opening the subagent view.
-    pub activity_label: Option<String>,
 }
 
 impl SubagentBlock {
@@ -79,13 +71,13 @@ impl SubagentBlock {
         is_background: bool,
     ) -> Self {
         Self {
+            event_id: None,
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: subagent_type.into(),
             model,
             is_background,
             kind: SubagentBlockKind::Started,
-            activity_label: None,
         }
     }
 
@@ -96,13 +88,13 @@ impl SubagentBlock {
         elapsed: Duration,
     ) -> Self {
         Self {
+            event_id: None,
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Completed { elapsed },
-            activity_label: None,
         }
     }
 
@@ -114,13 +106,13 @@ impl SubagentBlock {
         error: Option<String>,
     ) -> Self {
         Self {
+            event_id: None,
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Failed { elapsed, error },
-            activity_label: None,
         }
     }
 
@@ -131,14 +123,29 @@ impl SubagentBlock {
         elapsed: Duration,
     ) -> Self {
         Self {
+            event_id: None,
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Cancelled { elapsed },
-            activity_label: None,
         }
+    }
+
+    pub fn with_identity(
+        mut self,
+        subagent_type: impl Into<String>,
+        model: Option<String>,
+    ) -> Self {
+        self.subagent_type = subagent_type.into();
+        self.model = model;
+        self
+    }
+
+    pub fn with_event_id(mut self, event_id: Option<String>) -> Self {
+        self.event_id = event_id;
+        self
     }
 
     pub fn is_running(&self) -> bool {
@@ -173,65 +180,70 @@ impl BlockContent for SubagentBlock {
         let w = ctx.width as usize;
 
         let line = match (&self.kind, self.is_background) {
-            (SubagentBlockKind::Started, bg) => {
-                let verb = if bg { "started: " } else { "running: " };
-                let activity_suffix: String = self
-                    .activity_label
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|a| format!(" \u{2014} {a}"))
-                    .unwrap_or_default();
+            (SubagentBlockKind::Started, _) => {
+                let verb = "started: ";
                 let meta = format_subagent_meta(self.model.as_deref());
-                // "Subagent running: " / "Subagent started: " = 18 chars
-                let overhead = 18 + meta.width() + activity_suffix.width();
+                // "Subagent started: " = 18 chars
+                let overhead = 18 + meta.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(overhead));
                 let mut spans = vec![
                     Span::styled("Subagent ", bold),
                     Span::styled(verb, muted),
                     Span::styled(desc, muted),
                 ];
-                if !activity_suffix.is_empty() {
-                    spans.push(Span::styled(activity_suffix, muted));
-                }
                 spans.push(Span::styled(meta, muted));
                 Line::from(spans)
             }
-            // Completed: Subagent completed in Xs: "description"
             (SubagentBlockKind::Completed { elapsed }, _) => {
                 let time_str = format_duration(*elapsed);
-                // "Subagent completed in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len();
+                let identity = if self.subagent_type.is_empty() {
+                    "subagent"
+                } else {
+                    self.subagent_type.as_str()
+                };
+                let prefix = format!("{identity} completed · result delivered · {time_str} · ");
+                let prefix_len = 10 + prefix.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
-                    Span::styled("Subagent ", bold),
-                    Span::styled(format!("completed in {time_str}: "), muted),
+                    Span::styled("SUBAGENT  ", bold),
+                    Span::styled(prefix, muted),
                     Span::styled(desc, muted),
                 ])
             }
-            // Failed: Subagent failed in Xs: "description"
             (SubagentBlockKind::Failed { elapsed, error }, _) => {
                 let time_str = format_duration(*elapsed);
-                let detail = error
-                    .as_deref()
-                    .map(|e| format!(" ({e})"))
-                    .unwrap_or_default();
-                let prefix_len = 21 + time_str.len() + detail.len();
+                let identity = if self.subagent_type.is_empty() {
+                    "subagent"
+                } else {
+                    self.subagent_type.as_str()
+                };
+                let delivery = if error.is_some() {
+                    "error delivered"
+                } else {
+                    "no error detail"
+                };
+                let prefix = format!("{identity} failed · {delivery} · {time_str} · ");
+                let prefix_len = 10 + prefix.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
-                    Span::styled("Subagent ", bold),
-                    Span::styled(format!("failed in {time_str}{detail}: "), muted),
+                    Span::styled("SUBAGENT  ", bold),
+                    Span::styled(prefix, muted),
                     Span::styled(desc, muted),
                 ])
             }
-            // Cancelled: Subagent cancelled in Xs: "description"
             (SubagentBlockKind::Cancelled { elapsed }, _) => {
                 let time_str = format_duration(*elapsed);
-                // "Subagent cancelled in Xs: " = 26 + time_str.len()
-                let prefix_len = 26 + time_str.len();
+                let identity = if self.subagent_type.is_empty() {
+                    "subagent"
+                } else {
+                    self.subagent_type.as_str()
+                };
+                let prefix = format!("{identity} cancelled · no result delivered · {time_str} · ");
+                let prefix_len = 10 + prefix.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(prefix_len));
                 Line::from(vec![
-                    Span::styled("Subagent ", bold),
-                    Span::styled(format!("cancelled in {time_str}: "), muted),
+                    Span::styled("SUBAGENT  ", bold),
+                    Span::styled(prefix, muted),
                     Span::styled(desc, muted),
                 ])
             }

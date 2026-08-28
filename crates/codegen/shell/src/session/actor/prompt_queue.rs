@@ -146,6 +146,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
+            host_command: None,
             notification_ids: Vec::new(),
             respond_to,
             persist_ack,

@@ -30,6 +30,34 @@ use agent::AgentId;
 use crate::unified_log as ulog;
 use shell::sampling::error::http_status_from_error;
 use shell::session::{ExtMethodResult, SessionInfoResponse};
+
+fn control_rpc_outcome(status: Option<&str>) -> actions::ControlRpcOutcome {
+    if status == Some("superseded") {
+        actions::ControlRpcOutcome::Superseded
+    } else {
+        actions::ControlRpcOutcome::AuthoritativeUpdatePending
+    }
+}
+
+fn control_request_failure(error: acp::Error) -> actions::ControlRequestFailure {
+    actions::ControlRequestFailure {
+        terminal_published: shell::session::control_terminal_was_published(&error),
+        message: sanitize_user_error(&error.to_string()),
+    }
+}
+
+fn ext_control_rpc_outcome(response: &acp::ExtResponse) -> actions::ControlRpcOutcome {
+    let status = serde_json::from_str::<serde_json::Value>(response.0.get())
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/result/status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    control_rpc_outcome(status.as_deref())
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
@@ -1213,14 +1241,25 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+                    let mut meta = acp::Meta::new();
+                    control_token.shell_intent().insert_meta(&mut meta);
                     let req = acp::SetSessionModeRequest::new(
                         session_id.clone(),
                         acp::SessionModeId::new(mode.as_id()),
-                    );
+                    )
+                    .meta(meta);
                     let result = acp_send(req, &tx)
                         .await
-                        .map(|_| ())
-                        .map_err(|error| error.to_string());
+                        .map(|response| {
+                            control_rpc_outcome(
+                                response
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|meta| meta.get("status"))
+                                    .and_then(serde_json::Value::as_str),
+                            )
+                        })
+                        .map_err(control_request_failure);
                     TaskResult::SwitchBehaviorComplete {
                         agent_id,
                         session_id,
@@ -1426,22 +1465,28 @@ pub(crate) fn execute(
             control_token,
             model_id,
             effort,
+            effort_patch,
         } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let meta = effort
-                        .map(|eff| {
+                    let mut meta = acp::Meta::new();
+                    if let Some(eff) = effort {
                             use shell::sampling::types::{
                                 REASONING_EFFORT_META_KEY, reasoning_effort_meta_value,
                             };
-                            let mut m = acp::Meta::new();
-                            m.insert(
+                            meta.insert(
                                 REASONING_EFFORT_META_KEY.to_string(),
                                 reasoning_effort_meta_value(eff),
                             );
-                            m
-                        });
+                    }
+                    if effort_patch {
+                        meta.insert(
+                            shell::session::EFFORT_PATCH_META_KEY.to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    }
+                    control_token.shell_intent().insert_meta(&mut meta);
                     let req = acp::SetSessionModelRequest::new(
                             session_id.clone(),
                             model_id.clone(),
@@ -1449,8 +1494,16 @@ pub(crate) fn execute(
                         .meta(meta);
                     let result = acp_send(req, &tx)
                         .await
-                        .map(|_| ())
-                        .map_err(|e| sanitize_user_error(&e.to_string()));
+                        .map(|response| {
+                            control_rpc_outcome(
+                                response
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|meta| meta.get("status"))
+                                    .and_then(serde_json::Value::as_str),
+                            )
+                        })
+                        .map_err(control_request_failure);
                     TaskResult::SwitchModelComplete {
                         agent_id,
                         session_id,
@@ -1474,20 +1527,22 @@ pub(crate) fn execute(
                 struct SetAgentRequest<'a> {
                     session_id: &'a str,
                     agent_name: &'a str,
+                    intent: shell::session::ControlIntent,
                 }
                 let request = acp::ExtRequest::new(
                     "grow/session/set_agent",
                     serde_json::value::to_raw_value(&SetAgentRequest {
                         session_id: session_id.0.as_ref(),
                         agent_name: &agent_name,
+                        intent: control_token.shell_intent(),
                     })
                     .expect("serialize set-agent params")
                     .into(),
                 );
                 let result = acp_send(request, &tx)
                     .await
-                    .map(|_| ())
-                    .map_err(|error| sanitize_user_error(&error.to_string()));
+                    .map(|response| ext_control_rpc_outcome(&response))
+                    .map_err(control_request_failure);
                 TaskResult::SwitchAgentComplete {
                     agent_id,
                     session_id,
@@ -3107,24 +3162,31 @@ pub(crate) fn execute(
         Effect::ExecuteSlashCommand {
             agent_id,
             session_id,
-            command,
+            request,
         } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
-                let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "command": command,
-                });
-                let request = acp::ExtRequest::new(
+                let params = shell::extensions::session_admin::ExecuteCommandRequest {
+                    session_id: session_id.0.to_string(),
+                    command: request.command.clone(),
+                    description: request.description.clone(),
+                    invocation_id: request.invocation_id.clone(),
+                };
+                let ext_request = acp::ExtRequest::new(
                     "grow/commands/execute",
                     serde_json::value::to_raw_value(&params)
                         .expect("serialize commands/execute params")
                         .into(),
                 );
-                let error = acp_send(request, &tx).await.err().map(|error| {
+                let error = acp_send(ext_request, &tx).await.err().map(|error| {
                     sanitize_user_error(&format!("couldn't execute command: {error}"))
                 });
-                TaskResult::SlashCommandExecuted { agent_id, error }
+                TaskResult::SlashCommandExecuted {
+                    agent_id,
+                    session_id,
+                    request,
+                    error,
+                }
             });
         }
         Effect::QueryPromptStatus {

@@ -624,7 +624,7 @@ pub(super) fn dispatch_rewind_success(
             // Minimal has no toast surface and can't erase committed lines, so the confirmation stays in scrollback there.
             agent
                 .scrollback
-                .push_block(RenderBlock::system(msg.to_string()));
+                .push_block(RenderBlock::notice(msg.to_string()));
         } else {
             agent.show_toast(msg);
         }
@@ -707,7 +707,7 @@ pub(super) fn handle_rewind_points_loaded(
         if let Some(stashed) = stashed {
             agent.prompt.restore(stashed);
         }
-        app.show_toast("No undoable prompts");
+        app.show_toast("No rewind points available");
         return vec![];
     }
 

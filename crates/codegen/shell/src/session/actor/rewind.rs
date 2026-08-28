@@ -326,10 +326,14 @@ impl SessionActor {
             }
 
             // UI replay keeps a branch marker as a derived display cache.
-            self.persist_update_only(GrowSessionUpdate::RewindMarker {
+            self.persist_update_only_durably(GrowSessionUpdate::RewindMarker {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
-            });
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!(
+                "rewind Timeline committed, but its UI branch marker was not durably recorded: {error}"
+            ))?;
         }
 
         self.file_state_tracker

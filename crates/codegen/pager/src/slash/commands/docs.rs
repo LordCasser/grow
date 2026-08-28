@@ -18,10 +18,6 @@ impl SlashCommand for DocsCommand {
         "docs"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["howto", "guides"]
-    }
-
     fn description(&self) -> &str {
         "Open How-to Guides or online Build docs"
     }
@@ -190,10 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn aliases_and_metadata() {
+    fn canonical_metadata() {
         let cmd = DocsCommand;
         assert_eq!(cmd.name(), "docs");
-        assert_eq!(cmd.aliases(), &["howto", "guides"]);
         assert!(cmd.takes_args());
         assert!(!cmd.args_required());
     }

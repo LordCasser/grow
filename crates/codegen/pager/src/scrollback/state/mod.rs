@@ -18,7 +18,7 @@ pub use types::*;
 
 use layout::LayoutCache;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,12 @@ use super::wrappers::EntryRenderer;
 use crate::appearance::AppearanceConfig;
 use crate::render::Renderable;
 use crate::theme::Theme;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PushBlockOutcome {
+    pub(crate) entry_id: EntryId,
+    pub(crate) inserted: bool,
+}
 
 /// Lifecycle of a scroll-up warm-up that a resize postponed until the width
 /// settles. Settling is measured in FRAMES, not `prepare_layout` calls: one
@@ -67,6 +73,16 @@ struct MinimalCommitState {
 
     /// Bounded history of folded entries that can be re-printed by expand.
     commit_expand_ring: VecDeque<EntryId>,
+
+    /// Entry whose native-terminal write failed during the current frame.
+    ///
+    /// The normal read-only frontier predicts which committable entries the
+    /// later write pass will consume. Once a write actually fails, that
+    /// prediction is no longer true: this entry must remain in the live tail
+    /// until the next frame retries it. Keeping the failed identity beside the
+    /// committed set makes every frontier consumer agree without inventing a
+    /// second, renderer-local cursor.
+    failed_frontier: Option<EntryId>,
 }
 
 impl MinimalCommitState {
@@ -88,6 +104,9 @@ impl MinimalCommitState {
 
     fn remove(&mut self, id: EntryId) {
         self.committed.remove(&id);
+        if self.failed_frontier == Some(id) {
+            self.failed_frontier = None;
+        }
     }
 
     fn is_committed(&self, id: EntryId) -> bool {
@@ -96,6 +115,17 @@ impl MinimalCommitState {
 
     fn mark_committed(&mut self, id: EntryId) {
         self.committed.insert(id);
+        if self.failed_frontier == Some(id) {
+            self.failed_frontier = None;
+        }
+    }
+
+    fn failed_frontier(&self) -> Option<EntryId> {
+        self.failed_frontier
+    }
+
+    fn set_failed_frontier(&mut self, id: Option<EntryId>) {
+        self.failed_frontier = id;
     }
 
     fn remove_at(&mut self, id: EntryId, index: Option<usize>) {
@@ -115,6 +145,7 @@ impl MinimalCommitState {
         self.committed.clear();
         self.commit_scan_cursor = 0;
         self.commit_expand_ring.clear();
+        self.failed_frontier = None;
     }
 
     fn record_for_expand(&mut self, id: EntryId) {
@@ -141,6 +172,11 @@ pub struct ScrollbackState {
     /// All entries in the scrollback, keyed by EntryId for O(1) lookup.
     /// IndexMap preserves insertion order for rendering.
     entries: IndexMap<EntryId, ScrollbackEntry>,
+
+    /// Derived O(1) index for immutable domain events. Long replay streams can
+    /// contain thousands of notices/subagent lifecycle facts; scanning the
+    /// complete transcript for every event turns reconnect into O(n²).
+    immutable_event_entries: HashMap<String, EntryId>,
 
     /// Next entry ID to assign.
     next_id: u64,
@@ -293,6 +329,7 @@ impl ScrollbackState {
     pub fn new() -> Self {
         Self {
             entries: IndexMap::new(),
+            immutable_event_entries: HashMap::new(),
             next_id: 1, // Start at 1 so 0 can be a sentinel
             running: HashSet::new(),
             flashing: Vec::new(),
@@ -433,6 +470,7 @@ impl ScrollbackState {
         let tail_permission_epoch = tail.permission_epoch;
         let tail_active_permission_group = tail.active_permission_group;
         self.entries.extend(tail.entries);
+        self.rebuild_immutable_event_index();
         self.running.extend(tail.running);
         self.dirty_heights.extend(tail.dirty_heights);
         // Carry the tail's committed frontier: with a per-entry flag this
@@ -633,6 +671,9 @@ impl ScrollbackState {
             self.running.insert(id);
         }
 
+        if let Some(event_id) = entry.block.immutable_event_id() {
+            self.immutable_event_entries.insert(event_id.to_owned(), id);
+        }
         self.entries.insert(id, entry);
         if self.batch_depth == 0 {
             self.rebuild_turns();
@@ -680,7 +721,25 @@ impl ScrollbackState {
     ///
     /// Returns the assigned EntryId.
     pub fn push_block(&mut self, block: RenderBlock) -> EntryId {
-        self.push(ScrollbackEntry::new(block))
+        self.push_block_if_absent(block).entry_id
+    }
+
+    /// Append one immutable domain event and report whether this call created
+    /// the row. Callers that attach presentation state must never guess from
+    /// "the last entry": replay dedup may have returned an older matching row.
+    pub(crate) fn push_block_if_absent(&mut self, block: RenderBlock) -> PushBlockOutcome {
+        if let Some(event_id) = block.immutable_event_id()
+            && let Some(entry_id) = self.immutable_event_entries.get(event_id)
+        {
+            return PushBlockOutcome {
+                entry_id: *entry_id,
+                inserted: false,
+            };
+        }
+        PushBlockOutcome {
+            entry_id: self.push(ScrollbackEntry::new(block)),
+            inserted: true,
+        }
     }
 
     /// Append a permission audit event to the primary turn's current audit
@@ -803,6 +862,9 @@ impl ScrollbackState {
         if entry.is_running {
             self.running.insert(id);
         }
+        if let Some(event_id) = entry.block.immutable_event_id() {
+            self.immutable_event_entries.insert(event_id.to_owned(), id);
+        }
         self.entries.shift_insert(index, id, entry);
 
         if let Some(selected) = self.selected.as_mut()
@@ -843,9 +905,10 @@ impl ScrollbackState {
     pub fn remove_entry(&mut self, id: EntryId) -> bool {
         // Capture the index before the removal shifts everything after it down.
         let removed_index = self.entries.get_index_of(&id);
-        if self.entries.shift_remove(&id).is_none() {
+        let Some(removed_entry) = self.entries.shift_remove(&id) else {
             return false;
-        }
+        };
+        self.unindex_immutable_event(&removed_entry);
         self.running.remove(&id);
         self.dirty_heights.remove(&id);
         self.minimal_commit.remove_at(id, removed_index);
@@ -871,6 +934,7 @@ impl ScrollbackState {
         let mut removed = Vec::new();
         while self.entries.len() > index {
             if let Some((id, entry)) = self.entries.pop() {
+                self.unindex_immutable_event(&entry);
                 self.running.remove(&id);
                 self.dirty_heights.remove(&id);
                 self.minimal_commit.remove(id);
@@ -1208,6 +1272,7 @@ impl ScrollbackState {
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.immutable_event_entries.clear();
         self.running.clear();
         self.flashing.clear();
         self.dirty_heights.clear();
@@ -1254,6 +1319,84 @@ impl ScrollbackState {
         if let Some((&id, _)) = self.entries.get_index(index) {
             self.minimal_commit.mark_committed(id);
         }
+    }
+
+    /// Reconcile a successful full reconnect replay with Minimal's native
+    /// terminal history.
+    ///
+    /// Native commits are an ordered, contiguous prefix. A full replay assigns
+    /// fresh [`EntryId`]s, but rewind or a concurrent client may have replaced
+    /// part of the old history with a different branch. Inherit the frontier
+    /// only across the longest semantically identical prefix; comparing counts
+    /// would incorrectly mark the replacement branch as already printed.
+    /// Entries after the first mismatch remain eligible for the normal commit
+    /// pass. Initial session resume is a different path and does not call this
+    /// method.
+    pub(crate) fn reconcile_minimal_native_frontier_from(&mut self, previous: &Self) {
+        let old_entries = previous.entries.values().collect::<Vec<_>>();
+        let new_entries = self.entries.values().collect::<Vec<_>>();
+        let mut old_index = 0;
+        let mut committed_prefix = 0;
+        while committed_prefix < new_entries.len() && old_index < old_entries.len() {
+            let old = old_entries[old_index];
+            if !previous.minimal_commit.is_committed(old.id) {
+                break;
+            }
+            let new = new_entries[committed_prefix];
+            if old.block.replay_equivalent(&new.block) {
+                old_index += 1;
+                committed_prefix += 1;
+                continue;
+            }
+            // Local/ad-hoc notices are intentionally absent from a full
+            // session replay. They may already sit in native terminal history
+            // between two durable transcript facts, so ignore them only on
+            // the old side while aligning the rebuilt projection. Skipping a
+            // durable or model-derived block would hide a real branch change.
+            if matches!(
+                &old.block,
+                super::block::RenderBlock::Notice(notice) if notice.event_id.is_none()
+            ) {
+                old_index += 1;
+                continue;
+            }
+            break;
+        }
+        self.minimal_commit
+            .committed
+            .extend(self.entries.keys().take(committed_prefix).copied());
+        self.minimal_commit.failed_frontier = None;
+        self.minimal_commit.commit_scan_cursor = committed_prefix;
+    }
+
+    fn unindex_immutable_event(&mut self, entry: &ScrollbackEntry) {
+        let Some(event_id) = entry.block.immutable_event_id() else {
+            return;
+        };
+        if self.immutable_event_entries.get(event_id) == Some(&entry.id) {
+            self.immutable_event_entries.remove(event_id);
+        }
+    }
+
+    fn rebuild_immutable_event_index(&mut self) {
+        self.immutable_event_entries.clear();
+        for (id, entry) in &self.entries {
+            if let Some(event_id) = entry.block.immutable_event_id() {
+                self.immutable_event_entries
+                    .entry(event_id.to_owned())
+                    .or_insert(*id);
+            }
+        }
+    }
+
+    /// Entry whose native-terminal write failed during the current frame.
+    pub(crate) fn minimal_failed_frontier(&self) -> Option<EntryId> {
+        self.minimal_commit.failed_frontier()
+    }
+
+    /// Set or clear the current-frame native-terminal write failure.
+    pub(crate) fn set_minimal_failed_frontier(&mut self, id: Option<EntryId>) {
+        self.minimal_commit.set_failed_frontier(id);
     }
 
     /// Record that the entry `id` was committed to native scrollback in a folded
@@ -2097,6 +2240,166 @@ mod tests {
         assert!(state.is_empty());
         assert_eq!(state.len(), 0);
         assert_eq!(state.turn_count(), 0);
+    }
+
+    #[test]
+    fn immutable_ui_events_deduplicate_by_event_id_only() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(RenderBlock::terminal_notice(
+            "session-7",
+            NoticeTone::Success,
+            NoticeCategory::Control,
+            "Agent switched",
+            None,
+        ));
+        let duplicate = state.push_block(RenderBlock::terminal_notice(
+            "session-7",
+            NoticeTone::Success,
+            NoticeCategory::Control,
+            "Agent switched again",
+            None,
+        ));
+        assert_eq!(duplicate, first);
+        assert_eq!(state.len(), 1);
+
+        state.push_block(RenderBlock::notice("same local text"));
+        state.push_block(RenderBlock::notice("same local text"));
+        assert_eq!(
+            state.len(),
+            3,
+            "ad-hoc local notices have no durable identity"
+        );
+    }
+
+    #[test]
+    fn immutable_event_index_tracks_removal_clear_and_reinsert() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+
+        let event = || {
+            RenderBlock::terminal_notice(
+                "control-7",
+                NoticeTone::Success,
+                NoticeCategory::Control,
+                "Model switched",
+                None,
+            )
+        };
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(event());
+        assert_eq!(state.immutable_event_entries.get("control-7"), Some(&first));
+
+        assert!(state.remove_entry(first));
+        assert!(!state.immutable_event_entries.contains_key("control-7"));
+        let second = state.push_block(event());
+        assert_ne!(second, first);
+        assert_eq!(state.len(), 1);
+
+        state.clear();
+        assert!(state.immutable_event_entries.is_empty());
+        state.push_block(event());
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn minimal_replay_frontier_stops_at_a_divergent_branch() {
+        use crate::scrollback::blocks::UserPromptBlock;
+
+        fn prompt(id: &str, text: &str) -> RenderBlock {
+            RenderBlock::UserPrompt(UserPromptBlock::new(text).with_message_id(id))
+        }
+
+        let mut previous = ScrollbackState::new();
+        previous.push_block(prompt("p1", "first"));
+        previous.push_block(RenderBlock::agent_message("old answer"));
+        previous.push_block(prompt("p2", "old branch"));
+        for index in 0..previous.len() {
+            previous.mark_committed(index);
+        }
+        previous.set_commit_scan_cursor(previous.len());
+
+        let mut replay = previous.fresh_continuation();
+        let first = replay.push_block(prompt("p1", "first"));
+        let answer = replay.push_block(RenderBlock::agent_message("old answer"));
+        let replacement = replay.push_block(prompt("p3", "replacement branch"));
+        replay.reconcile_minimal_native_frontier_from(&previous);
+
+        assert!(replay.is_committed(first));
+        assert!(replay.is_committed(answer));
+        assert!(!replay.is_committed(replacement));
+        assert_eq!(replay.commit_scan_cursor(), 2);
+    }
+
+    #[test]
+    fn minimal_replay_frontier_skips_committed_local_notices() {
+        let mut previous = ScrollbackState::new();
+        previous.push_block(RenderBlock::agent_message("one"));
+        previous.push_block(RenderBlock::notice("local command result"));
+        previous.push_block(RenderBlock::agent_message("two"));
+        for index in 0..previous.len() {
+            previous.mark_committed(index);
+        }
+        previous.set_commit_scan_cursor(previous.len());
+
+        let mut replay = previous.fresh_continuation();
+        let one = replay.push_block(RenderBlock::agent_message("one"));
+        let two = replay.push_block(RenderBlock::agent_message("two"));
+        replay.reconcile_minimal_native_frontier_from(&previous);
+
+        assert!(replay.is_committed(one));
+        assert!(replay.is_committed(two));
+        assert_eq!(replay.commit_scan_cursor(), 2);
+    }
+
+    #[test]
+    fn minimal_replay_frontier_does_not_skip_durable_notices() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+
+        let mut previous = ScrollbackState::new();
+        previous.push_block(RenderBlock::agent_message("one"));
+        previous.push_block(RenderBlock::terminal_notice(
+            "control-1",
+            NoticeTone::Success,
+            NoticeCategory::Control,
+            "applied",
+            None,
+        ));
+        previous.push_block(RenderBlock::agent_message("two"));
+        for index in 0..previous.len() {
+            previous.mark_committed(index);
+        }
+
+        let mut replay = previous.fresh_continuation();
+        let one = replay.push_block(RenderBlock::agent_message("one"));
+        let two = replay.push_block(RenderBlock::agent_message("two"));
+        replay.reconcile_minimal_native_frontier_from(&previous);
+
+        assert!(replay.is_committed(one));
+        assert!(!replay.is_committed(two));
+        assert_eq!(replay.commit_scan_cursor(), 1);
+    }
+
+    #[test]
+    fn minimal_replay_frontier_inherits_only_committed_common_prefix() {
+        let mut previous = ScrollbackState::new();
+        previous.push_block(RenderBlock::agent_message("one"));
+        previous.push_block(RenderBlock::thinking("two"));
+        previous.push_block(RenderBlock::agent_message("three"));
+        previous.mark_committed(0);
+        previous.mark_committed(1);
+        previous.set_commit_scan_cursor(2);
+
+        let mut replay = previous.fresh_continuation();
+        let one = replay.push_block(RenderBlock::agent_message("one"));
+        let two = replay.push_block(RenderBlock::thinking("two"));
+        let three = replay.push_block(RenderBlock::agent_message("three"));
+        replay.reconcile_minimal_native_frontier_from(&previous);
+
+        assert!(replay.is_committed(one));
+        assert!(replay.is_committed(two));
+        assert!(!replay.is_committed(three));
+        assert_eq!(replay.commit_scan_cursor(), 2);
     }
 
     /// State with an explicit pager.toml-shaped `expanded_by_default`

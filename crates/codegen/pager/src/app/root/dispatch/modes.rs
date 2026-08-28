@@ -24,9 +24,9 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Select a Behavior and optionally stage its first prompt. Behavior shares
-/// the exact-session FIFO with model and Agent controls; only an authoritative
-/// `CurrentModeUpdate` permits the queued prompt to drain.
+/// Select a Behavior and optionally stage its first prompt. Behavior has an
+/// independent latest-wins control domain; only an authoritative
+/// `CurrentModeUpdate` permits the staged prompt to drain.
 pub(super) fn dispatch_set_behavior_then_prompt(
     app: &mut AppView,
     mode: tools::types::BehaviorId,
@@ -70,7 +70,7 @@ pub(super) fn dispatch_set_behavior_then_prompt(
             .session
             .enqueue_prompt_with_skill_tokens(prompt, skill_token_ranges);
         // Even when the Shell already owns this Behavior, send the explicit
-        // selection through the control FIFO before admitting the prompt.
+        // selection through the Behavior domain before admitting the prompt.
         // Reselecting the authoritative source is the Shell's cancellation
         // protocol for a pending interrupt-confirmation latch; treating it as
         // a local no-op leaves a later target selection able to confirm stale
@@ -79,15 +79,13 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         if queued_behavior == Some(mode) {
             return vec![];
         }
-        let effects = enqueue_behavior_control(id, session_id, &mut agent.session, mode);
-        if reconnecting { vec![] } else { effects }
+        enqueue_behavior_control(id, session_id, &mut agent.session, mode, !reconnecting)
     } else {
         if agent.session.behavior_control_target() == Some(mode) {
             agent.show_toast("Behavior selection is pending");
             return vec![];
         }
-        let effects = enqueue_behavior_control(id, session_id, &mut agent.session, mode);
-        if reconnecting { vec![] } else { effects }
+        enqueue_behavior_control(id, session_id, &mut agent.session, mode, !reconnecting)
     }
 }
 
@@ -153,18 +151,16 @@ pub(super) fn dispatch_set_behavior_mode(
         // authoritative target instead of creating a second queue mechanism.
         agent.session.deferred_session_mode = Some(mode);
     }
-    agent.show_mode_switch_banner(mode.display_label());
-
     let session_id = agent.session.session_id.clone();
     if session_id.is_none() {
         agent.session.deferred_session_mode =
             (mode != tools::types::BehaviorId::Normal).then_some(mode);
     }
-    let effects = session_id
-        .map(|session_id| enqueue_behavior_control(id, session_id, &mut agent.session, mode));
+    let effects = session_id.map(|session_id| {
+        enqueue_behavior_control(id, session_id, &mut agent.session, mode, !reconnecting)
+    });
     refresh_open_settings_modals(app);
     match effects {
-        Some(_) if reconnecting => vec![],
         Some(effects) => effects,
         None => skip_picker_and_create_session(app, id),
     }

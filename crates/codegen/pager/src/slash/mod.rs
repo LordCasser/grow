@@ -6,7 +6,7 @@
 //! - [`SlashState`] / [`SlashSnapshot`] -- snapshot holder for rendering.
 //! - [`parse_invocation()`] -- extracts command token + args from input.
 //! - [`is_command_complete()`] -- two-bit completeness model.
-//! - [`CommandRegistry`] -- maps names/aliases to command implementations.
+//! - [`CommandRegistry`] -- maps canonical names and optional aliases to commands.
 
 pub mod acp_command;
 pub mod command;
@@ -25,9 +25,12 @@ use std::{
 use crate::acp::model_state::ModelState;
 
 use matcher::FuzzyMatcher;
-use registry::{CommandRegistry, CommandSource, CommandTrigger};
+use registry::{CommandRegistry, CommandTrigger, RegistrySource};
 
-pub use command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+pub use command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandKind, CommandResult, CommandSource, HostCommandRequest,
+    SlashCommand,
+};
 pub use mode_support::{ModeSupport, Remedy};
 
 /// Maximum number of visible rows in the dropdown (scroll beyond this).
@@ -51,6 +54,9 @@ pub struct SuggestionRow {
     /// Free-form bracketed tag (e.g. "new") from the resolved tag map. `None`
     /// for untagged command rows and always `None` for arg rows.
     pub tag: Option<String>,
+    /// Present for command rows; argument rows have no command taxonomy.
+    pub kind: Option<CommandKind>,
+    pub source: Option<CommandSource>,
 }
 
 impl SuggestionRow {
@@ -65,6 +71,8 @@ impl SuggestionRow {
             insert_text,
             indices: Vec::new(),
             tag: None,
+            kind: Some(trigger.kind),
+            source: Some(trigger.source),
         }
     }
 
@@ -75,6 +83,8 @@ impl SuggestionRow {
             insert_text: item.insert_text.clone(),
             indices: Vec::new(),
             tag: None,
+            kind: None,
+            source: None,
         }
     }
 
@@ -942,42 +952,32 @@ impl SlashController {
             |trigger| trigger.match_text.as_str(),
         );
 
-        // Deduplicate: keep the best-scoring trigger per command.
-        // At equal fuzzy scores the tiebreaker is:
-        //   1. Exact match on match_text wins (e.g. alias "/m" for query "m")
-        //   2. Canonical name beats aliases
-        //   3. Lexicographic display order as final fallback
+        // A command may have canonical and alias triggers. Keep its strongest
+        // match, preferring an exact trigger and then the canonical spelling.
         let mut best_per_command: HashMap<usize, (u32, usize)> = HashMap::new();
         for (visible_idx, score) in hits {
             let trigger = visible_triggers[visible_idx];
             best_per_command
                 .entry(trigger.command_index)
                 .and_modify(|current| {
-                    let dominated = if score != current.0 {
+                    let current_trigger = visible_triggers[current.1];
+                    let replace = if score != current.0 {
                         score > current.0
                     } else {
                         let new_exact = trigger.match_text == trimmed;
-                        let cur_exact = visible_triggers[current.1].match_text == trimmed;
-                        if new_exact != cur_exact {
-                            new_exact
-                        } else {
-                            let new_canonical = trigger.alias.is_none();
-                            let cur_canonical = visible_triggers[current.1].alias.is_none();
-                            if new_canonical != cur_canonical {
-                                new_canonical
-                            } else {
-                                trigger.display < visible_triggers[current.1].display
-                            }
-                        }
+                        let current_exact = current_trigger.match_text == trimmed;
+                        new_exact > current_exact
+                            || (new_exact == current_exact
+                                && trigger.alias.is_none()
+                                && current_trigger.alias.is_some())
                     };
-                    if dominated {
+                    if replace {
                         *current = (score, visible_idx);
                     }
                 })
                 .or_insert((score, visible_idx));
         }
-
-        let mut deduped: Vec<(u32, usize)> = best_per_command.into_values().collect();
+        let mut ranked: Vec<(u32, usize)> = best_per_command.into_values().collect();
         // Re-borrow after rank so takes_args_now can see AppCtx without
         // overlapping the matcher mut borrow.
         let mut rows: Vec<SuggestionRow> = {
@@ -994,9 +994,9 @@ impl SlashController {
                 })
                 .collect()
         };
-        let sort_meta: Vec<(String, CommandSource)> = visible_triggers
+        let sort_meta: Vec<(String, RegistrySource)> = visible_triggers
             .iter()
-            .map(|t| (t.canonical.clone(), t.source))
+            .map(|t| (t.canonical.clone(), t.registry_source))
             .collect();
         // Tag each candidate from the data map (canonical key); one shared
         // borrow, dropped before the scoring borrow below.
@@ -1015,12 +1015,12 @@ impl SlashController {
                 .map(|(canonical, _)| m.rank_score(trimmed, canonical))
                 .collect()
         };
-        deduped.sort_by(|a, b| {
+        ranked.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| mru_scores[b.1].cmp(&mru_scores[a.1]))
                 .then_with(|| {
-                    let a_builtin = sort_meta[a.1].1 == CommandSource::Builtin;
-                    let b_builtin = sort_meta[b.1].1 == CommandSource::Builtin;
+                    let a_builtin = sort_meta[a.1].1 == RegistrySource::Builtin;
+                    let b_builtin = sort_meta[b.1].1 == RegistrySource::Builtin;
                     b_builtin.cmp(&a_builtin)
                 })
                 .then_with(|| rows[a.1].display.cmp(&rows[b.1].display))
@@ -1028,7 +1028,7 @@ impl SlashController {
         for row in &mut rows {
             row.indices = self.matcher.indices(row.display.as_str());
         }
-        deduped
+        ranked
             .into_iter()
             .map(|(_, idx)| rows[idx].clone())
             .collect()
@@ -1498,8 +1498,8 @@ mod tests {
 
     #[test]
     fn parses_invocation_no_args() {
-        let inv = parse_invocation("/exit").expect("parsed");
-        assert_eq!(inv.token, "exit");
+        let inv = parse_invocation("/quit").expect("parsed");
+        assert_eq!(inv.token, "quit");
         assert_eq!(inv.args, "");
     }
 
@@ -1527,10 +1527,8 @@ mod tests {
     #[test]
     fn no_arg_command_is_complete() {
         let reg = test_registry();
-        assert!(is_command_complete("/exit", &reg));
         assert!(is_command_complete("/quit", &reg));
         assert!(is_command_complete("/new", &reg));
-        assert!(is_command_complete("/clear", &reg));
     }
 
     #[test]
@@ -1754,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_suggests_alias_display_for_alias() {
+    fn removed_model_alias_is_only_a_fuzzy_prefix() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let state = SlashState::default();
         let models = ModelState::default();
@@ -1762,13 +1760,12 @@ mod tests {
         ctrl.refresh(&state, "/m", 2, &models);
         let snapshot = state.snapshot();
         assert!(snapshot.open);
-        let first = snapshot.matches.first().expect("match");
-        assert_eq!(first.display, "/m");
-        assert!(first.insert_text.starts_with("/m"));
+        assert!(snapshot.matches.iter().any(|row| row.display == "/model"));
+        assert!(!snapshot.matches.iter().any(|row| row.display == "/m"));
     }
 
-    /// Removed dashboard aliases must stay removed rather than silently
-    /// redirecting to `/agents`.
+    /// Removed command names must stay removed rather than silently
+    /// redirecting to another command.
     #[test]
     fn controller_does_not_suggest_removed_sessions_alias() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
@@ -2155,9 +2152,9 @@ mod tests {
 
     #[test]
     fn scan_handles_start_of_line() {
-        let tokens = scan_inline_slash_tokens("/exit now", 3);
+        let tokens = scan_inline_slash_tokens("/quit now", 3);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].name, "exit");
+        assert_eq!(tokens[0].name, "quit");
         assert!(tokens[0].has_cursor);
     }
 
@@ -2241,6 +2238,8 @@ mod tests {
             insert_text: "/Privacy ".to_string(),
             indices: Vec::new(),
             tag: None,
+            kind: Some(CommandKind::View),
+            source: Some(CommandSource::BuiltIn),
         };
         // Without smart-case, starts_with("p") fails on "Privacy" and ghost disappears
         // while the dropdown still highlights the row via CaseMatching::Smart.
@@ -2261,6 +2260,25 @@ mod tests {
     impl SlashCommand for TieCmd {
         fn name(&self) -> &str {
             self.0
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn usage(&self) -> &str {
+            ""
+        }
+        fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+            CommandResult::Handled
+        }
+    }
+
+    struct AliasedTieCmd;
+    impl SlashCommand for AliasedTieCmd {
+        fn name(&self) -> &str {
+            "canonical"
+        }
+        fn aliases(&self) -> &[&str] {
+            &["alternative"]
         }
         fn description(&self) -> &str {
             ""
@@ -2450,12 +2468,13 @@ mod tests {
 
     #[test]
     fn record_command_use_stores_canonical_for_alias() {
-        // Default controller store is already isolated + in-memory.
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        ctrl.record_command_use("e", "exit");
-        ctrl.record_command_use("q", "/quit");
-        assert!(ctrl.mru_last_used("", "quit") > 0);
-        assert_eq!(ctrl.mru_last_used("", "exit"), 0);
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(AliasedTieCmd)]),
+            std::path::PathBuf::from("."),
+        );
+        ctrl.record_command_use("a", "alternative");
+        assert!(ctrl.mru_last_used("", "canonical") > 0);
+        assert_eq!(ctrl.mru_last_used("", "alternative"), 0);
     }
 
     /// Inject a per-command tag map into a controller (test seam).
@@ -2650,7 +2669,7 @@ mod tests {
         let state = SlashState::default();
         let models = ModelState::default();
 
-        ctrl.refresh(&state, "run /exit and /model please", 0, &models);
+        ctrl.refresh(&state, "run /quit and /model please", 0, &models);
         let snapshot = state.snapshot();
         assert_eq!(snapshot.recognized_tokens.len(), 2);
     }
@@ -2663,7 +2682,7 @@ mod tests {
         let state = SlashState::default();
         let models = ModelState::default();
 
-        let text = "run /exit and /model please but not /zzzzz nor foo/bar";
+        let text = "run /quit and /model please but not /zzzzz nor foo/bar";
         ctrl.refresh(&state, text, text.len(), &models);
         let composer = state.snapshot().recognized_tokens;
 
@@ -2889,7 +2908,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_completion_prefers_canonical_but_honors_exact_aliases() {
+    fn doctor_completion_uses_only_the_canonical_name() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let state = SlashState::default();
         let models = ModelState::default();
@@ -2905,12 +2924,17 @@ mod tests {
         assert!(displays.contains(&"/doctor"), "matches: {displays:?}");
         assert!(!displays.contains(&"/terminal-setup"));
 
-        for text in ["/doctor ", "/terminal-setup "] {
-            ctrl.refresh(&state, text, text.len(), &models);
-            let snapshot = state.snapshot();
-            assert!(!snapshot.open, "bare args opened for {text:?}");
-            assert!(snapshot.matches.is_empty(), "matches for {text:?}");
-        }
+        let text = "/doctor ";
+        ctrl.refresh(&state, text, text.len(), &models);
+        let snapshot = state.snapshot();
+        assert!(!snapshot.open, "bare args opened for {text:?}");
+        assert!(snapshot.matches.is_empty(), "matches for {text:?}");
+
+        let removed = "/terminal-setup ";
+        ctrl.refresh(&state, removed, removed.len(), &models);
+        let snapshot = state.snapshot();
+        assert!(!snapshot.open);
+        assert!(snapshot.matches.is_empty());
         for (text, inserted, indices) in [
             ("/doctor f", "fix", vec![0]),
             ("/doctor fix s", "fix ssh-wrap", vec![0]),
@@ -2927,8 +2951,6 @@ mod tests {
                 "fix tmux-extended-keys",
                 vec![0, 1, 2, 3, 4, 5],
             ),
-            ("/terminal-setup f", "fix", vec![0]),
-            ("/terminal-setup fix s", "fix ssh-wrap", vec![0]),
         ] {
             ctrl.refresh(&state, text, text.len(), &models);
             let snapshot = state.snapshot();
@@ -2946,8 +2968,6 @@ mod tests {
             "/doctor fix terminal.dcs-passthrough",
             "/doctor fix tmux-extended-keys",
             "/doctor fix terminal.tmux-extended-keys",
-            "/terminal-setup fix ssh-wrap",
-            "/terminal-setup fix terminal.ssh-wrap",
         ] {
             ctrl.refresh(&state, text, text.len(), &models);
             let snapshot = state.snapshot();
@@ -2964,7 +2984,7 @@ mod tests {
             .map(|row| row.display.as_str())
             .collect();
         assert!(
-            displays.contains(&"/terminal-setup"),
+            !displays.contains(&"/terminal-setup"),
             "matches: {displays:?}"
         );
     }

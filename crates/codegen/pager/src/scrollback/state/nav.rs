@@ -1259,7 +1259,7 @@ mod tests {
         state.push_block(tool_block("cat")); // 4
         state.push_block(agent_block("Final answer part 1")); // 5 - trailing run start
         state.push_block(agent_block("Final answer part 2")); // 6
-        state.push_block(RenderBlock::system("turn done")); // 7 - doesn't break the run
+        state.push_block(RenderBlock::notice("turn done")); // 7 - doesn't break the run
         state.prepare_layout(80, 6);
 
         // The anchor is the trailing run's first message, not a mid-turn one

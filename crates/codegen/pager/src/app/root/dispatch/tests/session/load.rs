@@ -84,7 +84,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
         .scrollback
         .entries_in_range(0..app.agents[&id].scrollback.len())
         .iter()
-        .any(|e| matches!(&e.block, RenderBlock::System(s) if s.text.contains("Code restored")));
+        .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(has_restore_msg, "expected restore summary in scrollback");
     assert_eq!(
         app.agents[&id].session.restore_degree,
@@ -455,7 +455,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
         .scrollback
         .entries_in_range(0..app.agents[&id].scrollback.len());
     let warn = entries.iter().find_map(|e| match &e.block {
-        RenderBlock::System(s) if s.text.contains("Code restore failed") => Some(&s.text),
+        RenderBlock::Notice(s) if s.text.contains("Code restore failed") => Some(&s.text),
         _ => None,
     });
     let text = warn.expect("warning banner missing").as_str();
@@ -467,7 +467,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
     assert!(
         !entries.iter().any(|e| matches!(
             &e.block,
-            RenderBlock::System(s) if s.text.contains("Code restored")
+            RenderBlock::Notice(s) if s.text.contains("Code restored")
         )),
         "success banner must not appear on failure"
     );
@@ -508,7 +508,7 @@ fn session_loaded_without_restore_no_summary() {
         .scrollback
         .entries_in_range(0..app.agents[&id].scrollback.len())
         .iter()
-        .any(|e| matches!(&e.block, RenderBlock::System(s) if s.text.contains("Code restored")));
+        .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(!has_restore_msg, "should not have restore summary");
 }
 /// A second `SessionLoaded` without a restore must reset
@@ -1005,7 +1005,10 @@ fn resume_after_load_failed_reissues_load() {
         e,
         Effect::LoadSession { agent_id, .. } if *agent_id == agent_0
     )));
-    assert!(app.agents[&agent_0].loading_placeholder_id.is_some());
+    assert_eq!(
+        app.agents[&agent_0].session.live_status(100).as_deref(),
+        Some("Loading session fail-then-retry\u{2026}")
+    );
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoadFailed {
             agent_id: agent_0,
@@ -1015,7 +1018,11 @@ fn resume_after_load_failed_reissues_load() {
         &mut app,
     );
     assert!(!app.agents[&agent_0].session.loading_replay);
-    assert!(app.agents[&agent_0].loading_placeholder_id.is_some());
+    assert!(app.agents[&agent_0].session.live_status(100).is_none());
+    assert!(
+        app.agents[&agent_0].session.session_id.is_none(),
+        "failed loads must release their eager identity so retry is possible"
+    );
     let count_before = app.agents.len();
     let effects = dispatch(
         Action::LoadSession("fail-then-retry".into(), None),

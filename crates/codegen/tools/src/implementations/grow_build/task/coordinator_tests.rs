@@ -1168,6 +1168,67 @@ async fn cancel_parent_session_kills_prior_turn_background() {
     harness.actor.abort();
 }
 
+/// ParentSession cancellation waits for the exact non-workflow snapshot, but
+/// must ACK while an unrelated workflow child remains pending/active.
+#[tokio::test]
+async fn cancel_parent_session_ack_ignores_pending_workflow_child() {
+    let mut harness = harness_with_options(
+        true,
+        true,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+
+    let non_workflow = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("session-cancel", true)).await }
+    });
+    let mut workflow_request = request("workflow-survivor", true);
+    workflow_request.owner = SubagentOwner::workflow("workflow-run");
+    let workflow = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(workflow_request).await }
+    });
+
+    let mut observed = vec![
+        harness.requests.recv().await.unwrap().id,
+        harness.requests.recv().await.unwrap().id,
+    ];
+    observed.sort();
+    assert_eq!(observed, vec!["session-cancel", "workflow-survivor"]);
+
+    // The workflow child is still waiting for start. The session child is
+    // cancelled and waits for the finish signal, so this signal releases only
+    // the non-workflow snapshot. If workflow IDs leaked into the waiter, the
+    // timeout below would fire because workflow has no finish receiver yet.
+    let cancel = tokio::spawn({
+        let backend = parent_backend(&harness);
+        async move { backend.cancel_parent_session().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = harness.finish.send(());
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(500), cancel)
+        .await
+        .expect("workflow child must not block ParentSession ACK")
+        .unwrap();
+    assert!(matches!(outcome, SubagentCancelOutcome::Cancelled));
+    assert!(non_workflow.await.unwrap().unwrap().cancelled);
+
+    // The workflow child was not cancelled; allow it to start and finish so
+    // the coordinator has no orphaned test future.
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("workflow-survivor")
+    );
+    let _ = harness.finish.send(());
+    assert!(workflow.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
 /// Another session's children must not die when this session Stop fires.
 #[tokio::test]
 async fn cancel_parent_session_does_not_touch_other_session() {

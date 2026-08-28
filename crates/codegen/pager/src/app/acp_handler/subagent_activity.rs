@@ -1,28 +1,8 @@
 use super::*;
 
-/// Update the activity label on a subagent's collapsed scrollback block.
-///
-/// Skips the write (and cache invalidation) when the label hasn't changed,
-/// so the per-delta common case ("Responding" stays "Responding") allocates
-/// nothing.
-pub(super) fn sync_activity_label(
-    scrollback: &mut crate::scrollback::state::ScrollbackState,
-    entry_id: Option<crate::scrollback::entry::EntryId>,
-    activity_label: Option<&str>,
-) {
-    if let Some(eid) = entry_id
-        && let Some(entry) = scrollback.get_by_id_mut(eid)
-        && let RenderBlock::Subagent(ref mut sb) = entry.block
-        && sb.activity_label.as_deref() != activity_label
-    {
-        sb.activity_label = activity_label.map(str::to_owned);
-        entry.invalidate_cache();
-    }
-}
-
-/// Fan a subagent's computed activity label out to both surfaces that show
-/// it — the collapsed scrollback block and the [`SubagentInfo`] backing the
-/// tasks pane / dashboard rows — so the two can't drift.
+/// Update the mutable entity projection used by the tasks/dashboard panes.
+/// Started/Finished scrollback rows are immutable lifecycle facts; live
+/// activity never rewrites a row that Minimal may already have committed.
 pub(super) fn sync_subagent_activity(
     parent: &mut AgentView,
     child_key: &str,
@@ -31,11 +11,6 @@ pub(super) fn sync_subagent_activity(
     let Some(info) = parent.session.subagent_sessions.get_mut(child_key) else {
         return;
     };
-    sync_activity_label(
-        &mut parent.scrollback,
-        info.scrollback_entry_id,
-        activity_label.as_deref(),
-    );
     info.activity_label = activity_label;
 }
 

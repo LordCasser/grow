@@ -1,4 +1,4 @@
-//! `/theme` (alias `/t`) -- switch the color theme.
+//! `/theme` -- switch the color theme.
 //!
 //! Toggles between available themes or switches to a named theme.
 //! Selecting `auto` enables system-appearance-driven theme switching.
@@ -20,10 +20,6 @@ pub struct ThemeCommand;
 impl SlashCommand for ThemeCommand {
     fn name(&self) -> &str {
         "theme"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["t"]
     }
 
     fn description(&self) -> &str {

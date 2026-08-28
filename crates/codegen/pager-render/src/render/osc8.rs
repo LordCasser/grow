@@ -146,6 +146,28 @@ impl LinkOverlay {
         &self.links
     }
 
+    /// Resolve semantic overlay targets into terminal OSC 8 spans.
+    ///
+    /// The visible columns stay independent from the destination: callers may
+    /// paint a compact basename while this preserves the complete file URL or
+    /// web URL as the terminal-owned activation target.
+    pub fn resolved_spans(&self, emit_id: bool) -> Vec<ratatui_inline::LinkSpan> {
+        self.links
+            .iter()
+            .filter_map(|link| {
+                resolve_link_target_with_presentation(&link.target, link.presentation)
+                    .and_then(|resolved| resolved.osc8_url)
+                    .map(|url| ratatui_inline::LinkSpan {
+                        row: link.screen_row,
+                        col_start: link.col_start,
+                        col_end: link.col_end,
+                        url,
+                        id: emit_id.then_some(link.id).flatten(),
+                    })
+            })
+            .collect()
+    }
+
     /// Returns `true` if an existing link overlaps the given screen region.
     pub fn overlaps(&self, screen_row: u16, col_start: u16, col_end: u16) -> bool {
         self.links
@@ -311,27 +333,47 @@ fn file_link_presentation_with_home(
 /// Resolve a markdown link destination that names a local file into a semantic
 /// filesystem target, so model paths (`[videos/1.mp4](videos/1.mp4)`) open on click.
 ///
-/// Web/scheme URLs, `mailto:`/`tel:`, and anchors return `None`.
+/// Web/non-file scheme URLs, `mailto:`/`tel:`, anchors, and paths containing
+/// an omitted (`…`) component return `None`.
 ///
-/// - **Absolute / `~`** paths resolve directly (must be an existing file).
-/// - **Relative** paths (`images/1.jpg`) resolve against `media_paths` — the
-///   absolute paths of media actually generated in this transcript — by
-///   matching a unique entry whose path ends with those components. This ties
-///   each short path to the exact file its message produced (correct across
-///   forks/resumes) and never opens an arbitrary or out-of-session file; an
-///   ambiguous or absent match is left unlinked.
-pub fn local_link_to_file_target(dest: &str, media_paths: &[PathBuf]) -> Option<LinkTarget> {
+/// - **Absolute / `~` / `file://`** paths resolve directly (must be an existing file).
+/// - **Relative project** paths resolve against the session `cwd` when they
+///   name an existing file.
+/// - **Relative generated-media** paths fall back to a unique suffix match in
+///   `media_paths`. This keeps `images/1.jpg` bound to the exact transcript
+///   artifact across forks/resumes; ambiguous matches remain unlinked.
+pub fn local_link_to_file_target(
+    dest: &str,
+    cwd: Option<&Path>,
+    media_paths: &[PathBuf],
+) -> Option<LinkTarget> {
     let dest = dest.trim();
-    if dest.is_empty() || dest.starts_with('#') || dest.contains("://") {
+    if dest.is_empty() || dest.starts_with('#') || has_omitted_path_component(dest) {
         return None;
     }
     let lower = dest.to_ascii_lowercase();
     if lower.starts_with("mailto:") || lower.starts_with("tel:") {
         return None;
     }
+    if lower.starts_with("file://") {
+        let resolved = url::Url::parse(dest).ok()?.to_file_path().ok()?;
+        return resolved
+            .is_file()
+            .then(|| LinkTarget::File(Arc::from(resolved)));
+    }
+    if dest.contains("://") {
+        return None;
+    }
     let path = Path::new(dest);
-    let target = crate::render::tool_paths::resolve_tool_path_target(dest, None)?;
-    let resolved: PathBuf = if target.is_absolute() {
+    let target = crate::render::tool_paths::resolve_tool_path_target(dest, cwd)?;
+    let anchored = path.is_absolute()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+        || dest.starts_with("~/")
+        || dest.starts_with(r"~\");
+    let resolved: PathBuf = if anchored || target.is_file() {
         target
     } else {
         // Relative: match a single generated-media file ending with these
@@ -348,6 +390,62 @@ pub fn local_link_to_file_target(dest: &str, media_paths: &[PathBuf]) -> Option<
         return None;
     }
     Some(LinkTarget::File(Arc::from(resolved)))
+}
+
+/// Resolve a parser-projected local reference. Unlike the plain-text scanner,
+/// the Markdown parser has already established an explicit semantic target, so
+/// an anchored path remains actionable even if the file is created later or
+/// disappeared between render and click. Relative targets keep the conservative
+/// existence/media checks from [`local_link_to_file_target`].
+pub fn explicit_local_link_to_file_target(
+    dest: &str,
+    cwd: Option<&Path>,
+    media_paths: &[PathBuf],
+) -> Option<LinkTarget> {
+    let dest = dest.trim();
+    if dest.is_empty() || dest.starts_with('#') || has_omitted_path_component(dest) {
+        return None;
+    }
+    let lower = dest.to_ascii_lowercase();
+    if lower.starts_with("mailto:") || lower.starts_with("tel:") {
+        return None;
+    }
+    if lower.starts_with("file://") {
+        let resolved = url::Url::parse(dest).ok()?.to_file_path().ok()?;
+        return Some(LinkTarget::File(Arc::from(resolved)));
+    }
+    if dest.contains("://") {
+        return None;
+    }
+    let path = Path::new(dest);
+    let anchored = path.is_absolute()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+        || dest.starts_with("~/")
+        || dest.starts_with(r"~\");
+    if anchored {
+        return crate::render::tool_paths::resolve_tool_path_target(dest, cwd)
+            .map(|path| LinkTarget::File(Arc::from(path)));
+    }
+    local_link_to_file_target(dest, cwd, media_paths)
+}
+
+fn has_omitted_path_component(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|component| matches!(component, "…" | "..."))
+}
+
+fn touches_omitted_path_component(text: &str, start: usize, end: usize) -> bool {
+    let before = &text[..start];
+    let after = &text[end..];
+    before.ends_with('…')
+        || before.ends_with("...")
+        || after.starts_with("/…")
+        || after.starts_with(r"\…")
+        || after.starts_with("/...")
+        || after.starts_with(r"\...")
 }
 
 /// Convert a display-cell column to a `u16` suitable for overlay coordinates.
@@ -545,6 +643,9 @@ fn scan_logical_line(
         if range_overlaps_urls(path_m.start(), path_m.end()) {
             continue;
         }
+        if has_omitted_path_component(path_m.as_str()) {
+            continue;
+        }
         let Some(file_target) = path_to_file_target(path_m.as_str()) else {
             continue;
         };
@@ -572,6 +673,9 @@ fn scan_logical_line(
         {
             continue;
         }
+        if touches_omitted_path_component(text, m.start(), m.end()) {
+            continue;
+        }
         if m.start() > 0 {
             let prev = text.as_bytes()[m.start() - 1];
             if prev.is_ascii_alphanumeric()
@@ -586,6 +690,9 @@ fn scan_logical_line(
             .as_str()
             .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
         if path.is_empty() {
+            continue;
+        }
+        if has_omitted_path_component(path) {
             continue;
         }
         let path_end = m.start() + path.len();
@@ -617,6 +724,9 @@ fn scan_logical_line(
             {
                 continue;
             }
+            if touches_omitted_path_component(text, m.start(), m.end()) {
+                continue;
+            }
             if m.start() > 0 {
                 let prev = text.as_bytes()[m.start() - 1];
                 if prev.is_ascii_alphanumeric()
@@ -631,7 +741,10 @@ fn scan_logical_line(
             let path = m
                 .as_str()
                 .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-            let Some(file_target) = local_link_to_file_target(path, media_paths) else {
+            if has_omitted_path_component(path) {
+                continue;
+            }
+            let Some(file_target) = local_link_to_file_target(path, None, media_paths) else {
                 continue;
             };
             let path_end = m.start() + path.len();
@@ -680,7 +793,7 @@ mod tests {
         let media = vec![dir.path().join("images/1.jpg")];
 
         // Short session-relative path matches a known local output by suffix.
-        let target = local_link_to_file_target("images/1.jpg", &media).unwrap();
+        let target = local_link_to_file_target("images/1.jpg", None, &media).unwrap();
         assert_eq!(target, LinkTarget::File(Arc::from(media[0].as_path())));
         let resolved = resolve_link_target(&target).expect("resolved target");
         let url = resolved.osc8_url.expect("OSC 8 URL");
@@ -691,19 +804,81 @@ mod tests {
     }
 
     #[test]
+    fn local_link_relative_project_file_resolves_against_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("docs/architecture/report.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"report").unwrap();
+
+        let target =
+            local_link_to_file_target("docs/architecture/report.md", Some(dir.path()), &[])
+                .expect("project-relative file target");
+        assert_eq!(target, LinkTarget::File(Arc::from(file.as_path())));
+    }
+
+    #[test]
+    fn local_link_missing_project_file_can_still_resolve_generated_media() {
+        let project = tempfile::tempdir().unwrap();
+        let generated = tempfile::tempdir().unwrap();
+        let file = generated.path().join("images/1.jpg");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"image").unwrap();
+
+        let target = local_link_to_file_target(
+            "images/1.jpg",
+            Some(project.path()),
+            std::slice::from_ref(&file),
+        )
+        .expect("generated media fallback");
+        assert_eq!(target, LinkTarget::File(Arc::from(file.as_path())));
+    }
+
+    #[test]
+    fn local_link_file_url_preserves_percent_encoded_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report with spaces.md");
+        std::fs::write(&file, b"report").unwrap();
+        let url = url::Url::from_file_path(&file).unwrap();
+
+        let target = local_link_to_file_target(url.as_str(), None, &[]).unwrap();
+        assert_eq!(target, LinkTarget::File(Arc::from(file.as_path())));
+        let resolved = resolve_link_target(&target).expect("resolved target");
+        assert_eq!(resolved.osc8_url.as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
     fn local_link_ignores_web_anchor_and_unknown() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("images")).unwrap();
         std::fs::write(dir.path().join("images/1.jpg"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.jpg")];
 
-        assert!(local_link_to_file_target("https://example.com", &media).is_none());
-        assert!(local_link_to_file_target("mailto:a@b.c", &media).is_none());
-        assert!(local_link_to_file_target("#section", &media).is_none());
+        assert!(local_link_to_file_target("https://example.com", None, &media).is_none());
+        assert!(local_link_to_file_target("mailto:a@b.c", None, &media).is_none());
+        assert!(local_link_to_file_target("#section", None, &media).is_none());
+        assert!(local_link_to_file_target("/session/…/scratch/report.md", None, &media).is_none());
         // Relative path that isn't a known local output file.
-        assert!(local_link_to_file_target("images/2.jpg", &media).is_none());
+        assert!(local_link_to_file_target("images/2.jpg", None, &media).is_none());
         // No known media at all.
-        assert!(local_link_to_file_target("images/1.jpg", &[]).is_none());
+        assert!(local_link_to_file_target("images/1.jpg", None, &[]).is_none());
+    }
+
+    #[test]
+    fn explicit_anchored_link_preserves_a_missing_full_target() {
+        let path = "/Users/example/.grow/sessions/encoded/workflow/scratch/report.md";
+        assert!(
+            local_link_to_file_target(path, None, &[]).is_none(),
+            "plain-text discovery remains existence-gated"
+        );
+        let target = explicit_local_link_to_file_target(path, None, &[])
+            .expect("parser-projected anchored path remains actionable");
+        assert_eq!(target, LinkTarget::File(Arc::from(Path::new(path))));
+        assert_eq!(
+            resolve_link_target(&target)
+                .and_then(|resolved| resolved.osc8_url)
+                .as_deref(),
+            Some("file:///Users/example/.grow/sessions/encoded/workflow/scratch/report.md")
+        );
     }
 
     #[test]
@@ -719,9 +894,9 @@ mod tests {
             dir.path().join("a/images/1.jpg"),
             dir.path().join("b/images/1.jpg"),
         ];
-        assert!(local_link_to_file_target("images/1.jpg", &media).is_none());
+        assert!(local_link_to_file_target("images/1.jpg", None, &media).is_none());
         // A `..` never matches a clean absolute media path, so it can't escape.
-        assert!(local_link_to_file_target("../images/1.jpg", &media).is_none());
+        assert!(local_link_to_file_target("../images/1.jpg", None, &media).is_none());
     }
 
     // ── tool_path_file_target ──
@@ -1199,6 +1374,21 @@ mod tests {
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///Users/foo/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn scan_does_not_turn_abbreviated_path_suffix_into_a_root_path() {
+        let line = make_line(
+            "Report: ~/.grow/sessions/…/wf_01a043e527a17cc29bd7129b3fa1bff8/scratch/report.md",
+        );
+        let mut overlay = LinkOverlay::new();
+        scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
+
+        assert!(
+            overlay.links().is_empty(),
+            "an ellipsis has destroyed the parent identity; its suffix must not become /wf_...: {:?}",
+            overlay.links(),
         );
     }
 

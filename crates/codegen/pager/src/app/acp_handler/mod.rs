@@ -259,7 +259,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     let mut settings_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
                     let mut behavior_drain = None;
-                    let mut behavior_control_effect = None;
 
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
@@ -529,30 +528,19 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         advance_reconnect_cursor(agent, &mut meta);
 
                         if let Some(resolution) = behavior_resolution
-                            && let Some(completion) = agent.session.resolve_in_flight_behavior(
-                                agent.session.behavior_mode,
-                                resolution,
-                                behavior_target,
-                            )
+                            && agent
+                                .session
+                                .resolve_in_flight_behavior(
+                                    agent.session.behavior_mode,
+                                    resolution,
+                                    behavior_target,
+                                )
+                                .is_some()
                         {
-                            if completion == crate::app::session::SessionControlCompletion::Next {
-                                behavior_control_effect =
-                                    crate::app::root::dispatch::next_control_effect(
-                                        id,
-                                        notif.request.session_id.clone(),
-                                        &agent.session,
-                                    );
-                            } else {
-                                // Every terminal control boundary releases any
-                                // server-authoritative state parked behind the
-                                // FIFO, even when this Behavior was rejected.
-                                // Rejection/confirmation still retains the
-                                // prompt admission latch below.
-                                crate::app::acp_handler::apply_deferred_authoritative_controls(
-                                    agent,
-                                    notif.request.session_id.0.as_ref(),
-                                );
-                            }
+                            crate::app::acp_handler::apply_deferred_authoritative_controls(
+                                agent,
+                                notif.request.session_id.0.as_ref(),
+                            );
                         }
                         if matches!(
                             behavior_resolution,
@@ -583,10 +571,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         );
                         app.pending_effects.extend(drain.effects);
                     }
-                    if let Some(effect) = behavior_control_effect {
-                        app.pending_effects.push(effect);
-                    }
-
                     if settings_modal_refresh_needed {
                         crate::app::root::dispatch::refresh_open_settings_modals(app);
                     }
@@ -600,7 +584,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                 }
                 Some(SessionMatch::Child(parent_id)) => {
                     let is_active = is_matched_agent_active(app, parent_id);
-                    let mut child_behavior_effect = None;
                     let mut child_behavior_drain = None;
                     let parent = app
                         .agents
@@ -637,25 +620,19 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             child_view.submit_edit_highlight(entry_id);
                         }
                         if let Some(resolution) = behavior_resolution
-                            && let Some(completion) = child_view.session.resolve_in_flight_behavior(
-                                child_view.session.behavior_mode,
-                                resolution,
-                                behavior_target,
-                            )
+                            && child_view
+                                .session
+                                .resolve_in_flight_behavior(
+                                    child_view.session.behavior_mode,
+                                    resolution,
+                                    behavior_target,
+                                )
+                                .is_some()
                         {
-                            if completion == crate::app::session::SessionControlCompletion::Next {
-                                child_behavior_effect =
-                                    crate::app::root::dispatch::next_control_effect(
-                                        parent_id,
-                                        notif.request.session_id.clone(),
-                                        &child_view.session,
-                                    );
-                            } else {
-                                crate::app::acp_handler::apply_deferred_authoritative_controls(
-                                    child_view,
-                                    notif.request.session_id.0.as_ref(),
-                                );
-                            }
+                            crate::app::acp_handler::apply_deferred_authoritative_controls(
+                                child_view,
+                                notif.request.session_id.0.as_ref(),
+                            );
                         }
                         if matches!(
                             behavior_resolution,
@@ -682,10 +659,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         );
                         app.pending_effects.extend(drain.effects);
                     }
-                    if let Some(effect) = child_behavior_effect {
-                        app.pending_effects.push(effect);
-                    }
-
                     is_active
                 }
                 None => {

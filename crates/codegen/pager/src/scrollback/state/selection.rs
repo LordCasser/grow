@@ -997,7 +997,7 @@ mod tests {
             "ListDir should be groupable"
         );
         assert!(
-            RenderBlock::system("sys").is_groupable(),
+            RenderBlock::notice("sys").is_groupable(),
             "System should be groupable"
         );
     }

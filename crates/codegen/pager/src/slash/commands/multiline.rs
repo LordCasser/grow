@@ -19,10 +19,6 @@ impl SlashCommand for MultilineCommand {
         "multiline"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["ml"]
-    }
-
     fn description(&self) -> &str {
         "Toggle multiline input mode (swap Enter and Shift+Enter)"
     }
@@ -116,18 +112,5 @@ mod tests {
             result,
             CommandResult::Action(Action::SetMultilineMode(true))
         ));
-    }
-
-    /// `/ml` alias resolves via registry.
-    #[test]
-    fn alias_ml_resolves_via_registry() {
-        use std::sync::Arc;
-        let reg = crate::slash::registry::CommandRegistry::new(vec![Arc::new(MultilineCommand)]);
-        let resolved = reg.get("ml").expect("/ml alias must resolve to a command");
-        assert_eq!(
-            resolved.name(),
-            "multiline",
-            "/ml alias must resolve to MultilineCommand"
-        );
     }
 }

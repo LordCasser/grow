@@ -127,10 +127,51 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::RelaunchInScreenMode { minimal } => {
+            fn has_unsettled_relaunch_work(agent: &crate::app::agent_view::AgentView) -> bool {
+                !agent.session.state.is_idle()
+                    || agent.session.loading_replay
+                    || agent.session_reload.is_some()
+                    || agent
+                        .subagent_views
+                        .values()
+                        .any(|child| has_unsettled_relaunch_work(child))
+            }
+            if app.agents.values().any(has_unsettled_relaunch_work) {
+                let active_id = match app.active_view {
+                    ActiveView::Agent(id) => Some(id),
+                    _ => None,
+                };
+                if let Some(agent) = active_id.and_then(|id| app.agents.get_mut(&id)) {
+                    agent.show_toast(
+                        "Screen mode will not restart while a session has active work or replay. Stop or wait for it, then retry.",
+                    );
+                } else {
+                    app.show_toast(
+                        "Screen mode will not restart while a session has active work or replay.",
+                    );
+                }
+                return vec![];
+            }
+            fn collect_control_handoffs(
+                agent: &crate::app::agent_view::AgentView,
+                out: &mut Vec<crate::app::session::SessionControlHandoff>,
+            ) {
+                if let Some(handoff) = agent.session.screen_mode_control_handoff() {
+                    out.push(handoff);
+                }
+                for child in agent.subagent_views.values() {
+                    collect_control_handoffs(child, out);
+                }
+            }
+            let mut control_handoffs = Vec::new();
+            for agent in app.agents.values() {
+                collect_control_handoffs(agent, &mut control_handoffs);
+            }
             if let Some(session_id) = app.active_session_id().map(str::to_owned) {
                 app.relaunch = Some(crate::app::root::ScreenModeRelaunch {
                     minimal,
                     session_id,
+                    control_handoffs,
                 });
             }
             let mut effects = unregister_all_active_sessions(app);
@@ -468,7 +509,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if let Some(agent) = get_active_agent_mut(app) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(msg));
+                    .push_block(crate::scrollback::block::RenderBlock::notice(msg));
             }
             vec![]
         }
@@ -483,7 +524,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if let Some(agent) = get_active_agent_mut(app) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(msg));
+                    .push_block(crate::scrollback::block::RenderBlock::notice(msg));
             }
             vec![]
         }
@@ -746,9 +787,35 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 agent.session.deferred_model_switch = Some((model_id, effort));
                 return vec![];
             };
-            let effects =
-                queue::enqueue_model_control(id, session_id, &mut agent.session, model_id, effort);
-            if reconnecting { vec![] } else { effects }
+            queue::enqueue_model_control(
+                id,
+                session_id,
+                &mut agent.session,
+                model_id,
+                effort,
+                !reconnecting,
+            )
+        }
+        Action::PatchEffort { model_id, effort } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let reconnecting = app.reconnect_pending;
+            let Some(agent) = get_active_agent_mut(app) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.session.deferred_model_switch = Some((model_id, Some(effort)));
+                return vec![];
+            };
+            queue::enqueue_effort_control(
+                id,
+                session_id,
+                &mut agent.session,
+                model_id,
+                effort,
+                !reconnecting,
+            )
         }
         Action::SwitchAgent { agent_name } => {
             let ActiveView::Agent(id) = app.active_view else {
@@ -766,14 +833,18 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             let Some(session_id) = agent.session.session_id.clone() else {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
+                    .push_block(crate::scrollback::block::RenderBlock::notice(
                         "Agent can be changed after the session connects.",
                     ));
                 return vec![];
             };
-            let effects =
-                queue::enqueue_agent_control(id, session_id, &mut agent.session, agent_name);
-            if reconnecting { vec![] } else { effects }
+            queue::enqueue_agent_control(
+                id,
+                session_id,
+                &mut agent.session,
+                agent_name,
+                !reconnecting,
+            )
         }
         Action::OpenCommandPicker {
             command,
@@ -1055,18 +1126,18 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 super::task_result::deliver_doctor_message(
                     app,
                     target.agent_id,
+                    crate::scrollback::blocks::NoticeTone::Warning,
                     "This fix was cancelled because the session changed. Run `/doctor fix` again."
                         .to_owned(),
                 );
                 return vec![];
             };
             if let Some(agent) = app.agents.get_mut(&target.agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Applying {}…",
-                        plan.id()
-                    )));
+                agent.session.set_live_feedback(
+                    "doctor-fix",
+                    crate::scrollback::blocks::NoticeTone::Progress,
+                    format!("Applying {}…", plan.id()),
+                );
             }
             vec![Effect::ApplyDoctorFix { target, plan }]
         }
@@ -1074,6 +1145,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             super::task_result::deliver_doctor_message(
                 app,
                 target.agent_id,
+                crate::scrollback::blocks::NoticeTone::Info,
                 "Fix cancelled.".to_owned(),
             );
             vec![]

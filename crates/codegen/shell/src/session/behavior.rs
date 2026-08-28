@@ -10,6 +10,8 @@ use tool_types::{BehaviorAvailabilityDisposition, BehaviorAvailabilityEntry};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviorChangeOutcome {
     Applied,
+    InFlight,
+    Superseded,
     ConfirmationRequired { message: String, remaining_ms: u64 },
     Rejected { message: String },
 }
@@ -41,6 +43,8 @@ impl BehaviorChangeOutcome {
     pub fn response_meta(&self) -> serde_json::Map<String, serde_json::Value> {
         let value = match self {
             Self::Applied => serde_json::json!({ "status": "applied" }),
+            Self::InFlight => serde_json::json!({ "status": "in_flight" }),
+            Self::Superseded => serde_json::json!({ "status": "superseded" }),
             Self::ConfirmationRequired {
                 message,
                 remaining_ms,
@@ -115,10 +119,11 @@ pub struct BehaviorCoordinator {
     pending_switch: Option<PendingBehaviorSwitch>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingBehaviorSwitch {
     source: BehaviorId,
     target: BehaviorId,
+    owner: Option<String>,
     expires_at: std::time::Instant,
 }
 
@@ -250,6 +255,20 @@ impl BehaviorCoordinator {
         facts: BehaviorSwitchFacts,
         confirmation_window: std::time::Duration,
     ) -> BehaviorDecision {
+        self.decide_switch_owned(target, facts, confirmation_window, None)
+    }
+
+    /// Decide a transition while binding any destructive confirmation latch
+    /// to the client generation that created it. A different client may ask
+    /// for the same target, but its first request must never confirm another
+    /// client's interruption.
+    pub fn decide_switch_owned(
+        &mut self,
+        target: BehaviorId,
+        facts: BehaviorSwitchFacts,
+        confirmation_window: std::time::Duration,
+        confirmation_owner: Option<&str>,
+    ) -> BehaviorDecision {
         let source = self.behavior();
         if source == target {
             self.clear_pending_switch();
@@ -271,7 +290,11 @@ impl BehaviorCoordinator {
         }
 
         if facts.source_owned_work_active
-            && !self.confirm_interrupting_switch(target, confirmation_window)
+            && !self.confirm_interrupting_switch_owned(
+                target,
+                confirmation_window,
+                confirmation_owner,
+            )
         {
             let remaining_ms = self
                 .pending_switch()
@@ -381,10 +404,22 @@ impl BehaviorCoordinator {
         target: BehaviorId,
         window: std::time::Duration,
     ) -> bool {
+        self.confirm_interrupting_switch_owned(target, window, None)
+    }
+
+    pub fn confirm_interrupting_switch_owned(
+        &mut self,
+        target: BehaviorId,
+        window: std::time::Duration,
+        owner: Option<&str>,
+    ) -> bool {
         let now = std::time::Instant::now();
         let source = self.behavior();
-        let confirmed = self.pending_switch.is_some_and(|pending| {
-            pending.source == source && pending.target == target && pending.expires_at > now
+        let confirmed = self.pending_switch.as_ref().is_some_and(|pending| {
+            pending.source == source
+                && pending.target == target
+                && pending.owner.as_deref() == owner
+                && pending.expires_at > now
         });
         if confirmed {
             self.pending_switch = None;
@@ -393,6 +428,7 @@ impl BehaviorCoordinator {
             self.pending_switch = Some(PendingBehaviorSwitch {
                 source,
                 target,
+                owner: owner.map(str::to_owned),
                 expires_at: now + window,
             });
             false
@@ -400,7 +436,7 @@ impl BehaviorCoordinator {
     }
 
     pub fn pending_switch(&self) -> Option<(BehaviorId, BehaviorId, u64)> {
-        let pending = self.pending_switch?;
+        let pending = self.pending_switch.as_ref()?;
         let remaining = pending
             .expires_at
             .checked_duration_since(std::time::Instant::now())?;
@@ -1079,6 +1115,46 @@ mod tests {
                 BehaviorEffect::Select(BehaviorId::Normal),
             ]
         );
+    }
+
+    #[test]
+    fn interrupting_confirmation_is_owned_by_one_client_generation() {
+        let window = std::time::Duration::from_secs(8);
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        let facts = BehaviorSwitchFacts {
+            source_owned_work_active: true,
+            ..BehaviorSwitchFacts::default()
+        };
+
+        let first = controller.decide_switch_owned(
+            BehaviorId::Normal,
+            facts.clone(),
+            window,
+            Some("client-a:1"),
+        );
+        assert!(matches!(
+            first.outcome,
+            BehaviorChangeOutcome::ConfirmationRequired { .. }
+        ));
+
+        let other_client = controller.decide_switch_owned(
+            BehaviorId::Normal,
+            facts.clone(),
+            window,
+            Some("client-b:1"),
+        );
+        assert!(matches!(
+            other_client.outcome,
+            BehaviorChangeOutcome::ConfirmationRequired { .. }
+        ));
+
+        let owner_confirmation =
+            controller.decide_switch_owned(BehaviorId::Normal, facts, window, Some("client-b:1"));
+        assert!(matches!(
+            owner_confirmation.outcome,
+            BehaviorChangeOutcome::Applied
+        ));
     }
 
     #[test]

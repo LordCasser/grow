@@ -109,9 +109,14 @@ mod goal_admission_tests {
                     .unwrap();
                 assert_eq!(authority.goal, Some(("goal-1".into(), 1)));
 
-                assert!(actor.events.end_step("continued"));
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active Goal step boundary");
                 assert_eq!(
-                    actor.apply_pending_controls_at_step_boundary().await,
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
                     (false, false, false)
                 );
                 actor.refresh_goal_step_resources().await;
@@ -219,9 +224,14 @@ mod goal_admission_tests {
                     actor.goal_tracker.lock().status(),
                     Some(crate::session::goal_tracker::GoalStatus::Complete)
                 );
-                assert!(actor.events.end_step("continued"));
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("active Goal step boundary");
                 assert_eq!(
-                    actor.apply_pending_controls_at_step_boundary().await,
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
                     (false, false, true)
                 );
 
@@ -428,6 +438,7 @@ mod goal_admission_tests {
                             85,
                         ),
                         None,
+                        None,
                         model_tx,
                     )
                     .await;
@@ -435,6 +446,7 @@ mod goal_admission_tests {
                 actor
                     .admit_agent_selection(
                         agent::config::BuiltinAgentName::Explore.definition(),
+                        None,
                         agent_tx,
                     )
                     .await;
@@ -574,17 +586,21 @@ mod goal_admission_tests {
                     )
                     .unwrap();
                 let (responds_to, _response) = tokio::sync::oneshot::channel();
-                actor.state.lock().await.pending_step_controls.push_back(
-                    PendingStepControl::ModelSelection(PendingModelSelection {
-                        route: SessionActor::selection_route_for_test(
+                actor
+                    .state
+                    .lock()
+                    .await
+                    .pending_step_controls
+                    .admit_sampling(
+                        SessionActor::selection_route_for_test(
                             acp::ModelId::new("next/model"),
                             sampler::SamplerConfig::default(),
                             85,
                         ),
-                        catalog: None,
+                        None,
+                        None,
                         responds_to,
-                    }),
-                );
+                    );
                 let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 actor
@@ -697,7 +713,7 @@ mod goal_admission_tests {
                 };
 
                 assert!(actor.goal_tracker.lock().account_tokens("goal-1", 100));
-                actor.record_control_snapshot();
+                actor.record_control_snapshot_durably().await.unwrap();
 
                 let (respond_to, response) = tokio::sync::oneshot::channel();
                 actor
@@ -869,6 +885,7 @@ impl SessionActor {
         previous: Option<crate::session::goal_tracker::GoalState>,
     ) -> Result<(), String> {
         let _boundary = self.step_control_gate.lock().await;
+        let _transaction = self.goal_transaction_gate.lock().await;
         self.commit_goal_activation_or_restore_at_step_boundary(previous)
             .await
     }
@@ -972,19 +989,19 @@ impl SessionActor {
     pub(super) async fn apply_pending_goal_definition_control(
         &self,
         pending: &PendingGoalDefinitionControl,
-    ) -> Result<(bool, Option<(String, u64)>, bool), String> {
+    ) -> Result<(bool, Option<(String, u64)>, bool), acp::Error> {
+        let _transaction = self.goal_transaction_gate.lock().await;
         use crate::session::goal_tracker::GoalStatus;
         use tool_types::{BehaviorAvailabilityDisposition, BehaviorId};
 
         let (previous_tracker, mut next_tracker) = {
             let tracker = self.goal_tracker.lock();
             let Some(goal) = tracker.snapshot() else {
-                return Err("No Goal is currently set.".to_string());
+                return Err(acp::Error::invalid_request().data("No Goal is currently set."));
             };
             if goal.goal_id != pending.goal_id {
-                return Err(
-                    "The Goal changed before the scheduled definition control applied.".to_string(),
-                );
+                return Err(acp::Error::invalid_request()
+                    .data("The Goal changed before the scheduled definition control applied."));
             }
             (tracker.clone(), tracker.clone())
         };
@@ -1002,16 +1019,13 @@ impl SessionActor {
             }
             PendingGoalDefinitionMutation::Budget { token_budget } => {
                 if previous.status == GoalStatus::Complete {
-                    return Err(
-                        "Goal is already complete. Clear it before starting a new Goal."
-                            .to_string(),
-                    );
+                    return Err(acp::Error::invalid_request()
+                        .data("Goal is already complete. Clear it before starting a new Goal."));
                 }
                 if previous.usage_incomplete && token_budget.is_some() {
-                    return Err(
-                        "Goal usage is a lower bound, so an exact token budget cannot be installed. Keep it unlimited or clear and recreate the Goal."
-                            .to_string(),
-                    );
+                    return Err(acp::Error::invalid_request().data(
+                        "Goal usage is a lower bound, so an exact token budget cannot be installed. Keep it unlimited or clear and recreate the Goal.",
+                    ));
                 }
                 next_tracker.set_token_budget(*token_budget)
             }
@@ -1056,10 +1070,12 @@ impl SessionActor {
                 },
             );
             if choice.disposition != BehaviorAvailabilityDisposition::Available {
-                return Err(choice.reason.clone().unwrap_or_else(|| {
-                    "Finish or stop the current Behavior-owned work before editing this Goal."
-                        .to_string()
-                }));
+                return Err(acp::Error::invalid_request().data(
+                    choice.reason.clone().unwrap_or_else(|| {
+                        "Finish or stop the current Behavior-owned work before editing this Goal."
+                            .to_string()
+                    }),
+                ));
             }
             workflow_admission = Some(admission);
         }
@@ -1091,7 +1107,10 @@ impl SessionActor {
                 .await
         };
         if let Err(error) = persisted {
-            return Err(format!("Goal control state was not persisted: {error}"));
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "Goal definition control",
+                format!("Goal control state was not persisted: {error}"),
+            ));
         }
 
         *self.goal_tracker.lock() = next_tracker;
@@ -1123,7 +1142,21 @@ impl SessionActor {
         objective: &str,
         token_budget: Option<i64>,
     ) -> Result<(), String> {
+        self.initialize_goal_runtime_with_authority(objective, token_budget, None)
+            .await
+    }
+
+    async fn initialize_goal_runtime_with_authority(
+        self: &std::sync::Arc<Self>,
+        objective: &str,
+        token_budget: Option<i64>,
+        authority: Option<&tools::implementations::grow_build::update_goal::GoalMutationAuthority>,
+    ) -> Result<(), String> {
         let _boundary = self.step_control_gate.lock().await;
+        let _transaction = self.goal_transaction_gate.lock().await;
+        if authority.is_some_and(|authority| !self.goal_authority_matches(authority, false)) {
+            return Err("This turn was invalidated by a Goal lifecycle or control change.".into());
+        }
         if !self.state.lock().await.pending_step_controls.is_empty() {
             return Err(
                 "Goal creation cannot overtake an earlier model or Agent control. Retry after the current step reaches its boundary."
@@ -1153,6 +1186,7 @@ impl SessionActor {
 
     pub(super) async fn restart_goal(self: &std::sync::Arc<Self>) -> String {
         let boundary = self.step_control_gate.lock().await;
+        let transaction = self.goal_transaction_gate.lock().await;
         let previous = self.goal_tracker.lock().snapshot().cloned();
         {
             let mut tracker = self.goal_tracker.lock();
@@ -1199,6 +1233,7 @@ impl SessionActor {
             return format!("Goal was not restarted: {error}");
         }
         self.arm_terminal_preemption_if_running().await;
+        drop(transaction);
         drop(boundary);
         let used = self.goal_tokens_used();
         self.goal_notify_sender()
@@ -1235,6 +1270,7 @@ impl SessionActor {
         message: String,
         parent_prompt_id: Option<&str>,
     ) -> bool {
+        let transaction = self.goal_transaction_gate.lock().await;
         let used = self.goal_tokens_used();
         let previous = self.goal_tracker.lock().snapshot().cloned();
         let retired_goal_owner = previous
@@ -1249,6 +1285,7 @@ impl SessionActor {
             tracing::error!(%error, "failed to persist Goal stop");
             return false;
         }
+        drop(transaction);
         if let Some((goal_id, definition_revision)) = retired_goal_owner {
             self.retire_goal_owned_work(&goal_id, definition_revision, parent_prompt_id)
                 .await;
@@ -1266,6 +1303,7 @@ impl SessionActor {
         &self,
         parent_prompt_id: Option<&str>,
     ) -> bool {
+        let transaction = self.goal_transaction_gate.lock().await;
         let used = self.goal_tokens_used();
         let current = self.goal_tracker.lock().snapshot().cloned();
         let incomplete_goal_id = self.goal_usage_window.usage_incomplete_goal_id();
@@ -1284,6 +1322,7 @@ impl SessionActor {
                         tracing::error!(%error, "failed to persist incomplete-usage Goal stop");
                         return false;
                     }
+                    drop(transaction);
                     self.retire_goal_owned_work(
                         &current.goal_id,
                         current.definition_revision,
@@ -1327,6 +1366,7 @@ impl SessionActor {
             tracing::error!(%error, "failed to persist Goal budget limit");
             return false;
         }
+        drop(transaction);
         if let Some((goal_id, definition_revision)) = retired_goal_owner {
             self.retire_goal_owned_work(&goal_id, definition_revision, parent_prompt_id)
                 .await;
@@ -1400,7 +1440,10 @@ impl SessionActor {
         }
         {
             let state = self.state.lock().await;
-            if !state.foreground.is_idle() || !state.pending_inputs.is_empty() {
+            if !state.termination.is_open()
+                || !state.foreground.is_idle()
+                || !state.pending_inputs.is_empty()
+            {
                 return;
             }
         }
@@ -1442,7 +1485,8 @@ impl SessionActor {
         }
         let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
-        if !state.foreground.is_idle()
+        if !state.termination.is_open()
+            || !state.foreground.is_idle()
             || !state.pending_inputs.is_empty()
             || !state.pending_step_controls.is_empty()
         {
@@ -1480,6 +1524,7 @@ impl SessionActor {
             self.clone(),
             prompt_id.clone(),
             origin.clone(),
+            None,
             notification_ids,
             crate::session::TurnKind::Internal,
             prompt_blocks,
@@ -1527,14 +1572,12 @@ impl SessionActor {
                 authority,
                 respond_to,
             } => {
-                if !self.goal_authority_matches(&authority, false) {
-                    let _ = respond_to.send(Err(
-                        "This turn was invalidated by a Goal lifecycle or control change.".into(),
-                    ));
-                    return;
-                }
                 let response = self
-                    .initialize_goal_runtime(&input.objective, input.token_budget)
+                    .initialize_goal_runtime_with_authority(
+                        &input.objective,
+                        input.token_budget,
+                        Some(&authority),
+                    )
                     .await
                     .map(|()| "Goal created; automatic continuation is armed.".to_string());
                 let _ = respond_to.send(response);
@@ -1545,6 +1588,8 @@ impl SessionActor {
                 authority,
                 respond_to,
             } => {
+                let boundary = self.step_control_gate.lock().await;
+                let transaction = self.goal_transaction_gate.lock().await;
                 if !self.goal_authority_matches(&authority, true) {
                     let _ = respond_to.send(Err(
                         "This Goal turn was invalidated by a lifecycle or definition change."
@@ -1630,6 +1675,8 @@ impl SessionActor {
                         return;
                     }
                 }
+                drop(transaction);
+                drop(boundary);
                 if terminal && let Some((goal_id, definition_revision)) = retired_goal_owner {
                     self.retire_goal_owned_work(
                         &goal_id,

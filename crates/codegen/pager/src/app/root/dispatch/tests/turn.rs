@@ -605,7 +605,7 @@ fn goal_active_without_turn_pause_routes_command_plane() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::ExecuteSlashCommand { command, .. } if command == "/goal pause"
+            Effect::ExecuteSlashCommand { request, .. } if request.command == "/goal pause"
         )),
         "no-turn pause must route through the /goal pause command plane: {effects:?}"
     );

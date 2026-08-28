@@ -140,6 +140,39 @@ pub fn minimal_commit_display_mode(
     }
 }
 
+/// Project the print-once display policy onto every uncommitted entry before
+/// viewport measurement. `tail_height` and the live renderer both read the
+/// entry's display mode, so this must run before `overlay::sync_viewport` on
+/// the first frame an entry appears; stamping it during the later commit pass
+/// produces a one-frame expanded/collapsed height mismatch and a prompt jump.
+fn stamp_live_tail_display_modes(state: &mut ScrollbackState, appearance: &AppearanceConfig) {
+    let mut index = minimal_api::commit_scan_cursor(state);
+    while let Some(entry) = state.get_mut(index) {
+        let mode = minimal_commit_display_mode(&entry.block, appearance);
+        entry.set_display_mode(mode);
+        index += 1;
+    }
+}
+
+/// Prepare the active Minimal tail for the frame's sizing and rendering pass.
+pub fn prepare_live_tail_display(app: &mut AppView) {
+    let id = match minimal_api::app_active_view(app) {
+        ActiveView::Agent(id) => *id,
+        _ => return,
+    };
+    let appearance = committed_appearance(minimal_api::app_appearance(app));
+    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
+        return;
+    };
+    let sb = minimal_api::agent_scrollback_mut(agent);
+    // A writer failure is a one-frame observation. Clear it before predicting
+    // this frame's post-commit layout so the entry is retried; if the retry
+    // fails, `commit_leading_run` records it again and the draw loop remeasures
+    // the live tail from the actual frontier.
+    minimal_api::set_minimal_failed_frontier(sb, None);
+    stamp_live_tail_display_modes(sb, &appearance);
+}
+
 /// One step of the frontier walk — the single classification shared by every
 /// consumer ([`commit_leading_run`], [`scan_frontier`]). Keeping this in one
 /// place is load-bearing: the commit pass, the `will_commit` resize gate, the
@@ -163,6 +196,7 @@ fn classify(state: &ScrollbackState, i: usize, turn_running: bool) -> Step {
     match state.get(i) {
         None => Step::Stop,
         Some(e) if minimal_api::is_committed(state, e) => Step::Skip,
+        Some(e) if minimal_api::minimal_failed_frontier(state) == Some(e.id) => Step::Stop,
         Some(e) if !is_committable(e, turn_running, is_last) => Step::Stop,
         Some(_) => Step::Commit,
     }
@@ -227,6 +261,10 @@ pub fn commit_leading_run(
     turn_running: bool,
     mut on_commit: impl FnMut(&mut ScrollbackState, usize) -> bool,
 ) -> usize {
+    // Each invocation is a real retry boundary. The failed marker only makes
+    // the remainder of the frame's read-only consumers see what actually
+    // happened; it must not suppress the next write attempt.
+    minimal_api::set_minimal_failed_frontier(state, None);
     let mut i = minimal_api::commit_scan_cursor(state);
     let mut count = 0usize;
     loop {
@@ -235,6 +273,8 @@ pub fn commit_leading_run(
             Step::Skip => i += 1,
             Step::Commit => {
                 if !on_commit(state, i) {
+                    let failed = state.get(i).map(|entry| entry.id);
+                    minimal_api::set_minimal_failed_frontier(state, failed);
                     break; // emit failed — leave uncommitted, retry next frame
                 }
                 minimal_api::mark_committed(state, i);
@@ -325,6 +365,7 @@ fn insert_committed(
     width: u16,
     max_rows: u16,
     footer_style: Style,
+    media_paths: &[std::path::PathBuf],
 ) -> std::io::Result<()> {
     let full_h = renderer.desired_height(width);
     if full_h == 0 {
@@ -338,8 +379,32 @@ fn insert_committed(
     // Propagated (not swallowed): the caller must NOT mark the entry committed
     // when the terminal write failed — print-once means a marked-but-unprinted
     // block can never be emitted again (bugbot).
-    terminal.insert_before(commit_h, move |buf| {
-        paint_committed(buf, renderer, width, full_h, footer_style);
+    let route = pager::hyperlink_route::hyperlink_route();
+    terminal.insert_before_with_links(commit_h, move |buf, links| {
+        if route.emit_osc8 {
+            let area = Rect {
+                x: buf.area.x,
+                y: buf.area.y,
+                width,
+                height: full_h,
+            };
+            // A capped commit replaces its final buffer row with the
+            // `/transcript` footer. Do not leave a semantic link from the
+            // clipped content underneath that replacement row.
+            let linked_bottom = if commit_h < full_h {
+                buf.area.bottom().saturating_sub(1)
+            } else {
+                buf.area.bottom()
+            };
+            links.extend(
+                renderer
+                    .link_overlay(area, media_paths)
+                    .resolved_spans(route.emit_id)
+                    .into_iter()
+                    .filter(|span| span.row < linked_bottom),
+            );
+        }
+        paint_committed(buf, &renderer, width, full_h, footer_style);
     })?;
     insert_gap(terminal);
     Ok(())
@@ -363,7 +428,7 @@ pub(super) fn insert_gap(terminal: &mut PagerTerminal) {
 /// without a live terminal.
 fn paint_committed(
     buf: &mut ratatui::buffer::Buffer,
-    renderer: EntryRenderer<'_>,
+    renderer: &EntryRenderer<'_>,
     width: u16,
     full_h: u16,
     footer_style: Style,
@@ -401,31 +466,30 @@ fn paint_committed(
 /// mode (K9), then `insert_before` it using the shared `EntryRenderer` at
 /// exactly `desired_height(width)` rows (K5).
 ///
-/// On resume/attach (`loading_replay`) the replayed transcript is printed into
-/// native scrollback like any other finalized block — minimal has no separate
-/// history pane, so the terminal's scrollback *is* the history; without this a
-/// resumed session looks empty (nothing redrawn). The commit frontier
-/// (`committed` flags + `commit_scan_cursor`) still guarantees each block prints
-/// exactly once.
+/// Initial resume/attach replay still crosses the normal frontier so a newly
+/// opened Minimal terminal gets its history. A reconnect transaction is
+/// distinct: the session-reload window freezes all native writes, then its
+/// successful resolution inherits only the prefix already printed by this
+/// terminal. The first post-reconnect pass therefore emits only the real tail.
 pub fn commit_active(
     app: &mut AppView,
     terminal: &mut PagerTerminal,
     frame: pager::motion::FrameStamp,
-) {
+) -> bool {
     let id = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => *id,
-        _ => return, // welcome / dashboard: nothing to commit
+        _ => return false, // welcome / dashboard: nothing to commit
     };
     // Snapshot the commit appearance before borrowing `agents` mutably.
     let appearance = committed_appearance(minimal_api::app_appearance(app));
     let Some(agent) = minimal_api::app_agent_mut(app, id) else {
-        return;
+        return false;
     };
     // Hold commits while a centered fullscreen app-modal (settings) is open: it
     // takes the whole live region, so an `insert_before` underneath it would
     // scroll the popup. Deferred commits flush on the next frame after it closes.
-    if super::overlay::app_modal_active(agent) {
-        return;
+    if super::overlay::app_modal_active(agent) || minimal_api::agent_session_reload_active(agent) {
+        return false;
     }
     // NB: `sync_pending_user_input_marks` already ran at the top of the frame
     // ([`sync_pending_marks`], called from `crate::draw` BEFORE the viewport
@@ -438,18 +502,16 @@ pub fn commit_active(
     // left by the tracker must not wedge the frontier.
     let turn_running = minimal_api::agent_state(agent).is_turn_running();
     let cwd = minimal_api::agent_cwd(agent).to_path_buf();
+    minimal_api::ensure_agent_media_link_paths(agent);
+    let media_paths = minimal_api::agent_media_link_paths(agent).to_vec();
     let sb = minimal_api::agent_scrollback_mut(agent);
-
-    // NB: resume/attach replay (`agent.session.loading_replay`) intentionally
-    // falls through to the normal commit pass below, so the loaded transcript is
-    // printed into native scrollback (a resumed session must be visible).
 
     let theme = Theme::current();
     let footer_style = theme.dim();
     let max_rows = appearance.minimal_max_commit_rows;
     let width = terminal.viewport_area().width;
     if width == 0 {
-        return;
+        return false;
     }
 
     // Drive the ONE frontier walk (`commit_leading_run` — also what the unit
@@ -479,7 +541,16 @@ pub fn commit_active(
             // will NOT reach the screen — append a fresh block instead (see
             // the `SessionRecap` handler in `acp_handler.rs`).
             let renderer = minimal_renderer(e, &theme, appearance.clone(), &cwd, frame);
-            if insert_committed(terminal, renderer, width, max_rows, footer_style).is_err() {
+            if insert_committed(
+                terminal,
+                renderer,
+                width,
+                max_rows,
+                footer_style,
+                &media_paths,
+            )
+            .is_err()
+            {
                 return false;
             }
         }
@@ -493,21 +564,7 @@ pub fn commit_active(
         }
         true
     });
-
-    // Stamp the still-uncommitted "live tail" entries with the same print-once
-    // display policy they will commit with (collapsed reasoning, truncated tool
-    // output, full diffs/messages). The tail renders each entry at its current
-    // `display_mode`, but blocks stream Expanded and commit folded — so without
-    // this the live region is tall while a block streams and snaps short the
-    // instant it finalizes, jerking the prompt upward (dogfood nit). Matching
-    // the tail height to the committed height keeps the prompt put across a
-    // commit. Idempotent: `set_display_mode` no-ops when unchanged.
-    let mut j = minimal_api::commit_scan_cursor(sb);
-    while let Some(e) = sb.get_mut(j) {
-        let mode = minimal_commit_display_mode(&e.block, &appearance);
-        e.set_display_mode(mode);
-        j += 1;
-    }
+    minimal_api::minimal_failed_frontier(sb).is_some()
 }
 
 /// Re-print the entries queued by `Ctrl+E` / `/expand` into native scrollback,
@@ -543,10 +600,13 @@ pub fn expand_pending(
     // exists before consuming the queue below (the queue take needs `&mut app`,
     // which can't overlap the agent borrow — hence the check-then-reborrow).
     // Likewise hold the whole queue while a centered app-modal owns the live
-    // region — an `insert_before` would scroll the popup and the user wouldn't
-    // see the re-print (same hold as `commit_active`; bugbot).
+    // region or a reconnect transaction is staging replay. An `insert_before`
+    // would respectively scroll the popup or leak staged history into native
+    // scrollback (same hold as `commit_active`; bugbot).
     match minimal_api::app_agent(app, id) {
-        Some(agent) if !super::overlay::app_modal_active(agent) => {}
+        Some(agent)
+            if !super::overlay::app_modal_active(agent)
+                && !minimal_api::agent_session_reload_active(agent) => {}
         _ => return,
     }
     let theme = Theme::current();
@@ -566,6 +626,8 @@ pub fn expand_pending(
             return;
         };
         let cwd = minimal_api::agent_cwd(agent).to_path_buf();
+        minimal_api::ensure_agent_media_link_paths(agent);
+        let media_paths = minimal_api::agent_media_link_paths(agent).to_vec();
         let sb = minimal_api::agent_scrollback_mut(agent);
         let mut iter = ids.into_iter();
         while let Some(eid) = iter.next() {
@@ -577,7 +639,9 @@ pub fn expand_pending(
             }
             if let Some(e) = sb.get(idx) {
                 let renderer = minimal_renderer(e, &theme, appearance.clone(), &cwd, frame);
-                if insert_committed(terminal, renderer, width, 0, footer_style).is_err() {
+                if insert_committed(terminal, renderer, width, 0, footer_style, &media_paths)
+                    .is_err()
+                {
                     // Terminal write failed: keep this id and the rest queued
                     // so the request retries next frame instead of vanishing.
                     requeue.push(eid);

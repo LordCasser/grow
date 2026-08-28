@@ -46,7 +46,10 @@ fn manual_recap_with_no_messages_toasts_empty_state_and_skips_request() {
         "empty session must not fire grow/recap: {effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
-    assert!(agent.pending_recap_entry.is_none(), "no loading spinner");
+    assert!(
+        agent.session.live_status(100).is_none(),
+        "no loading status"
+    );
     assert_eq!(
         agent.toast.as_ref().map(|(s, _)| s.as_str()),
         Some("No messages yet"),
@@ -56,7 +59,7 @@ fn manual_recap_with_no_messages_toasts_empty_state_and_skips_request() {
 }
 
 #[test]
-fn manual_recap_with_messages_requests_and_shows_spinner() {
+fn manual_recap_with_messages_requests_and_shows_live_status() {
     let mut app = test_app_with_agent();
     app.session_recap_available = true;
     let id = AgentId(0);
@@ -75,9 +78,10 @@ fn manual_recap_with_messages_requests_and_shows_spinner() {
         "expected SendRecap effect, got {effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
-    assert!(
-        agent.pending_recap_entry.is_some(),
-        "manual recap shows a loading spinner when there is something to summarize"
+    assert_eq!(
+        agent.session.live_status(100).as_deref(),
+        Some("Generating session recap\u{2026}"),
+        "manual recap uses replaceable live status instead of Scrollback"
     );
     assert!(agent.toast.is_none());
 }
@@ -108,7 +112,10 @@ fn manual_recap_during_batch_load_with_prompts_still_requests() {
         "batched resume with user prompts must still fire grow/recap: {effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
-    assert!(agent.pending_recap_entry.is_some());
+    assert_eq!(
+        agent.session.live_status(100).as_deref(),
+        Some("Generating session recap\u{2026}")
+    );
     assert!(agent.toast.is_none());
     // Clean up batch for the test fixture (not required for the assertion).
     app.agents.get_mut(&id).unwrap().scrollback.end_batch();
@@ -134,7 +141,10 @@ fn manual_recap_while_loading_replay_still_requests() {
         "loading_replay must not short-circuit to No messages yet: {effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
-    assert!(agent.pending_recap_entry.is_some());
+    assert_eq!(
+        agent.session.live_status(100).as_deref(),
+        Some("Generating session recap\u{2026}")
+    );
     assert!(agent.toast.is_none());
 }
 
@@ -145,15 +155,11 @@ fn recap_request_transport_failure_with_no_turns_uses_empty_toast() {
     let session_id = app.agents[&id].session.session_id.clone().unwrap();
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        let spinner = agent
-            .scrollback
-            .push(crate::scrollback::entry::ScrollbackEntry::running(
-                RenderBlock::session_event(SessionEvent::Recap {
-                    summary: String::new(),
-                    auto: false,
-                }),
-            ));
-        agent.pending_recap_entry = Some(spinner);
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
         assert!(!scrollback_has_user_messages(&agent.scrollback));
     }
 
@@ -167,7 +173,7 @@ fn recap_request_transport_failure_with_no_turns_uses_empty_toast() {
     );
 
     let agent = app.agents.get(&id).unwrap();
-    assert!(agent.pending_recap_entry.is_none());
+    assert!(agent.session.live_status(100).is_none());
     assert_eq!(
         agent.toast.as_ref().map(|(s, _)| s.as_str()),
         Some("No messages yet")
@@ -184,15 +190,11 @@ fn recap_request_transport_failure_with_turns_uses_generic_toast() {
         agent
             .scrollback
             .push_block(RenderBlock::user_prompt("hello"));
-        let spinner = agent
-            .scrollback
-            .push(crate::scrollback::entry::ScrollbackEntry::running(
-                RenderBlock::session_event(SessionEvent::Recap {
-                    summary: String::new(),
-                    auto: false,
-                }),
-            ));
-        agent.pending_recap_entry = Some(spinner);
+        agent.session.set_live_feedback(
+            "recap",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Generating session recap\u{2026}",
+        );
         assert!(scrollback_has_user_messages(&agent.scrollback));
     }
 
@@ -206,7 +208,7 @@ fn recap_request_transport_failure_with_turns_uses_generic_toast() {
     );
 
     let agent = app.agents.get(&id).unwrap();
-    assert!(agent.pending_recap_entry.is_none());
+    assert!(agent.session.live_status(100).is_none());
     assert_eq!(
         agent.toast.as_ref().map(|(s, _)| s.as_str()),
         Some("Couldn't generate recap")

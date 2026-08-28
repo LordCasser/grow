@@ -11,10 +11,6 @@ impl SlashCommand for ViewPlanCommand {
         "view-plan"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["show-plan", "plan-view"]
-    }
-
     fn description(&self) -> &str {
         "View the current plan"
     }

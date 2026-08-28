@@ -6,6 +6,7 @@
 
 use super::*;
 use pager::scrollback::block::RenderBlock;
+use pager::scrollback::blocks::{NoticeCategory, NoticeTone};
 use pager::scrollback::entry::ScrollbackEntry;
 use pager::scrollback::state::ScrollbackState;
 use ratatui::style::Color;
@@ -31,6 +32,27 @@ fn collapsed_appearance() -> AppearanceConfig {
         minimal_collapse_thinking: true,
         ..Default::default()
     })
+}
+
+#[test]
+fn live_tail_is_stamped_before_the_first_height_measurement() {
+    let mut state = ScrollbackState::new();
+    state.push(ScrollbackEntry::running(RenderBlock::thinking(
+        "a long streaming thought",
+    )));
+    assert_eq!(
+        state.get(0).unwrap().display_mode(),
+        DisplayMode::Truncated,
+        "streaming thoughts begin in the retained renderer's truncated mode"
+    );
+
+    stamp_live_tail_display_modes(&mut state, &collapsed_appearance());
+
+    assert_eq!(
+        state.get(0).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "Minimal sizing sees the same mode that commit will print"
+    );
 }
 
 /// Run a commit pass for a RUNNING turn, returning the emitted indices.
@@ -330,6 +352,15 @@ fn failed_emit_leaves_entry_uncommitted_for_retry() {
     assert_eq!(calls, 1, "walk stops at the first failure");
     assert!(!minimal_api::is_committed(&s, s.get(0).unwrap()));
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0, "cursor holds");
+    let live = scan_frontier(&s, false);
+    assert_eq!(
+        live.tail_start, 0,
+        "the failed entry must remain in the live tail"
+    );
+    assert!(
+        !live.will_commit,
+        "the current frame must not keep predicting a write that already failed"
+    );
 
     // Retry pass succeeds and commits both.
     let n = commit_leading_run(&mut s, false, |_, _| true);
@@ -445,6 +476,39 @@ fn commit_leading_run_advances_frontier_and_marks_committed_once() {
         true
     });
     assert!(again.is_empty());
+}
+
+#[test]
+fn terminal_notice_commits_once_during_a_running_turn() {
+    let mut state = ScrollbackState::new();
+    state.push(ScrollbackEntry::new(RenderBlock::terminal_notice(
+        "control:42",
+        NoticeTone::Success,
+        NoticeCategory::Control,
+        "Model changed to provider/model",
+        None,
+    )));
+
+    let mut emitted = Vec::new();
+    assert_eq!(
+        commit_leading_run(&mut state, true, |_, index| {
+            emitted.push(index);
+            true
+        }),
+        1,
+        "terminal notices are immutable and may cross the native frontier immediately"
+    );
+    assert_eq!(emitted, vec![0]);
+
+    assert_eq!(
+        commit_leading_run(&mut state, true, |_, index| {
+            emitted.push(index);
+            true
+        }),
+        0,
+        "a committed terminal notice must never be printed twice"
+    );
+    assert_eq!(emitted, vec![0]);
 }
 
 #[test]
@@ -604,7 +668,7 @@ fn committed_blocks_fit_desired_height() {
             width,
         );
         assert_committed_fits("search", RenderBlock::search("TODO", 0, vec![]), width);
-        assert_committed_fits("system", RenderBlock::system("Session restored"), width);
+        assert_committed_fits("system", RenderBlock::notice("Session restored"), width);
         assert_committed_fits("bg_task", RenderBlock::bg_task("sleep 30", "task-1"), width);
     }
 }
@@ -670,7 +734,7 @@ fn terminal_native_lock_paints_only_native_colors() {
             "execute",
             RenderBlock::execute_with_output("cargo build", "ok\n", None::<String>),
         ),
-        ("system", RenderBlock::system("Session restored")),
+        ("system", RenderBlock::notice("Session restored")),
     ];
 
     for (label, block) in blocks {
@@ -729,7 +793,7 @@ fn large_commit_is_capped_with_footer() {
     let cap = 12u16;
     let area = Rect::new(0, 0, width, cap);
     let mut buf = Buffer::empty(area);
-    paint_committed(&mut buf, renderer, width, full_h, theme.dim());
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
 
     // The final row is the overflow footer naming the hidden line count and
     // pointing at /transcript; the buffer is exactly `cap` rows (bounded).
@@ -763,7 +827,7 @@ fn small_commit_is_not_capped() {
     // Buffer is exactly the block's height → no footer (uncapped path).
     let area = Rect::new(0, 0, width, full_h);
     let mut buf = Buffer::empty(area);
-    paint_committed(&mut buf, renderer, width, full_h, theme.dim());
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
 
     let mut all = String::new();
     for y in 0..full_h {
@@ -876,7 +940,7 @@ fn only_thinking_spends_the_accent_column() {
         RenderBlock::execute("ls"),
         RenderBlock::read("src/lib.rs", None),
         RenderBlock::edit("src/main.rs", None),
-        RenderBlock::system("Session restored"),
+        RenderBlock::notice("Session restored"),
     ] {
         let entry = ScrollbackEntry::new(block);
         assert_eq!(

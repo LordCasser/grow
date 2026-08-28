@@ -104,7 +104,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
         .scrollback
         .entries_in_range(0..app.agents[&id].scrollback.len())
         .iter()
-        .any(|e| matches!(&e.block, RenderBlock::System(s) if s.text.contains("Code restored")));
+        .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(has_restore_msg, "expected restore summary in scrollback");
     assert_eq!(
         app.agents[&id].session.restore_degree,
@@ -151,7 +151,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
         .scrollback
         .entries_in_range(0..app.agents[&id].scrollback.len());
     let warn = entries.iter().find_map(|e| match &e.block {
-        RenderBlock::System(s) if s.text.contains("Code restore failed") => Some(&s.text),
+        RenderBlock::Notice(s) if s.text.contains("Code restore failed") => Some(&s.text),
         _ => None,
     });
     let text = warn.expect("warning banner missing").as_str();
@@ -164,7 +164,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
     // The success banner must NOT also appear.
     let success_present = entries
         .iter()
-        .any(|e| matches!(&e.block, RenderBlock::System(s) if s.text.contains("Code restored")));
+        .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(
         !success_present,
         "success banner must not appear on failure"
@@ -186,7 +186,7 @@ fn fork_initiation_supersedes_open_reload_window() {
         agent.session.loading_replay = false;
         agent
             .scrollback
-            .push_block(RenderBlock::system("pre-outage content"));
+            .push_block(RenderBlock::notice("pre-outage content"));
         agent.begin_session_reload(1);
     }
 
@@ -696,8 +696,12 @@ fn build_child_fork_marker_minimal_mode_advertises_resume() {
 fn dispatch_fork_pushes_progress_message_worktree() {
     let mut app = fork_test_app();
     dispatch(Action::Fork(fork_args(Some(true), None)), &mut app);
-    let progress = last_system_text(&app, AgentId(1));
-    assert_eq!(progress, "Creating worktree\u{2026}");
+    let progress = app.agents[&AgentId(1)].session.live_status(100);
+    assert_eq!(progress.as_deref(), Some("Creating worktree\u{2026}"));
+    assert!(
+        app.agents[&AgentId(1)].scrollback.is_empty(),
+        "transient progress must not become immutable transcript history"
+    );
 }
 
 #[test]
@@ -1217,7 +1221,7 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         .get(app.agents[&id].scrollback.len() - 1)
         .expect("scrollback should have a new entry");
     match &last.block {
-        RenderBlock::System(sys) => {
+        RenderBlock::Notice(sys) => {
             assert_eq!(sys.text, "/fork cancelled because another question opened.")
         }
         other => panic!("expected System block, got {other:?}"),

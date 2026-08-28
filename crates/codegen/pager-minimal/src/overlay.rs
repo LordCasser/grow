@@ -207,7 +207,7 @@ fn will_commit(app: &AppView) -> bool {
     let Some(agent) = minimal_api::app_agent(app, *id) else {
         return false;
     };
-    if app_modal_active(agent) {
+    if app_modal_active(agent) || minimal_api::agent_session_reload_active(agent) {
         return false;
     }
     let turn_running = minimal_api::agent_state(agent).is_turn_running();

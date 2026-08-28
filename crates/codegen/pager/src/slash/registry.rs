@@ -1,9 +1,9 @@
-//! Command registry -- maps command names/aliases to `SlashCommand` implementations.
+//! Command registry -- maps canonical names and optional aliases to commands.
 //!
 //! Design choices:
 //!
 //! - `String` keys throughout (not `&'static str`) for ACP command support.
-//! - `CommandSource` tracks provenance (Builtin vs Acp) for replacement logic.
+//! - `RegistrySource` tracks ownership (Builtin vs Acp) for replacement logic.
 //! - `set_acp_commands()` replaces ACP-sourced entries without touching builtins.
 //! - `rebuild_triggers()` regenerates the trigger list after mutations.
 
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tools::implementations::skills::types::SkillScope;
 
 use super::acp_command::AcpSlashCommand;
-use super::command::SlashCommand;
+use super::command::{CommandKind, CommandSource, SlashCommand};
 use super::mode_support::ModeSupport;
 
 fn client_collision_qualified_name(
@@ -30,26 +30,24 @@ fn client_collision_qualified_name(
 
 /// Source of a command in the registry. Used for precedence and replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    /// Pager-local builtin (e.g., /exit, /model).
+pub enum RegistrySource {
+    /// Pager-local builtin (e.g., /quit, /model).
     Builtin,
     /// Advertised by the shell/agent via ACP AvailableCommandsUpdate.
     Acp,
 }
 
-/// A trigger entry in the registry -- one per canonical name or alias.
-///
-/// Triggers are what the fuzzy matcher operates on. Each command produces
-/// at least one trigger (canonical name), plus one per alias.
+/// A command trigger consumed by the fuzzy matcher. Each command has one
+/// canonical trigger and may expose additional alias triggers.
 #[derive(Debug, Clone)]
 pub struct CommandTrigger {
-    /// The canonical command name (e.g., "exit").
+    /// The canonical command name.
     pub canonical: String,
-    /// If this trigger is an alias, the alias text. None for canonical triggers.
+    /// Alias text for an alias trigger; `None` for the canonical trigger.
     pub alias: Option<String>,
-    /// Display text for the dropdown (e.g., "/exit").
+    /// Display text for the dropdown.
     pub display: String,
-    /// Text used for fuzzy matching (alias text or canonical name).
+    /// Text used for fuzzy matching.
     pub match_text: String,
     /// Command description.
     pub description: String,
@@ -61,7 +59,11 @@ pub struct CommandTrigger {
     pub args_required: bool,
     /// Index into `CommandRegistry::commands`.
     pub command_index: usize,
-    /// Source of this command.
+    /// Registry owner used for collision/replacement policy.
+    pub registry_source: RegistrySource,
+    /// User-facing purpose category.
+    pub kind: CommandKind,
+    /// User-facing provenance.
     pub source: CommandSource,
 }
 
@@ -71,13 +73,14 @@ impl CommandTrigger {
         alias: Option<&str>,
         canonical: &str,
         command_index: usize,
-        source: CommandSource,
+        registry_source: RegistrySource,
     ) -> Self {
-        let display = format!("/{}", alias.unwrap_or(canonical));
-        let match_text = alias.unwrap_or(canonical).to_string();
+        let display_name = alias.unwrap_or(canonical);
+        let display = format!("/{display_name}");
+        let match_text = display_name.to_string();
         Self {
             canonical: canonical.to_string(),
-            alias: alias.map(|s| s.to_string()),
+            alias: alias.map(str::to_owned),
             display,
             match_text,
             description: command.description().to_string(),
@@ -85,19 +88,21 @@ impl CommandTrigger {
             takes_args: command.takes_args(),
             args_required: command.args_required(),
             command_index,
-            source,
+            registry_source,
+            kind: command.kind(),
+            source: command.source(),
         }
     }
 }
 
 /// Registry of all known slash commands.
 ///
-/// Owns the command objects and provides lookup by name/alias.
+/// Owns the command objects and provides lookup by canonical name or alias.
 /// Supports dynamic mutation via `set_acp_commands()` for runtime
 /// ACP command catalog updates.
 pub struct CommandRegistry {
     commands: Vec<Arc<dyn SlashCommand>>,
-    sources: Vec<CommandSource>,
+    sources: Vec<RegistrySource>,
     key_to_index: HashMap<String, usize>,
     triggers: Vec<CommandTrigger>,
     /// Deny list of canonical command names (mode-support gating).
@@ -132,10 +137,10 @@ impl CommandRegistry {
     ///
     /// # Panics
     ///
-    /// Panics if two builtin commands share the same canonical name or alias.
+    /// Panics if two builtin commands share a canonical name or alias.
     pub fn new(builtins: Vec<Arc<dyn SlashCommand>>) -> Self {
         let n = builtins.len();
-        let sources = vec![CommandSource::Builtin; n];
+        let sources = vec![RegistrySource::Builtin; n];
         // Fail-closed until the matching `set_*_visible` call reveals them.
         let mut hidden = HashSet::new();
         hidden.insert("agents".to_string());
@@ -220,8 +225,7 @@ impl CommandRegistry {
         name.trim().trim_start_matches('/').to_lowercase()
     }
 
-    /// True when the command's canonical name or any alias is on the
-    /// deny list.
+    /// True when the command's canonical name or an alias is on the deny list.
     fn restricted_match(&self, cmd: &Arc<dyn SlashCommand>) -> bool {
         if self.restricted.is_empty() {
             return false;
@@ -230,7 +234,7 @@ impl CommandRegistry {
             || cmd
                 .aliases()
                 .iter()
-                .any(|a| self.restricted.contains(&a.to_lowercase()))
+                .any(|alias| self.restricted.contains(&alias.to_lowercase()))
     }
 
     /// Replace the restricted-command deny list (e.g. tier restrictions).
@@ -270,7 +274,10 @@ impl CommandRegistry {
             .filter(|cmd| self.restricted_match(cmd))
             .any(|cmd| {
                 cmd.name().to_lowercase() == key
-                    || cmd.aliases().iter().any(|a| a.to_lowercase() == key)
+                    || cmd
+                        .aliases()
+                        .iter()
+                        .any(|alias| alias.to_lowercase() == key)
             })
     }
 
@@ -303,7 +310,7 @@ impl CommandRegistry {
         self.key_to_index
             .get(key)
             .and_then(|idx| self.sources.get(*idx))
-            .is_some_and(|s| *s == CommandSource::Builtin)
+            .is_some_and(|s| *s == RegistrySource::Builtin)
     }
 
     /// All triggers (for fuzzy matching).
@@ -449,7 +456,7 @@ impl CommandRegistry {
     /// Replace all ACP-sourced commands with a new set.
     ///
     /// Builtin commands are preserved. ACP commands whose name collides
-    /// with any builtin trigger key (canonical name or alias) are silently
+    /// with any builtin canonical name are silently
     /// skipped.
     ///
     /// Triggers a full `rebuild_triggers()`. Prefer `set_acp_state`
@@ -464,7 +471,7 @@ impl CommandRegistry {
         // Remove old ACP-sourced commands.
         let mut i = 0;
         while i < self.commands.len() {
-            if self.sources[i] == CommandSource::Acp {
+            if self.sources[i] == RegistrySource::Acp {
                 self.commands.remove(i);
                 self.sources.remove(i);
             } else {
@@ -472,15 +479,15 @@ impl CommandRegistry {
             }
         }
 
-        // Build the set of all reserved builtin keys (canonical names + aliases).
+        // Build the set of reserved builtin canonical names and aliases.
         let builtin_keys: HashSet<String> = self
             .commands
             .iter()
             .enumerate()
-            .filter(|(j, _)| self.sources[*j] == CommandSource::Builtin)
-            .flat_map(|(_, c)| {
-                std::iter::once(c.name().to_lowercase())
-                    .chain(c.aliases().iter().map(|a| a.to_lowercase()))
+            .filter(|(j, _)| self.sources[*j] == RegistrySource::Builtin)
+            .flat_map(|(_, command)| {
+                std::iter::once(command.name().to_lowercase())
+                    .chain(command.aliases().iter().map(|alias| alias.to_lowercase()))
             })
             .collect();
 
@@ -495,7 +502,6 @@ impl CommandRegistry {
             "hooks-untrust",
             "hooks-add",
             "hooks-remove",
-            "reload-plugins",
         ];
 
         for acp_cmd in commands {
@@ -510,12 +516,12 @@ impl CommandRegistry {
                     renamed.name = qualified;
                     self.commands
                         .push(Arc::new(AcpSlashCommand::from(&renamed)));
-                    self.sources.push(CommandSource::Acp);
+                    self.sources.push(RegistrySource::Acp);
                 }
                 continue;
             }
             self.commands.push(Arc::new(AcpSlashCommand::from(acp_cmd)));
-            self.sources.push(CommandSource::Acp);
+            self.sources.push(RegistrySource::Acp);
         }
     }
 
@@ -525,7 +531,7 @@ impl CommandRegistry {
     ///
     /// # Panics
     ///
-    /// Panics if two builtin commands share an alias (programmer error).
+    /// Panics if two builtin commands share a canonical name or alias.
     fn rebuild_triggers(&mut self) {
         self.key_to_index.clear();
         self.triggers.clear();
@@ -550,20 +556,17 @@ impl CommandRegistry {
             // triggers.
             let menu_only = self.menu_hidden.contains(canonical);
 
-            // Insert canonical key.
+            if source == RegistrySource::Builtin && self.key_to_index.contains_key(canonical) {
+                panic!("slash command '{canonical}' is already registered");
+            }
             self.key_to_index.insert(canonical.to_string(), idx);
             if !menu_only {
                 self.triggers
                     .push(CommandTrigger::new(command, None, canonical, idx, source));
             }
-
-            // Insert alias keys.
             for alias in command.aliases() {
-                if source == CommandSource::Builtin && self.key_to_index.contains_key(*alias) {
-                    panic!(
-                        "slash command alias '{}' is already registered (builtin collision)",
-                        alias
-                    );
+                if source == RegistrySource::Builtin && self.key_to_index.contains_key(*alias) {
+                    panic!("slash command alias '{alias}' is already registered");
                 }
                 self.key_to_index.insert(alias.to_string(), idx);
                 if !menu_only {
@@ -587,10 +590,29 @@ mod tests {
 
     struct DummyCommand {
         name: &'static str,
-        aliases: &'static [&'static str],
     }
 
     impl SlashCommand for DummyCommand {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "dummy"
+        }
+        fn usage(&self) -> &str {
+            self.name
+        }
+        fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+            CommandResult::Handled
+        }
+    }
+
+    struct AliasedDummyCommand {
+        name: &'static str,
+        aliases: &'static [&'static str],
+    }
+
+    impl SlashCommand for AliasedDummyCommand {
         fn name(&self) -> &str {
             self.name
         }
@@ -598,7 +620,7 @@ mod tests {
             self.aliases
         }
         fn description(&self) -> &str {
-            "dummy"
+            "aliased dummy"
         }
         fn usage(&self) -> &str {
             self.name
@@ -641,63 +663,67 @@ mod tests {
 
     #[test]
     fn lookup_by_canonical_name() {
-        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "test",
-            aliases: &[],
-        });
+        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "test" });
         let registry = CommandRegistry::new(vec![cmd]);
         assert!(registry.get("test").is_some());
         assert!(registry.get("unknown").is_none());
     }
 
     #[test]
-    fn lookup_by_alias() {
-        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit"],
+    fn unknown_alternative_name_does_not_resolve() {
+        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "quit" });
+        let registry = CommandRegistry::new(vec![cmd]);
+        assert!(registry.get("quit").is_some());
+        assert!(registry.get("exit").is_none());
+    }
+
+    #[test]
+    fn alias_extension_point_resolves_and_emits_a_trigger() {
+        let cmd: Arc<dyn SlashCommand> = Arc::new(AliasedDummyCommand {
+            name: "canonical",
+            aliases: &["alternative"],
         });
         let registry = CommandRegistry::new(vec![cmd]);
-        assert!(registry.get("exit").is_some());
-        assert!(registry.get("quit").is_some());
-        // Both resolve to the same command.
-        assert!(std::ptr::eq(
-            registry.get("exit").unwrap().as_ref() as *const dyn SlashCommand,
-            registry.get("quit").unwrap().as_ref() as *const dyn SlashCommand,
-        ));
+        assert_eq!(
+            registry.get("alternative").map(|cmd| cmd.name()),
+            Some("canonical")
+        );
+        assert_eq!(registry.triggers().len(), 2);
+        assert!(registry.triggers().iter().any(|trigger| {
+            trigger.canonical == "canonical" && trigger.alias.as_deref() == Some("alternative")
+        }));
     }
 
     #[test]
     #[should_panic(expected = "alias")]
-    fn registry_panics_on_builtin_alias_collision() {
-        let cmd_a: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "alpha",
-            aliases: &["dup"],
+    fn alias_extension_point_rejects_builtin_collisions() {
+        let canonical: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "taken" });
+        let aliased: Arc<dyn SlashCommand> = Arc::new(AliasedDummyCommand {
+            name: "other",
+            aliases: &["taken"],
         });
-        let cmd_b: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "beta",
-            aliases: &["dup"],
-        });
+        let _ = CommandRegistry::new(vec![canonical, aliased]);
+    }
+
+    #[test]
+    #[should_panic(expected = "already registered")]
+    fn registry_panics_on_duplicate_builtin_name() {
+        let cmd_a: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "alpha" });
+        let cmd_b: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "alpha" });
         let _ = CommandRegistry::new(vec![cmd_a, cmd_b]);
     }
 
     #[test]
-    fn trigger_count_includes_aliases() {
-        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit", "q"],
-        });
+    fn each_command_has_one_trigger() {
+        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "quit" });
         let registry = CommandRegistry::new(vec![cmd]);
-        // 1 canonical + 2 aliases = 3 triggers.
-        assert_eq!(registry.triggers().len(), 3);
+        assert_eq!(registry.triggers().len(), 1);
         assert_eq!(registry.command_count(), 1);
     }
 
     #[test]
     fn set_acp_commands_replaces_only_acp() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit"],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         assert_eq!(registry.command_count(), 1);
 
@@ -719,14 +745,8 @@ mod tests {
 
     #[test]
     fn set_share_visible_hides_and_restores_share_command() {
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "share" });
+        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![share, other]);
 
         // Default: /share is menu-hidden (offered nowhere) but still dispatchable.
@@ -754,14 +774,8 @@ mod tests {
 
     #[test]
     fn restricted_commands_hide_and_restore() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "usage" });
+        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![usage, other]);
         assert!(registry.get("usage").is_some());
 
@@ -783,10 +797,7 @@ mod tests {
 
     #[test]
     fn restricted_entries_are_normalized() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "usage" });
         let mut registry = CommandRegistry::new(vec![usage]);
 
         // Leading slash, whitespace, and case are all tolerated; empty
@@ -797,50 +808,28 @@ mod tests {
     }
 
     /// `is_restricted` scans the command list (not `key_to_index`, which
-    /// can be missing tool-gated commands pre-handshake), resolves
-    /// aliases, and never matches unknown names.
+    /// can be missing tool-gated commands pre-handshake), normalizes canonical
+    /// names, and never matches unknown names.
     #[test]
-    fn is_restricted_resolves_names_and_aliases() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &["cost"],
-        });
+    fn is_restricted_resolves_canonical_names() {
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "usage" });
         let mut registry = CommandRegistry::new(vec![usage]);
         assert!(!registry.is_restricted("usage"), "empty deny list");
 
         registry.set_restricted_commands(&["usage".to_string()]);
         assert!(registry.get("usage").is_none(), "hidden from get()");
         assert!(registry.is_restricted("usage"));
-        assert!(registry.is_restricted("cost"), "alias resolves");
         assert!(registry.is_restricted("/Usage"), "normalized lookup");
+        assert!(
+            !registry.is_restricted("cost"),
+            "alternative name is unknown"
+        );
         assert!(!registry.is_restricted("frobnicate"), "unknown name");
     }
 
     #[test]
-    fn restricted_matches_aliases_both_ways() {
-        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit"],
-        });
-        let mut registry = CommandRegistry::new(vec![cmd]);
-
-        // Denying an alias hides the command entirely (canonical too).
-        registry.set_restricted_commands(&["quit".to_string()]);
-        assert!(registry.get("exit").is_none());
-        assert!(registry.get("quit").is_none());
-
-        // Denying the canonical name also hides alias lookups.
-        registry.set_restricted_commands(&["exit".to_string()]);
-        assert!(registry.get("exit").is_none());
-        assert!(registry.get("quit").is_none());
-    }
-
-    #[test]
     fn restricted_wins_over_visible_setters() {
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
-            aliases: &[],
-        });
+        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "share" });
         let mut registry = CommandRegistry::new(vec![share]);
 
         registry.set_restricted_commands(&["share".to_string()]);
@@ -852,10 +841,7 @@ mod tests {
 
     #[test]
     fn restricted_applies_to_acp_commands() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
             "flush".to_string(),
@@ -876,14 +862,8 @@ mod tests {
 
     #[test]
     fn dashboard_command_hidden_by_default_and_toggleable() {
-        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "agents",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "agents" });
+        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![dashboard, other]);
 
         // Fail-closed: hidden by default (until the feature flag reveals it).
@@ -903,14 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn acp_command_colliding_with_builtin_alias_is_skipped() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit"],
-        });
+    fn acp_command_colliding_with_builtin_name_is_skipped() {
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "quit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
 
-        // "quit" collides with the builtin alias.
         let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
             "quit".to_string(),
             "Should be skipped".to_string(),
@@ -931,10 +907,7 @@ mod tests {
 
     #[test]
     fn acp_nonplugin_skill_colliding_with_builtin_is_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "login" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[acp_skill("login", "local")]);
 
@@ -954,10 +927,7 @@ mod tests {
 
     #[test]
     fn acp_malformed_skill_meta_colliding_with_builtin_is_dropped() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "login" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         let meta = serde_json::json!({ "scope": "local" })
             .as_object()
@@ -979,10 +949,7 @@ mod tests {
 
     #[test]
     fn acp_skill_named_after_blocked_name_is_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[acp_skill("hooks-add", "local")]);
         assert!(registry.get("local:hooks-add").is_some());
@@ -991,10 +958,7 @@ mod tests {
 
     #[test]
     fn acp_plugin_skill_colliding_with_builtin_is_dropped_not_requalified() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "login" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[acp_skill("login", "plugin")]);
 
@@ -1009,10 +973,7 @@ mod tests {
 
     #[test]
     fn acp_nonskill_colliding_with_builtin_is_dropped() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
-            aliases: &[],
-        });
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "login" });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
             "login".to_string(),
@@ -1024,10 +985,7 @@ mod tests {
 
     #[test]
     fn command_without_required_tools_is_always_visible() {
-        let plain: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let plain: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut reg = CommandRegistry::new(vec![plain]);
         // Default (None) -> visible.
         assert!(reg.get("exit").is_some());
@@ -1057,10 +1015,7 @@ mod tests {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let plain: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let plain: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut reg = CommandRegistry::new(vec![gated, plain]);
         // Advertise a toolset missing `scheduler_create`.
         reg.set_available_tools(tool_set(["read_file"]));
@@ -1107,27 +1062,18 @@ mod tests {
         assert!(reg.get("multi").is_some());
     }
 
-    /// Builds a registry with `always-approve` (+ a synthetic alias to cover
-    /// generic alias key handling), `auto`, and a bystander `exit`.
+    /// Builds a registry with `always-approve`, `auto`, and a bystander `exit`.
     fn permission_mode_registry() -> CommandRegistry {
         let always_approve: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "always-approve",
-            aliases: &["approve-all-test-alias"],
         });
-        let auto: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "auto",
-            aliases: &[],
-        });
-        let exit: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
+        let auto: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "auto" });
+        let exit: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         CommandRegistry::new(vec![always_approve, auto, exit])
     }
 
     /// Menu-only hide: command disappears from `get()` / triggers but a
-    /// typed submission still resolves via `get_for_dispatch()` (including
-    /// aliases).
+    /// typed submission still resolves via `get_for_dispatch()`.
     #[test]
     fn menu_hidden_is_menu_only_and_still_dispatches() {
         let mut reg = permission_mode_registry();
@@ -1147,10 +1093,6 @@ mod tests {
         assert!(
             reg.get_for_dispatch("always-approve").is_some(),
             "typed invocation must still resolve for dispatch"
-        );
-        assert!(
-            reg.get_for_dispatch("approve-all-test-alias").is_some(),
-            "aliases of a menu-hidden command must still resolve for dispatch"
         );
         // Bystanders unaffected.
         assert!(reg.get("exit").is_some());
@@ -1197,15 +1139,9 @@ mod tests {
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
         // Hard-hidden by name (e.g. /agents default).
-        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "agents",
-            aliases: &[],
-        });
+        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "agents" });
         // Tier-restricted.
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "usage" });
         // Tool-gated (toolset unknown → fail-closed).
         let gated: Arc<dyn SlashCommand> = Arc::new(ToolGatedCommand {
             name: "loop",
@@ -1227,14 +1163,8 @@ mod tests {
 
     #[test]
     fn commands_by_index_in_range_returns_some_out_of_range_returns_none() {
-        let alpha: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "alpha",
-            aliases: &[],
-        });
-        let beta: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "beta",
-            aliases: &[],
-        });
+        let alpha: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "alpha" });
+        let beta: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "beta" });
         let registry = CommandRegistry::new(vec![alpha, beta]);
 
         // In-range indices resolve to the matching command.

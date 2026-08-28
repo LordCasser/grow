@@ -526,7 +526,13 @@ impl SessionActor {
         if paused {
             let summary =
                 format!("Goal stopped due to turn error: {slash_detail}. Restart it to retry.");
-            self.send_slash_command_output(&summary).await;
+            self.send_lifecycle_notice(
+                "goal",
+                crate::extensions::notification::UiNoticeTone::Warning,
+                &summary,
+                Some("Recovery: use /goal restart after correcting the turn failure.".into()),
+            )
+            .await;
         }
         paused
     }

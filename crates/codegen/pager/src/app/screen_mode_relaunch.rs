@@ -21,6 +21,10 @@ use std::sync::OnceLock;
 /// (read **and removed**) exactly once at startup by
 /// [`take_screen_mode_env_override`]; not a public user interface.
 pub(crate) const GROW_SCREEN_MODE_ENV: &str = "GROW_SCREEN_MODE";
+/// Private serialized desired-control handoff paired with
+/// [`GROW_SCREEN_MODE_ENV`]. It is consumed and removed before worker threads
+/// start, so tools and nested Grow processes never inherit it.
+pub(crate) const GROW_SCREEN_MODE_CONTROLS_ENV: &str = "GROW_SCREEN_MODE_CONTROLS";
 
 /// Argv tokens (`--long` and `-s`) of [`super::cli::PagerArgs`]
 /// flags that consume a following value token when not written as
@@ -211,7 +215,11 @@ pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: b
 /// `exec` by spawning the child on the same console, **waiting** for it, and
 /// exiting with its code. On failure it returns the IO error so the caller can
 /// fall back to a resume hint.
-pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) -> io::Result<()> {
+pub(crate) fn exec_screen_mode_relaunch(
+    session_id: &str,
+    want_minimal: bool,
+    control_handoffs: &[crate::app::session::SessionControlHandoff],
+) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let args = build_screen_mode_relaunch_args(std::env::args_os(), session_id, want_minimal);
 
@@ -219,6 +227,12 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
     cmd.args(&args);
     // Force mode resolution even when config.toml has the opposite preference.
     cmd.env(GROW_SCREEN_MODE_ENV, screen_mode_env_value(want_minimal));
+    if !control_handoffs.is_empty() {
+        let encoded = serde_json::to_string(control_handoffs).map_err(|error| {
+            io::Error::other(format!("failed to encode pending control handoff: {error}"))
+        })?;
+        cmd.env(GROW_SCREEN_MODE_CONTROLS_ENV, encoded);
+    }
 
     let mode_label = screen_mode_env_value(want_minimal);
     let reverse = if want_minimal {
@@ -328,6 +342,30 @@ pub(crate) fn take_screen_mode_env_override() -> Option<super::ScreenMode> {
         unsafe { std::env::remove_var(GROW_SCREEN_MODE_ENV) };
     }
     parse_screen_mode(raw.as_deref().and_then(OsStr::to_str))
+}
+
+/// Consume pending desired controls transported by a screen-mode re-exec.
+/// Malformed private state is discarded rather than preventing the Session
+/// itself from reopening; the warning remains visible on stderr before the TUI
+/// takes ownership of the terminal.
+pub(crate) fn take_screen_mode_control_handoffs() -> Vec<crate::app::session::SessionControlHandoff>
+{
+    let raw = std::env::var_os(GROW_SCREEN_MODE_CONTROLS_ENV);
+    if raw.is_some() {
+        // SAFETY: paired with `take_screen_mode_env_override`, called during
+        // single-threaded startup before workers or child processes exist.
+        unsafe { std::env::remove_var(GROW_SCREEN_MODE_CONTROLS_ENV) };
+    }
+    let Some(raw) = raw.and_then(|value| value.into_string().ok()) else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&raw) {
+        Ok(handoffs) => handoffs,
+        Err(error) => {
+            eprintln!("Ignoring invalid screen-mode control handoff: {error}");
+            Vec::new()
+        }
+    }
 }
 
 /// CLI > `[ui] screen_mode` > no preference.

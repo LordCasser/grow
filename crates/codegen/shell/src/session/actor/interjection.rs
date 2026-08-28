@@ -167,6 +167,7 @@ impl SessionActor {
             verbatim: requeue.verbatim,
             json_schema: requeue.json_schema,
             origin: requeue.origin,
+            host_command: None,
             notification_ids: Vec::new(),
             respond_to,
             persist_ack: None,

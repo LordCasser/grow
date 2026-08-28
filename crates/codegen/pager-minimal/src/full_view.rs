@@ -62,6 +62,9 @@ pub fn pump_transcript(app: &mut AppView) {
     // the user tabbing away — only a truly-removed agent drops it.
     let id = build.agent;
     let appearance = super::commit::committed_appearance(minimal_api::app_appearance(app));
+    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+        minimal_api::ensure_agent_media_link_paths(agent);
+    }
     {
         let Some(agent) = minimal_api::app_agent(app, id) else {
             tracing::warn!("minimal: transcript build's agent removed; dropping the build");
@@ -97,6 +100,7 @@ pub fn pump_transcript(app: &mut AppView) {
                     &theme,
                     &appearance,
                     minimal_api::agent_cwd(agent),
+                    minimal_api::agent_media_link_paths(agent),
                     &mut build.out,
                 );
             }
@@ -126,7 +130,7 @@ fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: S
     if out.is_empty() {
         if let Some(agent) = minimal_api::app_agent_mut(app, id) {
             minimal_api::agent_scrollback_mut(agent).push_block(
-                pager::scrollback::block::RenderBlock::system(
+                pager::scrollback::block::RenderBlock::notice(
                     "No conversation transcript to view yet",
                 ),
             );
@@ -141,7 +145,7 @@ fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: S
         Err(e) => {
             if let Some(agent) = minimal_api::app_agent_mut(app, id) {
                 minimal_api::agent_scrollback_mut(agent).push_block(
-                    pager::scrollback::block::RenderBlock::system(format!(
+                    pager::scrollback::block::RenderBlock::notice(format!(
                         "Failed to write transcript: {e}"
                     )),
                 );
@@ -158,6 +162,7 @@ fn render_entry_to_ansi(
     theme: &Theme,
     appearance: &pager::appearance::AppearanceConfig,
     cwd: &std::path::Path,
+    media_paths: &[std::path::PathBuf],
     out: &mut String,
 ) {
     let mut expanded = entry.clone();
@@ -174,7 +179,15 @@ fn render_entry_to_ansi(
     let area = Rect::new(0, 0, FULL_VIEW_WIDTH, height);
     let mut buf = Buffer::empty(area);
     renderer.render(area, &mut buf);
-    buffer_to_ansi(&buf, out);
+    let route = pager::hyperlink_route::hyperlink_route();
+    let links = if route.emit_osc8 {
+        renderer
+            .link_overlay(area, media_paths)
+            .resolved_spans(route.emit_id)
+    } else {
+        Vec::new()
+    };
+    buffer_to_ansi(&buf, &links, out);
     // Blank line between blocks so the transcript breathes in the pager.
     out.push('\n');
 }
@@ -182,7 +195,7 @@ fn render_entry_to_ansi(
 /// Serialize a rendered cell [`Buffer`] to ANSI text (one `\n`-terminated line
 /// per row), emitting an SGR sequence whenever the style changes and resetting
 /// at each row end. Trailing blank cells are trimmed so lines stay short.
-fn buffer_to_ansi(buf: &Buffer, out: &mut String) {
+fn buffer_to_ansi(buf: &Buffer, links: &[ratatui_inline::LinkSpan], out: &mut String) {
     let area = buf.area;
     for y in area.y..area.y.saturating_add(area.height) {
         // Last column carrying a visible glyph (trim trailing spaces).
@@ -202,6 +215,7 @@ fn buffer_to_ansi(buf: &Buffer, out: &mut String) {
             // Copy fields per cell is far cheaper than building + comparing an
             // SGR string per cell (the previous hot spot on long transcripts).
             let mut cur: Option<(Color, Color, Modifier)> = None;
+            let mut current_link: Option<&ratatui_inline::LinkSpan> = None;
             let mut sgr = String::with_capacity(32);
             for x in area.x..=last_x {
                 let Some(cell) = buf.cell((x, y)) else {
@@ -212,6 +226,18 @@ fn buffer_to_ansi(buf: &Buffer, out: &mut String) {
                     // Continuation cell of a wide glyph — already emitted.
                     continue;
                 }
+                let link = links
+                    .iter()
+                    .find(|span| span.row == y && span.col_start <= x && x < span.col_end);
+                if link != current_link {
+                    if current_link.is_some() {
+                        out.push_str("\x1b]8;;\x07");
+                    }
+                    if let Some(link) = link {
+                        push_osc8_open(out, &link.url, link.id);
+                    }
+                    current_link = link;
+                }
                 let style = (cell.fg, cell.bg, cell.modifier);
                 if cur != Some(style) {
                     cell_sgr(style.0, style.1, style.2, &mut sgr);
@@ -220,9 +246,26 @@ fn buffer_to_ansi(buf: &Buffer, out: &mut String) {
                 }
                 out.push_str(sym);
             }
+            if current_link.is_some() {
+                out.push_str("\x1b]8;;\x07");
+            }
             out.push_str("\x1b[0m");
         }
         out.push('\n');
+    }
+}
+
+fn push_osc8_open(out: &mut String, url: &str, id: Option<u32>) {
+    use std::fmt::Write as _;
+
+    let sanitized: String = url.chars().filter(|c| !c.is_control()).collect();
+    match id {
+        Some(id) => {
+            let _ = write!(out, "\x1b]8;id={id};{sanitized}\x07");
+        }
+        None => {
+            let _ = write!(out, "\x1b]8;;{sanitized}\x07");
+        }
     }
 }
 
@@ -319,7 +362,7 @@ mod tests {
 
         pager::appearance::cache::set_show_thinking_blocks(false);
         let mut out = String::new();
-        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &mut out);
+        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &[], &mut out);
         assert!(
             out.is_empty(),
             "thinking hidden while the toggle is off: {out:?}"
@@ -328,7 +371,7 @@ mod tests {
         // What `pump_transcript` sets for the duration of a slice.
         pager::appearance::cache::set_show_thinking_blocks(true);
         let mut out = String::new();
-        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &mut out);
+        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &[], &mut out);
         pager::appearance::cache::set_show_thinking_blocks(false);
         assert!(
             out.contains("reasoning"),
@@ -357,7 +400,7 @@ mod tests {
 
         let entry = sb.get_by_id(id).expect("thinking entry");
         let mut out = String::new();
-        render_entry_to_ansi(entry, &theme, &appearance, test_cwd(), &mut out);
+        render_entry_to_ansi(entry, &theme, &appearance, test_cwd(), &[], &mut out);
         pager::appearance::cache::set_show_thinking_blocks(false);
 
         assert!(
@@ -387,7 +430,7 @@ mod tests {
 
         pager::appearance::cache::set_show_thinking_blocks(true);
         let mut out = String::new();
-        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &mut out);
+        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &[], &mut out);
         pager::appearance::cache::set_show_thinking_blocks(false);
 
         assert!(
@@ -415,6 +458,7 @@ mod tests {
             &theme,
             &appearance,
             std::path::Path::new("/alternate/worktree"),
+            &[],
             &mut out,
         );
 
@@ -460,7 +504,7 @@ mod tests {
         buf.cell_mut((0, 0)).unwrap().set_symbol("h");
         buf.cell_mut((1, 0)).unwrap().set_symbol("i");
         let mut out = String::new();
-        buffer_to_ansi(&buf, &mut out);
+        buffer_to_ansi(&buf, &[], &mut out);
         let lines: Vec<&str> = out.split('\n').collect();
         // Row 0 has content ending in a reset; row 1 is blank; trailing newline.
         assert!(lines[0].contains('h') && lines[0].contains('i'));
@@ -476,5 +520,59 @@ mod tests {
             "trailing spaces not trimmed: {:?}",
             lines[0]
         );
+    }
+
+    #[test]
+    fn cjk_long_file_link_shows_basename_and_serializes_full_osc8_target() {
+        let root = std::env::temp_dir().join(format!("grow-link-{}", uuid::Uuid::new_v4()));
+        let file = root
+            .join("a-very-long-session-and-workflow-directory")
+            .join("scratch")
+            .join("report.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"report").unwrap();
+        let target = format!("file://{}", file.display());
+        let text = format!("中文报告位置：[{}](<{target}>)，请打开。", file.display());
+        let entry = ScrollbackEntry::new(RenderBlock::agent_message(text));
+        let theme = Theme::current();
+        let appearance = super::super::commit::committed_appearance(
+            &pager::appearance::AppearanceConfig::default(),
+        );
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_appearance(appearance)
+            .with_cwd(Some(&root))
+            .with_flat_background(true)
+            .with_hide_accent(true);
+        let width = 24;
+        let height = renderer.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+        let spans = renderer.link_overlay(area, &[]).resolved_spans(false);
+        assert!(!spans.is_empty(), "the compact label remains clickable");
+        assert!(spans.iter().all(|span| span.url.as_ref() == target));
+        let visible = buf
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            visible.contains("report.md"),
+            "compact display: {visible:?}"
+        );
+        assert!(
+            !visible.contains(file.to_string_lossy().as_ref()),
+            "visible text must not expose the full path: {visible:?}"
+        );
+
+        let mut out = String::new();
+        buffer_to_ansi(&buf, &spans, &mut out);
+        assert!(out.contains("report.md"), "compact display: {out:?}");
+        assert!(
+            out.contains(&format!("\x1b]8;;{target}\x07")),
+            "full OSC8 destination: {out:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -117,7 +117,7 @@ presses route to the attached agent; `Esc` / `Ctrl+\\` (or the `[Dashboard]`
 affordance) return to the dashboard, the `[‹]` / `[›]` chips cycle to
 the previous / next agent, and the agent's shortcuts bar shows a
 `Ctrl+\\: back to dashboard` hint. Quick gotcha — `Esc` only returns to
-the dashboard; typing `/exit` inside the agent actually closes the
+the dashboard; typing `/quit` inside the agent actually closes the
 underlying session (returning to the dashboard with a "Session closed"
 toast).
 
@@ -150,10 +150,10 @@ There is **no** “mark completed” command. Row state is derived from the agen
 - **`Ctrl+X` twice** (within 2s) **permanently deletes** the session
   (same as `/delete`). Hover an idle/done row to swap age for `[✗]` and
   click twice to confirm.
-- In the details view, `/exit` also closes the session (Esc only returns).
+- In the details view, `/quit` also closes the session (Esc only returns).
   `/delete` inside an attached agent wipes that session and returns home.
 
-There is no manual complete flag. Use `/exit` to leave a session without
+There is no manual complete flag. Use `/quit` to leave a session without
 deleting history.
 
 ---

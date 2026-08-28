@@ -353,8 +353,6 @@ impl AgentView {
             rewind_suppress_deadline: None,
             pending_first_prompt: None,
             pending_fork_banner: None,
-            loading_placeholder_id: None,
-            pending_recap_entry: None,
             display_name: None,
             generated_session_title: None,
             paste_probe_in_flight: 0,
@@ -433,6 +431,7 @@ impl AgentView {
         self.reset_mermaid_runtime();
         self.scrollback_search = None;
         self.session.loading_replay = true;
+        self.session.replay_live_cursor_seen = false;
         self.session.replayed_terminal_prompts.clear();
         self.session.unexpected_replay_drops = 0;
         self.pending_stop_hooks = None;
@@ -481,12 +480,7 @@ impl AgentView {
         while self.scrollback.in_batch() {
             self.scrollback.end_batch();
         }
-        if let Some(pid) = self.loading_placeholder_id.take() {
-            self.scrollback.remove_entry(pid);
-        }
-        if let Some(rid) = self.pending_recap_entry.take() {
-            self.scrollback.remove_entry(rid);
-        }
+        self.session.clear_live_feedback("recap");
         // Normalize edit blocks before stashing the old transcript. The
         // generic replay reset below runs after `scrollback` is replaced, which
         // would otherwise leave a restored block marked Pending without its
@@ -512,9 +506,11 @@ impl AgentView {
             saw_replay: false,
             saw_todo_update: false,
         });
-        self.loading_placeholder_id = Some(self.scrollback.push_block(
-            crate::scrollback::block::RenderBlock::system("Reloading session after reconnect..."),
-        ));
+        self.session.set_live_feedback(
+            "session-load",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Reloading session after reconnect\u{2026}",
+        );
         self.scrollback.begin_batch();
         self.begin_replay_window();
     }
@@ -523,6 +519,26 @@ impl AgentView {
     pub(crate) fn mark_reload_replay_seen(&mut self) {
         if let Some(reload) = self.session_reload.as_mut() {
             reload.saw_replay = true;
+        }
+    }
+
+    /// Advance the reconnect cursor for an applied update.
+    ///
+    /// During a reload, replay and live updates may be delivered in either
+    /// order. Event IDs are opaque across resume generations, so they cannot
+    /// be compared or merged with a string/numeric max. Keep the immediately
+    /// observed replay cursor for replay-only loads, but once a live cursor has
+    /// been observed, never let a later historical replay overwrite it.
+    pub(crate) fn advance_reconnect_cursor(&mut self, event_id: String, is_replay: bool) {
+        if !self.session.loading_replay {
+            self.session.last_seen_event_id = Some(event_id);
+            return;
+        }
+        if !is_replay {
+            self.session.replay_live_cursor_seen = true;
+            self.session.last_seen_event_id = Some(event_id);
+        } else if !self.session.replay_live_cursor_seen {
+            self.session.last_seen_event_id = Some(event_id);
         }
     }
     /// Record that a Plan update applied while a reload window is open.
@@ -641,12 +657,18 @@ impl AgentView {
     /// on the most common reconnect outcome, once per open tab).
     #[must_use = "purge retained memory iff a heavy transient dropped"]
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
-        if let Some(pid) = self.loading_placeholder_id.take() {
-            self.scrollback.remove_entry(pid);
-        }
+        let minimal_mode = self.is_minimal_mode();
         let dropped_heavy;
         if success && reload.saw_replay {
             self.scrollback.end_batch();
+            if minimal_mode {
+                // Reload commits were frozen for the whole window. Carry only
+                // the prefix that was actually printed before reconnect onto
+                // the rebuilt projection; replay entries beyond it are the
+                // real missed tail and must still cross the native frontier.
+                self.scrollback
+                    .reconcile_minimal_native_frontier_from(&reload.scrollback);
+            }
             dropped_heavy = true;
         } else if success {
             let tail = std::mem::replace(&mut self.scrollback, reload.scrollback);
@@ -705,12 +727,12 @@ impl AgentView {
             dropped_heavy = true;
         }
         self.session.loading_replay = false;
+        self.session.replay_live_cursor_seen = false;
+        self.session.clear_live_feedback("session-load");
         self.session.prompt_history_loading = false;
         self.session.finish_turn(&mut self.scrollback);
         self.scrollback.finish_all_running();
-        if let Some(id) = self.pending_recap_entry.take() {
-            self.scrollback.remove_entry(id);
-        }
+        self.session.clear_live_feedback("recap");
         self.mark_turn_finished();
         self.session.activity_started_at = None;
         self.session.last_activity = None;

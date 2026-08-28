@@ -15,6 +15,81 @@ use crate::app::bundle::BundleState;
 use crate::slash::mode_support::ModeSupport;
 use agent_client_protocol as acp;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandKind {
+    Session,
+    Control,
+    Run,
+    View,
+    Settings,
+    Extension,
+}
+
+impl CommandKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "SESSION",
+            Self::Control => "CONTROL",
+            Self::Run => "RUN",
+            Self::View => "VIEW",
+            Self::Settings => "SETTINGS",
+            Self::Extension => "EXTENSION",
+        }
+    }
+
+    fn for_builtin(name: &str) -> Self {
+        match name {
+            "new" | "resume" | "fork" | "delete" | "rename" | "home" | "quit" | "cd" => {
+                Self::Session
+            }
+            "model" | "effort" | "agent" | "permission" | "ask" | "always-approve" | "auto"
+            | "behavior" | "normal" | "clarify" | "plan" | "rewind" | "compact"
+            | "compact-mode" | "edit-prompt" => Self::Control,
+            "workflow" | "workflow-run" | "loop" | "remember" | "recap" | "btw" => Self::Run,
+            "help" | "shortcuts" | "docs" | "copy" | "find" | "history" | "export"
+            | "transcript" | "expand" | "context" | "dashboard" | "session-info"
+            | "announcements" | "view-plan" | "mcps" | "workflows" | "timeline" | "trajectory"
+            | "usage" | "queue" | "tasks" | "release-notes" | "tutorial" | "jump" | "doctor"
+            | "gboom" | "scroll-debug" | "debug" | "agents" => Self::View,
+            "minimal"
+            | "fullscreen"
+            | "multiline"
+            | "vim"
+            | "vim-mode"
+            | "theme"
+            | "timestamps"
+            | "settings"
+            | "hooks"
+            | "plugins"
+            | "marketplace"
+            | "skills"
+            | "toggle-mouse-reporting"
+            | "config-agents"
+            | "feedback" => Self::Settings,
+            _ => Self::Extension,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    BuiltIn,
+    Skill,
+    Workflow,
+    Extension,
+}
+
+impl CommandSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "BUILT-IN",
+            Self::Skill => "SKILL",
+            Self::Workflow => "WORKFLOW",
+            Self::Extension => "EXTENSION",
+        }
+    }
+}
+
 /// Provisional scheduled task info for immediate display in the tasks pane.
 ///
 /// Created by `/loop` when the user submits the command so the task appears
@@ -34,6 +109,23 @@ pub enum DoctorRequest {
     Report,
     ListFixes,
     Fix(crate::diagnostics::DiagnosticId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCommandRequest {
+    pub command: String,
+    pub description: String,
+    pub invocation_id: String,
+}
+
+impl HostCommandRequest {
+    pub fn new(command: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            description: description.into(),
+            invocation_id: format!("host-command-{}", uuid::Uuid::new_v4()),
+        }
+    }
 }
 
 /// Result of running a slash command.
@@ -76,7 +168,7 @@ pub enum CommandResult {
     /// ACP-advertised command owned by the shell. During a running turn this
     /// uses the out-of-band command channel; while idle it may use the normal
     /// turn path when the command intentionally starts inference.
-    HostCommand(String),
+    HostCommand(HostCommandRequest),
 }
 
 /// A suggestion item for command argument completion.
@@ -157,16 +249,29 @@ pub struct CommandExecCtx<'a> {
 /// `&'static str`) so ACP-sourced commands with runtime-determined data
 /// work from day one.
 pub trait SlashCommand: Send + Sync {
-    /// Canonical command name (without leading `/`). E.g., `"exit"`.
+    /// Canonical command name (without leading `/`). E.g., `"quit"`.
     fn name(&self) -> &str;
 
-    /// Alternative names for this command. E.g., `&["quit"]` for `/exit`.
+    /// Optional alternative names. Production commands currently register no
+    /// aliases; the extension point remains available for future catalogs.
     fn aliases(&self) -> &[&str] {
         &[]
     }
 
     /// Short human-readable description shown in the dropdown.
     fn description(&self) -> &str;
+
+    /// User-facing purpose category. The builtin mapping is centralized so
+    /// all completion surfaces remain exhaustive and consistent.
+    fn kind(&self) -> CommandKind {
+        CommandKind::for_builtin(self.name())
+    }
+
+    /// Provenance is independent from purpose. ACP-backed implementations
+    /// override this using Grow command metadata.
+    fn source(&self) -> CommandSource {
+        CommandSource::BuiltIn
+    }
 
     /// Usage string shown in help. E.g., `"/model <name>"`.
     fn usage(&self) -> &str;
@@ -192,7 +297,7 @@ pub trait SlashCommand: Send + Sync {
     ///
     /// | `takes_args` | `args_required` | Example          | Enter with no args |
     /// |-------------|----------------|------------------|-------------------|
-    /// | `false`     | `false`        | `/exit`          | Executes          |
+    /// | `false`     | `false`        | `/quit`          | Executes          |
     /// | `true`      | `false`        | `/compact [ctx]` | Executes          |
     /// | `true`      | `true`         | `/model <id>`    | Blocks            |
     fn args_required(&self) -> bool {

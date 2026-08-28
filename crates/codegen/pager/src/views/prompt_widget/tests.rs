@@ -1511,23 +1511,24 @@
     // ── Slash completion acceptance tests ──────────────────────────
 
     #[test]
-    fn accept_completion_inserts_alias_for_alias() {
+    fn accept_completion_expands_a_prefix_to_the_canonical_command() {
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
 
-        // Type alias "/m" → should match the "/m" alias of "/model".
-        pw.textarea.insert_str("/m");
+        // Use an unambiguous prefix: `/m` also matches marketplace, MCP and
+        // memory commands and is deliberately not an alias for `/model`.
+        pw.textarea.insert_str("/mod");
         pw.refresh_slash(&models);
 
         let snap = pw.slash_snapshot();
         assert!(snap.open);
-        assert_eq!(snap.selection().unwrap().display, "/m");
+        assert_eq!(snap.selection().unwrap().display, "/model");
 
-        // Accept → text should become "/m " (alias + trailing space since model takes args).
+        // Accept writes the full canonical name and its argument separator.
         pw.accept_slash_completion(&models);
         assert!(
-            pw.textarea.text().starts_with("/m"),
-            "should insert alias command, got: {:?}",
+            pw.textarea.text().starts_with("/model "),
+            "should insert canonical command, got: {:?}",
             pw.textarea.text()
         );
     }

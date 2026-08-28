@@ -345,6 +345,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         verbatim: true,
                         json_schema: None,
                         origin: crate::session::PromptOrigin::User,
+                        host_command: None,
                         respond_to,
                         persist_ack: None,
                         queue_meta: None,

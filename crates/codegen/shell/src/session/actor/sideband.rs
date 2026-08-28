@@ -31,6 +31,8 @@ pub(crate) struct SidebandRun {
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
     cancellation: tokio_util::sync::CancellationToken,
+    repair_cancellation: tokio_util::sync::CancellationToken,
+    fail_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     goal_usage_window: super::goal_support::GoalUsageWindow,
     usage_owner_id: String,
     usage_epoch: u64,
@@ -38,9 +40,19 @@ pub(crate) struct SidebandRun {
     admitted_attempt_id: Option<String>,
     pending: Option<chat_state::SidebandEvent>,
     persistence_poison: Option<String>,
+    activity: Option<super::tasks_cancel::SessionActivityPermit>,
 }
 
 impl SessionActor {
+    /// Atomically close Sideband writer admission before the final activity
+    /// drain. The same gate guards activity acquisition in `begin_sideband`,
+    /// so the final idle observation cannot race a late nested writer.
+    pub(super) async fn fail_stop_sideband_admission(&self) {
+        let _admission = self.sideband_admission_gate.lock().await;
+        self.sideband_fail_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Commit a spawn fact and the sideband request before the caller may emit
     /// the auxiliary provider request. `Frozen` ranges were materialized in one
     /// parent-actor query, so later parent appends cannot expand them.
@@ -53,6 +65,75 @@ impl SessionActor {
         route: chat_state::SidebandRoute,
         output_schema: Option<serde_json::Value>,
     ) -> Result<SidebandRun, SidebandRunError> {
+        self.begin_sideband_in_epoch(
+            purpose,
+            prompt,
+            source,
+            budget_policy,
+            route,
+            output_schema,
+            false,
+        )
+        .await
+    }
+
+    /// SessionEnd is the only lifecycle phase allowed to create auxiliary
+    /// model work after ordinary activity admission closes. Keeping this as a
+    /// separate entry point prevents a late regular caller from inheriting
+    /// finalizer authority from ambient Session state.
+    pub(super) async fn begin_finalizer_sideband(
+        &self,
+        purpose: chat_state::SidebandPurpose,
+        prompt: String,
+        source: SidebandSource,
+        budget_policy: chat_state::SidebandBudgetPolicy,
+        route: chat_state::SidebandRoute,
+        output_schema: Option<serde_json::Value>,
+    ) -> Result<SidebandRun, SidebandRunError> {
+        self.begin_sideband_in_epoch(
+            purpose,
+            prompt,
+            source,
+            budget_policy,
+            route,
+            output_schema,
+            true,
+        )
+        .await
+    }
+
+    async fn begin_sideband_in_epoch(
+        &self,
+        purpose: chat_state::SidebandPurpose,
+        prompt: String,
+        source: SidebandSource,
+        budget_policy: chat_state::SidebandBudgetPolicy,
+        route: chat_state::SidebandRoute,
+        output_schema: Option<serde_json::Value>,
+        finalizer: bool,
+    ) -> Result<SidebandRun, SidebandRunError> {
+        let activity = {
+            let _admission = self.sideband_admission_gate.lock().await;
+            if self
+                .sideband_fail_stop
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(SidebandRunError::Admission(
+                    "session Sideband writer epoch is closed".to_string(),
+                ));
+            }
+            if finalizer {
+                self.session_activities.start_nested("sideband_finalizer")
+            } else {
+                self.session_activities
+                    .try_start("sideband")
+                    .ok_or_else(|| {
+                        SidebandRunError::Admission(
+                            "session activity admission is closed".to_string(),
+                        )
+                    })?
+            }
+        };
         let source_refs = match source {
             SidebandSource::None => Vec::new(),
             SidebandSource::Frozen(source_refs) => source_refs,
@@ -94,7 +175,13 @@ impl SessionActor {
         let mut run = SidebandRun {
             timeline,
             persistence: self.notifications.clone(),
-            cancellation: self.sideband_cancel.child_token(),
+            cancellation: if finalizer {
+                self.finalizer_sideband_cancel.child_token()
+            } else {
+                self.sideband_cancel.child_token()
+            },
+            repair_cancellation: self.sideband_repair_cancel.child_token(),
+            fail_stop: std::sync::Arc::clone(&self.sideband_fail_stop),
             goal_usage_window: self.goal_usage_window.clone(),
             usage_owner_id: self.session_id_string(),
             usage_epoch: super::tasks_cancel::turn_usage_epoch_or(
@@ -108,6 +195,7 @@ impl SessionActor {
             admitted_attempt_id: None,
             pending: Some(request),
             persistence_poison: None,
+            activity: Some(activity),
         };
         // Parent ownership must become durable before the independent child
         // ledger can contain a fact. A crash after this boundary may leave an
@@ -158,6 +246,24 @@ impl SidebandRun {
             self.admitted_attempt_id = None;
         }
         Ok(())
+    }
+
+    fn claim_goal_attempt(&mut self, tokens: Option<i64>) -> Option<String> {
+        let attempt_id = self.admitted_attempt_id.clone()?;
+        if !self
+            .goal_usage_window
+            .claim_attempt_settlement(&attempt_id, tokens)
+        {
+            self.admitted_attempt_id = None;
+            return None;
+        }
+        Some(attempt_id)
+    }
+
+    fn accept_goal_attempt_settlement(&mut self, attempt_id: &str) {
+        if self.admitted_attempt_id.as_deref() == Some(attempt_id) {
+            self.admitted_attempt_id = None;
+        }
     }
 
     pub(crate) async fn attempt_all_sources(
@@ -291,7 +397,11 @@ impl SidebandRun {
         provider: F,
     ) -> Result<F::Output, SidebandRunError> {
         self.provider_attempt_started()?;
-        Ok(provider.await)
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(SidebandRunError::Cancelled),
+            output = provider => Ok(output),
+        }
     }
 
     fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
@@ -475,7 +585,17 @@ impl SessionActor {
         run: &mut SidebandRun,
         tokens: Option<i64>,
     ) -> Result<(), SidebandRunError> {
-        run.settle_goal_attempt(tokens).await
+        if self.startup_hints.is_subagent {
+            return run.settle_goal_attempt(tokens).await;
+        }
+        let Some(attempt_id) = run.claim_goal_attempt(tokens) else {
+            return Ok(());
+        };
+        self.settle_claimed_goal_usage_attempt(&attempt_id)
+            .await
+            .map_err(SidebandRunError::Persistence)?;
+        run.accept_goal_attempt_settlement(&attempt_id);
+        Ok(())
     }
 }
 
@@ -488,9 +608,19 @@ impl Drop for SidebandRun {
         if self.timeline.is_ended() {
             return;
         }
+        let activity = self.activity.take();
+        if self.cancellation.is_cancelled()
+            && self.fail_stop.load(std::sync::atomic::Ordering::Acquire)
+        {
+            // Fatal/final teardown has revoked the persistence epoch. Starting
+            // an independent repair writer here would cross the final flush.
+            // The open ledger is an explicit fail-stop artifact instead.
+            return;
+        }
         let mut timeline = self.timeline.clone();
         let pending = self.pending.take();
         let persistence = self.persistence.clone();
+        let cancellation = self.repair_cancellation.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
                 sideband_id = %timeline.sideband_id(),
@@ -499,10 +629,10 @@ impl Drop for SidebandRun {
             return;
         };
         runtime.spawn(async move {
+            let _activity = activity;
             // The foreground future may have been aborted after enqueueing an
             // immutable event but before receiving its acknowledgement. Replay
             // that exact event first; persistence deduplicates it by identity.
-            let cancellation = tokio_util::sync::CancellationToken::new();
             if let Some(event) = pending {
                 if let Err(error) =
                     append_sideband_exact(&persistence, &cancellation, event.clone()).await
@@ -671,6 +801,8 @@ mod tests {
                 timeline,
                 persistence,
                 cancellation: tokio_util::sync::CancellationToken::new(),
+                repair_cancellation: tokio_util::sync::CancellationToken::new(),
+                fail_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(
                     goal_tx, None,
                 ),
@@ -680,6 +812,7 @@ mod tests {
                 admitted_attempt_id: None,
                 pending: None,
                 persistence_poison: None,
+                activity: None,
             },
             persistence_rx,
         )
@@ -1096,7 +1229,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn root_sideband_usage_is_serialized_through_the_lifecycle_mailbox() {
+    async fn root_sideband_usage_uses_the_in_process_lifecycle_authority() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (gateway_tx, _) =
@@ -1121,8 +1254,9 @@ mod tests {
                     .behavior
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
                 let (mut run, _rx) = test_run();
-                run.goal_usage_window = goal_usage_mailbox(&actor, Some("goal-1".into()));
+                run.goal_usage_window = actor.goal_usage_window.clone();
                 run.admitted_attempt_id = run
                     .goal_usage_window
                     .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
@@ -1132,7 +1266,7 @@ mod tests {
                     actor.settle_sideband_response_usage(&mut run, &provider_response_with_usage()),
                 )
                 .await
-                .expect("root Sideband settlement must reach the lifecycle mailbox")
+                .expect("root Sideband settlement must reach the lifecycle authority")
                 .unwrap();
 
                 assert_eq!(actor.goal_tokens_used(), 80);
@@ -1166,9 +1300,10 @@ mod tests {
                     .behavior
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
 
                 let (mut run, _rx) = test_run();
-                run.goal_usage_window = goal_usage_mailbox(&actor, Some("goal-1".into()));
+                run.goal_usage_window = actor.goal_usage_window.clone();
                 run.admitted_attempt_id = run
                     .goal_usage_window
                     .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))

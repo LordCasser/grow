@@ -42,8 +42,12 @@ impl SessionActor {
             first_seq: materialized.input_ref.last_seq,
             last_seq: materialized.input_ref.last_seq,
         };
+        let Some(activity) = self.session_activities.try_start("session_title") else {
+            return;
+        };
         let session = std::sync::Arc::clone(self);
         tokio::task::spawn_local(async move {
+            let _activity = activity;
             session
                 .generate_session_title(route, user_text, input_ref)
                 .await;

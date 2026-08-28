@@ -945,7 +945,7 @@ impl SessionActor {
         let mcp_strategy = self.mcp.strategy;
         let is_reinit = !existing_client_names.is_empty();
         let init_total_bg = init_total;
-        tokio::task::spawn_local(async move {
+        let initialization = tokio::task::spawn_local(async move {
             let handshake_start = std::time::Instant::now();
             let dispatcher_event_tx = mcp_state_bg.lock().await.client_event_tx();
             use futures::stream::StreamExt;
@@ -1370,6 +1370,7 @@ impl SessionActor {
                 ));
             }
         });
+        self.mcp_initialization_worker.arm(initialization);
     }
     /// Summaries of the currently connected MCP servers, from the live
     /// tool-metadata snapshot. The single source for every consumer of

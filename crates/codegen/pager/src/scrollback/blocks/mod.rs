@@ -8,11 +8,11 @@ mod btw;
 mod context_info;
 pub mod markdown_content;
 pub mod mermaid_content;
+mod notice;
 mod quote_bar;
 mod session_event;
 mod subagent;
 mod subagent_permission;
-mod system;
 mod thinking;
 pub mod tool;
 mod user;
@@ -22,10 +22,10 @@ pub use agent::AgentMessageBlock;
 pub use bg_task::{BgTaskBlock, BgTaskKind};
 pub use btw::BtwBlock;
 pub use context_info::ContextInfoBlock;
+pub use notice::{NoticeBlock, NoticeCategory, NoticeTone, UiFeedback};
 pub use session_event::{SessionEvent, SessionEventBlock};
 pub use subagent::{SubagentBlock, SubagentBlockKind};
 pub use subagent_permission::{SubagentPermissionBlock, SubagentPermissionEvent};
-pub use system::SystemMessageBlock;
 pub use thinking::ThinkingBlock;
 pub use tool::{
     DiffLineOutput, DiffRenderConfig, DiscoveredTool, EditToolCallBlock, ExecuteToolCallBlock,

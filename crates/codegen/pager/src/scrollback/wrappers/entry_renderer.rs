@@ -405,6 +405,164 @@ impl<'a> EntryRenderer<'a> {
             .is_hidden_thinking(crate::appearance::cache::load_show_thinking_blocks())
     }
 
+    /// Collect the hyperlinks painted by this renderer in the same coordinate
+    /// space as `area`.
+    ///
+    /// Minimal uses the exact same `EntryRenderer` on both sides of its native
+    /// scrollback frontier. Keeping link projection here means live frames,
+    /// committed rows, and `/transcript` all derive wrapping, basename display,
+    /// and the full semantic target from one cached `BlockOutput`.
+    pub fn link_overlay(
+        &self,
+        area: Rect,
+        media_paths: &[std::path::PathBuf],
+    ) -> crate::render::osc8::LinkOverlay {
+        use crate::render::osc8::{LinkOverlay, LinkPresentation, OverlayLink};
+        use crate::scrollback::types::{derive_selection_text, selectable_cols_usize};
+
+        let mut overlay = LinkOverlay::new();
+        let chrome = self.chrome_width();
+        if area.width < chrome + 1 || area.height == 0 || self.thinking_hidden() {
+            return overlay;
+        }
+        if self.group_header_count > 0 && !self.group_collapse_header {
+            return overlay;
+        }
+
+        let (area, skip_rows) = if self.group_collapse_header {
+            if self.skip_rows == 0 {
+                let remaining_height = area.height.saturating_sub(1);
+                if remaining_height == 0 {
+                    return overlay;
+                }
+                (
+                    Rect::new(area.x, area.y + 1, area.width, remaining_height),
+                    0,
+                )
+            } else {
+                (area, self.skip_rows - 1)
+            }
+        } else {
+            (area, self.skip_rows)
+        };
+
+        let layout_cfg = &self.appearance().scrollback.layout;
+        let accent_w = if self.hide_accent {
+            0
+        } else {
+            HorizontalLayout::ACCENT
+        };
+        let [_accent, _left_pad, content_area, _right_pad] = Layout::horizontal([
+            Constraint::Length(accent_w),
+            Constraint::Length(layout_cfg.block_pad_left),
+            Constraint::Min(1),
+            Constraint::Length(layout_cfg.block_pad_right),
+        ])
+        .areas(area);
+
+        let text_width = content_area.width.saturating_sub(self.timestamp_reserved());
+        self.entry
+            .ensure_cached(text_width, self.appearance(), self.is_selected, self.cwd);
+        let output = self.entry.cached_output_ref();
+        let ctx = self
+            .entry
+            .context(content_area.width, self.appearance(), self.cwd);
+        let vpad_top = u16::from(self.entry.block.has_vpad(&ctx));
+        let content_skip = skip_rows.saturating_sub(vpad_top) as usize;
+        let first_content_y = content_area.y + u16::from(skip_rows < vpad_top);
+        let max_y = content_area.bottom();
+        let content_line_offset = match &self.entry.block {
+            RenderBlock::Btw(_) if ctx.mode != DisplayMode::Collapsed => 2,
+            RenderBlock::Thinking(_)
+                if ctx.mode != DisplayMode::Collapsed
+                    && self.appearance().scrollback.blocks.thinking.header =>
+            {
+                2
+            }
+            _ => 0,
+        };
+
+        self.entry.block.with_hyperlinks(|hyperlinks| {
+            if !hyperlinks.is_empty() {
+                crate::scrollback::render::map_hyperlinks_to_overlay(
+                    hyperlinks,
+                    &output,
+                    content_skip,
+                    first_content_y,
+                    max_y,
+                    content_area.x,
+                    content_line_offset,
+                    self.cwd,
+                    media_paths,
+                    &mut overlay,
+                );
+            }
+        });
+
+        for (idx, line) in output.lines.iter().enumerate().skip(content_skip) {
+            let row = first_content_y.saturating_add((idx - content_skip) as u16);
+            if row >= max_y {
+                break;
+            }
+            let Some(target) = line.link_target.as_ref() else {
+                continue;
+            };
+            let Some(cols) = selectable_cols_usize(&line.content, &line.selectable) else {
+                continue;
+            };
+            let visible_width = usize::from(text_width.min(content_area.width));
+            let start = cols.start.min(visible_width);
+            let end = cols.end.min(visible_width);
+            if start >= end {
+                continue;
+            }
+            let (Ok(start), Ok(end)) = (u16::try_from(start), u16::try_from(end)) else {
+                continue;
+            };
+            let col_start = content_area.x.saturating_add(start);
+            let col_end = content_area.x.saturating_add(end);
+            if overlay.overlaps(row, col_start, col_end) {
+                continue;
+            }
+            let painted = derive_selection_text(line);
+            overlay.push(OverlayLink {
+                screen_row: row,
+                col_start,
+                col_end,
+                target: target.clone(),
+                presentation: if cols.end <= visible_width {
+                    crate::render::osc8::file_link_presentation(&painted, target, self.cwd)
+                } else {
+                    LinkPresentation::Opaque
+                },
+                id: None,
+            });
+        }
+
+        let visible_lines = output
+            .lines
+            .iter()
+            .enumerate()
+            .skip(content_skip)
+            .filter(|(_, line)| line.link_target.is_none())
+            .map(|(idx, line)| {
+                (
+                    first_content_y.saturating_add((idx - content_skip) as u16),
+                    &line.content,
+                    line.joiner.as_deref(),
+                )
+            })
+            .take_while(|(row, _, _)| *row < max_y);
+        crate::render::osc8::scan_lines_for_url_overlays(
+            visible_lines,
+            content_area.x,
+            media_paths,
+            &mut overlay,
+        );
+
+        overlay
+    }
+
     /// Compute height as if displayed in Truncated mode.
     ///
     /// This avoids cloning the entry just to compute truncated height.
@@ -1394,7 +1552,7 @@ mod tests {
         let negative_blocks = vec![
             ("Thinking", RenderBlock::thinking("think")),
             ("ToolCall", RenderBlock::tool_call("Read", "file.rs", true)),
-            ("System", RenderBlock::system("sys msg")),
+            ("System", RenderBlock::notice("sys msg")),
             ("Stub", RenderBlock::stub("stub", Color::Blue)),
         ];
 

@@ -17,10 +17,6 @@ impl SlashCommand for TranscriptCommand {
         "transcript"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["log"]
-    }
-
     fn description(&self) -> &str {
         "View the full conversation transcript in your pager ($PAGER)"
     }

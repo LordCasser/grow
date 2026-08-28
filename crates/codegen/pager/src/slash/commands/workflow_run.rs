@@ -1,5 +1,7 @@
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{
+    AppCtx, CommandExecCtx, CommandResult, HostCommandRequest, SlashCommand,
+};
 use crate::slash::{ModeSupport, Remedy};
 
 /// Bare `/workflow-run` is a selector, never an implicit launch. Explicit
@@ -47,7 +49,10 @@ impl SlashCommand for WorkflowRunCommand {
         {
             CommandResult::Action(Action::ToggleWorkflows)
         } else {
-            CommandResult::HostCommand(format!("/workflow-run {trimmed}"))
+            CommandResult::HostCommand(HostCommandRequest::new(
+                format!("/workflow-run {trimmed}"),
+                self.description(),
+            ))
         }
     }
 }
@@ -73,12 +78,13 @@ mod tests {
         }
         assert!(matches!(
             WorkflowRunCommand.run(&mut ctx, "pause review-2"),
-            CommandResult::HostCommand(command) if command == "/workflow-run pause review-2"
+            CommandResult::HostCommand(command)
+                if command.command == "/workflow-run pause review-2"
         ));
         assert!(matches!(
             WorkflowRunCommand.run(&mut ctx, "deep-research compiler design"),
             CommandResult::HostCommand(command)
-                if command == "/workflow-run deep-research compiler design"
+                if command.command == "/workflow-run deep-research compiler design"
         ));
         assert_eq!(
             WorkflowRunCommand.usage(),

@@ -544,7 +544,8 @@
         assert!(!agent.show_workflows);
     }
 
-    /// Rejection retains the source identity and never releases a held FIFO.
+    /// Rejection retains the source identity. Presentation is owned by the
+    /// Shell's typed terminal Notice, not a second Pager-local toast.
     #[test]
     fn behavior_change_rejected_retains_source_identity() {
         let mut agent = make_agent(Some("s1"));
@@ -560,5 +561,5 @@
             behavior_mode_update_resolution(&update),
             Some(crate::app::session::BehaviorControlResolution::Rejected)
         );
-        assert!(agent.toast.is_some());
+        assert!(agent.toast.is_none());
     }

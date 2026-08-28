@@ -14,10 +14,10 @@ use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef};
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
     AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, EditToolCallBlock,
-    ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock, ReadToolCallBlock,
-    SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock, SubagentBlock,
-    SubagentBlockKind, SubagentPermissionBlock, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
-    UserPromptBlock, WorkflowBlock,
+    ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, NoticeBlock, NoticeCategory, NoticeTone,
+    OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent,
+    SessionEventBlock, SubagentBlock, SubagentBlockKind, SubagentPermissionBlock, ThinkingBlock,
+    ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -374,8 +374,8 @@ pub enum RenderBlock {
     ToolCall(ToolCallBlock),
     /// Thinking/reasoning content.
     Thinking(ThinkingBlock),
-    /// System message (arbitrary text).
-    System(SystemMessageBlock),
+    /// Immutable UI-only notice. Never projected into model context.
+    Notice(NoticeBlock),
     /// Session-level event (typed: turn completed, cancelled, failed, etc.).
     SessionEvent(SessionEventBlock),
     /// Background task (always collapsed, animated bullet while running).
@@ -400,7 +400,7 @@ macro_rules! delegate_block {
             RenderBlock::AgentMessage(b) => b.$method($($arg),*),
             RenderBlock::ToolCall(b) => b.$method($($arg),*),
             RenderBlock::Thinking(b) => b.$method($($arg),*),
-            RenderBlock::System(b) => b.$method($($arg),*),
+            RenderBlock::Notice(b) => b.$method($($arg),*),
             RenderBlock::SessionEvent(b) => b.$method($($arg),*),
             RenderBlock::BgTask(b) => b.$method($($arg),*),
             RenderBlock::Subagent(b) => b.$method($($arg),*),
@@ -455,6 +455,88 @@ pub(crate) fn join_searchable(parts: impl IntoIterator<Item = Option<String>>) -
 }
 
 impl RenderBlock {
+    /// Identity of an immutable durable UI event, when this block represents
+    /// one. Local/ad-hoc blocks intentionally return `None`.
+    pub(crate) fn immutable_event_id(&self) -> Option<&str> {
+        match self {
+            Self::Notice(block) => block.event_id.as_deref(),
+            Self::Subagent(block) => block.event_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whether two independently rebuilt transcript blocks represent the same
+    /// durable visible fact.
+    ///
+    /// Reconnect full replay allocates fresh [`EntryId`](super::entry::EntryId)s,
+    /// while Minimal mode has already printed an immutable prefix into the
+    /// terminal. Stable domain IDs win when available; the remaining ACP
+    /// stream-derived blocks are compared by their exact block kind and stored
+    /// source text. This deliberately does not compare presentation state
+    /// (folding, selection, theme): those are not durable transcript identity.
+    pub(crate) fn replay_equivalent(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::UserPrompt(left), Self::UserPrompt(right)) => {
+                if let (Some(left_id), Some(right_id)) =
+                    (left.message_id.as_deref(), right.message_id.as_deref())
+                {
+                    return left_id == right_id;
+                }
+                left.text == right.text
+                    && left.is_bash == right.is_bash
+                    && left.is_cron == right.is_cron
+                    && left.is_interjection == right.is_interjection
+                    && left.prompt_index == right.prompt_index
+                    && left.skill_token_ranges == right.skill_token_ranges
+            }
+            (Self::Notice(left), Self::Notice(right)) => {
+                if let (Some(left_id), Some(right_id)) =
+                    (left.event_id.as_deref(), right.event_id.as_deref())
+                {
+                    return left_id == right_id;
+                }
+                left.tone == right.tone
+                    && left.category == right.category
+                    && left.text == right.text
+                    && left.details == right.details
+            }
+            (Self::Subagent(left), Self::Subagent(right)) => {
+                if let (Some(left_id), Some(right_id)) =
+                    (left.event_id.as_deref(), right.event_id.as_deref())
+                {
+                    return left_id == right_id;
+                }
+                format!("{left:?}") == format!("{right:?}")
+            }
+            (Self::AgentMessage(left), Self::AgentMessage(right)) => left.text() == right.text(),
+            (Self::Thinking(left), Self::Thinking(right)) => left.text() == right.text(),
+            (Self::ToolCall(left), Self::ToolCall(right)) => {
+                tool_replay_kind(left) == tool_replay_kind(right)
+                    && left.searchable_text() == right.searchable_text()
+            }
+            (Self::Stub(left), Self::Stub(right)) => left.text == right.text,
+            (Self::SessionEvent(left), Self::SessionEvent(right)) => {
+                format!("{left:?}") == format!("{right:?}")
+            }
+            (Self::BgTask(left), Self::BgTask(right)) => {
+                format!("{left:?}") == format!("{right:?}")
+            }
+            (Self::SubagentPermission(left), Self::SubagentPermission(right)) => {
+                left.searchable_text() == right.searchable_text()
+            }
+            (Self::Workflow(left), Self::Workflow(right)) => {
+                format!("{left:?}") == format!("{right:?}")
+            }
+            (Self::Btw(left), Self::Btw(right)) => {
+                left.question == right.question && left.content().text() == right.content().text()
+            }
+            (Self::ContextInfo(left), Self::ContextInfo(right)) => {
+                format!("{left:?}") == format!("{right:?}")
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn rendered_output(&self, ctx: &BlockContext) -> RenderedBlockOutput {
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = self else {
             return RenderedBlockOutput::from(self.output(ctx));
@@ -464,6 +546,23 @@ impl RenderBlock {
             prepend_bullet(&mut rendered.output, ctx, self.bullet(ctx));
         }
         rendered
+    }
+}
+
+fn tool_replay_kind(block: &ToolCallBlock) -> &'static str {
+    match block {
+        ToolCallBlock::Execute(_) => "execute",
+        ToolCallBlock::Read(_) => "read",
+        ToolCallBlock::Edit(_) => "edit",
+        ToolCallBlock::ListDir(_) => "list_dir",
+        ToolCallBlock::Search(_) => "search",
+        ToolCallBlock::WebFetch(_) => "web_fetch",
+        ToolCallBlock::IntegrationSearch(_) => "integration_search",
+        ToolCallBlock::UseTool(_) => "use_tool",
+        ToolCallBlock::MemorySearch(_) => "memory_search",
+        ToolCallBlock::Skill(_) => "skill",
+        ToolCallBlock::Other(_) => "other",
+        ToolCallBlock::Lifecycle(_) => "lifecycle",
     }
 }
 
@@ -757,9 +856,30 @@ impl RenderBlock {
         RenderBlock::Thinking(ThinkingBlock::streaming_replay())
     }
 
-    /// Create a system message block.
-    pub fn system(text: impl Into<String>) -> Self {
-        RenderBlock::System(SystemMessageBlock::new(text))
+    /// Create a compact terminal UI notice.
+    pub fn notice(text: impl Into<String>) -> Self {
+        RenderBlock::Notice(NoticeBlock::new(text))
+    }
+
+    pub fn typed_notice(
+        tone: NoticeTone,
+        category: NoticeCategory,
+        text: impl Into<String>,
+        details: Option<String>,
+    ) -> Self {
+        RenderBlock::Notice(NoticeBlock::typed(tone, category, text, details))
+    }
+
+    pub fn terminal_notice(
+        event_id: impl Into<String>,
+        tone: NoticeTone,
+        category: NoticeCategory,
+        text: impl Into<String>,
+        details: Option<String>,
+    ) -> Self {
+        RenderBlock::Notice(NoticeBlock::terminal(
+            event_id, tone, category, text, details,
+        ))
     }
 
     /// Create a structured subagent permission audit row.
@@ -992,7 +1112,7 @@ impl RenderBlock {
                 }
             }
             RenderBlock::SubagentPermission(_) => None,
-            RenderBlock::System(_) | RenderBlock::SessionEvent(_) | RenderBlock::ContextInfo(_) => {
+            RenderBlock::Notice(_) | RenderBlock::SessionEvent(_) | RenderBlock::ContextInfo(_) => {
                 None
             }
             RenderBlock::Btw(_) => Some(theme.accent_plan),
@@ -1105,7 +1225,7 @@ impl RenderBlock {
             RenderBlock::UserPrompt(b) => join_searchable([Some(b.text.clone())]),
             RenderBlock::AgentMessage(b) => join_searchable([Some(b.copy_text(false))]),
             RenderBlock::Thinking(b) => join_searchable([Some(b.copy_text(false))]),
-            RenderBlock::System(b) => join_searchable([Some(b.text.clone())]),
+            RenderBlock::Notice(b) => join_searchable([Some(b.text.clone())]),
             RenderBlock::SessionEvent(b) => join_searchable([Some(b.event.message())]),
             RenderBlock::BgTask(b) => {
                 join_searchable([Some(b.command.clone()), b.description.clone()])
@@ -1125,7 +1245,6 @@ impl RenderBlock {
                     Some(b.description.clone()),
                     Some(b.subagent_type.clone()),
                     b.model.clone(),
-                    b.activity_label.clone(),
                     error,
                 ])
             }
@@ -1434,7 +1553,7 @@ mod searchable_text_tests {
 
     #[test]
     fn system_indexes_message_text() {
-        let block = RenderBlock::system("disk almost full");
+        let block = RenderBlock::notice("disk almost full");
         assert_eq!(block.searchable_text().as_deref(), Some("disk almost full"));
     }
 
@@ -1451,7 +1570,7 @@ mod searchable_text_tests {
     fn empty_only_source_field_returns_none() {
         // join_searchable drops empty strings, so a block whose only source
         // field is empty is left out of the index entirely.
-        assert_eq!(RenderBlock::system("").searchable_text(), None);
+        assert_eq!(RenderBlock::notice("").searchable_text(), None);
         assert_eq!(RenderBlock::user_prompt("").searchable_text(), None);
     }
 
@@ -1486,13 +1605,11 @@ mod searchable_text_tests {
         if let RenderBlock::Subagent(b) = &mut block {
             b.subagent_type = "explore".into();
             b.model = Some("grow-test".into());
-            b.activity_label = Some("Running: cargo build".into());
         }
         let text = block.searchable_text().expect("subagent text");
         assert!(text.contains("investigate flaky test"), "got: {text:?}");
         assert!(text.contains("explore"), "got: {text:?}");
         assert!(text.contains("grow-test"), "got: {text:?}");
-        assert!(text.contains("Running: cargo build"), "got: {text:?}");
         assert!(text.contains("panicked at assert"), "got: {text:?}");
     }
 

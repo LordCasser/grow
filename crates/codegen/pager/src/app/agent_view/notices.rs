@@ -7,6 +7,7 @@ use super::{
     AgentView, CLIPBOARD_TOAST_DEBOUNCE_MS, MODE_BANNER_DURATION, MODE_BANNER_FADE, PromptInputMode,
 };
 use crate::app::actions::Action;
+use crate::scrollback::blocks::{NoticeTone, UiFeedback};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(3);
@@ -18,7 +19,11 @@ impl AgentView {
     /// is replaced; [`Self::sticky_toast`] is preserved and returns after this
     /// expires or is dismissed.
     pub fn show_toast(&mut self, msg: &str) {
-        self.show_toast_for(msg, DEFAULT_TOAST_DURATION);
+        self.show_toast_with_tone_for(NoticeTone::Info, msg, DEFAULT_TOAST_DURATION);
+    }
+
+    pub fn show_toast_with_tone(&mut self, tone: NoticeTone, msg: &str) {
+        self.show_toast_with_tone_for(tone, msg, DEFAULT_TOAST_DURATION);
     }
 
     /// Show an ephemeral tip in the banner row above the prompt, gated by the
@@ -227,19 +232,32 @@ impl AgentView {
 
     /// Show a toast for an explicit duration.
     pub fn show_toast_for(&mut self, msg: &str, duration: Duration) {
+        self.show_toast_with_tone_for(NoticeTone::Info, msg, duration);
+    }
+
+    pub fn show_toast_with_tone_for(&mut self, tone: NoticeTone, msg: &str, duration: Duration) {
         self.toast = Some((
-            crate::glyphs::sanitize_toast_message(msg).into_owned(),
+            UiFeedback::new(
+                tone,
+                crate::glyphs::sanitize_toast_message(msg).into_owned(),
+            ),
             Instant::now() + duration,
         ));
+    }
+
+    pub(super) fn active_toast(&self) -> Option<(NoticeTone, &str)> {
+        if let Some((ref feedback, _)) = self.toast {
+            return Some((feedback.tone, feedback.as_str()));
+        }
+        self.sticky_toast
+            .as_deref()
+            .map(|message| (NoticeTone::Info, message))
     }
 
     /// Message currently drawn in the toast slot: transient wins while active,
     /// otherwise sticky status (if any).
     pub(super) fn active_toast_message(&self) -> Option<&str> {
-        if let Some((ref msg, _)) = self.toast {
-            return Some(msg.as_str());
-        }
-        self.sticky_toast.as_deref()
+        self.active_toast().map(|(_, message)| message)
     }
 
     /// Show a transient "Switched to mode: ..." banner above the prompt.
@@ -372,7 +390,7 @@ impl AgentView {
             OpenUrlResult::Opened | OpenUrlResult::RejectedScheme => {}
             OpenUrlResult::BrowserUnavailable => {
                 self.scrollback
-                    .push_block(RenderBlock::system(browser_unavailable_message(url)));
+                    .push_block(RenderBlock::notice(browser_unavailable_message(url)));
                 // Best-effort clipboard so SSH/VM users can paste into a
                 // browser on another machine without selecting TUI text.
                 let _ = crate::clipboard::SystemClipboard::try_set(url);
@@ -415,6 +433,17 @@ mod sticky_banner_tests {
         view.set_sticky_toast(Some("Reconnecting"));
         view.active_pane = AgentPane::Prompt;
         assert_eq!(view.active_toast_message(), Some("Reconnecting"));
+    }
+
+    #[test]
+    fn typed_toast_keeps_tone_separate_from_sanitized_text() {
+        let mut view = make_running_agent();
+        view.show_toast_with_tone(NoticeTone::Warning, "line one\nline two");
+
+        let (tone, message) = view.active_toast().expect("typed toast");
+        assert_eq!(tone, NoticeTone::Warning);
+        assert_eq!(message, "line one line two");
+        assert!(!message.contains(crate::glyphs::ballot_x()));
     }
 
     #[test]

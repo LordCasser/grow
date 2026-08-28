@@ -50,6 +50,11 @@ impl IdlePromptExtension {
         self.last_turn_completed.set(false);
     }
 
+    pub(crate) async fn shutdown(&self) -> Result<(), tokio::task::JoinError> {
+        self.last_turn_completed.set(false);
+        self.timer.abort_and_join().await
+    }
+
     pub(crate) fn on_session_idle(&self) {
         if !self.last_turn_completed.get() {
             return;

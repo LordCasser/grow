@@ -557,7 +557,7 @@ pub(super) fn scrollback_has_system_text(agent: &mut AgentView, needle: &str) ->
         .scrollback
         .entries_mut()
         .any(|e| {
-            matches!(&e.block, crate::scrollback::block::RenderBlock::System(b) if b.text.contains(needle))
+            matches!(&e.block, crate::scrollback::block::RenderBlock::Notice(b) if b.text.contains(needle))
         })
 }
 /// `Plan` update message with the given entry contents.
@@ -688,7 +688,7 @@ pub(super) fn grow_turn_completed_notif(
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
     (0..sb.len())
         .filter_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::System(b)) if b.text.contains("still running") => {
+            Some(RenderBlock::Notice(b)) if b.text.contains("still running") => {
                 Some(b.text.clone())
             }
             _ => None,
@@ -962,10 +962,12 @@ pub(super) fn snapshot_after_subagent_finish(
 ) -> SubagentFinishSnapshot {
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let info = agent.session.subagent_sessions.get(child_sid).unwrap();
-    let entry_id = info.scrollback_entry_id.expect("scrollback_entry_id after finish");
-    let entry = agent.scrollback.get_by_id(entry_id).unwrap();
+    let entry = agent
+        .scrollback
+        .entry(agent.scrollback.len().saturating_sub(1))
+        .expect("terminal subagent event after finish");
     let RenderBlock::Subagent(sb) = &entry.block else {
-        panic!("expected Subagent block after finish");
+        panic!("expected terminal Subagent block after finish");
     };
     SubagentFinishSnapshot {
         finished: info.finished,

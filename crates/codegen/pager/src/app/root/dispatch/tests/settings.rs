@@ -289,11 +289,14 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
             control_token,
             model_id: model_a,
             effort: None,
-            result: Ok(()),
+            result: control_rpc_accepted(),
         }),
         &mut app,
     );
-    assert!(!app.agents[&id].session.model_switch_pending());
+    assert!(
+        app.agents[&id].session.model_switch_pending(),
+        "transport acceptance must wait for the Shell's authoritative projection"
+    );
     dispatch(
         Action::SwitchModel {
             model_id: model_b.clone(),
@@ -310,7 +313,7 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
             control_token,
             model_id: model_b,
             effort: None,
-            result: Err("network error".into()),
+            result: Err(local_control_failure("network error")),
         }),
         &mut app,
     );
@@ -888,7 +891,7 @@ fn dispatch_confirm_reset_setting_reset_on_already_default_is_no_op_with_toast()
     let toast_text = agent
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .unwrap_or_default();
     assert!(
         toast_text.contains("already at default"),
@@ -1690,14 +1693,14 @@ fn set_multiline_mode_toast_format() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, "\u{2713} Multiline: on");
     let _ = dispatch(Action::SetMultilineMode(false), &mut app);
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("toast must be set");
     assert_eq!(toast, "\u{2713} Multiline: off");
 }
@@ -2658,7 +2661,7 @@ fn rollback_permission_mode_reverts_state_no_effect() {
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
-        .map(|(s, _)| s.clone())
+        .map(|(s, _)| s.message.clone())
         .expect("failure toast must be set");
     assert_eq!(
         toast, "\u{2717} Could not save permission_mode: permission denied",

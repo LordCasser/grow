@@ -185,33 +185,11 @@ fn compact_converged_over_window_error(context_window: u64) -> acp::Error {
     }))
 }
 
-/// A durable replacement is the compaction transaction's commit point. Every
-/// later operation is a repairable projection/side effect, so its failure must
-/// never reopen or fail the already-committed transaction.
+/// A durable replacement is the compaction transaction's commit point. The
+/// Timeline terminal therefore remains `Completed`, even when a required
+/// post-commit projection prevents the current turn from continuing.
 fn compaction_completed(result: &Result<(), acp::Error>, replacement_committed: bool) -> bool {
     replacement_committed || result.is_ok()
-}
-
-fn normalize_committed_compaction_result(
-    result: Result<(), acp::Error>,
-    replacement_committed: bool,
-) -> Result<(), acp::Error> {
-    if !replacement_committed {
-        return result;
-    }
-    match result {
-        // This is a turn-control outcome, not a failed compaction: the caller
-        // must stop resampling an input that remains larger than the window.
-        Err(error) if is_compact_converged_over_window(&error) => Err(error),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "post-commit compaction projection failed; transaction remains completed and will be repaired from Timeline"
-            );
-            Ok(())
-        }
-        Ok(()) => Ok(()),
-    }
 }
 /// Why auto-compaction was suppressed after a deterministic failure.
 /// [`SuppressReason::as_str`] is a stable local diagnostics value; do not rename
@@ -300,17 +278,23 @@ impl SessionActor {
                 tracing::warn!("pre-compaction memory flush could not freeze Timeline input");
                 return;
             };
-            tokio::task::spawn_local({
-                let session = self.clone();
-                async move {
-                    if session.run_memory_flush(trigger, Some(snapshot)).await {
-                        session
-                            .memory
-                            .last_flush_compaction
-                            .store(compaction_count, std::sync::atomic::Ordering::Relaxed);
+            if let Some(activity) = self
+                .session_activities
+                .try_start("pre_compaction_memory_flush")
+            {
+                tokio::task::spawn_local({
+                    let session = self.clone();
+                    async move {
+                        let _activity = activity;
+                        if session.run_memory_flush(trigger, Some(snapshot)).await {
+                            session
+                                .memory
+                                .last_flush_compaction
+                                .store(compaction_count, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
     }
     /// Runs the compact operation over here which compresses the current conversation
@@ -681,7 +665,11 @@ impl SessionActor {
                     "compaction terminal was not durably recorded: {error}"
                 ))
             })?;
-        normalize_committed_compaction_result(result, replacement_committed)
+        // Completed describes the committed replacement transaction. A
+        // required post-commit repair may still fail closed for this turn;
+        // swallowing that error would allow the next Step to sample without
+        // its active Agent/Goal/Behavior authority.
+        result
     }
 
     async fn run_compact_attempt(
@@ -1522,7 +1510,7 @@ impl SessionActor {
                 ))
             })?;
         *replacement_committed = true;
-        if let Err(error) = self
+        let control_reprojection_error = if let Err(error) = self
             .reproject_control_contexts_durably(shadowed_control_contexts)
             .await
         {
@@ -1531,9 +1519,12 @@ impl SessionActor {
             // missing Control projections from the Timeline fact source.
             tracing::warn!(
                 %error,
-                "compaction Control context was not durably re-projected; leaving it for durable repair"
+                "compaction Control context was not durably re-projected; scheduling an in-transaction repair"
             );
-        }
+            Some(error)
+        } else {
+            None
+        };
         let new_len = self.chat_state_handle.get_conversation_len().await;
         let post_replace_tokens = self.chat_state_handle.get_projected_tokens().await;
         self.compaction
@@ -1579,7 +1570,13 @@ impl SessionActor {
             .await;
         self.persist_announcement_state().await;
         self.behavior.lock().reset_after_compaction();
-        self.record_control_snapshot();
+        self.record_control_snapshot_durably()
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "post-compaction Behavior state was not persisted: {error}"
+                ))
+            })?;
         self.dispatch_hook(
             ::hooks::event::HookEventName::PostCompact,
             ::hooks::event::HookPayload::PostCompact {
@@ -1634,6 +1631,13 @@ impl SessionActor {
             }
         }
         compaction.complete(tokens_after);
+        if let Some(initial_error) = control_reprojection_error
+            && let Err(repair_error) = self.repair_missing_control_contexts_durably().await
+        {
+            return Err(acp::Error::internal_error().data(format!(
+                "compaction replacement committed, but active Control context could not be restored before the next Step: initial reprojection failed: {initial_error}; repair failed: {repair_error}"
+            )));
+        }
         if converged_over_window {
             // The conversation was replaced and every post-compaction side
             // effect above has run; only the *outcome* is reported as a
@@ -2342,12 +2346,12 @@ mod context_recall_tests {
     }
 
     #[test]
-    fn control_reprojection_failure_closes_committed_compaction() {
+    fn control_reprojection_failure_closes_transaction_but_fails_the_turn() {
         let control_failure = Err(acp::Error::internal_error()
             .data("compaction Control context was not durably re-projected"));
 
         assert!(compaction_completed(&control_failure, true));
         assert!(!compaction_completed(&control_failure, false));
-        assert!(normalize_committed_compaction_result(control_failure, true).is_ok());
+        assert!(control_failure.is_err());
     }
 }

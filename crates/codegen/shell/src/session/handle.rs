@@ -327,8 +327,9 @@ impl SessionHandle {
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
     /// Ask the actor to atomically unload itself if it owns no live work.
-    /// Returns `true` only after the actor has accepted the unload and closed
-    /// its command mailbox. Actor failure is conservative: keep the handle.
+    /// Returns `true` once the actor has latched termination and accepted the
+    /// unload. Physical teardown may continue after the acknowledgement;
+    /// actor failure before acceptance is conservative and keeps the handle.
     pub async fn unload_if_idle(&self) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
@@ -467,11 +468,14 @@ impl SessionHandle {
         rx.await
             .unwrap_or_else(|_| crate::session::slash_commands::ListCommandsResponse::default())
     }
-    pub(crate) async fn execute_slash_command(&self, command: String) -> Result<(), String> {
+    pub(crate) async fn execute_slash_command(
+        &self,
+        invocation: crate::session::HostCommandInvocation,
+    ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::ExecuteSlashCommand {
-                command,
+                invocation,
                 respond_to: tx,
             })
             .map_err(|_| "session actor is not available".to_string())?;

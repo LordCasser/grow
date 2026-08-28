@@ -71,12 +71,12 @@ pub(super) fn dispatch_copy_assistant_message(
         if agent_messages.is_empty() {
             agent
                 .scrollback
-                .push_block(RenderBlock::system("No assistant messages to copy"));
+                .push_block(RenderBlock::notice("No assistant messages to copy"));
             return;
         }
 
         if n > agent_messages.len() {
-            agent.scrollback.push_block(RenderBlock::system(format!(
+            agent.scrollback.push_block(RenderBlock::notice(format!(
                 "Only {} assistant {} available to copy",
                 agent_messages.len(),
                 if agent_messages.len() == 1 {
@@ -92,7 +92,7 @@ pub(super) fn dispatch_copy_assistant_message(
         if text.is_empty() {
             agent
                 .scrollback
-                .push_block(RenderBlock::system("Assistant message is empty"));
+                .push_block(RenderBlock::notice("Assistant message is empty"));
             return;
         }
 
@@ -101,7 +101,7 @@ pub(super) fn dispatch_copy_assistant_message(
         if let Some(p) = file_path {
             match crate::clipboard::write_text_to_copy_file(text, &p) {
                 Ok(path) => {
-                    agent.scrollback.push_block(RenderBlock::system(format!(
+                    agent.scrollback.push_block(RenderBlock::notice(format!(
                         "Copied to {}{stats}",
                         path.display()
                     )));
@@ -109,7 +109,7 @@ pub(super) fn dispatch_copy_assistant_message(
                 Err(e) => {
                     agent
                         .scrollback
-                        .push_block(RenderBlock::system(format!("Failed to write file: {e}")));
+                        .push_block(RenderBlock::notice(format!("Failed to write file: {e}")));
                 }
             }
             return;
@@ -125,10 +125,10 @@ pub(super) fn dispatch_copy_assistant_message(
                     ),
                     None => format!("Copied to clipboard{stats}"),
                 };
-                agent.scrollback.push_block(RenderBlock::system(block_msg));
+                agent.scrollback.push_block(RenderBlock::notice(block_msg));
             }
             crate::clipboard::CopyDelivery::File { path } => {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "Clipboard unreachable — wrote {}{stats}",
                     crate::clipboard::display_copy_path(path)
                 )));
@@ -136,7 +136,7 @@ pub(super) fn dispatch_copy_assistant_message(
             crate::clipboard::CopyDelivery::Failed { .. } => {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(format!("Copy failed{stats}")));
+                    .push_block(RenderBlock::notice(format!("Copy failed{stats}")));
             }
         }
         agent.show_toast_for(
@@ -164,7 +164,7 @@ pub(super) fn dispatch_export_conversation(
         if md.is_empty() {
             agent
                 .scrollback
-                .push_block(RenderBlock::system("No conversation content to export"));
+                .push_block(RenderBlock::notice("No conversation content to export"));
             return;
         }
 
@@ -175,14 +175,14 @@ pub(super) fn dispatch_export_conversation(
             if let Some(parent) = expanded.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "Failed to create directory: {e}"
                 )));
                 return;
             }
             match std::fs::write(&expanded, &md) {
                 Ok(()) => {
-                    agent.scrollback.push_block(RenderBlock::system(format!(
+                    agent.scrollback.push_block(RenderBlock::notice(format!(
                         "Conversation exported to {}",
                         expanded.display()
                     )));
@@ -192,7 +192,7 @@ pub(super) fn dispatch_export_conversation(
                     // (it may contain secrets or PII); the generic failure is sufficient.
                     agent
                         .scrollback
-                        .push_block(RenderBlock::system(format!("Failed to write file: {}", e)));
+                        .push_block(RenderBlock::notice(format!("Failed to write file: {}", e)));
                 }
             }
         } else {
@@ -219,7 +219,7 @@ pub(super) fn dispatch_export_conversation(
                     format!("Conversation copy failed{stats}")
                 }
             };
-            agent.scrollback.push_block(RenderBlock::system(block_msg));
+            agent.scrollback.push_block(RenderBlock::notice(block_msg));
         }
     });
 }
@@ -259,7 +259,7 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
 
     let Some(content) = md else {
         with_active_agent(app, |agent| {
-            agent.scrollback.push_block(RenderBlock::system(
+            agent.scrollback.push_block(RenderBlock::notice(
                 "No conversation transcript to view yet",
             ));
         });
@@ -274,7 +274,7 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
         }
         Err(e) => {
             with_active_agent(app, |agent| {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "Failed to write transcript: {e}"
                 )));
             });
@@ -698,7 +698,7 @@ pub(super) fn handle_marketplace_updates_available(
         };
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(format!(
+            .push_block(crate::scrollback::block::RenderBlock::notice(format!(
                 "{} Plugins auto-updated: {summary}.",
                 crate::glyphs::diamond_filled()
             )));

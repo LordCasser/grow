@@ -216,16 +216,18 @@ pub(in crate::app::root::dispatch) fn dispatch_fork_resolved(
             worktree,
         });
         if worktree {
-            agent
-                .scrollback
-                .push_block(RenderBlock::system("Creating worktree\u{2026}".to_string()));
+            agent.session.set_live_feedback(
+                "worktree",
+                crate::scrollback::blocks::NoticeTone::Progress,
+                "Creating worktree\u{2026}",
+            );
         }
         agent.pending_first_prompt = directive;
     }
     if let Some(parent_mut) = app.agents.get_mut(&parent_id) {
         parent_mut
             .scrollback
-            .push_block(RenderBlock::system(parent_marker));
+            .push_block(RenderBlock::notice(parent_marker));
     }
     switch_to_agent(app, new_id, SwitchCause::Fork);
     if let Some(d) = app.dashboard.as_mut()
@@ -467,6 +469,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_forked(
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("worktree");
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
         agent.mark_turn_finished();
@@ -478,7 +481,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_forked(
         agent.session.is_worktree = true;
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
-        agent.scrollback.push_block(RenderBlock::system(format!(
+        agent.scrollback.push_block(RenderBlock::notice(format!(
             "Worktree ready: {}",
             worktree_path.display()
         )));
@@ -486,10 +489,10 @@ pub(in crate::app::root::dispatch) fn handle_worktree_forked(
             (true, Some(s)) => {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(format!("\u{2713} Code restored: {s}")));
+                    .push_block(RenderBlock::notice(format!("\u{2713} Code restored: {s}")));
             }
             (false, Some(s)) => {
-                agent.scrollback.push_block(RenderBlock::system(format!(
+                agent.scrollback.push_block(RenderBlock::notice(format!(
                     "\u{26A0} Code restore failed: {s}"
                 )));
             }
@@ -511,6 +514,7 @@ pub(in crate::app::root::dispatch) fn handle_fork_session_ready(
 ) -> Vec<Effect> {
     let session_id_str = new_session_id.0.to_string();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("worktree");
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
         agent.mark_turn_finished();
@@ -534,6 +538,7 @@ pub(in crate::app::root::dispatch) fn handle_fork_session_failed(
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Fork session failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.clear_live_feedback("worktree");
         agent.session.clear_pending_extensions_fetch();
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();

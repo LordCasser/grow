@@ -1,6 +1,10 @@
 //! Public handle for talking to the sampler actor.
 
 use futures_util::future::BoxFuture;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{mpsc, oneshot};
 
 use sampling_types::{ConversationRequest, ConversationResponse, SamplingError, TokenUsage};
@@ -38,6 +42,7 @@ pub type AttemptUsageSink =
 #[derive(Clone)]
 pub struct SamplerHandle {
     cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
+    accepting: Arc<AtomicBool>,
 }
 
 impl SamplerHandle {
@@ -45,7 +50,10 @@ impl SamplerHandle {
     /// only [`SamplerActor::spawn`](crate::actor::SamplerActor::spawn)
     /// produces one of these.
     pub(crate) fn new(cmd_tx: mpsc::UnboundedSender<SamplerCommand>) -> Self {
-        Self { cmd_tx }
+        Self {
+            cmd_tx,
+            accepting: Arc::new(AtomicBool::new(true)),
+        }
     }
 
     /// Create a no-op handle that discards all commands.
@@ -57,12 +65,25 @@ impl SamplerHandle {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         // Receiver is dropped immediately; sends will fail but every
         // send-site uses `let _ = ...` so that is fine.
-        Self { cmd_tx }
+        Self {
+            cmd_tx,
+            accepting: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Atomically reject new requests and ask the actor to stop.
+    pub fn close(&self) {
+        if self.accepting.swap(false, Ordering::AcqRel) {
+            let _ = self.cmd_tx.send(SamplerCommand::Shutdown);
+        }
     }
 
     /// Submit a sampling request. Fire-and-forget -- results arrive
     /// via the shared event channel.
     pub fn submit(&self, request_id: RequestId, request: ConversationRequest) {
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
         let _ = self.cmd_tx.send(SamplerCommand::Submit {
             request_id,
             request: Box::new(request),
@@ -81,6 +102,9 @@ impl SamplerHandle {
         request: ConversationRequest,
         config: SamplerConfig,
     ) {
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
         let _ = self.cmd_tx.send(SamplerCommand::Submit {
             request_id,
             request: Box::new(request),
@@ -139,6 +163,11 @@ impl SamplerHandle {
         request_id: RequestId,
         request: ConversationRequest,
     ) -> Result<(ConversationResponse, InferenceLatencyStats), SamplingError> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(SamplingError::auth_unknown(
+                "sampler actor is shutting down",
+            ));
+        }
         // RAII guard: when this future is dropped (cancel, panic, or normal return),
         // tell the sampler actor to cancel the in-flight request_id. No-op if the
         // actor already finished and removed it from its active set.
@@ -191,6 +220,11 @@ impl SamplerHandle {
         scope_capture: Option<AttemptScopeCapture>,
         usage_sink: Option<AttemptUsageSink>,
     ) -> Result<(sampling_types::ConversationResponse, InferenceLatencyStats), SamplingError> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(SamplingError::auth_unknown(
+                "sampler actor is shutting down",
+            ));
+        }
         struct CancelOnDrop {
             cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
             request_id: RequestId,

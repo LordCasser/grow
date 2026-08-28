@@ -394,7 +394,7 @@
     }
 
     #[test]
-    fn agent_changed_is_applied_after_an_unrelated_local_control_drains() {
+    fn agent_changed_is_not_blocked_by_an_unrelated_sampling_control() {
         let mut app = make_app_with_agent("sess-1");
         let token = app
             .agents
@@ -404,15 +404,18 @@
             .begin_model_switch_for_test();
 
         let notif = agent_changed_ext("sess-1", "reviewer");
-        assert!(!handle_ext_notification(&notif, &mut app));
-        assert_ne!(app.agents[&AgentId(0)].session.agent_name(), Some("reviewer"));
+        assert!(handle_ext_notification(&notif, &mut app));
+        assert_eq!(app.agents[&AgentId(0)].session.agent_name(), Some("reviewer"));
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert_eq!(
             agent.session.complete_control(token),
             crate::app::session::SessionControlCompletion::Drained
         );
-        assert!(apply_deferred_authoritative_controls(agent, "sess-1"));
+        assert!(
+            !apply_deferred_authoritative_controls(agent, "sess-1"),
+            "draining Sampling must not re-apply an Agent event that already committed"
+        );
         assert_eq!(agent.session.agent_name(), Some("reviewer"));
     }
 

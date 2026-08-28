@@ -388,14 +388,65 @@ pub struct ChatChoice {
     pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     Stop,
     Length,
     ToolCalls,
     ContentFilter,
     FunctionCall,
+    /// Provider extension outside the OpenAI-documented value set.
+    ///
+    /// Chat Completions is an interoperability boundary: compatible engines
+    /// may add terminal reasons without coordinating their schema with Grow.
+    /// Keep the exact wire value so the adapter can normalize it without
+    /// rejecting the entire response chunk.
+    Unknown(String),
+}
+
+impl FinishReason {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+            Self::FunctionCall => "function_call",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    pub fn unknown_value(&self) -> Option<&str> {
+        match self {
+            Self::Unknown(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for FinishReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FinishReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "stop" => Self::Stop,
+            "length" => Self::Length,
+            "tool_calls" => Self::ToolCalls,
+            "content_filter" => Self::ContentFilter,
+            "function_call" => Self::FunctionCall,
+            value => Self::Unknown(value.to_owned()),
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -945,6 +996,74 @@ impl From<crate::rs::CreateResponse> for CreateResponseWrapper {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn finish_reason_preserves_provider_extensions() {
+        let reason: FinishReason = serde_json::from_str("\"unexpected_state\"").unwrap();
+
+        assert_eq!(reason, FinishReason::Unknown("unexpected_state".to_owned()));
+        assert_eq!(reason.as_str(), "unexpected_state");
+        assert_eq!(reason.unknown_value(), Some("unexpected_state"));
+        assert_eq!(
+            serde_json::to_string(&reason).unwrap(),
+            "\"unexpected_state\""
+        );
+    }
+
+    #[test]
+    fn finish_reason_keeps_known_wire_values_canonical() {
+        for (wire, expected) in [
+            ("stop", FinishReason::Stop),
+            ("length", FinishReason::Length),
+            ("tool_calls", FinishReason::ToolCalls),
+            ("content_filter", FinishReason::ContentFilter),
+            ("function_call", FinishReason::FunctionCall),
+        ] {
+            let reason: FinishReason = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(reason, expected);
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn chat_stream_and_non_stream_responses_accept_extended_finish_reason() {
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+            "id": "chunk-1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "kimi-k2.7-code-highspeed",
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "done" },
+                "finish_reason": "unexpected_state"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            chunk.choices[0].finish_reason,
+            Some(FinishReason::Unknown("unexpected_state".to_owned()))
+        );
+
+        let response: ChatCompletionResponse = serde_json::from_value(json!({
+            "id": "response-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "kimi-k2.7-code-highspeed",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "done" },
+                "finish_reason": "unexpected_state"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some(FinishReason::Unknown("unexpected_state".to_owned()))
+        );
+    }
 
     #[test]
     fn reasoning_effort_serde_lowercase_round_trip() {

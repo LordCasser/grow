@@ -524,6 +524,7 @@ impl MvpAgent {
             active_child_sessions: Default::default(),
             activity,
             loading_sessions: RefCell::new(HashMap::new()),
+            session_lifecycle_gates: RefCell::new(HashMap::new()),
             retained_resources: RefCell::new(HashMap::new()),
             session_threads: RefCell::new(HashMap::new()),
             resident_roster_titles: RefCell::new(HashMap::new()),
@@ -617,45 +618,65 @@ impl MvpAgent {
             sessions = ?p.session_ids,
             "Client disconnected; detaching sessions (no-evict keystone)"
         );
-        let unloads = p
-            .session_ids
-            .iter()
-            .map(|sid| {
-                let id = acp::SessionId::new(sid.clone());
-                let handle = self.sessions.borrow().get(&id).cloned();
-                async move {
-                    let unloaded = match handle {
-                        Some(handle) => tokio::time::timeout(
-                            IDLE_UNLOAD_TIMEOUT,
-                            handle.unload_if_idle(),
-                        )
-                        .await
-                        .unwrap_or(false),
-                        None => false,
-                    };
-                    (id, unloaded)
-                }
-            });
-        let resolved = futures::future::join_all(unloads).await;
-        let mut kept_resident: usize = 0;
-        let mut unloaded: usize = 0;
-        for (id, actor_unloaded) in resolved {
-            if actor_unloaded && self.take_session(&id).is_some() {
-                self.resident_resources.borrow_mut().remove(&id);
-                self.set_session_live_state(&id, SessionLiveState::Dormant);
-                unloaded += 1;
-                tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
-            } else if self.sessions.borrow().contains_key(&id) {
-                self.set_session_live_state(&id, SessionLiveState::Working);
-                kept_resident += 1;
-                tracing::info!(
-                    session_id = %id.0,
-                    "kept session resident across client disconnect (live work)"
-                );
-            }
+        #[derive(Clone, Copy)]
+        enum EvictionOutcome {
+            Absent,
+            KeptResident,
+            Unloaded,
         }
+
+        let unloads = p.session_ids.iter().map(|sid| {
+            let id = acp::SessionId::new(sid.clone());
+            async move {
+                // Hold the same per-id transaction gate used by new/load/close
+                // from actor snapshot through acknowledgement and removal. An
+                // acknowledgement from an old actor incarnation must never
+                // remove a handle installed later for the same SessionId.
+                let _lifecycle_guard = self.lock_session_lifecycle(&id).await;
+                let Some(handle) = self.sessions.borrow().get(&id).cloned() else {
+                    return (id, EvictionOutcome::Absent);
+                };
+                let expected_actor = handle.cmd_tx.clone();
+                let actor_unloaded = tokio::time::timeout(
+                    IDLE_UNLOAD_TIMEOUT,
+                    handle.unload_if_idle(),
+                )
+                .await
+                .unwrap_or(false);
+                let is_same_incarnation = self
+                    .sessions
+                    .borrow()
+                    .get(&id)
+                    .is_some_and(|current| current.cmd_tx.same_channel(&expected_actor));
+
+                if actor_unloaded && is_same_incarnation && self.take_session(&id).is_some() {
+                    self.resident_resources.borrow_mut().remove(&id);
+                    self.set_session_live_state(&id, SessionLiveState::Dormant);
+                    tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
+                    (id, EvictionOutcome::Unloaded)
+                } else if self.sessions.borrow().contains_key(&id) {
+                    self.set_session_live_state(&id, SessionLiveState::Working);
+                    tracing::info!(
+                        session_id = %id.0,
+                        "kept session resident across client disconnect (live work)"
+                    );
+                    (id, EvictionOutcome::KeptResident)
+                } else {
+                    (id, EvictionOutcome::Absent)
+                }
+            }
+        });
+        let resolved = futures::future::join_all(unloads).await;
+        let kept_resident = resolved
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, EvictionOutcome::KeptResident))
+            .count();
+        let unloaded = resolved
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, EvictionOutcome::Unloaded))
+            .count();
         tracing::info!(kept_resident, unloaded, "client-disconnect detach complete");
-        self.sweep_dead_sessions();
+        self.sweep_dead_sessions().await;
     }
     /// Wait for an old session thread to finish before reloading the same session.
     ///
@@ -668,11 +689,25 @@ impl MvpAgent {
     ///
     /// Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline
     /// to handle slow shutdowns (e.g., embedding API timeouts).
-    pub(super) async fn drain_old_session_thread(&self, session_id: &acp::SessionId) {
-        let thread = self.session_threads.borrow_mut().remove(session_id);
-        let Some(thread) = thread else { return };
-        if thread.is_finished() {
-            return;
+    pub(super) async fn drain_old_session_thread(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Result<SessionThreadExit, String> {
+        let Some(is_finished) = self
+            .session_threads
+            .borrow()
+            .get(session_id)
+            .map(crate::session::SessionThread::is_finished)
+        else {
+            return Ok(SessionThreadExit::Absent);
+        };
+        if is_finished {
+            let thread = self
+                .session_threads
+                .borrow_mut()
+                .remove(session_id)
+                .expect("finished session thread remains registered");
+            return Ok(SessionThreadExit::from_join(thread.join()));
         }
         tracing::info!(
             session_id = %session_id.0,
@@ -680,20 +715,28 @@ impl MvpAgent {
         );
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if thread.is_finished() {
+            let finished = self
+                .session_threads
+                .borrow()
+                .get(session_id)
+                .is_none_or(crate::session::SessionThread::is_finished);
+            if finished {
+                let Some(thread) = self.session_threads.borrow_mut().remove(session_id) else {
+                    return Ok(SessionThreadExit::Absent);
+                };
+                let exit = SessionThreadExit::from_join(thread.join());
                 tracing::debug!(
                     session_id = %session_id.0,
-                    "Old session thread finished cleanly"
+                    ?exit,
+                    "Old session thread finished"
                 );
-                return;
+                return Ok(exit);
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "Old session thread still running after 5s — proceeding with replay. \
-                     Session data may be incomplete if the old actor is still writing."
-                );
-                return;
+                return Err(format!(
+                    "session {} is still shutting down; retry after its writer exits",
+                    session_id.0
+                ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -702,20 +745,37 @@ impl MvpAgent {
     ///
     /// Returns an RAII guard; while it is alive,
     /// [`Self::wait_for_in_flight_session_load`] blocks racing session-scoped
-    /// requests for the same session. Dropping the guard (every exit path of
-    /// `load_session`, success or error) removes the marker and wakes all
-    /// waiters via watch-channel closure.
+    /// requests for the same session. Concurrent loads share one marker and
+    /// each hold a lease, so cancellation or failure wakes waiters only after
+    /// the final queued/running load exits.
     pub(super) fn begin_session_load(
         &self,
         session_id: &acp::SessionId,
     ) -> SessionLoadGuard<'_> {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        self.loading_sessions.borrow_mut().insert(session_id.clone(), rx.clone());
+        let marker = {
+            let mut loading = self.loading_sessions.borrow_mut();
+            loading
+                .entry(session_id.clone())
+                .or_insert_with(|| {
+                    let (completion, _receiver) = tokio::sync::watch::channel(());
+                    std::rc::Rc::new(SessionLoadMarker {
+                        leases: std::cell::Cell::new(0),
+                        _completion: completion,
+                    })
+                })
+                .clone()
+        };
+        marker.leases.set(
+            marker
+                .leases
+                .get()
+                .checked_add(1)
+                .expect("Session load lease count cannot overflow"),
+        );
         SessionLoadGuard {
             agent: self,
             session_id: session_id.clone(),
-            rx,
-            _tx: tx,
+            marker,
         }
     }
     /// Session lookup that tolerates an in-flight `session/load`.
@@ -808,7 +868,11 @@ impl MvpAgent {
             if self.sessions.borrow().contains_key(session_id) {
                 return;
             }
-            let rx = self.loading_sessions.borrow().get(session_id).cloned();
+            let rx = self
+                .loading_sessions
+                .borrow()
+                .get(session_id)
+                .map(|marker| marker._completion.subscribe());
             let Some(mut rx) = rx else { return };
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -1850,7 +1914,20 @@ impl MvpAgent {
                 code_nav: client_code_nav_enabled,
                 git_head_changed,
             });
-            spawn_session_on_thread(
+            let registered_thread = std::cell::Cell::new(false);
+            let register_session_thread = |thread: crate::session::SessionThread| {
+                let displaced = self
+                    .session_threads
+                    .borrow_mut()
+                    .insert(session_info.id.clone(), thread);
+                debug_assert!(
+                    displaced.is_none(),
+                    "session lifecycle gate must drain the previous thread before spawn"
+                );
+                registered_thread.set(true);
+                self.ensure_session_supervisor();
+            };
+            let spawned = spawn_session_on_thread(
                     session_info.clone(),
                     crate::session::persistence::session_dir(&session_info),
                     self.gateway.clone(),
@@ -1939,8 +2016,13 @@ impl MvpAgent {
                     None,
                     None,
                     max_turns,
+                    Some(&register_session_thread),
                 )
-                .await?
+                .await;
+            if spawned.is_err() && registered_thread.get() {
+                self.session_threads.borrow_mut().remove(&session_info.id);
+            }
+            spawned?
         };
         self.session_threads
             .borrow_mut()

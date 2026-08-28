@@ -94,6 +94,7 @@ impl AgentTask {
         session: Arc<SessionActor>,
         prompt_id: String,
         origin: PromptOrigin,
+        host_command: Option<crate::session::HostCommandInvocation>,
         notification_ids: Vec<String>,
         turn_kind: crate::session::TurnKind,
         input: Vec<ContentBlock>,
@@ -129,29 +130,32 @@ impl AgentTask {
                 {
                     return;
                 }
-                TURN_DURABLE_START_ACK
-                    .scope(
-                        std::cell::RefCell::new(durable_start_ack),
-                        TURN_USAGE_EPOCH.scope(
-                            usage_epoch,
-                            run_task(
-                                session.clone(),
-                                input,
-                                admitted_behavior,
-                                client_identifier,
-                                screen_mode,
-                                verbatim,
-                                json_schema,
-                                pid,
-                                origin,
-                                notification_ids,
-                                turn_kind,
-                                completion_tx,
-                                persist_ack,
-                            ),
+                let task = TURN_DURABLE_START_ACK.scope(
+                    std::cell::RefCell::new(durable_start_ack),
+                    TURN_USAGE_EPOCH.scope(
+                        usage_epoch,
+                        run_task(
+                            session.clone(),
+                            input,
+                            admitted_behavior,
+                            client_identifier,
+                            screen_mode,
+                            verbatim,
+                            json_schema,
+                            pid,
+                            origin,
+                            notification_ids,
+                            turn_kind,
+                            completion_tx,
+                            persist_ack,
                         ),
-                    )
-                    .await
+                    ),
+                );
+                if let Some(invocation) = host_command {
+                    HOST_COMMAND_INVOCATION.scope(invocation, task).await
+                } else {
+                    task.await
+                }
             })
             .abort_handle(),
             steering_open: true,
@@ -210,6 +214,123 @@ impl<T> TaskSlot<T> {
             self.handle.set(Some(handle));
             running
         })
+    }
+
+    /// Abort the current owner and observe its terminal before returning.
+    /// Dropping a JoinHandle only detaches it, which is never a shutdown
+    /// barrier for a task that can still publish persistence or usage facts.
+    pub(crate) async fn abort_and_join(&self) -> Result<(), tokio::task::JoinError> {
+        let Some(handle) = self.take() else {
+            return Ok(());
+        };
+        handle.abort();
+        match handle.await {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Counts finite session-owned activities that run outside the foreground
+/// turn/control owner. Admission closes exactly once at teardown; a permit is
+/// acquired synchronously before `spawn_local`, eliminating spawn-before-flag
+/// races. The final owner drop wakes both explicit drain waiters and the main
+/// loop's graceful-shutdown readiness check.
+#[derive(Clone)]
+pub(crate) struct SessionActivityTracker {
+    inner: Arc<SessionActivityInner>,
+}
+
+struct SessionActivityInner {
+    accepting: std::sync::atomic::AtomicBool,
+    active: std::sync::atomic::AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+
+pub(crate) struct SessionActivityPermit {
+    inner: Arc<SessionActivityInner>,
+    label: &'static str,
+}
+
+impl SessionActivityTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(SessionActivityInner {
+                accepting: std::sync::atomic::AtomicBool::new(true),
+                active: std::sync::atomic::AtomicUsize::new(0),
+                changed: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn try_start(&self, label: &'static str) -> Option<SessionActivityPermit> {
+        use std::sync::atomic::Ordering;
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.active.fetch_add(1, Ordering::AcqRel);
+        if !self.inner.accepting.load(Ordering::Acquire) {
+            if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.inner.changed.notify_waiters();
+            }
+            return None;
+        }
+        Some(SessionActivityPermit {
+            inner: Arc::clone(&self.inner),
+            label,
+        })
+    }
+
+    /// Register nested work already owned by a foreground or detached activity.
+    /// This deliberately remains available after top-level admission closes:
+    /// an admitted owner and the inline SessionEnd finalizer must be able to
+    /// finish their Sideband ledger before the final persistence barrier.
+    pub(crate) fn start_nested(&self, label: &'static str) -> SessionActivityPermit {
+        self.inner
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        SessionActivityPermit {
+            inner: Arc::clone(&self.inner),
+            label,
+        }
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.inner
+            .accepting
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.inner.changed.notify_waiters();
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.inner.active.load(std::sync::atomic::Ordering::Acquire) == 0
+    }
+
+    pub(crate) async fn changed(&self) {
+        self.inner.changed.notified().await;
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            if self.is_idle() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for SessionActivityPermit {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let previous = self.inner.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "session activity permit underflow");
+        if previous == 1 {
+            self.inner.changed.notify_waiters();
+        }
+        tracing::trace!(activity = self.label, "session activity owner released");
     }
 }
 
@@ -493,6 +614,60 @@ impl SessionActor {
         trigger: Option<String>,
     ) -> Result<(), acp::Error> {
         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+        // Linearize foreground classification with Step/control transitions.
+        // The guard remains held through a real turn's terminal transaction;
+        // non-turn owners return without touching the prompt FIFO.
+        let _step_control_guard = self.step_control_gate.lock().await;
+        #[derive(Clone, Copy)]
+        enum NonTurnForeground {
+            Idle,
+            ApplyingControl,
+            Settling,
+            Compaction,
+        }
+        let non_turn = {
+            let state = self.state.lock().await;
+            match &state.foreground {
+                ForegroundState::RegularTurn(_) => None,
+                ForegroundState::Idle => Some(NonTurnForeground::Idle),
+                ForegroundState::ApplyingControl => Some(NonTurnForeground::ApplyingControl),
+                ForegroundState::Settling { .. } => Some(NonTurnForeground::Settling),
+                ForegroundState::Compaction => Some(NonTurnForeground::Compaction),
+            }
+        };
+        if let Some(non_turn) = non_turn {
+            if matches!(non_turn, NonTurnForeground::Compaction) {
+                self.compaction.cancel.request_cancel();
+            }
+            if cancel_subagents {
+                self.cancel_all_session_subagents();
+            }
+            if kill_background_tasks {
+                if self.startup_hints.is_subagent {
+                    self.agent
+                        .borrow()
+                        .tool_bridge()
+                        .kill_all_background_tasks_by_owner(&self.session_info.id.0)
+                        .await;
+                } else {
+                    self.agent
+                        .borrow()
+                        .tool_bridge()
+                        .kill_all_background_tasks()
+                        .await;
+                }
+            }
+            tracing::debug!(
+                foreground = match non_turn {
+                    NonTurnForeground::Idle => "idle",
+                    NonTurnForeground::ApplyingControl => "applying_control",
+                    NonTurnForeground::Settling => "settling",
+                    NonTurnForeground::Compaction => "compaction",
+                },
+                "Stop preserved the prompt FIFO because no regular turn owned it"
+            );
+            return Ok(());
+        }
         // Close the current provider-admission epoch before cancellation is
         // delivered. A sampler/Sideband that has not crossed its network edge
         // yet is rejected even if its task observes Stop later; the next turn
@@ -502,11 +677,19 @@ impl SessionActor {
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();
-        // A route/Agent transition has a durable fact followed by a live-state
-        // swap. Never abort the owning turn between those halves. This mutex is
-        // uncontended during ordinary sampling/tool execution, so Stop keeps
-        // its fast path while waiting only for the rare in-progress boundary.
-        let _step_control_guard = self.step_control_gate.lock().await;
+        // Linearize Stop against the causal Step boundary before aborting the
+        // producer. A control transaction owns this gate from its durable
+        // append through live-state swap and authoritative terminal receipt.
+        // The append-only UI projection is repairable after the gate opens. If
+        // preparation has not claimed the gate yet, abort leaves the desired
+        // control queued for the idle drain; if it has, Stop waits until the
+        // control can no longer be mistaken for in-flight.
+        {
+            let state = self.state.lock().await;
+            if let Some(task) = state.foreground.regular() {
+                task.abort();
+            }
+        }
         let already_settling = {
             let mut state = self.state.lock().await;
             let settling = matches!(&state.foreground, ForegroundState::Settling { .. });
@@ -569,17 +752,6 @@ impl SessionActor {
             );
         }
 
-        // Stop the producer before any terminal/resource cleanup. The task
-        // slot stays in foreground for prompt attribution and is taken below;
-        // abort is idempotent. Without this early edge, an ordinary Stop could
-        // still append provider output or launch another tool while the cancel
-        // path was preparing its durable TurnEnded terminal.
-        {
-            let state = self.state.lock().await;
-            if let Some(task) = state.foreground.regular() {
-                task.abort();
-            }
-        }
         // Compaction::Started is a causal child of the active Step. Aborting
         // the foreground future can otherwise strand it open and make the
         // following StepEnded/TurnEnded invalid. The Timeline owner decides

@@ -316,6 +316,43 @@ async fn cancel_in_flight_request_terminates_task() {
     server.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_shutdown_cancels_and_joins_in_flight_request() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let stream = stream::iter(vec![Ok::<_, std::convert::Infallible>(text_chunk_event(
+                "starting", false,
+            ))])
+            .chain(stream::pending());
+            Sse::new(stream)
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut owner = SamplerActor::spawn_owned(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let handle = owner.handle();
+    handle.submit(RequestId::from("req-shutdown"), user_request("hi"));
+    await_event_matching(
+        &mut event_rx,
+        |event| matches!(event, SamplingEvent::FirstToken { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("request must be active before shutdown");
+
+    tokio::time::timeout(Duration::from_secs(2), owner.shutdown())
+        .await
+        .expect("shutdown must not hang")
+        .expect("sampler actor must join");
+    while event_rx.recv().await.is_some() {}
+    server.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent requests
 // ---------------------------------------------------------------------------
@@ -951,4 +988,22 @@ async fn await_event_matching(
             Err(_) => return None,
         }
     }
+}
+
+#[tokio::test]
+async fn owned_sampler_shutdown_closes_clones_and_event_channel() {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut owner =
+        SamplerActor::spawn_owned(SamplerConfig::default(), RetryPolicy::default(), event_tx);
+    let stale_clone = owner.handle();
+
+    owner.shutdown().await.expect("sampler actor must join");
+
+    assert_eq!(stale_clone.active_count().await, 0);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("event channel must close promptly")
+            .is_none()
+    );
 }

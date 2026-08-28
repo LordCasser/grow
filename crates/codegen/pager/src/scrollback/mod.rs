@@ -30,9 +30,7 @@ pub mod wrappers;
 
 // Re-exports for convenience
 pub use block::{BlockContent, RenderBlock};
-pub use blocks::{
-    AgentMessageBlock, SystemMessageBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock,
-};
+pub use blocks::{AgentMessageBlock, NoticeBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock};
 pub use entry::{EntryId, ScrollbackEntry};
 pub use layout::HorizontalLayout;
 pub use link_map::{VisibleLink, VisibleLinkMap};

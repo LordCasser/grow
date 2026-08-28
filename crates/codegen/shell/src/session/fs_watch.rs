@@ -4,10 +4,11 @@
 //! decides which consumers exist, fans events through three explicit phases, and
 //! owns one `select!` loop (event hot path + debounced refresh).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
@@ -364,20 +365,15 @@ impl ClientNotify {
         }
     }
 
-    async fn send_initial_file_index(&self) {
+    async fn send_initial_file_index(
+        &self,
+        index: FileIndex,
+        build_elapsed_ms: u64,
+        cancelled: &AtomicBool,
+    ) {
         const FILE_INDEX_CHUNK_SIZE: usize = 500;
         let session_id = &self.session_id;
         let cwd = &self.cwd;
-
-        let (index_res, build_elapsed_ms) =
-            crate::timed!({ FileIndex::from_walk_with_options(cwd, WalkOptions::default()) });
-        let index = match index_res {
-            Ok(idx) => idx,
-            Err(e) => {
-                tracing::warn!("failed to build file index for {:?}: {:?}", cwd, e);
-                return;
-            }
-        };
 
         let total_entries = index.len();
         tracing::info!(
@@ -391,6 +387,10 @@ impl ClientNotify {
 
         let (_, send_elapsed_ms) = crate::timed!({
             for (chunk_idx, chunk) in entries.chunks(FILE_INDEX_CHUNK_SIZE).enumerate() {
+                if cancelled.load(Ordering::Acquire) {
+                    tracing::debug!("initial file index delivery cancelled");
+                    return;
+                }
                 let is_complete = chunk_idx == total_chunks - 1;
 
                 let files: Vec<serde_json::Value> = chunk
@@ -833,14 +833,119 @@ impl Drop for ResetOnDrop {
     }
 }
 
-/// RAII drop-guard: dropping closes the shutdown channel and cancels the loop.
 pub(crate) struct FsWatchHandle {
-    _shutdown_tx: mpsc::UnboundedSender<()>,
+    shutdown_tx: mpsc::UnboundedSender<()>,
+    initial_index_cancel: Arc<AtomicBool>,
+    initial_index_worker: Cell<Option<tokio::task::JoinHandle<()>>>,
+    watcher: Cell<Option<tokio::task::JoinHandle<()>>>,
+    refresh: Rc<RefCell<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+async fn join_fs_owner(
+    label: &'static str,
+    mut owner: tokio::task::JoinHandle<()>,
+) -> Option<String> {
+    match tokio::time::timeout(Duration::from_secs(3), &mut owner).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("{label} failed: {error}")),
+        Err(_) => {
+            owner.abort();
+            let _ = owner.await;
+            Some(format!("{label} did not stop within 3 seconds"))
+        }
+    }
+}
+
+impl FsWatchHandle {
+    /// Stop both the event loop and its single-flight refresh owner before the
+    /// Session persistence frontier. Merely dropping a JoinHandle detaches it,
+    /// so explicit join ownership is required for GitHead persistence.
+    pub(crate) async fn shutdown_and_join(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        self.initial_index_cancel.store(true, Ordering::Release);
+        let _ = self.shutdown_tx.send(());
+        if let Some(watcher) = self.watcher.take()
+            && let Some(error) = join_fs_owner("filesystem watcher", watcher).await
+        {
+            errors.push(error);
+        }
+        if let Some(initial_index) = self.initial_index_worker.take()
+            && let Some(error) = join_fs_owner("initial file index worker", initial_index).await
+        {
+            errors.push(error);
+        }
+        // Always drain the single-flight refresh, even when the watcher itself
+        // timed out. The refresh can emit GitHead persistence independently;
+        // returning early here would let it cross the final Session frontier.
+        let refresh = self.refresh.borrow_mut().take();
+        if let Some(refresh) = refresh
+            && let Some(error) = join_fs_owner("filesystem refresh", refresh).await
+        {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for FsWatchHandle {
+    fn drop(&mut self) {
+        self.initial_index_cancel.store(true, Ordering::Release);
+        let _ = self.shutdown_tx.send(());
+        if let Some(initial_index) = self.initial_index_worker.take() {
+            initial_index.abort();
+        }
+        if let Some(watcher) = self.watcher.take() {
+            watcher.abort();
+        }
+        if let Some(refresh) = self.refresh.borrow_mut().take() {
+            refresh.abort();
+        }
+    }
 }
 
 /// Spawn the watcher task; caller holds the handle for the session lifetime.
 pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
+    let initial_index_cancel = Arc::new(AtomicBool::new(false));
+    let (initial_index_worker, mut initial_index_rx, mut initial_index_start) = if plan
+        .client_notify
+        .as_ref()
+        .is_some_and(|client| client.mode == ClientFsMode::Index)
+    {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let cwd = plan.cwd.clone();
+        let cancel = Arc::clone(&initial_index_cancel);
+        let worker = tokio::task::spawn_local(async move {
+            if start_rx.await.is_err() || cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let started = std::time::Instant::now();
+            let walk_cancel = Arc::clone(&cancel);
+            let result = tokio::task::spawn_blocking(move || {
+                FileIndex::from_walk_with_options_cancelled(
+                    cwd,
+                    WalkOptions::default(),
+                    &walk_cancel,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()))
+            .map(|index| (index, started.elapsed().as_millis() as u64));
+            let _ = result_tx.send(result);
+        });
+        (Some(worker), Some(result_rx), Some(start_tx))
+    } else {
+        (None, None, None)
+    };
+    let refresh_owner = Rc::new(RefCell::new(None));
+    let refresh_owner_for_loop = Rc::clone(&refresh_owner);
+    let initial_index_cancel_for_watcher = Arc::clone(&initial_index_cancel);
     let cwd = plan.cwd.clone();
     let fs_config = plan.fs_config.clone();
     let send_index_at_start = plan
@@ -854,7 +959,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
         "fs-notify: starting FsEventSource"
     );
 
-    tokio::task::spawn_local(async move {
+    let watcher = tokio::task::spawn_local(async move {
         tokio::task::yield_now().await;
         let start_time = std::time::Instant::now();
 
@@ -886,8 +991,34 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
         };
 
         let mut events = source.subscribe();
-        if send_index_at_start && let Some(c) = &plan.client_notify {
-            c.send_initial_file_index().await;
+        if send_index_at_start
+            && let Some(c) = &plan.client_notify
+            && let Some(index_rx) = initial_index_rx.as_mut()
+        {
+            if let Some(start) = initial_index_start.take() {
+                let _ = start.send(());
+            }
+            let result = tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => return,
+                result = index_rx => result,
+            };
+            match result {
+                Ok(Ok((index, build_elapsed_ms)))
+                    if !initial_index_cancel_for_watcher.load(Ordering::Acquire) =>
+                {
+                    c.send_initial_file_index(
+                        index,
+                        build_elapsed_ms,
+                        &initial_index_cancel_for_watcher,
+                    )
+                    .await;
+                }
+                Ok(Err(error)) if !initial_index_cancel_for_watcher.load(Ordering::Acquire) => {
+                    tracing::warn!(%error, "failed to build initial file index");
+                }
+                _ => {}
+            }
         }
 
         let mut rebuild_codebase_graph = false;
@@ -926,12 +1057,17 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                             refreshing.set(true);
                             let fut = plan.refresh_future(rebuild);
                             let reset = ResetOnDrop(refreshing.clone());
-                            tokio::task::spawn_local(async move {
+                            let refresh = tokio::task::spawn_local(async move {
                                 // Reset on completion OR panic so a panicking refresh
                                 // can't wedge single-flight for the session's life.
                                 let _reset = reset;
                                 fut.await;
                             });
+                            if let Some(previous) =
+                                refresh_owner_for_loop.borrow_mut().replace(refresh)
+                            {
+                                debug_assert!(previous.is_finished());
+                            }
                         }
                     }
                 }
@@ -968,7 +1104,11 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
     });
 
     FsWatchHandle {
-        _shutdown_tx: shutdown_tx,
+        shutdown_tx,
+        initial_index_cancel,
+        initial_index_worker: Cell::new(initial_index_worker),
+        watcher: Cell::new(Some(watcher)),
+        refresh: refresh_owner,
     }
 }
 
@@ -978,7 +1118,100 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use workspace::file_system::FileIndexDelta;
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn shutdown_joins_all_fs_owners_even_when_each_times_out() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dropped = Arc::new(AtomicUsize::new(0));
+                let watcher_guard = DropCounter(Arc::clone(&dropped));
+                let initial_index_guard = DropCounter(Arc::clone(&dropped));
+                let refresh_guard = DropCounter(Arc::clone(&dropped));
+                let watcher = tokio::task::spawn_local(async move {
+                    let _guard = watcher_guard;
+                    std::future::pending::<()>().await;
+                });
+                let refresh = tokio::task::spawn_local(async move {
+                    let _guard = refresh_guard;
+                    std::future::pending::<()>().await;
+                });
+                let initial_index = tokio::task::spawn_local(async move {
+                    let _guard = initial_index_guard;
+                    std::future::pending::<()>().await;
+                });
+                let (shutdown_tx, _shutdown_rx) = mpsc::unbounded_channel();
+                let handle = FsWatchHandle {
+                    shutdown_tx,
+                    initial_index_cancel: Arc::new(AtomicBool::new(false)),
+                    initial_index_worker: Cell::new(Some(initial_index)),
+                    watcher: Cell::new(Some(watcher)),
+                    refresh: Rc::new(RefCell::new(Some(refresh))),
+                };
+                let shutdown =
+                    tokio::task::spawn_local(async move { handle.shutdown_and_join().await });
+
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(4)).await;
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(4)).await;
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(4)).await;
+                let error = shutdown
+                    .await
+                    .expect("shutdown task")
+                    .expect_err("both deliberately stuck owners must time out");
+
+                assert!(error.contains("filesystem watcher"));
+                assert!(error.contains("initial file index worker"));
+                assert!(error.contains("filesystem refresh"));
+                assert_eq!(
+                    dropped.load(Ordering::SeqCst),
+                    3,
+                    "every aborted filesystem owner must be joined before shutdown returns"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_reports_panicked_watcher_and_refresh_owners() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let watcher = tokio::task::spawn_local(async {
+                    panic!("watcher panic seam");
+                });
+                let refresh = tokio::task::spawn_local(async {
+                    panic!("refresh panic seam");
+                });
+                tokio::task::yield_now().await;
+                let (shutdown_tx, _shutdown_rx) = mpsc::unbounded_channel();
+                let handle = FsWatchHandle {
+                    shutdown_tx,
+                    initial_index_cancel: Arc::new(AtomicBool::new(false)),
+                    initial_index_worker: Cell::new(None),
+                    watcher: Cell::new(Some(watcher)),
+                    refresh: Rc::new(RefCell::new(Some(refresh))),
+                };
+
+                let error = handle
+                    .shutdown_and_join()
+                    .await
+                    .expect_err("owner panic must fail the persistence barrier");
+                assert!(error.contains("filesystem watcher failed"));
+                assert!(error.contains("filesystem refresh failed"));
+            })
+            .await;
+    }
 
     #[test]
     fn fs_event_to_delta_create() {

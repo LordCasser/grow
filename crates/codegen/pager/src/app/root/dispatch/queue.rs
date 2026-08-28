@@ -22,12 +22,17 @@ fn control_effect(
     control: PendingSessionControl,
 ) -> Effect {
     match control {
-        PendingSessionControl::Model { model_id, effort } => Effect::SwitchModel {
+        PendingSessionControl::Model {
+            model_id,
+            effort,
+            effort_patch,
+        } => Effect::SwitchModel {
             agent_id,
             session_id,
             control_token: token,
             model_id,
             effort,
+            effort_patch,
         },
         PendingSessionControl::Agent { agent_name } => Effect::SwitchAgent {
             agent_id,
@@ -50,9 +55,43 @@ pub(super) fn enqueue_model_control(
     session: &mut AgentSession,
     model_id: acp::ModelId,
     effort: Option<shell::sampling::types::ReasoningEffort>,
+    dispatch_now: bool,
 ) -> Vec<Effect> {
+    let control = PendingSessionControl::Model {
+        model_id,
+        effort,
+        effort_patch: false,
+    };
+    if !dispatch_now {
+        session.defer_control(control);
+        return Vec::new();
+    }
     session
-        .enqueue_control(PendingSessionControl::Model { model_id, effort })
+        .enqueue_control(control)
+        .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+        .into_iter()
+        .collect()
+}
+
+pub(super) fn enqueue_effort_control(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &mut AgentSession,
+    model_id: acp::ModelId,
+    effort: shell::sampling::types::ReasoningEffort,
+    dispatch_now: bool,
+) -> Vec<Effect> {
+    let control = PendingSessionControl::Model {
+        model_id,
+        effort: Some(effort),
+        effort_patch: true,
+    };
+    if !dispatch_now {
+        session.defer_control(control);
+        return Vec::new();
+    }
+    session
+        .enqueue_control(control)
         .map(|(token, control)| control_effect(agent_id, session_id, token, control))
         .into_iter()
         .collect()
@@ -63,26 +102,36 @@ pub(super) fn enqueue_agent_control(
     session_id: acp::SessionId,
     session: &mut AgentSession,
     agent_name: String,
+    dispatch_now: bool,
 ) -> Vec<Effect> {
+    let control = PendingSessionControl::Agent { agent_name };
+    if !dispatch_now {
+        session.defer_control(control);
+        return Vec::new();
+    }
     session
-        .enqueue_control(PendingSessionControl::Agent { agent_name })
+        .enqueue_control(control)
         .map(|(token, control)| control_effect(agent_id, session_id, token, control))
         .into_iter()
         .collect()
 }
 
-/// Enqueue an authoritative Behavior transition in the same per-session FIFO
-/// as model and Agent changes. The CurrentModeUpdate, rather than the RPC
-/// response, commits this control because the server may reject or require
-/// confirmation while returning a successful transport response.
+/// Publish a Behavior intent. CurrentModeUpdate commits the Behavior while the
+/// Shell's typed control projection owns pending/applying/terminal feedback.
 pub(super) fn enqueue_behavior_control(
     agent_id: AgentId,
     session_id: acp::SessionId,
     session: &mut AgentSession,
     mode: tools::types::BehaviorId,
+    dispatch_now: bool,
 ) -> Vec<Effect> {
+    let control = PendingSessionControl::Behavior { mode };
+    if !dispatch_now {
+        session.defer_control(control);
+        return Vec::new();
+    }
     session
-        .enqueue_control(PendingSessionControl::Behavior { mode })
+        .enqueue_control(control)
         .map(|(token, control)| control_effect(agent_id, session_id, token, control))
         .into_iter()
         .collect()
@@ -91,11 +140,23 @@ pub(super) fn enqueue_behavior_control(
 pub(crate) fn next_control_effect(
     agent_id: AgentId,
     session_id: acp::SessionId,
-    session: &AgentSession,
+    session: &mut AgentSession,
 ) -> Option<Effect> {
     session
-        .in_flight_control()
+        .claim_control_for_dispatch()
         .map(|(token, control)| control_effect(agent_id, session_id, token, control))
+}
+
+pub(crate) fn pending_control_effects(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    session: &mut AgentSession,
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    while let Some(effect) = next_control_effect(agent_id, session_id.clone(), session) {
+        effects.push(effect);
+    }
+    effects
 }
 
 fn page_flip_on_send() -> bool {

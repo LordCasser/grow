@@ -228,7 +228,7 @@ impl GoalUsageWindow {
         removed
     }
 
-    fn claim_attempt_settlement(&self, attempt_id: &str, tokens: Option<i64>) -> bool {
+    pub(super) fn claim_attempt_settlement(&self, attempt_id: &str, tokens: Option<i64>) -> bool {
         let mut state = self.state.lock();
         let Some(attempt) = state.pending_attempts.get_mut(attempt_id) else {
             return false;
@@ -437,6 +437,7 @@ impl SessionActor {
         goal_id: &str,
         tokens: i64,
     ) -> Result<bool, String> {
+        let _transaction = self.goal_transaction_gate.lock().await;
         let Some(previous) = self.goal_tracker.lock().snapshot().cloned() else {
             return Ok(false);
         };
@@ -475,6 +476,7 @@ impl SessionActor {
         &self,
         goal_id: &str,
     ) -> Result<bool, String> {
+        let _transaction = self.goal_transaction_gate.lock().await;
         let Some(previous) = self.goal_tracker.lock().snapshot().cloned() else {
             return Ok(false);
         };
@@ -819,7 +821,8 @@ impl SessionActor {
         behavior: crate::session::behavior::BehaviorSnapshot,
         goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> std::io::Result<()> {
-        let context = crate::session::behavior::behavior_transition_context(behavior.behavior());
+        let behavior_id = behavior.behavior();
+        let context = crate::session::behavior::behavior_transition_context(behavior_id);
         self.persist_control_snapshot_with_context_durably(
             behavior,
             goal,
@@ -829,6 +832,54 @@ impl SessionActor {
                 chat_state::ControlContextActivation::Transition,
                 sampling_types::ConversationItem::system_reminder(context),
             )),
+        )
+        .await
+    }
+
+    pub(super) async fn persist_behavior_transition_for_control_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
+        intent: crate::session::ControlIntent,
+    ) -> std::io::Result<()> {
+        let behavior_id = behavior.behavior();
+        let context = crate::session::behavior::behavior_transition_context(behavior_id);
+        self.persist_control_snapshot_with_contexts_and_receipt_durably(
+            behavior,
+            goal,
+            None,
+            vec![(
+                chat_state::ControlContextLayer::Behavior,
+                chat_state::ControlContextActivation::Transition,
+                sampling_types::ConversationItem::system_reminder(context),
+            )],
+            Some(crate::session::control::DurableControlReceipt {
+                domain: crate::extensions::notification::ControlDomain::Behavior,
+                intent,
+                target: crate::extensions::notification::ControlTarget::Behavior {
+                    behavior_id: behavior_id.as_id().to_owned(),
+                },
+            }),
+        )
+        .await
+    }
+
+    pub(super) async fn persist_applied_control_receipt_durably(
+        &self,
+        domain: crate::extensions::notification::ControlDomain,
+        target: crate::extensions::notification::ControlTarget,
+        intent: crate::session::ControlIntent,
+    ) -> std::io::Result<()> {
+        self.persist_control_snapshot_with_contexts_and_receipt_durably(
+            self.behavior.lock().snapshot(),
+            self.goal_tracker.lock().snapshot().cloned(),
+            None,
+            Vec::new(),
+            Some(crate::session::control::DurableControlReceipt {
+                domain,
+                intent,
+                target,
+            }),
         )
         .await
     }
@@ -887,6 +938,38 @@ impl SessionActor {
         .await
     }
 
+    pub(super) async fn persist_agent_transition_for_control_durably(
+        &self,
+        agent_name: &str,
+        role_prompt: Option<&str>,
+        capability_catalog: Option<&str>,
+        intent: crate::session::ControlIntent,
+    ) -> std::io::Result<()> {
+        let context = crate::session::control::agent_role_transition_context(
+            agent_name,
+            role_prompt,
+            capability_catalog,
+        );
+        self.persist_control_snapshot_with_contexts_and_receipt_durably(
+            self.behavior.lock().snapshot(),
+            self.goal_tracker.lock().snapshot().cloned(),
+            Some(agent_name),
+            vec![(
+                chat_state::ControlContextLayer::AgentRole,
+                chat_state::ControlContextActivation::Transition,
+                sampling_types::ConversationItem::system_reminder(context),
+            )],
+            Some(crate::session::control::DurableControlReceipt {
+                domain: crate::extensions::notification::ControlDomain::Agent,
+                intent,
+                target: crate::extensions::notification::ControlTarget::Agent {
+                    agent_name: agent_name.to_owned(),
+                },
+            }),
+        )
+        .await
+    }
+
     pub(super) async fn persist_goal_definition_transition_durably(
         &self,
         goal: crate::session::goal_tracker::GoalState,
@@ -915,6 +998,7 @@ impl SessionActor {
             ),
         >,
     ) -> std::io::Result<()> {
+        let _transaction = self.goal_transaction_gate.lock().await;
         let contexts = contexts
             .into_iter()
             .map(|(layer, context)| {
@@ -1014,6 +1098,28 @@ impl SessionActor {
             sampling_types::ConversationItem,
         )>,
     ) -> std::io::Result<()> {
+        self.persist_control_snapshot_with_contexts_and_receipt_durably(
+            behavior,
+            goal,
+            agent_name,
+            model_contexts,
+            None,
+        )
+        .await
+    }
+
+    async fn persist_control_snapshot_with_contexts_and_receipt_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
+        agent_name: Option<&str>,
+        model_contexts: Vec<(
+            chat_state::ControlContextLayer,
+            chat_state::ControlContextActivation,
+            sampling_types::ConversationItem,
+        )>,
+        applied_control: Option<crate::session::control::DurableControlReceipt>,
+    ) -> std::io::Result<()> {
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1021,9 +1127,10 @@ impl SessionActor {
         let agent_name = agent_name
             .map(str::to_owned)
             .unwrap_or_else(|| self.agent.borrow().definition().selector_identity());
-        let state = crate::session::control::SessionControlSnapshot::new(
+        let mut state = crate::session::control::SessionControlSnapshot::new(
             revision, agent_name, behavior, goal,
         );
+        state.applied_control = applied_control;
         let contexts = model_contexts
             .into_iter()
             .map(|(layer, activation, item)| chat_state::ControlContext {
@@ -1058,6 +1165,7 @@ impl SessionActor {
     /// Snapshot the only Goal state that is allowed to survive actor teardown,
     /// then let the caller issue the persistence barrier.
     pub(super) async fn checkpoint_goal_before_shutdown(&self) {
+        let _transaction = self.goal_transaction_gate.lock().await;
         if self.goal_tracker.lock().snapshot().is_none() {
             return;
         }

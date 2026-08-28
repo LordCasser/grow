@@ -1054,7 +1054,7 @@ pub(super) mod paste_key_tests {
         let toast_msg = agent
             .toast
             .as_ref()
-            .map(|(msg, _ticks)| msg.clone())
+            .map(|(msg, _ticks)| msg.message.clone())
             .unwrap_or_default();
         assert!(
             toast_msg.contains("Image limit reached"),
@@ -1635,7 +1635,7 @@ pub(super) mod paste_key_tests {
         let toast = agent
             .toast
             .as_ref()
-            .map(|(m, _)| m.clone())
+            .map(|(m, _)| m.message.clone())
             .unwrap_or_default();
         assert!(
             toast.starts_with("Copied")
@@ -1667,7 +1667,7 @@ pub(super) mod paste_key_tests {
             let toast = agent
                 .toast
                 .as_ref()
-                .map(|(m, _)| m.clone())
+                .map(|(m, _)| m.message.clone())
                 .unwrap_or_default();
             assert!(
                 toast.contains("not ready"),
