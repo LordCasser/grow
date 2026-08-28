@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `2.0.1`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `2.0.2`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -28,6 +28,21 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 扩展 | 支持项目/用户级 Agent、Skill、MCP、Hook、Plugin 和可替换 Marketplace；Web Search 通过用户配置的 MCP 提供。 |
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
+
+### 2.0.2 重点
+
+- TUI 提示收敛为 UI-only `Notice` 与临时 live status 两层：Fullscreen/Inline 在状态区原位更新，
+  Minimal 只把终态提交到原生 Scrollback；提示、命令结果和控制反馈不会混入模型上下文。
+- Model/effort 组成一个 Sampling 目标，Agent 与 Behavior 各自独立；每个域只保留最新 pending 目标。
+  Sampling 与 Agent 在下一次 step 边界生效，Behavior 保持原有 ownership、确认与 turn admission 语义。
+- 用户发起的 Model、effort、Agent、Behavior 切换现在都有明确的 pending 与终态反馈。Session resume、
+  初始化和自动恢复只水合权威状态，不再伪装成新的 “switched” 用户动作；断线前仍在途的真实请求会正常结算。
+- Subagent 完成、失败与取消使用独立不可变终态行，模型结果与主视图提示各投影一次；root、child、重连和
+  Minimal commit 使用同一事件身份去重。
+- 斜杠菜单增加用途分类，移除生产命令的全部 alias（保留扩展机制），回退只保留 `/rewind`。长文件路径
+  与链接显示 basename、跳转仍使用完整目标；CJK 多行选择与窄终端布局同步修正。
+
+版本级变更见 [2.0.2 release notes](crates/codegen/shell/changelogs/2.0.2.md)。
 
 ### 2.0.1 重点
 
@@ -65,21 +80,21 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-2.0.1-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-2.0.1-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-2.0.1-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-2.0.1-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-2.0.1-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-2.0.1-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-2.0.1-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-2.0.1-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-2.0.1-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-2.0.1-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-2.0.2-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-2.0.2-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-2.0.2-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-2.0.2-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-2.0.2-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-2.0.2-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-2.0.2-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-2.0.2-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-2.0.2-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-2.0.2-ohos-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=2.0.1
+GROW_VERSION=2.0.2
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
@@ -105,7 +120,7 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "2.0.1"
+$GrowVersion = "2.0.2"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
@@ -406,7 +421,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 2.0.1 发布准备
+## 2.0.2 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -424,20 +439,20 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=2.0.1 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+GROW_VERSION=2.0.2 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
   cargo build --locked --profile release-dist --features release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
 release commit 完成且工作区干净后，先创建本地 annotated tag，再用
-`scripts/validate-release.sh v2.0.1` 静态校验 tag/version、不可变 commit、平台矩阵、资产集合、
+`scripts/validate-release.sh v2.0.2` 静态校验 tag/version、不可变 commit、平台矩阵、资产集合、
 attestation 和 updater 契约。该门禁不模拟 GitHub Actions，也不进行跨平台编译；正式 workflow
 是唯一的发布执行机制。
 
 正式发布流程：
 
-1. 提交版本、lockfile、release notes 和文档，创建本地 annotated tag `v2.0.1`，运行
-   `scripts/validate-release.sh v2.0.1`。
+1. 提交版本、lockfile、release notes 和文档，创建本地 annotated tag `v2.0.2`，运行
+   `scripts/validate-release.sh v2.0.2`。
 2. 推送已验证的 tag，不要提前创建公开 Release；然后从默认分支手动运行
    [release workflow](.github/workflows/release.yml)，传入这个已有 tag。workflow checkout 精确 tag，
    但让 Cargo 缓存保留在默认分支作用域以供后续版本复用。

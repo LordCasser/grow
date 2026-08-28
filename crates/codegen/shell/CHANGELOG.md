@@ -1,5 +1,33 @@
 # Changelog
 
+# 2.0.2 — 2026-08-29
+
+## TUI feedback and projection
+
+- UI 提示收敛为类型化、UI-only Notice；Fullscreen/Inline 原位显示临时状态，Minimal 只把不可变终态
+  提交到原生 Scrollback。命令、控制与生命周期提示不再进入模型上下文。
+- Subagent 完成、失败和取消以独立终态事件追加；模型结果、主视图提示、实时接收与 Session 重放按稳定
+  event ID 各自 exactly-once。
+- 长文件路径显示 basename 但保留完整跳转目标；CJK 多行选项、窄终端 Slash 标签和 Minimal
+  live/committed 高度计算统一修正。
+
+## Session controls and resume
+
+- Sampling（完整 `provider/model + effort`）、Agent、Behavior 采用独立 latest-wins desired state。
+  Sampling 与 Agent 在下一 step 边界生效；Behavior 保留既有 ownership、确认和 turn admission 规则。
+- 用户切换获得明确 pending 与 Applied/Rejected 反馈。内部 load/startup/recovery 没有 `ControlIntent` 时
+  不发布伪控制事件；历史 control replay 静默水合，只有恢复中的真实本地在途 intent 会显示终态。
+- Root 与 child 使用相同控制、重连与反馈协议；Agent 切换只重投影相关上下文层，不重写 Timeline 历史。
+
+## Commands
+
+- Slash 菜单增加 Session、Control、Run、View、Settings、Extension 用途标签及独立来源元数据。
+- alias 机制保留，但生产内置命令不再注册 alias；删除 `/undo`，统一使用 `/rewind`。
+
+2.0.2 沿用 Timeline schema v21、Sideband schema v6 和 Trajectory schema v3，不新增 Session 迁移边界。
+
+完整发布说明见 [changelogs/2.0.2.md](changelogs/2.0.2.md)。
+
 # 2.0.1 — 2026-08-27
 
 > [!WARNING]

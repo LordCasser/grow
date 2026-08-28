@@ -2,9 +2,9 @@
 
 Type `/` in the prompt to open the command menu. It fuzzy-matches as you type, and picking a command runs it immediately.
 
-Commands come from two places: **shell builtins**, handled by the agent backend (shell), and **pager builtins**, handled by the TUI frontend (pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too.
+Commands come from pager and Shell builtins, enabled Skills, saved Workflows, and ACP extensions. They share one menu. Each row carries a purpose label — **SESSION**, **CONTROL**, **RUN**, **VIEW**, **SETTINGS**, or **EXTENSION** — while Skill and Workflow remain source metadata rather than a second command hierarchy.
 
-The menu lists canonical command names. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
+The menu lists canonical command names. Grow registers no production aliases; in particular, history rollback is `/rewind`, not `/undo`. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
 
 ---
 
@@ -150,6 +150,8 @@ Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan
 
 These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 
+Model and effort form one Sampling target; Agent and Behavior are separate control domains. If a domain is changed repeatedly before it applies, only the newest target remains pending. Sampling and Agent changes submitted during a running turn leave the current stream and tool batch untouched, then apply after `StepEnded` and before the next model step. Behavior keeps its own ownership, confirmation, and turn-admission rules. Fullscreen/inline show pending state in the footer; Minimal uses its live status line. Only the final applied or rejected user action becomes a transcript Notice. Loading or resuming a session silently hydrates the current values and does not print a new switch result.
+
 ### `/multiline`
 
 Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still steers the top queued prompt into the active turn.
@@ -173,6 +175,8 @@ Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on)
 Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grow` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
 
 A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grow says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
+
+Fullscreen and inline retain a mutable status/footer layer. Minimal instead writes final blocks into the terminal's native Scrollback, so pending and applying controls stay in the single live status line and are never committed as disposable history. Applied, rejected, cancelled, and Subagent-finished terminals are committed once; relaunching between render modes restores pending state from the Shell rather than inventing another result row.
 
 ### `/plan`
 

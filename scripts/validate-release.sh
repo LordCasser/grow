@@ -7,7 +7,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-release_tag="${1:-v2.0.1}"
+release_tag="${1:-v2.0.2}"
 release_workflow=".github/workflows/release.yml"
 build_workflow=".github/workflows/build-one.yml"
 
