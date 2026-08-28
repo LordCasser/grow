@@ -230,6 +230,6 @@ impl BlockContent for NoticeBlock {
     }
 
     fn is_groupable(&self) -> bool {
-        true
+        self.event_id.is_none()
     }
 }

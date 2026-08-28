@@ -1062,6 +1062,23 @@ fn slash_model_invalid_arg_produces_scrollback_error() {
     let effects = dispatch(Action::SendPrompt("/model nonexistent".into()), &mut app);
     assert!(effects.is_empty(), "error should not produce effects");
     assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback + 1);
+    let entry = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .scrollback
+        .entries_mut()
+        .last()
+        .unwrap();
+    let RenderBlock::Notice(notice) = &entry.block else {
+        panic!("slash error must render as a typed Notice");
+    };
+    assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Error);
+    assert_eq!(
+        notice.category,
+        crate::scrollback::blocks::NoticeCategory::Command
+    );
+    assert!(notice.details.is_some(), "errors need a recovery action");
     assert!(app.agents[&id].prompt.text().is_empty());
 }
 #[test]

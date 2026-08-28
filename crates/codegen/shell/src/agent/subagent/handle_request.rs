@@ -1505,6 +1505,23 @@ pub(crate) async fn run_shell_child(
         ctx.parent_cmd_tx.as_ref(),
     );
     completion_data.spawned_notification_emitted = true;
+    // SubagentSpawned creates the Pager child view. Publish the child's
+    // authoritative control snapshot before admitting its first prompt so
+    // subsequent step-boundary controls cannot race an unseeded view.
+    let (control_ack_tx, control_ack_rx) = oneshot::channel();
+    if child_handle
+        .cmd_tx
+        .send(SessionCommand::PublishControlState {
+            respond_to: control_ack_tx,
+        })
+        .is_err()
+        || control_ack_rx.await.is_err()
+    {
+        tracing::warn!(
+            child_session_id = %child_session_id.0,
+            "child ended before its initial control state was published"
+        );
+    }
     spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),

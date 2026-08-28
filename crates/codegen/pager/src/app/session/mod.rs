@@ -1903,10 +1903,10 @@ impl AgentSession {
             if update.receipt_only {
                 return ShellControlApplyOutcome::Rejected;
             }
-            // A live update from an unknown actor can otherwise erase the
-            // current projection and let a delayed packet from a restarted
-            // actor become authoritative. Epoch creation is reserved for an
-            // explicit load snapshot or the bounded replay window.
+            // Only an explicit snapshot (or the bounded load replay window)
+            // may establish or rotate authority. Accepting an arbitrary first
+            // live packet lets a delayed update from an old actor incarnation
+            // capture a freshly-created view that reuses the same session ID.
             if !allow_snapshot_reset && !update.snapshot {
                 tracing::debug!(
                     update_epoch = %update.epoch,
@@ -2120,31 +2120,83 @@ impl AgentSession {
     /// an ACP prompt. Both retained and minimal renderers consume this method.
     pub(crate) fn control_status(&self, width: usize) -> Option<String> {
         use shell::extensions::notification::{ControlDomain, ControlPhase, ControlTarget};
+        fn short_model(model_id: &str) -> &str {
+            model_id
+                .rsplit_once('/')
+                .map_or(model_id, |(_, model)| model)
+        }
+        fn behavior_label(behavior_id: &str) -> String {
+            tools::types::BehaviorId::try_from_id(behavior_id).map_or_else(
+                || behavior_id.to_string(),
+                |mode| mode.display_label().to_string(),
+            )
+        }
         let label = |domain| {
             let slot = self.shell_controls.slot(domain)?;
             if !matches!(slot.phase, ControlPhase::Pending | ControlPhase::Applying) {
                 return None;
             }
             let target = slot.desired.as_ref()?;
-            let text = match target {
-                ControlTarget::Sampling {
-                    model_id,
-                    reasoning_effort,
-                } => {
-                    let display = model_id
-                        .rsplit_once('/')
-                        .map_or(model_id.as_str(), |(_, model)| model);
+            let text = match (&slot.current, target) {
+                (
+                    ControlTarget::Sampling {
+                        model_id: current_model,
+                        reasoning_effort: current_effort,
+                    },
+                    ControlTarget::Sampling {
+                        model_id: desired_model,
+                        reasoning_effort: desired_effort,
+                    },
+                ) if current_model == desired_model && current_effort != desired_effort => format!(
+                    "effort {}→{}",
+                    current_effort.as_deref().unwrap_or("default"),
+                    desired_effort.as_deref().unwrap_or("default")
+                ),
+                (
+                    ControlTarget::Sampling {
+                        model_id: current_model,
+                        ..
+                    },
+                    ControlTarget::Sampling {
+                        model_id: desired_model,
+                        reasoning_effort,
+                    },
+                ) => {
+                    let current_short = short_model(current_model);
+                    let desired_short = short_model(desired_model);
+                    let (current_label, desired_label) =
+                        if current_model != desired_model && current_short == desired_short {
+                            (current_model.as_str(), desired_model.as_str())
+                        } else {
+                            (current_short, desired_short)
+                        };
+                    let transition = format!("model {}→{}", current_label, desired_label);
                     match reasoning_effort {
-                        Some(effort) => format!("model→{display} ({effort})"),
-                        None => format!("model→{display}"),
+                        Some(effort) => format!("{transition} ({effort})"),
+                        None => transition,
                     }
                 }
-                ControlTarget::Agent { agent_name } => format!("agent→{agent_name}"),
-                ControlTarget::Behavior { behavior_id } => {
-                    let display = tools::types::BehaviorId::try_from_id(behavior_id)
-                        .map_or(behavior_id.as_str(), |mode| mode.display_label());
-                    format!("behavior→{display}")
-                }
+                (
+                    ControlTarget::Agent {
+                        agent_name: current,
+                    },
+                    ControlTarget::Agent {
+                        agent_name: desired,
+                    },
+                ) => format!("agent {current}→{desired}"),
+                (
+                    ControlTarget::Behavior {
+                        behavior_id: current,
+                    },
+                    ControlTarget::Behavior {
+                        behavior_id: desired,
+                    },
+                ) => format!(
+                    "behavior {}→{}",
+                    behavior_label(current),
+                    behavior_label(desired)
+                ),
+                _ => return None,
             };
             Some(
                 if slot.phase == ControlPhase::Applying
@@ -2171,7 +2223,12 @@ impl AgentSession {
                 if UnicodeWidthStr::width(verbose.as_str()) <= width {
                     Some(verbose)
                 } else {
-                    Some(format!("{} changes pending", parts.len()))
+                    let noun = if parts.len() == 1 {
+                        "change"
+                    } else {
+                        "changes"
+                    };
+                    Some(format!("{} {noun} pending", parts.len()))
                 }
             }
         }
@@ -3716,9 +3773,9 @@ mod tests {
         ));
 
         let wide = s.control_status(100).expect("pending status");
-        assert!(wide.contains("model→new (high)"), "{wide}");
-        assert!(wide.contains("agent→reviewer"), "{wide}");
-        assert!(wide.contains("behavior→Goal"), "{wide}");
+        assert!(wide.contains("model old→new (high)"), "{wide}");
+        assert!(wide.contains("agent builder→reviewer"), "{wide}");
+        assert!(wide.contains("behavior Normal→Goal"), "{wide}");
         assert_eq!(s.control_status(40).as_deref(), Some("3 changes pending"));
         s.set_live_feedback(
             "compaction",
@@ -3769,7 +3826,7 @@ mod tests {
             .phase_since = Instant::now() - Duration::from_millis(301);
         assert_eq!(
             s.control_status(100).as_deref(),
-            Some("applying agent→reviewer")
+            Some("applying agent builder→reviewer")
         );
         assert!(
             !s.apply_shell_control_state(update(1, ControlPhase::Applied, Some("stale")), false)
@@ -3782,6 +3839,72 @@ mod tests {
         );
         assert!(s.apply_shell_control_state(update(2, ControlPhase::Applied, None), false));
         assert_eq!(s.control_status(100), None);
+    }
+
+    #[test]
+    fn shell_control_status_describes_effort_only_transition() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        assert!(s.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Sampling,
+                revision: 1,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Sampling {
+                    model_id: "provider/model".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                desired: Some(ControlTarget::Sampling {
+                    model_id: "provider/model".into(),
+                    reasoning_effort: Some("max".into()),
+                }),
+                message: None,
+            },
+            false,
+        ));
+        assert_eq!(s.control_status(100).as_deref(), Some("effort high→max"));
+        assert_eq!(s.control_status(5).as_deref(), Some("1 change pending"));
+    }
+
+    #[test]
+    fn shell_control_status_preserves_provider_when_model_names_match() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut s = test_session();
+        assert!(s.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Sampling,
+                revision: 1,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Sampling {
+                    model_id: "bigmodel/glm-5.3".into(),
+                    reasoning_effort: None,
+                },
+                desired: Some(ControlTarget::Sampling {
+                    model_id: "volcengine/glm-5.3".into(),
+                    reasoning_effort: None,
+                }),
+                message: None,
+            },
+            false,
+        ));
+        assert_eq!(
+            s.control_status(100).as_deref(),
+            Some("model bigmodel/glm-5.3→volcengine/glm-5.3")
+        );
     }
 
     #[test]
@@ -3877,7 +4000,7 @@ mod tests {
     }
 
     #[test]
-    fn control_epoch_requires_snapshot_for_a_new_live_epoch() {
+    fn control_epoch_bootstraps_once_then_requires_snapshot_to_rotate() {
         use shell::extensions::notification::{
             ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
         };
@@ -3898,6 +4021,19 @@ mod tests {
                 message: Some(format!("Agent switched to {agent_name}")),
             };
         let mut session = test_session();
+
+        assert!(
+            !session
+                .apply_shell_control_state(update("stale", 1, false, false, "stale-agent"), false,),
+            "a fresh view must not let an arbitrary live packet establish authority"
+        );
+        assert!(
+            session.apply_shell_control_state(update("epoch-a", 1, true, false, "a-agent"), false,)
+        );
+        assert_eq!(
+            session.shell_controls.active_epoch.as_deref(),
+            Some("epoch-a")
+        );
 
         assert!(
             session.apply_shell_control_state(update("epoch-b", 7, true, false, "b-agent"), false)

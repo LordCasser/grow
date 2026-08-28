@@ -14,7 +14,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::{AgentCommand, AgentId, AgentState};
 use crate::scrollback::block::RenderBlock;
-use crate::scrollback::blocks::SessionEvent;
+use crate::scrollback::blocks::{NoticeCategory, NoticeTone, SessionEvent};
 use crate::slash::command::DoctorRequest;
 use agent_client_protocol as acp;
 use diagnostics::session_ctx::log_event;
@@ -600,14 +600,24 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::notice(msg));
+                agent.scrollback.push_block(RenderBlock::typed_notice(
+                    NoticeTone::Error,
+                    NoticeCategory::Command,
+                    msg,
+                    Some("Correct the reported issue and retry the command.".into()),
+                ));
                 return vec![];
             }
             CommandResult::Message(msg) => {
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::notice(msg));
+                agent.scrollback.push_block(RenderBlock::typed_notice(
+                    NoticeTone::Info,
+                    NoticeCategory::Command,
+                    msg,
+                    None,
+                ));
                 return vec![];
             }
             CommandResult::Doctor(request) => {

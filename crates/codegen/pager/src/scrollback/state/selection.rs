@@ -1000,6 +1000,17 @@ mod tests {
             RenderBlock::notice("sys").is_groupable(),
             "System should be groupable"
         );
+        assert!(
+            !RenderBlock::terminal_notice(
+                "event-1",
+                crate::scrollback::blocks::NoticeTone::Success,
+                crate::scrollback::blocks::NoticeCategory::Control,
+                "Agent switched to reviewer",
+                None,
+            )
+            .is_groupable(),
+            "durable terminal notices must remain independently visible"
+        );
     }
 
     // -----------------------------------------------------------------------

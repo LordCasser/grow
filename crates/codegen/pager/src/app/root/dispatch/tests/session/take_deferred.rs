@@ -1,7 +1,8 @@
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::app::root::dispatch::session::lifecycle::{
-    DeferredSwitchOutcome, take_deferred_model_switch,
+    DeferredSwitchOutcome, apply_deferred_switch_outcome, take_deferred_model_switch,
 };
+use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
 use shell::sampling::types::ReasoningEffort;
 use std::sync::Arc;
@@ -208,5 +209,40 @@ fn effort_only_errors_without_active_model() {
             switch: None,
             effort_error: Some(EffortTokenError::NoActiveModel),
         }
+    );
+}
+
+#[test]
+fn deferred_effort_error_uses_one_typed_control_notice() {
+    let mut app = super::super::test_app_with_agent();
+    let agent = app
+        .agents
+        .get_mut(&crate::app::session::AgentId(0))
+        .unwrap();
+    let initial_scrollback = agent.scrollback.len();
+
+    assert_eq!(
+        apply_deferred_switch_outcome(
+            agent,
+            DeferredSwitchOutcome {
+                switch: None,
+                effort_error: Some(EffortTokenError::Unsupported),
+            },
+        ),
+        None
+    );
+    assert_eq!(agent.scrollback.len(), initial_scrollback + 1);
+    assert!(
+        agent.toast.is_none(),
+        "the same failure must not also become a toast"
+    );
+    let entry = agent.scrollback.entries_mut().last().unwrap();
+    let RenderBlock::Notice(notice) = &entry.block else {
+        panic!("effort failure must render as a typed Notice");
+    };
+    assert_eq!(notice.tone, crate::scrollback::blocks::NoticeTone::Error);
+    assert_eq!(
+        notice.category,
+        crate::scrollback::blocks::NoticeCategory::Control
     );
 }

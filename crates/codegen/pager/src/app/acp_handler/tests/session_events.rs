@@ -87,7 +87,7 @@
                 domain: ControlDomain::Sampling,
                 revision,
                 intent: None,
-                snapshot: revision == 1,
+                snapshot: false,
                 receipt_only: false,
                 phase,
                 current: ControlTarget::Sampling {
@@ -101,6 +101,27 @@
                 message: message.map(str::to_owned),
             })
         };
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "epoch-a".into(),
+                    domain: ControlDomain::Sampling,
+                    revision: 0,
+                    intent: None,
+                    snapshot: true,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: ControlTarget::Sampling {
+                        model_id: "provider/old".into(),
+                        reasoning_effort: None,
+                    },
+                    desired: None,
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
         assert!(handle(
             make_ext_session_notification(
                 "s1",
@@ -122,7 +143,7 @@
         );
         assert_eq!(
             app.agents[&AgentId(0)].session.control_status(100).as_deref(),
-            Some("model→final (high)")
+            Some("model old→final (high)")
         );
 
         assert!(handle(
@@ -156,6 +177,143 @@
             "stale terminal projection must be ignored"
         );
         assert_eq!(app.agents[&AgentId(0)].scrollback.len(), committed);
+    }
+
+    #[test]
+    fn fresh_session_commits_terminal_feedback_for_every_control_domain() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("s1");
+        assert!(handle(
+            make_ext_session_notification(
+                "s1",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "fresh-epoch".into(),
+                    domain: ControlDomain::Sampling,
+                    revision: 0,
+                    intent: None,
+                    snapshot: true,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: ControlTarget::Sampling {
+                        model_id: "provider/old".into(),
+                        reasoning_effort: None,
+                    },
+                    desired: None,
+                    message: None,
+                }),
+            ),
+            &mut app,
+        ));
+        let updates = [
+            (
+                ControlDomain::Sampling,
+                ControlTarget::Sampling {
+                    model_id: "provider/new".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                "Sampling switched to provider/new (high)",
+            ),
+            (
+                ControlDomain::Agent,
+                ControlTarget::Agent {
+                    agent_name: "reviewer".into(),
+                },
+                "Agent switched to reviewer",
+            ),
+            (
+                ControlDomain::Behavior,
+                ControlTarget::Behavior {
+                    behavior_id: "goal".into(),
+                },
+                "Behavior switched to goal",
+            ),
+        ];
+
+        for (index, (domain, target, message)) in updates.into_iter().enumerate() {
+            assert!(handle(
+                make_ext_session_notification(
+                    "s1",
+                    GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                        epoch: "fresh-epoch".into(),
+                        domain,
+                        revision: 1,
+                        intent: None,
+                        snapshot: false,
+                        receipt_only: false,
+                        phase: ControlPhase::Applied,
+                        current: target.clone(),
+                        desired: Some(target),
+                        message: Some(message.into()),
+                    }),
+                ),
+                &mut app,
+            ));
+            assert_eq!(
+                app.agents[&AgentId(0)].scrollback.len(),
+                index + 1,
+                "each terminal control fact must append one visible Notice"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_assignment_snapshot_seeds_epoch_before_new_session_response() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("placeholder");
+        let agent_id = AgentId(0);
+        app.agents.get_mut(&agent_id).unwrap().session.session_id = None;
+        let snapshot = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+            epoch: "new-actor".into(),
+            domain: ControlDomain::Agent,
+            revision: 0,
+            intent: None,
+            snapshot: true,
+            receipt_only: false,
+            phase: ControlPhase::Applied,
+            current: ControlTarget::Agent {
+                agent_name: "builder".into(),
+            },
+            desired: None,
+            message: None,
+        });
+        assert!(handle(
+            make_ext_session_notification("fresh-session", snapshot),
+            &mut app,
+        ));
+
+        app.agents
+            .get_mut(&agent_id)
+            .unwrap()
+            .bind_session_id(acp::SessionId::new("fresh-session"));
+        assert!(handle(
+            make_ext_session_notification(
+                "fresh-session",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "new-actor".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 1,
+                    intent: None,
+                    snapshot: false,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: ControlTarget::Agent {
+                        agent_name: "reviewer".into(),
+                    },
+                    desired: Some(ControlTarget::Agent {
+                        agent_name: "reviewer".into(),
+                    }),
+                    message: Some("Agent switched to reviewer".into()),
+                }),
+            ),
+            &mut app,
+        ));
+        assert_eq!(app.agents[&agent_id].scrollback.len(), 1);
     }
 
     #[test]
@@ -228,7 +386,7 @@
         ));
         assert_eq!(
             app.agents[&AgentId(0)].session.control_status(100).as_deref(),
-            Some("agent→new-target"),
+            Some("agent builder→new-target"),
             "a historical receipt must not replace the live desired projection"
         );
 
@@ -953,12 +1111,31 @@
         agent
             .subagent_views
             .insert(child_sid.into(), Box::new(make_agent(Some(child_sid))));
+        assert!(handle_child_session_notification(
+            GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Agent,
+                revision: 0,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Applied,
+                current: ControlTarget::Agent {
+                    agent_name: "builder".into(),
+                },
+                desired: None,
+                message: None,
+            }),
+            child_sid,
+            None,
+            &mut agent,
+        ));
         let update = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
             epoch: "epoch-a".into(),
             domain: ControlDomain::Agent,
             revision: 7,
             intent: None,
-            snapshot: true,
+            snapshot: false,
             receipt_only: false,
             phase: ControlPhase::Applied,
             current: ControlTarget::Agent {

@@ -191,7 +191,7 @@ pub struct TurnStatusArgs<'a> {
     pub flat_background: bool,
     pub held_queue: usize,
     pub held_queue_top_sendable: bool,
-    /// Presentation-only pending control summary (`model→… · agent→…`).
+    /// Presentation-only pending control summary (`model old→new · agent old→new`).
     pub control_status: Option<&'a str>,
 }
 

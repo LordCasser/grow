@@ -484,6 +484,27 @@ impl acp::Agent for MvpAgent {
         };
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
+        // Establish the actor incarnation before any ordinary control update
+        // can reach the client. Pager deliberately accepts only a snapshot as
+        // the first epoch-bearing fact, so a delayed packet from an older
+        // actor cannot capture a fresh view that reuses this session ID.
+        let control_tx = self
+            .control_session_handle(&session_id)
+            .map(|handle| handle.cmd_tx)
+            .ok_or_else(|| acp::Error::internal_error().data("new session actor missing"))?;
+        let (control_ack_tx, control_ack_rx) = tokio::sync::oneshot::channel();
+        control_tx
+            .send(SessionCommand::PublishControlState {
+                respond_to: control_ack_tx,
+            })
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("Session actor ended before initial control state publication")
+            })?;
+        control_ack_rx.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("Session actor ended while publishing initial control state")
+        })?;
         {
             let sid = session_id.0.to_string();
             let ci = client_identifier.clone();

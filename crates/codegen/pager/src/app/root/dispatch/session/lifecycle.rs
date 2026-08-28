@@ -106,8 +106,12 @@ pub(crate) fn apply_deferred_switch_outcome(
     if let Some(err) = outcome.effort_error {
         let msg = format!("--reasoning-effort: {}", err.message());
         tracing::warn!("{msg}");
-        agent.show_toast(&msg);
-        agent.scrollback.push_block(RenderBlock::notice(msg));
+        agent.scrollback.push_block(RenderBlock::typed_notice(
+            NoticeTone::Error,
+            NoticeCategory::Control,
+            msg,
+            Some("Choose an effort supported by the selected model and retry.".into()),
+        ));
     }
     outcome.switch
 }
