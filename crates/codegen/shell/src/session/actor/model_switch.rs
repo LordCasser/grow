@@ -139,6 +139,15 @@ impl SessionActor {
         message: Option<String>,
         durable: bool,
     ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        // Control feedback belongs to a client-authored intent. Session load,
+        // startup routing, and automatic recovery reuse the same atomic
+        // transition machinery with no intent; publishing those projections
+        // would turn state hydration into a fake user-visible switch on every
+        // resume. Their authoritative values are projected separately through
+        // ModelChanged, AgentChanged, CurrentModeUpdate, and load snapshots.
+        if projection.intent.is_none() {
+            return Ok(());
+        }
         let domain = projection.target.domain();
         let update = GrowSessionUpdate::ControlStateUpdate(
             crate::extensions::notification::ControlStateUpdate {
@@ -239,12 +248,16 @@ impl SessionActor {
             [ControlDomain::Sampling, ControlDomain::Agent]
                 .into_iter()
                 .map(|domain| {
-                    let pending = admission.pending_step_controls.domain_projection(domain);
+                    let pending = admission
+                        .pending_step_controls
+                        .domain_projection(domain)
+                        .filter(|projection| projection.intent.is_some());
                     let applying = admission
                         .applying_step_control
                         .as_ref()
                         .filter(|projection| projection.target.domain() == domain)
                         .cloned();
+                    let applying = applying.filter(|projection| projection.intent.is_some());
                     let (projection, phase) = match (pending, applying) {
                         (Some(pending), Some(applying))
                             if applying.revision >= pending.revision =>
@@ -287,35 +300,39 @@ impl SessionActor {
             ))
             .await;
         }
-        let (behavior_revision, behavior_phase, behavior_projection) =
-            {
-                let admission = self.state.lock().await;
-                let pending = admission.pending_behavior_control.as_ref().map(|pending| {
-                    StepControlProjection {
-                        revision: pending.revision,
-                        target: crate::extensions::notification::ControlTarget::Behavior {
-                            behavior_id: pending.session_mode.0.to_string(),
-                        },
-                        intent: pending.intent.clone(),
-                    }
+        let (behavior_revision, behavior_phase, behavior_projection) = {
+            let admission = self.state.lock().await;
+            let pending = admission
+                .pending_behavior_control
+                .as_ref()
+                .filter(|pending| pending.intent.is_some())
+                .map(|pending| StepControlProjection {
+                    revision: pending.revision,
+                    target: crate::extensions::notification::ControlTarget::Behavior {
+                        behavior_id: pending.session_mode.0.to_string(),
+                    },
+                    intent: pending.intent.clone(),
                 });
-                let applying = admission.applying_behavior_control.clone();
-                let (projection, phase) = match (pending, applying) {
-                    (Some(pending), Some(applying)) if applying.revision >= pending.revision => {
-                        (Some(applying), ControlPhase::Applying)
-                    }
-                    (Some(pending), _) => (Some(pending), ControlPhase::Pending),
-                    (None, Some(applying)) => (Some(applying), ControlPhase::Applying),
-                    (None, None) => (None, ControlPhase::Applied),
-                };
-                (
-                    projection
-                        .as_ref()
-                        .map_or(admission.behavior_control_revision, |p| p.revision),
-                    phase,
-                    projection,
-                )
+            let applying = admission
+                .applying_behavior_control
+                .clone()
+                .filter(|projection| projection.intent.is_some());
+            let (projection, phase) = match (pending, applying) {
+                (Some(pending), Some(applying)) if applying.revision >= pending.revision => {
+                    (Some(applying), ControlPhase::Applying)
+                }
+                (Some(pending), _) => (Some(pending), ControlPhase::Pending),
+                (None, Some(applying)) => (Some(applying), ControlPhase::Applying),
+                (None, None) => (None, ControlPhase::Applied),
             };
+            (
+                projection
+                    .as_ref()
+                    .map_or(admission.behavior_control_revision, |p| p.revision),
+                phase,
+                projection,
+            )
+        };
         self.send_transient_grow_notification(GrowSessionUpdate::ControlStateUpdate(
             ControlStateUpdate {
                 epoch: self.control_epoch.clone(),
@@ -2283,6 +2300,95 @@ impl SessionActor {
 mod tests {
     use super::*;
     use crate::session::events::Event;
+
+    #[tokio::test]
+    async fn internal_control_transition_does_not_publish_ui_feedback() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let projection = StepControlProjection {
+                    revision: 1,
+                    target: crate::extensions::notification::ControlTarget::Sampling {
+                        model_id: "provider/restored".into(),
+                        reasoning_effort: Some("high".into()),
+                    },
+                    intent: None,
+                };
+
+                actor
+                    .publish_control_projection(
+                        &projection,
+                        crate::extensions::notification::ControlPhase::Applied,
+                        Some("Sampling switched to provider/restored (high)".into()),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+
+                assert!(
+                    gateway_rx.try_recv().is_err(),
+                    "session restoration must not emit a user control notification"
+                );
+
+                let user_projection = StepControlProjection {
+                    intent: Some(crate::session::ControlIntent {
+                        client_id: "pager".into(),
+                        generation: 1,
+                        sequence: 1,
+                    }),
+                    ..projection.clone()
+                };
+                actor
+                    .publish_control_projection(
+                        &user_projection,
+                        crate::extensions::notification::ControlPhase::Pending,
+                        None,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    gateway_rx.try_recv().is_ok(),
+                    "a client-authored control must retain live feedback"
+                );
+
+                while gateway_rx.try_recv().is_ok() {}
+                actor.state.lock().await.applying_step_control = Some(projection);
+                actor.publish_control_state_snapshot().await;
+                let sampling_snapshot = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                    .filter_map(|message| {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            return None;
+                        };
+                        serde_json::from_str::<
+                            crate::extensions::notification::SessionNotification,
+                        >(args.request.params.get())
+                        .ok()
+                    })
+                    .find_map(|notification| {
+                        let crate::extensions::notification::SessionUpdate::ControlStateUpdate(
+                            update,
+                        ) = notification.update
+                        else {
+                            return None;
+                        };
+                        (update.domain == crate::extensions::notification::ControlDomain::Sampling)
+                            .then_some(update)
+                    })
+                    .expect("Sampling snapshot");
+                assert!(sampling_snapshot.snapshot);
+                assert_eq!(
+                    sampling_snapshot.phase,
+                    crate::extensions::notification::ControlPhase::Applied
+                );
+                assert!(
+                    sampling_snapshot.desired.is_none(),
+                    "internal restoration must not leak into reconnect pending state"
+                );
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn applied_control_receipt_is_terminal_before_ui_repair() {

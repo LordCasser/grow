@@ -260,6 +260,127 @@
     }
 
     #[test]
+    fn clean_resume_hydrates_control_terminals_without_new_notices() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("s1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+        let updates = [
+            (
+                ControlDomain::Sampling,
+                ControlTarget::Sampling {
+                    model_id: "provider/model".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                "Sampling switched to provider/model (high)",
+            ),
+            (
+                ControlDomain::Agent,
+                ControlTarget::Agent {
+                    agent_name: "reviewer".into(),
+                },
+                "Agent switched to reviewer",
+            ),
+            (
+                ControlDomain::Behavior,
+                ControlTarget::Behavior {
+                    behavior_id: "goal".into(),
+                },
+                "Behavior switched to goal",
+            ),
+        ];
+
+        for (revision, (domain, target, message)) in updates.into_iter().enumerate() {
+            assert!(handle(
+                make_replayed_ext_session_notification(
+                    "s1",
+                    &format!("replayed-control-{revision}"),
+                    GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                        epoch: "resume-epoch".into(),
+                        domain,
+                        revision: revision as u64,
+                        intent: None,
+                        snapshot: false,
+                        receipt_only: false,
+                        phase: ControlPhase::Applied,
+                        current: target.clone(),
+                        desired: Some(target),
+                        message: Some(message.into()),
+                    }),
+                ),
+                &mut app,
+            ));
+        }
+
+        assert_eq!(
+            app.agents[&AgentId(0)].scrollback.len(),
+            0,
+            "historical control receipts hydrate state but are not new user feedback"
+        );
+    }
+
+    #[test]
+    fn replayed_terminal_still_notifies_when_it_settles_local_intent() {
+        use crate::app::session::PendingSessionControl;
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut app = make_app_with_agent("s1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .loading_replay = true;
+        let (token, _) = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .enqueue_control(PendingSessionControl::Agent {
+                agent_name: "reviewer".into(),
+            })
+            .expect("control intent");
+
+        assert!(handle(
+            make_replayed_ext_session_notification(
+                "s1",
+                "replayed-local-control",
+                GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                    epoch: "reconnect-epoch".into(),
+                    domain: ControlDomain::Agent,
+                    revision: 7,
+                    intent: Some(token.shell_intent()),
+                    snapshot: false,
+                    receipt_only: false,
+                    phase: ControlPhase::Applied,
+                    current: ControlTarget::Agent {
+                        agent_name: "reviewer".into(),
+                    },
+                    desired: Some(ControlTarget::Agent {
+                        agent_name: "reviewer".into(),
+                    }),
+                    message: Some("Agent switched to reviewer".into()),
+                }),
+            ),
+            &mut app,
+        ));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(!agent.session.controls_pending());
+        assert_eq!(
+            agent.scrollback.len(),
+            1,
+            "a reconnect result for the user's still-pending intent remains visible"
+        );
+    }
+
+    #[test]
     fn pre_assignment_snapshot_seeds_epoch_before_new_session_response() {
         use shell::extensions::notification::{
             ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
@@ -967,7 +1088,8 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, None, &mut agent);
+        let changed =
+            handle_child_session_notification(update, child_sid, None, false, &mut agent);
         assert!(changed);
 
         let info = agent.session.subagent_sessions.get(child_sid).unwrap();
@@ -1007,7 +1129,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, None, &mut agent);
+        let _ = handle_child_session_notification(update, child_sid, None, false, &mut agent);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -1026,8 +1148,13 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        let changed =
-            handle_child_session_notification(update, "unknown-child", None, &mut agent);
+        let changed = handle_child_session_notification(
+            update,
+            "unknown-child",
+            None,
+            false,
+            &mut agent,
+        );
         assert!(!changed);
     }
 
@@ -1046,7 +1173,8 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, None, &mut agent);
+        let changed =
+            handle_child_session_notification(update, child_sid, None, false, &mut agent);
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
@@ -1059,7 +1187,8 @@
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = GrowSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", None, &mut agent);
+        let changed =
+            handle_child_session_notification(update, "child-1", None, false, &mut agent);
         assert!(!changed);
     }
 
@@ -1086,6 +1215,7 @@
             update,
             child_sid,
             Some("event-child-command".into()),
+            false,
             &mut agent,
         ));
 
@@ -1128,6 +1258,7 @@
             }),
             child_sid,
             None,
+            false,
             &mut agent,
         ));
         let update = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
@@ -1149,6 +1280,7 @@
             update,
             child_sid,
             Some("event-child-control".into()),
+            false,
             &mut agent,
         ));
         let child = agent.subagent_views.get_mut(child_sid).unwrap();
@@ -1160,6 +1292,35 @@
             }
             other => panic!("expected child control Notice, got {other:?}"),
         }
+
+        let before = child.scrollback.len();
+        assert!(handle_child_session_notification(
+            GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Agent,
+                revision: 8,
+                intent: None,
+                snapshot: false,
+                receipt_only: false,
+                phase: ControlPhase::Applied,
+                current: ControlTarget::Agent {
+                    agent_name: "auditor".into(),
+                },
+                desired: Some(ControlTarget::Agent {
+                    agent_name: "auditor".into(),
+                }),
+                message: Some("Agent switched to auditor".into()),
+            }),
+            child_sid,
+            Some("replayed-child-control".into()),
+            true,
+            &mut agent,
+        ));
+        assert_eq!(
+            agent.subagent_views[child_sid].scrollback.len(),
+            before,
+            "child resume must hydrate historical control state silently"
+        );
     }
 
     // ── apply_retry_state ─────────────────────────────────────────────

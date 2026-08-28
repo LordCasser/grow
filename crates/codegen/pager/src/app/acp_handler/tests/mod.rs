@@ -841,6 +841,28 @@ pub(super) fn make_ext_session_notification(
         update,
     )
 }
+/// Build a replay-stamped Grow session notification for resume/reconnect tests.
+pub(super) fn make_replayed_ext_session_notification(
+    session_id: &str,
+    event_id: &str,
+    update: GrowSessionUpdate,
+) -> AcpClientMessage {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update,
+        meta: Some(serde_json::json!({
+            "eventId": event_id,
+            "isReplay": true,
+        })),
+    };
+    let raw = serde_json::value::to_raw_value(&payload).unwrap();
+    let request = acp::ExtNotification::new("grow/session_notification", raw.into());
+    AcpClientMessage::ExtNotification(acp_transport::AcpArgs {
+        request,
+        response_tx: tx,
+    })
+}
 /// Build an `ExtNotification` envelope with an explicit Grow session method.
 pub(super) fn make_ext_session_notification_with_method(
     session_id: &str,

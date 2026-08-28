@@ -323,6 +323,7 @@ fn handle_session_notification_inner(
             session_notif.update,
             child_sid,
             meta.event_id.clone(),
+            meta.is_replay,
             agent,
         );
         let control_resolved = controls_pending_before
@@ -411,7 +412,7 @@ fn handle_session_notification_inner(
             true
         }
         GrowSessionUpdate::ControlStateUpdate(update) => {
-            apply_control_state_update(agent, update, meta.event_id.clone())
+            apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
         }
         ref update @ (GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
@@ -1292,6 +1293,7 @@ pub(super) fn handle_child_session_notification(
     update: GrowSessionUpdate,
     child_sid: &str,
     event_id: Option<String>,
+    is_replay: bool,
     agent: &mut AgentView,
 ) -> bool {
     let changed = match update {
@@ -1309,7 +1311,7 @@ pub(super) fn handle_child_session_notification(
         GrowSessionUpdate::ControlStateUpdate(update) => agent
             .subagent_views
             .get_mut(child_sid)
-            .is_some_and(|child| apply_control_state_update(child, update, event_id)),
+            .is_some_and(|child| apply_control_state_update(child, update, event_id, is_replay)),
         GrowSessionUpdate::ModelChanged {
             model_id,
             reasoning_effort,
@@ -1420,6 +1422,7 @@ fn apply_control_state_update(
     agent: &mut AgentView,
     update: shell::extensions::notification::ControlStateUpdate,
     event_id: Option<String>,
+    is_replay: bool,
 ) -> bool {
     use shell::extensions::notification::{ControlPhase, ControlTarget};
     let phase = update.phase;
@@ -1467,6 +1470,15 @@ fn apply_control_state_update(
     }
     let terminal = matches!(phase, ControlPhase::Applied | ControlPhase::Rejected);
     if !terminal {
+        return state_changed;
+    }
+    // A replayed terminal is historical control state, not a new action in
+    // this TUI process. Hydrate the authoritative projection silently unless
+    // it settles an exact local intent preserved across reconnect or a screen
+    // mode relaunch. Without this gate every clean resume appends the last
+    // model/effort/Agent success below the transcript even though the user did
+    // nothing.
+    if is_replay && !intent_resolved {
         return state_changed;
     }
     let target = desired.as_ref();
