@@ -964,7 +964,8 @@ impl SessionActor {
                 .collect();
         }
 
-        const BUDGET_PERCENT: u64 = 85;
+        const BUDGET_PERCENT: u64 =
+            crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT as u64;
         const BUDGET_HEADROOM_TOKENS: u64 = 4_000;
         let judgment_message =
             workspace::permission::build_primary_context_judgment_message(judgment);
@@ -972,7 +973,7 @@ impl SessionActor {
         let mut items = vec![ConversationItem::system(policy)];
         items.extend(direct_user_inputs);
 
-        // Apply the normal 85%-with-headroom budget to the snapshot copy only.
+        // Apply the default compaction threshold with headroom to the snapshot copy only.
         // Keep the dedicated authorization policy, then spend the remainder
         // only on recent genuine user-origin task context. Model/tool output
         // and synthetic summaries are deliberately absent from this branch.
@@ -1611,16 +1612,17 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        if self.should_compact_on_error(&error).await {
-            let cw = error
-                .model_metadata
-                .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+        if let Some(cw) = self.compaction_window_on_error(&error).await {
             {
                 let total_tokens = self.chat_state_handle.get_projected_tokens().await;
                 let percentage = token_estimation::usage_percentage_u8(total_tokens, cw);
-                if let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
+                let provider_context_window = error
+                    .model_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.context_window)
+                    .filter(|window| *window > 0);
+                if provider_context_window == Some(cw)
+                    && let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
@@ -1794,6 +1796,26 @@ impl SessionActor {
             )),
         )
     }
+
+    pub(in crate::session::actor) async fn surface_repeated_context_overflow(
+        &self,
+        projected_tokens: u64,
+        context_window: u64,
+    ) -> acp::Error {
+        let message = format!(
+            "Context still exceeds the provider limit after automatic compaction; stopped to avoid an unbounded retry loop. Local projection: {projected_tokens} tokens; context window: {context_window} tokens. Start a new session or switch to a model with a larger context window."
+        );
+        self.log_terminal_failure("context_length_recovery_exhausted", None, &message);
+        self.send_grow_notification(GrowSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: "context_length_recovery_exhausted".to_owned(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        acp::Error::internal_error().data(message)
+    }
+
     /// Drive a single turn through the sampler-based path.
     ///
     /// Calls `prepare_sampler_for_turn` first (auth refresh + config

@@ -6,8 +6,8 @@
 
 /// Default auto-compact threshold (% of context window) when no other source
 /// (env var, user config, remote per-model/global flags) sets it. Shared by
-/// the shell (~85% context usage).
-pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 85;
+/// the shell (75% context usage).
+pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 75;
 
 /// Minimum character count for a cleaned summary seed.
 ///
@@ -34,5 +34,15 @@ impl Default for SummaryConfig {
             retry_delay_secs: 3,
             sampling_timeout_secs: 120,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
+
+    #[test]
+    fn default_auto_compaction_keeps_provider_headroom() {
+        assert_eq!(DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, 75);
     }
 }

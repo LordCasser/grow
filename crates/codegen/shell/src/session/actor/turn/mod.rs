@@ -854,7 +854,12 @@ impl SessionActor {
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
         let mut image_projection_retries: u8 = 0;
-        let mut pending_forced_compaction = None;
+        let mut pending_forced_compaction: Option<compaction::AutoCompactTriggerInfo> = None;
+        // True only between a provider overflow and the first successful
+        // non-overflow response after its forced compaction. Long Goal turns
+        // may legitimately compact again after later successful Steps grow
+        // the context; only an immediate post-compaction overflow is terminal.
+        let mut context_overflow_recovery_pending = false;
         let structured_output_validator = json_schema.as_ref().map(|schema| {
             sampling_types::compile_output_schema(schema)
                 .map_err(|error| format!("invalid output schema: {error}"))
@@ -920,6 +925,15 @@ impl SessionActor {
                         snapshot: Box::new(snapshot),
                     });
                 }
+                if model_changed || agent_changed {
+                    if let Some(stale) = pending_forced_compaction.take() {
+                        tracing::info!(
+                            source = stale.source,
+                            "discarded forced compaction from the previous request projection epoch"
+                        );
+                    }
+                    context_overflow_recovery_pending = false;
+                }
                 if model_changed {
                     // A smaller model window must compact before the first
                     // request that uses it, not at the next outer turn.
@@ -940,6 +954,9 @@ impl SessionActor {
                     }
                 }
                 if model_changed || agent_changed {
+                    // The request projection epoch changed. A provider
+                    // overflow on the replacement route/Agent gets its own
+                    // single recovery attempt.
                     identical_tool_calls = IdenticalToolCallRun::default();
                     let span = tracing::Span::current();
                     span.record("agent.name", self.agent.borrow().name());
@@ -1257,11 +1274,24 @@ impl SessionActor {
                     });
                 }
                 Ok(SamplerTurnOutcome::CompactAndResubmit(trigger_info)) => {
+                    if context_overflow_recovery_pending {
+                        return Err(self
+                            .surface_repeated_context_overflow(
+                                trigger_info.tokens_used,
+                                trigger_info.context_window,
+                            )
+                            .await);
+                    }
+                    context_overflow_recovery_pending = true;
                     auth_retry_schedule.reset();
                     pending_forced_compaction = Some(trigger_info);
                     continue;
                 }
                 Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit) => {
+                    // Irreversible ImageShadows changed the provider-facing
+                    // projection, so a later overflow belongs to a new input
+                    // epoch rather than the prior compaction attempt.
+                    context_overflow_recovery_pending = false;
                     auth_retry_schedule.reset();
                     continue;
                 }
@@ -1498,6 +1528,16 @@ impl SessionActor {
             // only pick the recovery strategy for the next sampling cycle. A
             // completed `tool_use` wins over any of these stop reasons — the
             // turn falls through to tool execution below.
+            // Any accepted response other than a bare input-overflow proves
+            // the preceding compaction converged for this request epoch. A
+            // future overflow after more tools/output is a new recovery cycle.
+            if !matches!(
+                stop_reason,
+                Some(sampling_types::StopReason::ModelContextWindowExceeded)
+            ) || !tool_calls.is_empty()
+            {
+                context_overflow_recovery_pending = false;
+            }
             match stop_reason {
                 Some(sampling_types::StopReason::Length) if tool_calls.is_empty() => {
                     // max_tokens truncation: inject the continue prompt and
@@ -1567,6 +1607,12 @@ impl SessionActor {
                             "percentage": percentage,
                         })),
                     );
+                    if context_overflow_recovery_pending {
+                        return Err(self
+                            .surface_repeated_context_overflow(total_tokens, context_window)
+                            .await);
+                    }
+                    context_overflow_recovery_pending = true;
                     pending_forced_compaction = Some(trigger_info);
                     continue;
                 }

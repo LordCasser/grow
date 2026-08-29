@@ -96,10 +96,11 @@ pub(crate) fn build_recap_items(
 /// wins (e.g. a 256k legacy model or a debug override).
 const RECAP_CONTEXT_WINDOW_CAP: u64 = 500_000;
 
-/// Fraction of the (conservative) window a recap may occupy — the DEFAULT
-/// auto-compact threshold. Fixed rather than the remote-settings-resolved value (which
-/// can exceed 85), so recap stays at least as conservative as the turn path.
-const RECAP_BUDGET_THRESHOLD_PERCENT: u64 = 85;
+/// Fraction of the conservative window a recap may occupy. It follows the
+/// client default rather than a remotely raised session threshold, so recap
+/// remains conservative while sharing one authoritative default.
+const RECAP_BUDGET_THRESHOLD_PERCENT: u64 =
+    crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT as u64;
 
 /// Estimator/serialization slack (mirrors memory-flush's soft-threshold pad). The
 /// appended instruction is reserved SEPARATELY via `snapshot_budget`, so it is not
@@ -111,7 +112,7 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 /// (the same bytes/4 estimator compaction triggers on) to prevent
 /// `ic_400_prompt_too_long` on long sessions. Not an absolute guarantee — a
 /// degenerate tiny window, an oversized retained `System` prefix, or estimator
-/// optimism can still exceed the real limit (the 85% + headroom + 500k cap make
+/// optimism can still exceed the real limit (the default threshold + headroom + 500k cap make
 /// that unlikely for normal grow-build sessions).
 ///
 /// * Fast path — if the whole snapshot already fits, returns

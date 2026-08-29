@@ -21,6 +21,27 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
 }
 
 #[tokio::test]
+async fn shared_read_session_resolution_stays_out_of_the_writer_cache() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let opened = observer
+        .open_session_by_id_shared_read(info.id.0.as_ref())
+        .unwrap()
+        .expect("Trajectory observer must resolve the live session");
+
+    assert_eq!(opened.summary().info.id.0, info.id.0);
+    assert_eq!(opened.summary().info.cwd, info.cwd);
+    assert!(
+        observer.opened_sessions.lock().unwrap().is_empty(),
+        "shared-delete observer handles must never become writer capabilities"
+    );
+}
+
+#[tokio::test]
 async fn write_load_claims_the_session_lease_before_timeline_replay() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();

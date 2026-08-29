@@ -275,6 +275,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     } else if let acp::SessionUpdate::SessionInfoUpdate(ref update) =
                         notif.request.update
                     {
+                        let context_pressure_changed = update
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.get("grow/contextPressure"))
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true);
                         let changed = match &update.title {
                             acp::MaybeUndefined::Value(title) => {
                                 let title = crate::util::decode_html_entities(title).into_owned();
@@ -295,7 +301,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 agent.display_name = None;
                                 true
                             }
-                            acp::MaybeUndefined::Undefined => false,
+                            acp::MaybeUndefined::Undefined => context_pressure_changed,
                         };
                         advance_reconnect_cursor(agent, &mut meta);
                         changed

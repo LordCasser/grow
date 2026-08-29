@@ -1,5 +1,5 @@
 /// Default auto-compact threshold (% of context window) when no source sets it.
-pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 85;
+pub use ::compaction::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
 
 /// Env-var override for `compaction.pre_prune` (session-side tool-result
 /// pruning before summary compaction). `"true"`/`"false"`; anything else falls
@@ -65,7 +65,7 @@ pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROW_AUTO_COMPACT_T
 ///      user-vs-GB per-model distinction is preserved)
 ///   5. remote settings global `RemoteSettings.auto_compact_threshold_percent`
 ///      (populated from `grow_build_settings.auto_compact_threshold_percent`)
-///   6. default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT` (85)
+///   6. default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT` (75)
 ///
 /// Values outside `0..=100` from the env var are ignored with a debug log and
 /// the resolver falls through to the next tier. TOML/remote fields are typed

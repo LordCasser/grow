@@ -33,7 +33,7 @@ Compress conversation history to reclaim context-window space. Pass a note to te
 /compact keep the auth implementation details
 ```
 
-Grow also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+Grow also auto-compacts once the context window hits 75% (tune it with `[session] auto_compact_threshold_percent`).
 
 ### `/context`
 

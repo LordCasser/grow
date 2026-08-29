@@ -67,7 +67,7 @@ remote_fetch = false                   # disable optional catalog/settings fetch
 crash_handler = true                   # local crash capture; Grow has no telemetry exporter
 
 [session]
-auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
+auto_compact_threshold_percent = 75    # auto-compact at this % of context window (default: 75)
 load_envrc = true                      # load .envrc environment variables
 permission_prompt_timeout_secs = 60    # interactive permission response deadline
 non_interactive_permission_prompt_timeout_secs = 10 # headless/CI deadline; both values must be > 0

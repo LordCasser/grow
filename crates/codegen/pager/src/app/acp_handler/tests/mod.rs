@@ -200,6 +200,48 @@ fn canonical_session_info_title_update_replaces_legacy_extension_channel() {
     assert_eq!(agent.generated_session_title.as_deref(), Some("User title"));
     assert_eq!(agent.display_name.as_deref(), Some("User title"));
 }
+
+#[test]
+fn transient_context_pressure_refreshes_state_without_scrollback() {
+    let mut app = make_app_with_agent("session-context-pressure");
+    let id = AgentId(0);
+    let scrollback_before = app.agents[&id].scrollback.len();
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    let update = acp::SessionInfoUpdate::new().meta(
+        serde_json::json!({ "grow/contextPressure": true })
+            .as_object()
+            .cloned(),
+    );
+    let notification = acp::SessionNotification::new(
+        acp::SessionId::new("session-context-pressure"),
+        acp::SessionUpdate::SessionInfoUpdate(update),
+    )
+    .meta(
+        serde_json::json!({
+            "totalTokens": 123_456,
+            "transient": true,
+        })
+        .as_object()
+        .cloned(),
+    );
+
+    assert!(handle(
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request: notification,
+            response_tx,
+        }),
+        &mut app,
+    ));
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .context_state
+            .as_ref()
+            .map(|context| context.used),
+        Some(123_456)
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), scrollback_before);
+}
 /// A server-shape interjection broadcast (no `interjectionId`, like the
 /// shared-queue interject path — every pane renders it).
 pub(super) fn interjection_broadcast(

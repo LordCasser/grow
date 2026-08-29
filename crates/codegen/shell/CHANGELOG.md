@@ -1,5 +1,25 @@
 # Changelog
 
+# 2.0.3 — 2026-08-29
+
+## Context pressure and compaction recovery
+
+- 默认自动压缩阈值由 85% 调整为 75%，为 provider tokenizer、请求封装与本地估算偏差预留更充分空间；
+  环境变量、模型级配置和 Session 配置的覆盖优先级保持不变。
+- Provider 以 API 错误报告上下文溢出时，即使本地估算尚未越线也会进入一次受限压缩恢复；未变化的超大请求
+  不再由 transport 重复提交，压缩后立即再次溢出会明确终止。
+- Context pressure 变更实时投影到 Fullscreen、Inline 与 Minimal，但不写入 Timeline、Scrollback 或模型上下文。
+
+## Windows Trajectory
+
+- Trajectory 使用独立的只读 Session capability，并在 Windows 上共享 namespace mutation，修复读取实时 Session
+  时因发布句柄仍持有 `DELETE` access 而出现的 OS Error 5。
+- 只读观察者不会进入写 capability 缓存；目录仍按 handle-relative、no-follow 和 regular-directory 规则验证。
+
+2.0.3 沿用 Timeline schema v21、Sideband schema v6 和 Trajectory schema v3，不新增 Session 迁移边界。
+
+完整发布说明见 [changelogs/2.0.3.md](changelogs/2.0.3.md)。
+
 # 2.0.2 — 2026-08-29
 
 ## TUI feedback and projection

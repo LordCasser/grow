@@ -233,6 +233,17 @@ impl ContainedDirectory {
         Ok(Self { path, handle })
     }
 
+    /// Open a contained directory for an independent read-only observer.
+    /// Unix directory descriptors already coexist with namespace mutation, so
+    /// this retains the ordinary pinned, no-follow capability semantics.
+    pub(crate) fn open_shared_read(
+        root: &Path,
+        relative: &Path,
+        description: &str,
+    ) -> io::Result<Self> {
+        Self::open(root, relative, description, false)
+    }
+
     pub(crate) fn open_relative(
         &self,
         relative: &Path,
@@ -252,6 +263,14 @@ impl ContainedDirectory {
             path.push(name);
         }
         Ok(Self { path, handle })
+    }
+
+    pub(crate) fn open_relative_shared_read(
+        &self,
+        relative: &Path,
+        description: &str,
+    ) -> io::Result<Self> {
+        self.open_relative(relative, description, false)
     }
 
     pub(crate) fn display_path(&self) -> &Path {
@@ -858,6 +877,49 @@ impl ContainedDirectory {
         root.open_relative(relative, description, create_missing)
     }
 
+    /// Open a contained directory for an independent read-only observer.
+    ///
+    /// Canonical writer capabilities intentionally deny `FILE_SHARE_DELETE`
+    /// so a validated namespace cannot be renamed underneath a write. A
+    /// separate process such as the Trajectory debugger must also be able to
+    /// inspect a live entity whose post-publication handle still has `DELETE`
+    /// access (some redirected filesystems cannot `ReOpenFile` that handle).
+    /// Sharing delete in both directions makes that read coexist without
+    /// weakening the writer capability. Every component remains handle-
+    /// relative, is opened without following reparse points, and is validated
+    /// as a directory before it becomes a capability.
+    pub(crate) fn open_shared_read(
+        root: &Path,
+        relative: &Path,
+        description: &str,
+    ) -> io::Result<Self> {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let root_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(root)?;
+        let metadata = root_handle.metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} authority is not a regular directory"),
+            ));
+        }
+        let root = Self {
+            path: root.to_path_buf(),
+            handle: cap_std::fs::Dir::from_std_file(root_handle),
+        };
+        root.open_relative_shared_read(relative, description)
+    }
+
     pub(crate) fn open_relative(
         &self,
         relative: &Path,
@@ -874,6 +936,26 @@ impl ContainedDirectory {
                 ));
             };
             handle = Self::open_child_directory(&handle, name, description, create_missing)?;
+            path.push(name);
+        }
+        Ok(Self { path, handle })
+    }
+
+    pub(crate) fn open_relative_shared_read(
+        &self,
+        relative: &Path,
+        description: &str,
+    ) -> io::Result<Self> {
+        let mut handle = self.handle.try_clone()?;
+        let mut path = self.path.clone();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} path must be relative and contained"),
+                ));
+            };
+            handle = Self::open_shared_child_directory(&handle, name, description)?;
             path.push(name);
         }
         Ok(Self { path, handle })
@@ -1218,6 +1300,43 @@ impl ContainedDirectory {
         Ok(directory)
     }
 
+    fn open_shared_child_directory(
+        parent: &cap_std::fs::Dir,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<cap_std::fs::Dir> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsMaybeDirExt as _};
+        use cap_std::fs::OpenOptionsExt as _;
+        use std::os::windows::fs::MetadataExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        Self::component(name)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .follow(FollowSymlinks::No)
+            // cap-primitives removes FILE_SHARE_DELETE when `maybe_dir` is
+            // enabled. BACKUP_SEMANTICS already permits this directory open;
+            // keep the observer's explicitly requested sharing intact.
+            .maybe_dir(false);
+        let file = parent.open_with(name, &options)?.into_std();
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & Self::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !metadata.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a contained regular directory"),
+            ));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(file))
+    }
+
     fn component(name: &std::ffi::OsStr) -> io::Result<()> {
         if Path::new(name).components().count() != 1
             || !matches!(
@@ -1432,6 +1551,28 @@ impl ContainedDirectory {
         _relative: &Path,
         _description: &str,
         _create_missing: bool,
+    ) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative contained storage is unsupported on this platform",
+        ))
+    }
+
+    pub(crate) fn open_shared_read(
+        _root: &Path,
+        _relative: &Path,
+        _description: &str,
+    ) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative contained storage is unsupported on this platform",
+        ))
+    }
+
+    pub(crate) fn open_relative_shared_read(
+        &self,
+        _relative: &Path,
+        _description: &str,
     ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -3836,6 +3977,69 @@ pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn shared_read_capability_opens_contained_regular_descendants() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("session")).unwrap();
+        std::fs::write(root.path().join("session/timeline.jsonl"), b"event\n").unwrap();
+
+        let directory = ContainedDirectory::open_shared_read(
+            root.path(),
+            Path::new("session"),
+            "shared read fixture",
+        )
+        .unwrap();
+
+        assert_eq!(
+            directory
+                .read_bounded(
+                    std::ffi::OsStr::new("timeline.jsonl"),
+                    "shared read ledger",
+                    32,
+                )
+                .unwrap(),
+            b"event\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_read_capability_coexists_with_delete_access_handle() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("session");
+        std::fs::create_dir(&session).unwrap();
+        std::fs::write(session.join("timeline.jsonl"), b"event\n").unwrap();
+        let _publishing = std::fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ.0 | DELETE.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(&session)
+            .unwrap();
+
+        let ordinary = ContainedDirectory::open(
+            root.path(),
+            Path::new("session"),
+            "ordinary read fixture",
+            false,
+        )
+        .expect_err("ordinary namespace pin must conflict with pending DELETE access");
+        assert_eq!(ordinary.kind(), io::ErrorKind::PermissionDenied);
+
+        ContainedDirectory::open_shared_read(
+            root.path(),
+            Path::new("session"),
+            "shared read fixture",
+        )
+        .expect("read-only observer must share a live publication handle");
+    }
 
     #[cfg(any(unix, windows))]
     #[test]

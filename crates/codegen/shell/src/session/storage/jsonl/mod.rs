@@ -1990,38 +1990,73 @@ impl JsonlStorageAdapter {
     }
 
     pub(crate) fn open_session_by_id(&self, session_id: &str) -> io::Result<Option<OpenedSession>> {
+        self.open_session_by_id_inner(session_id, false)
+    }
+
+    /// Resolve a session for a separate read-only process such as Trajectory.
+    /// On Windows this uses directory handles that share namespace mutation so
+    /// it can coexist with a live writer's publication handle. The returned
+    /// capability is deliberately not inserted into the writer cache.
+    pub(crate) fn open_session_by_id_shared_read(
+        &self,
+        session_id: &str,
+    ) -> io::Result<Option<OpenedSession>> {
+        self.open_session_by_id_inner(session_id, true)
+    }
+
+    fn open_session_by_id_inner(
+        &self,
+        session_id: &str,
+        shared_read: bool,
+    ) -> io::Result<Option<OpenedSession>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "id-only resolution requires the canonical storage root",
             ));
         }
-        let authority = self.authority(false)?;
-        let sessions =
-            match authority.open_relative(Path::new("sessions"), "sessions directory", false) {
-                Ok(sessions) => sessions,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
+        let authority = if shared_read {
+            let SessionDirMode::FromRoot(root) = &self.dir_mode else {
+                unreachable!("id-only resolution checked canonical storage above")
             };
+            super::ContainedDirectory::open_shared_read(
+                root,
+                Path::new(""),
+                "session storage authority",
+            )?
+        } else {
+            self.authority(false)?
+        };
+        let open_directory =
+            |parent: &super::ContainedDirectory, relative: &Path, description: &str| {
+                if shared_read {
+                    parent.open_relative_shared_read(relative, description)
+                } else {
+                    parent.open_relative(relative, description, false)
+                }
+            };
+        let sessions = match open_directory(&authority, Path::new("sessions"), "sessions directory")
+        {
+            Ok(sessions) => sessions,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let mut found: Option<OpenedSession> = None;
         for cwd_name in sessions.list_names()? {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            let cwd_dir = match sessions.open_relative(
-                Path::new(&cwd_name),
-                "session cwd directory",
-                false,
-            ) {
-                Ok(directory) => directory,
-                Err(_) => continue,
-            };
-            let session =
-                match cwd_dir.open_relative(Path::new(session_id), "session directory", false) {
+            let cwd_dir =
+                match open_directory(&sessions, Path::new(&cwd_name), "session cwd directory") {
                     Ok(directory) => directory,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
+                    Err(_) => continue,
                 };
+            let session = match open_directory(&cwd_dir, Path::new(session_id), "session directory")
+            {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             let summary = match Self::read_summary_from_directory(&session) {
                 Ok(summary) => summary,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -2039,12 +2074,14 @@ impl JsonlStorageAdapter {
                     format!("duplicate canonical session id {session_id}"),
                 ));
             }
-            let key = format!("{}\0{}", summary.info.id, summary.info.cwd);
             let directory = std::sync::Arc::new(session);
-            self.opened_sessions
-                .lock()
-                .map_err(|_| io::Error::other("session capability cache poisoned"))?
-                .insert(key, directory.clone());
+            if !shared_read {
+                let key = format!("{}\0{}", summary.info.id, summary.info.cwd);
+                self.opened_sessions
+                    .lock()
+                    .map_err(|_| io::Error::other("session capability cache poisoned"))?
+                    .insert(key, directory.clone());
+            }
             found = Some(OpenedSession { directory, summary });
         }
         Ok(found)

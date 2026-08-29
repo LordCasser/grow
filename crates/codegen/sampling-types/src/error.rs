@@ -575,6 +575,10 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+        || m.contains("context length exceeded")
+        || m.contains("context window exceeded")
+        || m.contains("context window is exceeded")
+        || m.contains("exceeds the context window")
         || (m.contains("current message") && m.contains("exceeds budget"))
 }
 
@@ -754,6 +758,10 @@ mod tests {
             "The prompt is too long for this model's context window.",
             "none: The prompt is too long for this model's context window.",
             "This model's maximum context length is 200000 tokens",
+            "The context window exceeded the model limit",
+            "The context window is exceeded for this request",
+            "The request exceeds the context window of 128000 tokens",
+            "context length exceeded",
             "invalid_request_error: prompt is too long: 300000 tokens > 200000 maximum",
             "error type: context_length_exceeded",
             "Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",

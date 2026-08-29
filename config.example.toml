@@ -164,7 +164,7 @@ name = "DeepSeek Chat"
 description = "Primary coding model"
 context_window = 128000             # 仅用于本地上下文管理与自动压缩
 # output_limit = 65536               # 可选：作为 max_tokens/max_output_tokens 发送
-auto_compact_threshold_percent = 85
+auto_compact_threshold_percent = 75
 system_prompt_label = "Grow"
 inference_idle_timeout_secs = 300
 max_retries = 3
@@ -307,7 +307,7 @@ mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监
 # enabled = false
 
 [session]
-auto_compact_threshold_percent = 85
+auto_compact_threshold_percent = 75
 load_envrc = true
 permission_prompt_timeout_secs = 60
 non_interactive_permission_prompt_timeout_secs = 10

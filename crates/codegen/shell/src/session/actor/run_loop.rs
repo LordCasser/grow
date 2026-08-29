@@ -847,10 +847,18 @@ pub(super) async fn run_session(
                             })),
                         );
                     }
-                    Some(chat_state::ChatStateEvent::PromptIndexChanged { .. }) |
-                    Some(chat_state::ChatStateEvent::ContextPressureUpdated { .. }) => {
-                        // Prompt index and token updates are informational —
-                        // consumers query the actor directly when they need them.
+                    Some(chat_state::ChatStateEvent::PromptIndexChanged { .. }) => {
+                        // Prompt-index updates are informational; consumers
+                        // query the actor directly when they need them.
+                    }
+                    Some(chat_state::ChatStateEvent::ContextPressureUpdated {
+                        projected_tokens,
+                    }) => {
+                        // Compression reads ChatState synchronously. This
+                        // transient projection keeps both Pager render modes
+                        // on the same fresh value without creating replay or
+                        // model-context facts.
+                        session.emit_context_pressure_update(projected_tokens);
                     }
                     None => {
                         tracing::error!(

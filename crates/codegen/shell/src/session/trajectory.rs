@@ -452,7 +452,7 @@ pub async fn serve(
     }
     let storage = super::storage::jsonl::JsonlStorageAdapter::new();
     let session = storage
-        .open_session_by_id(session_id)?
+        .open_session_by_id_shared_read(session_id)?
         .ok_or_else(|| anyhow::anyhow!("session '{session_id}' was not found"))?;
     let canonical_session_id = session.summary().info.id.to_string();
     let session_dir = session.directory().display_path().to_path_buf();
@@ -1237,7 +1237,7 @@ impl TrajectorySessionResolver<'_> {
     > {
         match self {
             Self::Storage(storage) => {
-                let Some(opened) = storage.open_session_by_id(session_id)? else {
+                let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
                     return Ok(None);
                 };
                 Ok(Some((
@@ -1817,10 +1817,9 @@ impl SessionTrajectoryCache {
         let mut seen = BTreeSet::new();
         for sideband_id in sideband_ids {
             chat_state::validate_sideband_id(&sideband_id)?;
-            let sideband_dir = match directory.open_relative(
+            let sideband_dir = match directory.open_relative_shared_read(
                 &Path::new(super::storage::SIDEBANDS_DIR).join(&sideband_id),
                 "Trajectory sideband directory",
-                false,
             ) {
                 Ok(sideband_dir) => sideband_dir,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1890,10 +1889,9 @@ impl SessionTrajectoryCache {
                 );
             }
             super::workflow::store::validate_run_id(run_id)?;
-            let run_dir = match directory.open_relative(
+            let run_dir = match directory.open_relative_shared_read(
                 &Path::new("workflows").join(run_id),
                 "Trajectory Workflow run directory",
-                false,
             ) {
                 Ok(run_dir) => run_dir,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,

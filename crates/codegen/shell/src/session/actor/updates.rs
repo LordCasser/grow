@@ -351,6 +351,31 @@ impl SessionActor {
                 .forward_fire_and_forget(notification);
         }
     }
+
+    /// Publish the canonical request-pressure projection to the live client.
+    /// This is ephemeral UI state: it must neither enter model context nor be
+    /// replayed as immutable transcript history.
+    pub(super) fn emit_context_pressure_update(&self, projected_tokens: u64) {
+        let update = acp::SessionInfoUpdate::new().meta(
+            serde_json::json!({ "grow/contextPressure": true })
+                .as_object()
+                .cloned(),
+        );
+        let notification = acp::SessionNotification::new(
+            self.session_info.id.clone(),
+            acp::SessionUpdate::SessionInfoUpdate(update),
+        )
+        .meta(
+            serde_json::json!({
+                "totalTokens": projected_tokens,
+                "agentTimestampMs": chrono::Utc::now().timestamp_millis(),
+                "transient": true,
+            })
+            .as_object()
+            .cloned(),
+        );
+        self.emit_transient_notification(notification);
+    }
     /// Flush buffered notifications and drain the persistence merge buffer to
     /// disk. Blocks until the persistence actor confirms the write is complete.
     ///

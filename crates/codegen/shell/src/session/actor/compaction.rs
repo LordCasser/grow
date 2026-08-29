@@ -26,6 +26,30 @@ use std::sync::Arc;
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
 
+/// Resolve the context window to use for provider-error recovery.
+///
+/// An explicit provider overflow is authoritative even when the local request
+/// estimate is lower: tokenizers and provider-side envelopes are not exactly
+/// reproducible locally. Metadata-only recovery remains as a fallback for
+/// providers whose error text is opaque but which report a smaller window.
+fn sampling_error_compaction_window(
+    err: &sampler::SamplingErrorInfo,
+    projected_tokens: u64,
+    configured_context_window: u64,
+) -> Option<u64> {
+    let metadata_context_window = err
+        .model_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.context_window)
+        .filter(|window| *window > 0);
+    if matches!(err.kind, sampler::SamplingErrorKind::Api) && is_context_length_error(&err.message)
+    {
+        return metadata_context_window
+            .or_else(|| (configured_context_window > 0).then_some(configured_context_window));
+    }
+    metadata_context_window.filter(|window| projected_tokens > *window)
+}
+
 /// The terminal backend is shared by a primary session and its descendants.
 /// Compaction context is session-local, so never leak another session's
 /// background commands into this session's model-visible state.
@@ -1672,33 +1696,29 @@ impl SessionActor {
             None
         }
     }
-    /// Returns true if the error response indicates tokens exceed the
-    /// model's context window. Inspects only the model-metadata
-    /// portion of the [`SamplingErrorInfo`] (the `context_window`
-    /// field) against the session's tracked token estimate.
-    ///
-    /// Called from `handle_sampling_failure` with the
-    /// `SamplingErrorInfo` the sampler hands back.
-    pub(crate) async fn should_compact_on_error(&self, err: &sampler::SamplingErrorInfo) -> bool {
+    /// Resolve a provider-error recovery window. Explicit provider overflow
+    /// evidence outranks the local estimate; otherwise a smaller provider
+    /// metadata window may still prove the request is too large.
+    pub(crate) async fn compaction_window_on_error(
+        &self,
+        err: &sampler::SamplingErrorInfo,
+    ) -> Option<u64> {
         if self
             .compaction
             .auto_compact_suppressed
             .load(std::sync::atomic::Ordering::Relaxed)
             != SUPPRESS_NONE
         {
-            return false;
-        }
-        let Some(ref metadata) = err.model_metadata else {
-            return false;
-        };
-        let Some(context_window) = metadata.context_window else {
-            return false;
-        };
-        if context_window == 0 {
-            return false;
+            return None;
         }
         let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
-        projected_tokens > context_window
+        let configured_context_window = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| config.context_window.get())
+            .unwrap_or(0);
+        sampling_error_compaction_window(err, projected_tokens, configured_context_window)
     }
     /// Pre-sampling compaction check against the canonical projected context
     /// pressure. Returns `None` when `is_flushing`.
@@ -2184,6 +2204,60 @@ impl SessionActor {
 #[cfg(test)]
 mod context_recall_tests {
     use super::*;
+
+    fn api_error(message: &str, context_window: Option<u64>) -> sampler::SamplingErrorInfo {
+        sampler::SamplingErrorInfo {
+            kind: sampler::SamplingErrorKind::Api,
+            status_code: Some(400),
+            message: message.to_owned(),
+            is_retryable: false,
+            retry_after_secs: None,
+            model_metadata: context_window.map(|context_window| {
+                sampling_types::ResponseModelMetadata {
+                    context_window: Some(context_window),
+                    ..Default::default()
+                }
+            }),
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential: sampling_types::SentCredential::Unknown,
+        }
+    }
+
+    #[test]
+    fn explicit_provider_overflow_outranks_a_lower_local_estimate() {
+        let error = api_error("context window exceeded", Some(128_000));
+
+        assert_eq!(
+            sampling_error_compaction_window(&error, 96_000, 1_000_000),
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn explicit_provider_overflow_falls_back_to_the_configured_window() {
+        let error = api_error("request exceeds the context window", None);
+
+        assert_eq!(
+            sampling_error_compaction_window(&error, 96_000, 128_000),
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn metadata_only_recovery_still_requires_the_local_estimate_to_cross_it() {
+        let opaque = api_error("invalid request", Some(128_000));
+
+        assert_eq!(
+            sampling_error_compaction_window(&opaque, 128_001, 1_000_000),
+            Some(128_000)
+        );
+        assert_eq!(
+            sampling_error_compaction_window(&opaque, 96_000, 1_000_000),
+            None
+        );
+    }
 
     fn task(task_id: &str, owner_session_id: Option<&str>) -> tools::computer::types::TaskSnapshot {
         tools::computer::types::TaskSnapshot {

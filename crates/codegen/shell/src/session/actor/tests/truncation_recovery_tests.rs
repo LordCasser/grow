@@ -812,6 +812,184 @@ fn context_window_exceeded_triggers_compaction() {
     });
 }
 
+/// Providers also report input overflow as an HTTP error instead of a normal
+/// stop reason. The transport must not retry the unchanged payload, and the
+/// Session must compact even when its local projection is below the configured
+/// window and the error response carries no model-metadata header.
+#[test]
+fn api_context_window_error_triggers_session_compaction() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                ScriptedResponse::json(
+                    400,
+                    json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "context window exceeded"
+                        }
+                    }),
+                ),
+            );
+            let long_summary = format!(
+                "compacted summary: {}",
+                "filler sentence that keeps the summary above the minimum seed length. ".repeat(20)
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block(&long_summary)], END_TURN),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("after API-error compact")], END_TURN),
+            );
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            seed_closed_compaction_range(&actor).await;
+
+            run_user_turn(&actor, "api-ctx-exceeded")
+                .await
+                .expect("explicit provider overflow must compact and resume");
+
+            let full_text = actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(full_text.contains("compacted summary"));
+            assert!(full_text.contains("after API-error compact"));
+            assert_eq!(
+                server.messages_request_count(),
+                3,
+                "the unchanged oversized request must not be retried by the transport"
+            );
+        }));
+    });
+}
+
+#[test]
+fn repeated_api_context_window_error_after_compaction_is_terminal() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let overflow = || {
+                ScriptedResponse::json(
+                    400,
+                    json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "context window exceeded"
+                        }
+                    }),
+                )
+            };
+            server.enqueue_response("/v1/messages", overflow());
+            let long_summary = format!(
+                "compacted summary: {}",
+                "filler sentence that keeps the summary above the minimum seed length. ".repeat(20)
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block(&long_summary)], END_TURN),
+            );
+            server.enqueue_response("/v1/messages", overflow());
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            seed_closed_compaction_range(&actor).await;
+
+            let error = run_user_turn(&actor, "api-ctx-still-exceeded")
+                .await
+                .expect_err("an immediate post-compaction overflow must stop");
+            let detail = error.data.as_ref().map(ToString::to_string).unwrap_or_default();
+            assert!(detail.contains("stopped to avoid an unbounded retry loop"));
+            assert_eq!(
+                server.messages_request_count(),
+                3,
+                "only one compaction and one rebuilt provider attempt are allowed per recovery cycle"
+            );
+        }));
+    });
+}
+
+#[test]
+fn successful_tool_step_opens_a_new_context_recovery_attempt() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let overflow = || {
+                ScriptedResponse::json(
+                    400,
+                    json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "context window exceeded"
+                        }
+                    }),
+                )
+            };
+            server.enqueue_response("/v1/messages", overflow());
+            let first_summary = format!(
+                "first compacted summary: {}",
+                "filler sentence that keeps the summary above the minimum seed length. ".repeat(20)
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block(&first_summary)], END_TURN),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[tool_use_block(
+                        "call_between_compactions",
+                        "todo_write",
+                        r#"{"todos":[{"id":"t1","content":"continue","status":"completed"}]}"#,
+                    )],
+                    END_TURN,
+                ),
+            );
+            server.enqueue_response("/v1/messages", overflow());
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            seed_closed_compaction_range(&actor).await;
+
+            let error = run_user_turn(&actor, "two-context-recovery-cycles")
+                .await
+                .expect_err("the active turn has no second closed range to summarize");
+            let detail = error
+                .data
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                detail.contains("no closed Surface range"),
+                "the successful tool Step must clear the immediate-overflow guard; got {detail}"
+            );
+            assert!(!detail.contains("unbounded retry loop"));
+            assert_eq!(server.messages_request_count(), 4);
+        }));
+    });
+}
+
 /// `pause_turn` resends the persisted assistant content: the sampler is
 /// re-called WITHOUT any continue prompt injection.
 #[test]
