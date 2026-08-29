@@ -143,12 +143,22 @@ fn merge_tool_params(
 fn apply_workflow_tool_gates(
     tool_config: &mut tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
+    prompt_audience: crate::prompt::context::PromptAudience,
 ) {
-    use tools::types::tool::ToolKind;
-    if !background_workflows_enabled {
-        tool_config
-            .tools
-            .retain(|tool| tool.kind != Some(ToolKind::Workflow));
+    use tools::implementations::grow_build::{WORKFLOW_TOOL_NAME, WorkflowTool};
+    use tools::types::tool::{ToolKind, ToolNamespace};
+
+    // Workflow is a fixed primary-session control-plane capability. Ignore
+    // authored variants (including untyped `from_id` entries), then install
+    // exactly one canonical descriptor when the runtime gate admits it.
+    let workflow_id = format!("{}:{WORKFLOW_TOOL_NAME}", ToolNamespace::Grow);
+    tool_config
+        .tools
+        .retain(|tool| tool.id != workflow_id && tool.kind != Some(ToolKind::Workflow));
+    if background_workflows_enabled
+        && prompt_audience == crate::prompt::context::PromptAudience::Primary
+    {
+        tool_config.tools.push((&WorkflowTool).into());
     }
 }
 impl AgentBuilder {
@@ -586,7 +596,11 @@ impl AgentBuilder {
             );
             tool_config.tools.retain(|tc| tc.id != ask_user_id);
         }
-        apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
+        apply_workflow_tool_gates(
+            &mut tool_config,
+            self.background_workflows_enabled,
+            self.prompt_audience,
+        );
         let task_tool_id = format!("{}:{}", tools::types::tool::ToolNamespace::Grow, "task");
         let mut task_stripped = false;
         if !self.subagents_enabled {
@@ -989,6 +1003,42 @@ pub(crate) fn build_task_description(
 mod tests {
     use super::*;
     use crate::config::AgentScope;
+
+    #[test]
+    fn workflow_tool_gate_is_runtime_owned_and_primary_only() {
+        let mut enabled_primary = tools::registry::types::ToolServerConfig { tools: vec![] };
+        apply_workflow_tool_gates(
+            &mut enabled_primary,
+            true,
+            crate::prompt::context::PromptAudience::Primary,
+        );
+        assert_eq!(
+            enabled_primary
+                .tools
+                .iter()
+                .filter(|tool| tool.kind == Some(ToolKind::Workflow))
+                .count(),
+            1
+        );
+
+        let mut enabled_subagent = tools::registry::types::ToolServerConfig { tools: vec![] };
+        apply_workflow_tool_gates(
+            &mut enabled_subagent,
+            true,
+            crate::prompt::context::PromptAudience::Subagent,
+        );
+        assert!(enabled_subagent.tools.is_empty());
+
+        let mut disabled = tools::registry::types::ToolServerConfig {
+            tools: vec![(&tools::implementations::grow_build::WorkflowTool).into()],
+        };
+        apply_workflow_tool_gates(
+            &mut disabled,
+            false,
+            crate::prompt::context::PromptAudience::Primary,
+        );
+        assert!(disabled.tools.is_empty());
+    }
 
     /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
     /// the workspace's rustls setup): production installs the ring provider at

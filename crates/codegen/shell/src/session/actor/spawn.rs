@@ -1472,11 +1472,12 @@ pub(crate) async fn spawn_session_actor(
             .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
             .await
             .is_none(),
-        tool_types::BehaviorId::Workflow => agent
-            .tool_bridge()
-            .tool_for_kind(tools::types::tool::ToolKind::Workflow)
-            .await
-            .is_none(),
+        // Workflow support belongs to the Shell-owned runtime. Do not infer
+        // it from this Agent definition's authored tool list; only a disabled
+        // runtime or a subagent session can make the restored choice invalid.
+        tool_types::BehaviorId::Workflow => {
+            !background_workflows_enabled || startup_hints.is_subagent
+        }
         tool_types::BehaviorId::Goal => false,
         tool_types::BehaviorId::Clarify | tool_types::BehaviorId::Normal => false,
     };

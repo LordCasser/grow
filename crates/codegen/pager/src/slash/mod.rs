@@ -2095,12 +2095,15 @@ mod tests {
         );
     }
 
-    /// `/model`, `/plan`, and `/multiline` opt in via `offered_when_session_less`,
-    /// so they stay recognized on the dashboard even though they're session-scoped.
+    /// `/model`, `/plan`, `/multiline`, and `/workflow` opt in via
+    /// `offered_when_session_less`, so they stay recognized on the dashboard
+    /// even though they're session-scoped. Workflow availability is enabled
+    /// here to model the dashboard's unknown (not yet authoritative) snapshot.
     #[test]
     fn session_less_opt_in_commands_recognized_on_dashboard() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         ctrl.set_hide_session_scoped(true);
+        ctrl.set_workflows_available(true);
         let state = SlashState::default();
         let models = ModelState::default();
 
@@ -2120,6 +2123,12 @@ mod tests {
         assert!(
             state.snapshot().command_recognized,
             "/multiline must be recognized on the dashboard"
+        );
+
+        ctrl.refresh(&state, "/workflow", 8, &models);
+        assert!(
+            state.snapshot().command_recognized,
+            "/workflow must be recognized on the dashboard"
         );
     }
 

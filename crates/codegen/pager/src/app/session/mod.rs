@@ -2538,7 +2538,9 @@ impl AgentSession {
     /// structured `BehaviorAvailability` projection arrives.
     ///
     /// Signals (any true → available):
-    /// 1. `available_tools` is `Some(_)` and contains the `workflow` tool.
+    /// 1. `available_tools` is `None` (the shell has not published the
+    ///    authoritative snapshot yet), or `Some(_)` and contains the
+    ///    `workflow` tool.
     /// 2. A Workflow runtime slash command is advertised.
     /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
     ///    to the pager (running or history).
@@ -2553,7 +2555,7 @@ impl AgentSession {
         has_workflow_runs: bool,
     ) -> bool {
         let has_workflow_tool =
-            available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
+            available_tools.is_none_or(|tools| tools.contains(WORKFLOW_TOOL_NAME));
         let has_workflow_command = available_commands
             .iter()
             .any(|c| c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME);
@@ -2877,10 +2879,10 @@ mod tests {
     }
 
     #[test]
-    fn workflows_available_false_without_any_signal() {
-        // (c) No tool, no command, no runs → unavailable. Covers both the
-        // not-yet-received (None) and empty-toolset (Some(&[])) cases.
-        assert!(!AgentSession::bootstrap_workflow_support(None, &[], false));
+    fn workflows_unknown_is_optimistically_visible_but_known_empty_is_not() {
+        // (c) No tool, no command, no runs → an unknown tool snapshot remains
+        // enterable; an authoritative empty snapshot does not.
+        assert!(AgentSession::bootstrap_workflow_support(None, &[], false));
         assert!(!AgentSession::bootstrap_workflow_support(
             Some(&HashSet::new()),
             &[],

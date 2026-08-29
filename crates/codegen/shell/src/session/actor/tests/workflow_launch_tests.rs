@@ -10,6 +10,43 @@ use crate::session::workflow::notify::WorkflowNotifySender;
 use crate::session::workflow::store::WorkflowRunStore;
 
 #[tokio::test(flavor = "current_thread")]
+async fn workflow_behavior_and_commands_follow_runtime_not_agent_tools() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _gateway_rx) = super::support::build_actor().await;
+            let actor = Arc::get_mut(&mut actor).expect("test actor Arc is uniquely owned");
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            assert!(
+                bridge
+                    .tool_for_kind(tools::types::tool::ToolKind::Workflow)
+                    .await
+                    .is_none(),
+                "fixture intentionally has no authored Workflow tool"
+            );
+
+            actor.background_workflows_enabled = true;
+            let (_, workflow_supported, _) = actor.behavior_capability_support().await;
+            assert!(workflow_supported);
+            assert!(actor.build_command_availability(&[], false).workflows);
+
+            actor.startup_hints.is_subagent = true;
+            let (_, workflow_supported, _) = actor.behavior_capability_support().await;
+            assert!(!workflow_supported);
+            assert!(!actor.build_command_availability(&[], false).workflows);
+            actor.startup_hints.is_subagent = false;
+            actor.workflow_service_shutdown.cancel();
+            let (_, workflow_supported, _) = actor.behavior_capability_support().await;
+            assert!(!workflow_supported);
+
+            actor.background_workflows_enabled = false;
+            let (_, workflow_supported, _) = actor.behavior_capability_support().await;
+            assert!(!workflow_supported);
+            assert!(!actor.build_command_availability(&[], false).workflows);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
     tokio::task::LocalSet::new()
         .run_until(async {

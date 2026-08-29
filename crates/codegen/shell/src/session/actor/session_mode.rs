@@ -217,10 +217,12 @@ impl SessionActor {
             .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
             .await
             .is_some();
-        let workflow_supported = bridge
-            .tool_for_kind(tools::types::tool::ToolKind::Workflow)
-            .await
-            .is_some();
+        // Workflow is a Shell-owned control-plane runtime. Its availability
+        // is the feature gate plus a live worker, not the selected Agent's
+        // authored tool list.
+        let workflow_supported = self.background_workflows_enabled
+            && !self.startup_hints.is_subagent
+            && !self.workflow_service_shutdown.is_cancelled();
         let goal_supported =
             super::goal_support::goal_runtime_available_from_tools(self.goal_enabled, &tool_names);
         (plan_supported, workflow_supported, goal_supported)

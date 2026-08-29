@@ -19,6 +19,11 @@ When the user does not name a Definition:
    orchestration, or Agent prompts must change. Create a new session draft only
    when no candidate fits.
 
+Treat requests such as “execute the release workflow” or “start <workflow>” as
+Workflow requests, not as permission to guess a Definition or a focus. Search
+the name and task metadata first; use one clear match, ask the user to choose
+among near-equal matches, and run only after the target is unambiguous.
+
 Inspect source on demand. Modifying a saved Definition first derives one same-name
 session draft; validation and trial Runs use the draft while the saved Definition
 remains available. Never edit a Project or User Definition file directly; only a

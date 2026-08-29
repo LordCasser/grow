@@ -2132,10 +2132,9 @@ impl SessionActor {
             .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
             .await
             .is_some();
-        let candidate_supports_workflow = candidate_bridge
-            .tool_for_kind(tools::types::tool::ToolKind::Workflow)
-            .await
-            .is_some();
+        let candidate_supports_workflow = self.background_workflows_enabled
+            && !self.startup_hints.is_subagent
+            && !self.workflow_service_shutdown.is_cancelled();
         let candidate_supports_goal = super::goal_support::goal_runtime_available_from_tools(
             self.goal_enabled,
             &candidate_tool_names,

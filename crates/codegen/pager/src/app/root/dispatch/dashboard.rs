@@ -87,6 +87,10 @@ fn configure_dashboard_state(app: &mut AppView) {
             .set_plugins_visible(!disable_plugins);
         d.dispatch
             .sync_acp_commands(&bootstrap_commands, None, &models);
+        // There is no session tool snapshot on the dashboard. Keep Workflow
+        // visible during this unknown interval; the session is the authority
+        // that validates the runtime gate once it is created.
+        d.dispatch.slash_controller.set_workflows_available(true);
         d.models = models;
         d.pending_model = None;
         d.pending_behavior = tools::types::BehaviorId::Normal;
@@ -1314,7 +1318,9 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     .map(|(id, _info)| (id.0.to_string(), id.clone()))
                     .collect(),
                 behavior_mode: pending_behavior,
-                workflows_available: false,
+                // Sessionless dashboard state has no authoritative tool
+                // snapshot yet; keep Workflow optimistically visible.
+                workflows_available: true,
                 goal_available: false,
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,

@@ -1881,9 +1881,12 @@ impl SessionActor {
             hooks: self.hooks.registry.borrow().is_some(),
             plugins: self.plugin_registry.read().is_some(),
             goal,
-            workflows: tool_names
-                .iter()
-                .any(|n| n == tools::implementations::grow_build::workflow::WORKFLOW_TOOL_NAME),
+            // Workflow is a Shell-owned control-plane capability. Keep slash
+            // command availability aligned with the runtime gate even when a
+            // selected Agent definition has no authored Workflow tool.
+            workflows: self.background_workflows_enabled
+                && !self.startup_hints.is_subagent
+                && !self.workflow_service_shutdown.is_cancelled(),
             workflow_management: has_workflow_runs,
             workflow_behavior: self.behavior.lock().behavior() == tool_types::BehaviorId::Workflow,
         }
