@@ -46,36 +46,6 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
     }
 }
-/// Resolve permission config with project override semantics.
-///
-/// Priority (per approved plan):
-/// 1. Nearest project `.grow/config.toml` with `[permission]` section (from cwd upward)
-/// 2. Global `~/.grow/config.toml` `[permission]` section
-///
-/// Project `[permission]` overrides global wholesale (no deep merge).
-///
-/// Returns `(config, source_path)` from the highest-priority config file
-/// that contains a `[permission]` section.
-pub async fn resolve_permission_config(
-    cwd: &std::path::Path,
-) -> Option<(PermissionConfig, std::path::PathBuf)> {
-    let project_configs = crate::config::find_project_configs(cwd);
-    for config_path in project_configs.into_iter().rev() {
-        if let Ok(root) = crate::config::load_config_file(&config_path)
-            && let Some(perm_val) = root.get("permission")
-        {
-            match perm_val.clone().try_into::<PermissionConfig>() {
-                Ok(perm_config) => {
-                    tracing::info!("Loaded [permission] from project");
-                    return Some((perm_config, config_path));
-                }
-                Err(e) => tracing::warn!(error = %e, "Failed to parse [permission]"),
-            }
-        }
-    }
-    let global_path = user_config_path();
-    load_config().await.permission.map(|cfg| (cfg, global_path))
-}
 #[cfg(test)]
 mod tests {
     use super::*;

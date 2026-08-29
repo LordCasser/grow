@@ -314,24 +314,10 @@ pub(in crate::app::root::dispatch) fn open_project_question_with_context(
         }
         return vec![];
     }
-    // The production pager runs on a multi-thread Tokio runtime. Unit and
-    // embedded current-thread runtimes cannot use `block_in_place`; the picker
-    // remains useful there with its current-directory and free-form choices.
-    let recent_dirs = tokio::runtime::Handle::try_current()
-        .ok()
-        .filter(|handle| {
-            matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        })
-        .map(|handle| {
-            tokio::task::block_in_place(|| {
-                handle.block_on(crate::project_picker::sources::collect_recent_dirs(10))
-            })
-        })
-        .unwrap_or_default();
-    let pq = crate::project_picker::build_project_question(&recent_dirs, &app.cwd);
+    // Show the current-directory choice immediately. Recent directories are
+    // only an enhancement and are loaded by an async effect below; the
+    // pending create capability is installed before that effect can return.
+    let pq = crate::project_picker::build_project_question(&[], &app.cwd);
     let prompt_fallback = prompt_text.clone();
     let mut stashed = agent.prompt.stash();
     if stashed.text.is_empty() && !prompt_text.is_empty() {
@@ -352,6 +338,7 @@ pub(in crate::app::root::dispatch) fn open_project_question_with_context(
         stashed_prompt: prompt_fallback,
         dont_ask_index: pq.dont_ask_index,
     });
+    let picker_id = state.tool_call_id.clone();
     agent.pending_project_create = Some(crate::app::agent_view::PendingProjectCreate {
         model_id,
         prompt: None,
@@ -365,6 +352,68 @@ pub(in crate::app::root::dispatch) fn open_project_question_with_context(
     agent.replace_question_view(Some(state));
     agent.prompt.set_text("");
     crate::unified_log::info("project_picker.opened", None, None);
+    vec![Effect::FetchProjectPickerRecents {
+        agent_id: id,
+        picker_id,
+    }]
+}
+
+/// Apply asynchronously loaded recent directories only while the same
+/// untouched project picker still owns the pending create capability.
+pub(in crate::app::root::dispatch) fn handle_project_picker_recents_loaded(
+    app: &mut AppView,
+    agent_id: AgentId,
+    picker_id: String,
+    recent_dirs: Vec<(std::path::PathBuf, chrono::DateTime<chrono::Utc>)>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.is_some()
+        || agent.session.mcp_init_progress().is_some()
+        || agent.pending_project_create.is_none()
+    {
+        return vec![];
+    }
+    let Some(question) = agent.question_view.as_mut() else {
+        return vec![];
+    };
+    let untouched = question.tool_call_id == picker_id
+        && question.active_tab == 0
+        && matches!(
+            question.focus,
+            crate::views::question_view::QuestionFocus::Navigation
+        )
+        && question.cursor() == 0
+        && question.per_question_freeform.iter().all(String::is_empty)
+        && question
+            .per_question_freeform_selected
+            .iter()
+            .all(|selected| !selected)
+        && question.selections.first().is_some_and(|selection| {
+            matches!(
+                selection,
+                crate::views::question_view::QuestionSelection::Single(None)
+            )
+        });
+    if !untouched {
+        return vec![];
+    }
+    let Some(crate::views::question_view::LocalQuestionKind::ProjectSelect {
+        resolved_paths,
+        original_cwd,
+        dont_ask_index,
+        ..
+    }) = question.local_kind.as_mut()
+    else {
+        return vec![];
+    };
+    let pq = crate::project_picker::build_project_question(&recent_dirs, original_cwd);
+    if let Some(current_question) = question.questions.first_mut() {
+        *current_question = pq.question;
+    }
+    *resolved_paths = pq.resolved_paths;
+    *dont_ask_index = pq.dont_ask_index;
     vec![]
 }
 pub(in crate::app::root::dispatch) fn dispatch_project_selected(

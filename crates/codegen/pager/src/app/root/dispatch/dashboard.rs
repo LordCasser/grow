@@ -743,21 +743,6 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
     }
 
     let cwd = app.cwd.clone();
-    // Same pattern as `open_project_question` — the recent-dirs source is
-    // async; block the current runtime thread briefly to collect it.
-    let recent = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(crate::project_picker::sources::collect_recent_dirs(10))
-    });
-
-    // Worktree label index (root path → label), built once and reused to
-    // tag both recents and live directory suggestions.
-    let worktrees = crate::git_info::worktree_label_index();
-    let worktree_label = |path: &std::path::Path| -> Option<String> {
-        let key = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        worktrees.get(&key).cloned()
-    };
-
     let mut candidates: Vec<LocationCandidate> = Vec::new();
     candidates.push(LocationCandidate {
         label: location_picker_label(&cwd),
@@ -765,33 +750,51 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
             "{}  (current)",
             crate::project_picker::sources::display_path(&cwd)
         ),
-        worktree: worktree_label(&cwd),
+        worktree: None,
         path: cwd.clone(),
     });
-    for (path, ts) in recent.into_iter().filter(|(p, _)| p != &cwd) {
-        let detail = format!(
-            "{}  ({})",
-            crate::project_picker::sources::display_path(&path),
-            crate::views::session_title::format_relative_time(
-                (chrono::Utc::now() - ts).to_std().unwrap_or_default()
-            ),
-        );
-        candidates.push(LocationCandidate {
-            label: location_picker_label(&path),
-            detail,
-            worktree: worktree_label(&path),
-            path,
-        });
-    }
-
-    if let Some(d) = app.dashboard.as_mut() {
-        let mut lp = LocationPickerState::new(candidates, cwd, worktrees);
+    let picker_id = if let Some(d) = app.dashboard.as_mut() {
+        let mut lp =
+            LocationPickerState::new(candidates, cwd.clone(), std::collections::HashMap::new());
         // Reflect the dashboard's current worktree arming so reopening the
         // picker shows the toggle in its existing state.
         lp.worktree_mode = d.dispatch_worktree;
+        let picker_id = lp.picker_id().to_owned();
         d.location_picker = Some(lp);
-    }
+        Some(picker_id)
+    } else {
+        None
+    };
     crate::unified_log::info("dashboard.location_picker.opened", None, None);
+    picker_id
+        .map(|picker_id| Effect::FetchDashboardLocationCandidates {
+            base_cwd: cwd,
+            picker_id,
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Apply recent directories to the still-open dashboard location picker.
+/// Closing/reopening the picker or changing its base cwd makes a completion
+/// stale.
+pub(super) fn handle_dashboard_location_candidates_loaded(
+    app: &mut AppView,
+    base_cwd: std::path::PathBuf,
+    picker_id: String,
+    recent_dirs: Vec<(std::path::PathBuf, chrono::DateTime<chrono::Utc>)>,
+    worktrees: std::collections::HashMap<std::path::PathBuf, String>,
+) -> Vec<Effect> {
+    let Some(dashboard) = app.dashboard.as_mut() else {
+        return vec![];
+    };
+    let Some(picker) = dashboard.location_picker.as_mut() else {
+        return vec![];
+    };
+    if picker.base_cwd != base_cwd || picker.picker_id() != picker_id {
+        return vec![];
+    }
+    picker.replace_recent_candidates(&recent_dirs, worktrees);
     vec![]
 }
 

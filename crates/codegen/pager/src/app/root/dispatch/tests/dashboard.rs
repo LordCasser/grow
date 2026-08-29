@@ -25,6 +25,101 @@ fn open_location_picker_without_dashboard_is_noop() {
     assert!(effects.is_empty());
     assert!(app.dashboard.is_none());
 }
+
+#[test]
+fn dashboard_location_recent_completion_is_scoped_to_picker_instance() {
+    let mut app = test_app();
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+
+    let first = dispatch(Action::DashboardOpenLocationPicker, &mut app);
+    let (base_cwd, first_picker_id) = first
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchDashboardLocationCandidates {
+                base_cwd,
+                picker_id,
+            } => Some((base_cwd.clone(), picker_id.clone())),
+            _ => None,
+        })
+        .expect("location picker must schedule async recent-dir loading");
+    dispatch(Action::DashboardCloseLocationPicker, &mut app);
+    let second = dispatch(Action::DashboardOpenLocationPicker, &mut app);
+    let second_picker_id = second
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchDashboardLocationCandidates { picker_id, .. } => Some(picker_id.clone()),
+            _ => None,
+        })
+        .expect("reopened picker must get a new instance id");
+    assert_ne!(first_picker_id, second_picker_id);
+    {
+        let picker = app
+            .dashboard
+            .as_mut()
+            .unwrap()
+            .location_picker
+            .as_mut()
+            .unwrap();
+        picker.picker.set_query("new");
+        picker.picker.selected = 0;
+        picker.worktree_mode = true;
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::DashboardLocationCandidatesLoaded {
+            base_cwd: base_cwd.clone(),
+            picker_id: first_picker_id,
+            dirs: vec![(PathBuf::from("/old"), chrono::Utc::now())],
+            worktrees: std::collections::HashMap::new(),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.dashboard
+            .as_ref()
+            .unwrap()
+            .location_picker
+            .as_ref()
+            .unwrap()
+            .recents
+            .len(),
+        1,
+        "old completion must not update a reopened picker"
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::DashboardLocationCandidatesLoaded {
+            base_cwd,
+            picker_id: second_picker_id,
+            dirs: vec![(PathBuf::from("/new"), chrono::Utc::now())],
+            worktrees: std::collections::HashMap::new(),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.dashboard
+            .as_ref()
+            .unwrap()
+            .location_picker
+            .as_ref()
+            .unwrap()
+            .recents
+            .len(),
+        2,
+        "current completion should enrich the open picker"
+    );
+    let picker = app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .location_picker
+        .as_ref()
+        .unwrap();
+    assert_eq!(picker.picker.query(), "new");
+    assert_eq!(picker.picker.selected, 0);
+    assert!(picker.worktree_mode);
+}
 /// Regression: `/cd` is gated on the dashboard being the FOREGROUND view,
 /// not merely existing. `app.dashboard` stays `Some` for the rest of the
 /// session once opened, so a stale `is_some()` check would let `/cd <path>`

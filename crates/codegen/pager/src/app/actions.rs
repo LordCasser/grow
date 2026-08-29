@@ -1274,6 +1274,17 @@ pub enum Effect {
     },
     /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },
+    /// Load recent project directories for an already-visible session picker.
+    FetchProjectPickerRecents {
+        agent_id: AgentId,
+        picker_id: String,
+    },
+    /// Load recent project directories for an already-visible dashboard
+    /// location picker.
+    FetchDashboardLocationCandidates {
+        base_cwd: std::path::PathBuf,
+        picker_id: String,
+    },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
     /// instead of creating a fresh one (`--resume` + `--worktree` combination).
@@ -2080,6 +2091,19 @@ pub enum TaskResult {
         /// search) clears the search in-flight indicator; `None` must leave
         /// it alone — in Build mode the flag belongs to the FTS5 deep search.
         query: Option<String>,
+    },
+    /// Recent project directories loaded for a session project picker.
+    ProjectPickerRecentsLoaded {
+        agent_id: AgentId,
+        picker_id: String,
+        dirs: Vec<(std::path::PathBuf, chrono::DateTime<chrono::Utc>)>,
+    },
+    /// Recent project directories loaded for a dashboard location picker.
+    DashboardLocationCandidatesLoaded {
+        base_cwd: std::path::PathBuf,
+        picker_id: String,
+        dirs: Vec<(std::path::PathBuf, chrono::DateTime<chrono::Utc>)>,
+        worktrees: std::collections::HashMap<std::path::PathBuf, String>,
     },
     /// Picker search debounce elapsed ([`Effect::DebounceSessionSearch`]).
     SessionSearchDebounceExpired {

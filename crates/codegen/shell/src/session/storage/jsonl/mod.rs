@@ -877,15 +877,18 @@ impl JsonlStorageAdapter {
     /// List the N most recently modified session summaries across all
     /// workspaces.
     ///
-    /// Instead of reading every `summary.json` (expensive at scale — ~12K
-    /// files), this stats each file to get its mtime, sorts by mtime, and
-    /// only reads the top `limit` files. On a machine with ~12K sessions
-    /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
-    /// Final order among candidates uses `last_active_at` else `updated_at`.
+    /// Enumerates and validates local summaries, sorts them by activity, and
+    /// truncates the result to `limit`. The blocking scan is isolated from
+    /// async callers by the adapter's `spawn_blocking` boundary.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
-        let mut summaries = self.list_sessions_sync(None)?;
-        summaries.truncate(limit);
-        Ok(summaries)
+        let adapter = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut summaries = adapter.list_sessions_sync(None)?;
+            summaries.truncate(limit);
+            Ok(summaries)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn append_jsonl<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> io::Result<()> {
         self.append_jsonl_with_durability(path, data, AppendDurability::Buffered)

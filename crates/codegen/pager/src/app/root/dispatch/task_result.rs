@@ -5,6 +5,7 @@ use super::cta::{
     handle_plugin_cta_mcps_loaded,
 };
 use super::ctx::{find_agent_by_session_id, find_agent_view_by_session_id, get_active_agent_mut};
+use super::dashboard::handle_dashboard_location_candidates_loaded;
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
     handle_compact_complete, handle_prompt_response, handle_suggestion_debounce_expired,
@@ -16,7 +17,8 @@ use super::rewind::{
 };
 use super::router::{dispatch, dispatch_action_result};
 use super::session::fork::{
-    handle_fork_session_failed, handle_fork_session_ready, handle_worktree_forked,
+    handle_fork_session_failed, handle_fork_session_ready, handle_project_picker_recents_loaded,
+    handle_worktree_forked,
 };
 use super::session::lifecycle::{
     dispatch_exit_session, handle_session_created, handle_session_failed,
@@ -370,6 +372,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::SessionListFailed { error, seq, query } => {
             handle_session_list_failed(app, error, seq, query)
         }
+        TaskResult::ProjectPickerRecentsLoaded {
+            agent_id,
+            picker_id,
+            dirs,
+        } => handle_project_picker_recents_loaded(app, agent_id, picker_id, dirs),
+        TaskResult::DashboardLocationCandidatesLoaded {
+            base_cwd,
+            picker_id,
+            dirs,
+            worktrees,
+        } => handle_dashboard_location_candidates_loaded(app, base_cwd, picker_id, dirs, worktrees),
         TaskResult::SessionSearchDebounceExpired { query, seq } => {
             handle_session_search_debounce_expired(app, query, seq)
         }

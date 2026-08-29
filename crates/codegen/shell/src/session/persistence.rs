@@ -2413,9 +2413,9 @@ pub async fn delete_session_history(
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
 
-/// List the `limit` most recently modified session summaries across all
-/// workspaces. Uses stat-based mtime sorting to avoid reading every
-/// summary file on disk; final order uses `last_active_at` else `updated_at`.
+/// List the `limit` most recent session summaries across all workspaces.
+/// The adapter enumerates and validates summaries in its blocking pool before
+/// sorting/truncating, keeping this async boundary non-blocking.
 pub async fn list_recent_summaries(limit: usize) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grow_home::grow_home();
     let storage = JsonlStorageAdapter::with_root(root_dir);

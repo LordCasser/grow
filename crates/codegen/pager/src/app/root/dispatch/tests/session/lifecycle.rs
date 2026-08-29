@@ -1498,6 +1498,142 @@ fn new_session_opens_project_picker_before_creating_session_for_non_project_dir(
             .iter()
             .any(|e| matches!(e, Effect::CreateSession { .. })),
     );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchProjectPickerRecents { .. }))
+    );
+}
+
+#[test]
+fn project_picker_recents_complete_only_for_untouched_picker() {
+    let mut app = project_picker_app();
+    let effects = dispatch(Action::NewSession, &mut app);
+    let (agent_id, picker_id) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchProjectPickerRecents {
+                agent_id,
+                picker_id,
+            } => Some((*agent_id, picker_id.clone())),
+            _ => None,
+        })
+        .expect("picker must schedule async recent-dir loading");
+    assert_eq!(
+        app.agents[&agent_id]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options
+            .len(),
+        2
+    );
+    let recent = PathBuf::from("/projects/recent");
+    dispatch(
+        Action::TaskComplete(TaskResult::ProjectPickerRecentsLoaded {
+            agent_id,
+            picker_id,
+            dirs: vec![(recent.clone(), chrono::Utc::now())],
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_id];
+    let Some(crate::views::question_view::LocalQuestionKind::ProjectSelect {
+        resolved_paths, ..
+    }) = agent
+        .question_view
+        .as_ref()
+        .and_then(|question| question.local_kind.as_ref())
+    else {
+        panic!("project picker must remain open");
+    };
+    assert_eq!(resolved_paths.last(), Some(&recent));
+
+    let mut interacted = project_picker_app();
+    let effects = dispatch(Action::NewSession, &mut interacted);
+    let (agent_id, picker_id) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchProjectPickerRecents {
+                agent_id,
+                picker_id,
+            } => Some((*agent_id, picker_id.clone())),
+            _ => None,
+        })
+        .unwrap();
+    interacted.agents[&agent_id]
+        .question_view
+        .as_mut()
+        .unwrap()
+        .set_cursor(1);
+    dispatch(
+        Action::TaskComplete(TaskResult::ProjectPickerRecentsLoaded {
+            agent_id,
+            picker_id,
+            dirs: vec![(PathBuf::from("/projects/stale"), chrono::Utc::now())],
+        }),
+        &mut interacted,
+    );
+    assert_eq!(
+        interacted.agents[&agent_id]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options
+            .len(),
+        2,
+        "user navigation makes the async completion stale"
+    );
+}
+
+#[test]
+fn closed_project_picker_recents_completion_is_a_noop() {
+    let mut app = project_picker_app();
+    let effects = dispatch(Action::NewSession, &mut app);
+    let (agent_id, picker_id) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchProjectPickerRecents {
+                agent_id,
+                picker_id,
+            } => Some((*agent_id, picker_id.clone())),
+            _ => None,
+        })
+        .expect("picker must schedule async recent-dir loading");
+    let outcome = {
+        let agent = app.agents.get_mut(&agent_id).unwrap();
+        agent.question_view.as_mut().unwrap().selections[0] =
+            crate::views::question_view::QuestionSelection::Single(Some(0));
+        agent.submit_question_answers_for_test(false)
+    };
+    let crate::app::root::InputOutcome::Action(action) = outcome else {
+        panic!("project picker selection must produce an action");
+    };
+    let selection_effects = dispatch(action, &mut app);
+    assert_eq!(
+        selection_effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::CreateSession { .. }))
+            .count(),
+        1
+    );
+    let cwd = app.cwd.clone();
+    let session_cwd = app.agents[&agent_id].session.cwd.clone();
+    dispatch(
+        Action::TaskComplete(TaskResult::ProjectPickerRecentsLoaded {
+            agent_id,
+            picker_id,
+            dirs: vec![(PathBuf::from("/stale"), chrono::Utc::now())],
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_id];
+    assert!(agent.pending_project_create.is_none());
+    assert!(agent.question_view.is_none());
+    assert_eq!(app.cwd, cwd);
+    assert_eq!(agent.session.cwd, session_cwd);
 }
 
 #[test]

@@ -826,6 +826,9 @@ const LOCATION_VISIBLE_CAP: usize = 200;
 pub struct LocationPickerState {
     pub picker: crate::views::picker::PickerState,
     pub window: crate::views::modal_window::ModalWindowState,
+    /// Stable identity for this picker instance, used to reject late async
+    /// recent-directory completions after close/reopen.
+    picker_id: String,
     /// Static suggestions shown when the query isn't a path: current cwd
     /// first, then recent project dirs.
     pub recents: Vec<LocationCandidate>,
@@ -877,6 +880,7 @@ impl LocationPickerState {
         Self {
             picker,
             window: crate::views::modal_window::ModalWindowState::new(),
+            picker_id: uuid::Uuid::new_v4().to_string(),
             recents,
             base_cwd,
             worktrees,
@@ -888,6 +892,11 @@ impl LocationPickerState {
             worktree_hit: crate::app::agent_view::HitArea::default(),
             worktree_repo_cache: None,
         }
+    }
+
+    /// Identity of this location-picker instance.
+    pub fn picker_id(&self) -> &str {
+        &self.picker_id
     }
 
     /// Whether `dir` is inside a git repo (worktrees require one), memoized
@@ -965,6 +974,67 @@ impl LocationPickerState {
         self.dir_listing_parent = Some(parent);
         self.picker.selected = 0;
         self.picker.scroll_offset = None;
+    }
+
+    /// Replace the asynchronously loaded recent-directory candidates while
+    /// retaining the current query, selection, and worktree toggle.
+    pub fn replace_recent_candidates(
+        &mut self,
+        recent_dirs: &[(PathBuf, chrono::DateTime<chrono::Utc>)],
+        worktrees: std::collections::HashMap<PathBuf, String>,
+    ) {
+        let selected = self.picker.selected;
+        let scroll_offset = self.picker.scroll_offset;
+        self.worktrees = worktrees;
+        // Rebuild a path-mode listing too, so worktree badges use the new
+        // index, while restoring the user's selection/scroll below.
+        self.dir_listing_parent = None;
+        let cwd = self.base_cwd.clone();
+        let worktrees = &self.worktrees;
+        let label_for_path = |path: &Path| {
+            if dirs::home_dir().is_some_and(|home| home == path) {
+                return "~".to_string();
+            }
+            let raw = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("/");
+            crate::render::line_utils::truncate_str(raw, 30)
+        };
+        let label_for = |path: &Path| {
+            let key = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            worktrees.get(&key).cloned()
+        };
+        let mut recents = vec![LocationCandidate {
+            label: label_for_path(&cwd),
+            detail: format!(
+                "{}  (current)",
+                crate::project_picker::sources::display_path(&cwd)
+            ),
+            worktree: label_for(&cwd),
+            path: cwd.clone(),
+        }];
+        recents.extend(
+            recent_dirs
+                .iter()
+                .filter(|(path, _)| path != &cwd)
+                .map(|(path, ts)| LocationCandidate {
+                    label: label_for_path(path),
+                    detail: format!(
+                        "{}  ({})",
+                        crate::project_picker::sources::display_path(path),
+                        crate::views::session_title::format_relative_time(
+                            (chrono::Utc::now() - *ts).to_std().unwrap_or_default()
+                        ),
+                    ),
+                    worktree: label_for(path),
+                    path: path.clone(),
+                }),
+        );
+        self.recents = recents;
+        self.refresh_suggestions();
+        self.picker.selected = selected.min(self.visible_candidates().len().saturating_sub(1));
+        self.picker.scroll_offset = scroll_offset;
     }
 
     /// The effective list shown + selected from, given the current query.

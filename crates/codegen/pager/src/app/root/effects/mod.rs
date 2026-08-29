@@ -91,6 +91,33 @@ pub(crate) fn execute(
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
             }
         }
+        Effect::FetchProjectPickerRecents { agent_id, picker_id } => {
+            tasks.spawn(async move {
+                let dirs = crate::project_picker::sources::collect_recent_dirs(10).await;
+                TaskResult::ProjectPickerRecentsLoaded {
+                    agent_id,
+                    picker_id,
+                    dirs,
+                }
+            });
+        }
+        Effect::FetchDashboardLocationCandidates {
+            base_cwd,
+            picker_id,
+        } => {
+            tasks.spawn(async move {
+                let (dirs, worktrees) = tokio::join!(
+                    crate::project_picker::sources::collect_recent_dirs(10),
+                    tokio::task::spawn_blocking(crate::git_info::worktree_label_index),
+                );
+                TaskResult::DashboardLocationCandidatesLoaded {
+                    base_cwd,
+                    picker_id,
+                    dirs,
+                    worktrees: worktrees.unwrap_or_default(),
+                }
+            });
+        }
         Effect::LaunchTrajectory {
             agent_id,
             session_id,
