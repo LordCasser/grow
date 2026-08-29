@@ -16,8 +16,6 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 ## 核心能力与边界
 
-下面只列出会影响使用方式的当前行为。
-
 | 领域 | Grow 当前行为 |
 | --- | --- |
 | 模型 | 不提供内置模型目录。用户显式配置 Provider、模型和默认模型，支持 Chat Completions、Responses、Messages 三类后端。 |
@@ -136,7 +134,7 @@ Artifact Attestation；下载后可以用
 
 ### 从源码安装
 
-源码构建方式见本文后面的[编译与构建](#编译与构建)。
+源码构建见[编译与构建](#编译与构建)。
 
 ## 第一次启动
 
@@ -419,13 +417,11 @@ musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 - [图片与 PDF 阅读架构](crates/codegen/shell/docs/architecture/image-reading.md)
 
 CLI composition root 位于 `crates/codegen/cli`，TUI 位于 `pager`，Agent/session runtime 位于
-`shell`，工作区与权限位于 `workspace`，工具实现位于 `tools`。更细的依赖边界以各模块源码和
-架构文档为准，不在 README 重复。
+`shell`，工作区与权限位于 `workspace`，工具实现位于 `tools`。依赖边界见各模块源码和架构文档。
 
 ## 来源与许可证
 
-Grow 基于 xAI Grok Build 的开源代码分叉；上游名称仅用于说明来源。README 只描述当前产品行为，
-不承载变更记录。
+Grow 基于 xAI Grok Build 的开源代码分叉。
 
 第一方代码使用 Apache License 2.0，见 [LICENSE](LICENSE)。第三方与 vendored 代码沿用各自
 许可证，见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) 和
