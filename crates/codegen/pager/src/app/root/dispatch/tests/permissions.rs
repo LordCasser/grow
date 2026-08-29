@@ -311,57 +311,6 @@ fn permission_cancel_toasts_when_requester_disconnected() {
     );
 }
 
-#[test]
-fn set_permission_mode_always_approve_blocked_by_policy_pin() {
-    use crate::app::actions::PermissionModeKind;
-    use crate::views::modal::ActiveModal;
-    let mut app = test_app_with_agent();
-    app.always_approve_policy_block = Some(POLICY_WARNING);
-    // Open the settings modal so the blocked path's snapshot refresh is
-    // exercised: the modal must keep showing the live (non-always-approve) value.
-    let _ = dispatch(Action::OpenSettings, &mut app);
-
-    let effects = dispatch(
-        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
-        &mut app,
-    );
-
-    assert!(
-        effects.is_empty(),
-        "blocked modal commit must not persist, got {effects:?}",
-    );
-    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
-    assert_eq!(
-        app.current_ui.permission_mode, None,
-        "canonical mirror must stay untouched"
-    );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
-        panic!("Settings modal must remain open across the blocked dispatch")
-    };
-    assert!(
-        !state.pager_snapshot.permission_mode.is_always_approve(),
-        "modal snapshot must show the live (non-always-approve) value after the block",
-    );
-    assert_ne!(
-        state.ui_snapshot.permission_mode.as_deref(),
-        Some("always-approve"),
-        "modal canonical must not show the refused mode",
-    );
-    assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
-
-    // Non-always-approve kinds still commit under the pin.
-    let effects = dispatch(Action::SetPermissionMode(PermissionModeKind::Ask), &mut app);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::NotifySessionPermissionMode {
-            canonical: "ask",
-            ..
-        }]
-    ));
-    assert_eq!(app.current_ui.permission_mode, None);
-}
-
 /// SetPermissionMode(Auto) changes only the active session.
 #[test]
 fn set_permission_mode_auto_notifies_without_changing_default() {

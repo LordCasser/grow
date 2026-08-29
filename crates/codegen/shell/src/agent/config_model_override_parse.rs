@@ -4,7 +4,7 @@
 //! vocabulary; the `[auth_provider.*]` parser in `config.rs` emits them too.
 //!
 //! A model entry must survive a bad field: warn and skip the field, never
-//! drop the model (managed configs must not lose catalog entries).
+//! drop the model (local configs must not lose catalog entries).
 //!
 //! Every table is deserialized through `serde_ignored`, so unknown fields
 //! warn on every path and [`ConfigModelOverride`] stays the single source of

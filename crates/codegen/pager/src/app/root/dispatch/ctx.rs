@@ -167,23 +167,6 @@ pub(crate) enum SwitchCause {
     // sets `DashboardState::attached_agent` directly.
 }
 
-/// Surface a launch-blocked `--permission-mode always-approve` once on the first agent view (the TUI owns
-/// the terminal, so stderr is gone); idempotent via `.take()`. Dashboard flows
-/// that bypass [`switch_to_agent`] call it directly.
-pub(super) fn surface_always_approve_launch_block_notice(app: &mut AppView, target: AgentId) {
-    if let Some(warning) = app.always_approve_launch_block_notice.take()
-        && let Some(agent) = app.agents.get_mut(&target)
-    {
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::notice(
-                warning.to_string(),
-            ));
-        agent.show_toast(warning);
-    }
-    surface_screen_mode_switch_hint(app, target);
-}
-
 /// Surface a one-shot switch-back toast after a screen-mode relaunch (fullscreen only).
 pub(super) fn surface_screen_mode_switch_hint(app: &mut AppView, target: AgentId) {
     if let Some(hint) = app.screen_mode_switch_hint.take()
@@ -195,9 +178,9 @@ pub(super) fn surface_screen_mode_switch_hint(app: &mut AppView, target: AgentId
 }
 
 /// Switch the active agent — the primary funnel for assigning `ActiveView::Agent`
-/// (new, resume, picker, fork); also fires [`surface_always_approve_launch_block_notice`].
+/// (new, resume, picker, fork).
 /// No-op if `target` is unknown or already active. Dashboard-first flows that
-/// assign `Agent` directly must call the notice themselves.
+/// assign `Agent` directly must surface their screen-mode hint themselves.
 pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: SwitchCause) {
     // Structural backstop for the auth + folder-trust session gate. This is the
     // single funnel every FRESH-agent creator routes through (New/Load/Fork —
@@ -253,7 +236,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
     // Seed the auto feature gate on the (possibly new) active agent's slash
     // registry.
     app.sync_permission_mode_slash_gate();
-    surface_always_approve_launch_block_notice(app, target);
+    surface_screen_mode_switch_hint(app, target);
 }
 
 pub(super) fn find_agent_id_by_session_id(

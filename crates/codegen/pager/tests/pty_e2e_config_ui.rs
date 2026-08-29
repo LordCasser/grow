@@ -8,8 +8,6 @@
 #[path = "pty_e2e/common.rs"]
 mod common;
 
-#[path = "pty_e2e/campaign_nudges_default_until_dismissed_by_model_pick.rs"]
-mod campaign_nudges_default_until_dismissed_by_model_pick;
 #[path = "pty_e2e/dashboard_overlay_tab_esc_backout_and_ctrl_backslash.rs"]
 mod dashboard_overlay_tab_esc_backout_and_ctrl_backslash;
 #[path = "pty_e2e/extensions_modal_copy_hints_pty.rs"]

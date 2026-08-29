@@ -2623,8 +2623,7 @@ fn disconnect_unload_serializes_a_replacement_incarnation() {
             .await
             .expect("old actor must receive idle-unload request");
 
-        let (replacement, replacement_tx, _replacement_rx) =
-            make_live_session_handle(&sid, None);
+        let (replacement, replacement_tx, _replacement_rx) = make_live_session_handle(&sid, None);
         let replacement_agent = agent.clone();
         let replacement_sid = sid.clone();
         let install = tokio::task::spawn_local(async move {
@@ -2749,8 +2748,7 @@ fn explicit_close_reports_panicked_writer_as_failed() {
                 .roster_delta_spy
                 .borrow()
                 .iter()
-                .any(|(id, state)| id == sid.0.as_ref()
-                    && *state == SessionLiveState::DeadFailed),
+                .any(|(id, state)| id == sid.0.as_ref() && *state == SessionLiveState::DeadFailed),
             "joining the writer must preserve panic identity"
         );
         assert!(
@@ -2758,8 +2756,7 @@ fn explicit_close_reports_panicked_writer_as_failed() {
                 .roster_delta_spy
                 .borrow()
                 .iter()
-                .any(|(id, state)| id == sid.0.as_ref()
-                    && *state == SessionLiveState::Completed),
+                .any(|(id, state)| id == sid.0.as_ref() && *state == SessionLiveState::Completed),
             "a panicked writer must never be reported as a clean close"
         );
     });

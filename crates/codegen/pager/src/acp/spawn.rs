@@ -166,8 +166,6 @@ pub async fn spawn_shell(
     cancel: &CancellationToken,
     memory_config: Option<shell::config::MemoryConfig>,
 ) -> Result<SpawnedAgent> {
-    shell::managed_config::ensure_managed_policy_present().await;
-
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =

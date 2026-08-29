@@ -1726,7 +1726,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::path::PathBuf::from("/home/u/.grow/hooks"),
             extra_env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
-            layer: hooks::config::HookProvenance::Managed,
+            layer: hooks::config::HookProvenance::User,
         };
         assert_eq!(
             serde_json::to_value(&spec).unwrap(),

@@ -184,12 +184,7 @@ pub struct LspServerEntry {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigSources {
-    /// Config layers (system + user managed, user + system requirements, user
-    /// config.toml, the macOS MDM managed-preferences layer, and project
-    /// .grow/config.toml files). Driven from the same resolvers used at runtime
-    /// (`ConfigLayers`, `requirements_layers`) so system + MDM layers and
-    /// precedence are included, and emptiness reflects real contribution after
-    /// stripping (version_overrides, fail_closed, etc).
+    /// The global config.toml and trusted project .grow/config.toml files.
     pub layers: Vec<ConfigLayer>,
 }
 
@@ -197,8 +192,7 @@ pub struct ConfigSources {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigLayer {
-    /// Logical role of the layer: "system-managed", "managed", "user",
-    /// "system-requirements", "requirements", "mdm", or "project".
+    /// Logical role of the layer: "user" or "project".
     pub role: String,
     pub path: String,
     /// "empty" or "parse error" when the on-disk file does not contribute
@@ -234,8 +228,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
     // Route through the live folder-trust gate rather than a raw store read; no
     // session resolve has run for a one-shot `inspect`. The single verdict drives
     // the top-level flag and gates the hooks, plugins, and MCP/LSP listings so
-    // they reflect runtime gating. `remote = None`: env/user/managed opt-out is
-    // honored, but a remote kill-switch is not consulted on this report-only path.
+    // they reflect runtime gating.
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
 
@@ -450,8 +443,7 @@ fn list_hooks(
     discovered_plugins: &[agent::plugins::DiscoveredPlugin],
 ) -> Vec<HookEntry> {
     // Route through the same assembly as session startup so config-layer hooks
-    // (config.toml / managed_config.toml / requirements.toml) appear in `/hooks`
-    // status alongside file hooks, each carrying its provenance name prefix.
+    // appear in `/hooks` status alongside file hooks.
     let config_layers = config::hook_config_layers();
     let (registry, _errors) =
         crate::util::hooks::assemble_hooks(&config_layers, git_root, project_trusted);
@@ -460,24 +452,12 @@ fn list_hooks(
         .all_hooks()
         .into_iter()
         .map(|h| {
-            // Classify via the shared `hook_origin` (typed provenance + file-tier
-            // name prefix), the same classifier diagnostics uses, so admin/system
-            // hooks aren't mislabeled and the two surfaces can't diverge.
+            // Classify via the shared `hook_origin`, the same classifier used by
+            // diagnostics, so both surfaces agree on provenance.
             use ::hooks::config::HookOrigin as O;
-            // Config-layer hooks store the layer's directory in `source_dir`;
-            // rejoin the tier's filename so inspect shows the actual config file.
-            let config_file = |name: &str| h.source_dir.join(name);
             let path = h.source_dir.clone();
             let source = match ::hooks::config::hook_origin(h) {
-                O::SystemManaged | O::Managed => ConfigSource::Managed {
-                    path: Some(config_file(config::MANAGED_CONFIG_FILENAME)),
-                },
-                O::Requirements => ConfigSource::Managed {
-                    path: Some(config_file(config::REQUIREMENTS_FILENAME)),
-                },
-                O::UserConfig => ConfigSource::ConfigToml {
-                    path: config_file(config::USER_CONFIG_FILENAME),
-                },
+                O::UserConfig => ConfigSource::ConfigToml { path },
                 O::ProjectFile => ConfigSource::Project { path },
                 // File/plugin/agent/unknown hooks are user-scoped for display.
                 O::UserFile | O::Plugin | O::Agent | O::Unknown => ConfigSource::User { path },
@@ -713,8 +693,8 @@ fn list_lsp_servers(
 
     // Folder-trust gate (display-only): inspect never spawns servers, but mark the
     // repo-local (project-scoped) entries a session would skip in an untrusted
-    // clone so the listing matches the live gate. `remote = None` mirrors
-    // `grow mcp doctor` (no loaded RemoteSettings in a standalone command).
+    // Clone so the listing matches the live gate. Standalone inspection has no
+    // live session state.
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let project_allowed = crate::agent::folder_trust::project_scope_allowed(cwd);
 
@@ -734,46 +714,14 @@ fn list_lsp_servers(
         .collect()
 }
 
-/// Locates the config files that contribute to the effective config by
-/// probing the canonical locations used by `ConfigLayers::load` and
-/// `requirements_layers`: system + user `managed_config.toml`, user
-/// `config.toml`, user + system `requirements.toml`, and project
-/// `.grow/config.toml` files (via `find_project_configs`). The macOS MDM
-/// managed-preferences layer has no file on disk, so it is sourced directly
-/// from `requirements_layers()` rather than a path probe.
-///
-/// Only on-disk files (plus the synthetic MDM layer) are emitted, except the
-/// primary user `config.toml` which always gets a "User: (none)" line in the
-/// human view when absent.
+/// Locates the global `config.toml` and project `.grow/config.toml` files. Only
+/// on-disk files are emitted; the primary global config always gets a
+/// "User: (none)" line in the human view when absent.
 /// `note` distinguishes files that exist but contribute nothing after the
 /// real loader's processing (stripping, version overrides, fail_closed, etc).
 /// Parse errors are reported distinctly rather than as "empty".
 fn list_config_sources(cwd: &Path) -> ConfigSources {
     let mut layers: Vec<ConfigLayer> = vec![];
-
-    // System managed (comes first in merge precedence)
-    if let Some(dir) = crate::config::system_config_dir() {
-        let p = dir.join("managed_config.toml");
-        if let Some((path_s, note)) = describe_config_file(&p) {
-            layers.push(ConfigLayer {
-                role: "system-managed".to_string(),
-                path: path_s,
-                note,
-            });
-        }
-    }
-
-    // User managed
-    if let Some(home) = crate::config::user_grow_home() {
-        let p = home.join("managed_config.toml");
-        if let Some((path_s, note)) = describe_config_file(&p) {
-            layers.push(ConfigLayer {
-                role: "managed".to_string(),
-                path: path_s,
-                note,
-            });
-        }
-    }
 
     // User config.toml (primary user layer; shown as (none) when absent)
     if let Some(home) = crate::config::user_grow_home() {
@@ -785,50 +733,6 @@ fn list_config_sources(cwd: &Path) -> ConfigSources {
                 note,
             });
         }
-    }
-
-    // Requirements: user then system (order they appear in requirements_layers)
-    if let Some(home) = crate::config::user_grow_home() {
-        let p = home.join("requirements.toml");
-        if let Some((path_s, note)) = describe_requirements_file(&p) {
-            layers.push(ConfigLayer {
-                role: "requirements".to_string(),
-                path: path_s,
-                note,
-            });
-        }
-    }
-    if let Some(dir) = crate::config::system_config_dir() {
-        let p = dir.join("requirements.toml");
-        if let Some((path_s, note)) = describe_requirements_file(&p) {
-            layers.push(ConfigLayer {
-                role: "system-requirements".to_string(),
-                path: path_s,
-                note,
-            });
-        }
-    }
-
-    // macOS MDM managed preferences: a synthetic, admin-forced requirements layer
-    // with no file on disk, so it's sourced from requirements_layers() (keyed on
-    // the synthetic label) with contribution decided from the in-memory value
-    // rather than a path probe. Absent on non-macOS or when no profile is forced.
-    let rt_layers = crate::config::requirements_layers();
-    if let Some(mdm) = rt_layers
-        .iter()
-        .find(|l| matches!(l.source, crate::config::RequirementsSource::Mdm))
-    {
-        let path_s = mdm.source.label().into_owned();
-        let note = if requirements_layer_contributes(&rt_layers, &path_s) {
-            None
-        } else {
-            Some("empty".to_string())
-        };
-        layers.push(ConfigLayer {
-            role: "mdm".to_string(),
-            path: path_s,
-            note,
-        });
     }
 
     // Project configs (from git root up); each is its own "project" role entry
@@ -847,7 +751,7 @@ fn list_config_sources(cwd: &Path) -> ConfigSources {
     ConfigSources { layers }
 }
 
-/// For managed / user / project config files: use `load_config_file` (the
+/// For global / project config files: use `load_config_file` (the
 /// production path for those layers) so `note` reflects post-processing
 /// (version overrides stripped) and distinguishes parse failure.
 fn describe_config_file(path: &Path) -> Option<(String, Option<String>)> {
@@ -869,37 +773,6 @@ fn describe_config_file(path: &Path) -> Option<(String, Option<String>)> {
         }
         Err(_) => Some((path_s, Some("parse error".to_string()))),
     }
-}
-
-/// Classify a requirements file against the real loader. `load_config_file`
-/// catches both syntax errors and invalid `[[version_overrides]]` (the loader
-/// rejects the latter too), so those read "(parse error)"; contribution is
-/// then sourced from `requirements_layers()` via `requirements_layer_contributes`.
-fn describe_requirements_file(path: &Path) -> Option<(String, Option<String>)> {
-    if !path.exists() {
-        return None;
-    }
-    let path_s = path.display().to_string();
-    if crate::config::load_config_file(path).is_err() {
-        return Some((path_s, Some("parse error".to_string())));
-    }
-    if requirements_layer_contributes(&crate::config::requirements_layers(), &path_s) {
-        Some((path_s, None))
-    } else {
-        Some((path_s, Some("empty".to_string())))
-    }
-}
-
-/// Whether the loader keeps `path_s` *and* its post-load table is non-empty.
-/// The non-empty guard runs before `fail_closed` is stripped, so a
-/// `fail_closed`-only file is retained with an empty table yet contributes nothing.
-fn requirements_layer_contributes(
-    layers: &[crate::config::RequirementsLayer],
-    path_s: &str,
-) -> bool {
-    layers.iter().any(|l| {
-        l.source.label().as_ref() == path_s && l.value.as_table().is_some_and(|t| !t.is_empty())
-    })
 }
 
 fn print_section<T>(title: &str, items: &[T], format_item: impl Fn(&T) -> String) {
@@ -1130,11 +1003,7 @@ fn print_human(r: &InspectReport) {
             _ => "",
         };
         let label = match layer.role.as_str() {
-            "system-managed" => "System Managed",
-            "managed" => "Managed",
-            "system-requirements" => "System Requirements",
-            "requirements" => "Requirements",
-            "mdm" => "MDM Requirements",
+            "user" => "User",
             "project" => "Project",
             other => other,
         };
@@ -1240,42 +1109,6 @@ mod tests {
         std::fs::write(&bad, "[[[ this is not valid toml").unwrap();
         let (_, note) = describe_config_file(&bad).unwrap();
         assert_eq!(note.as_deref(), Some("parse error"));
-    }
-
-    #[test]
-    fn describe_requirements_file_flags_invalid_version_overrides_as_parse_error() {
-        // Valid TOML but invalid `[[version_overrides]]` is rejected by the real
-        // loader, so it must read "parse error", not "empty".
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("requirements.toml");
-        std::fs::write(&path, "[[version_overrides]]\nminimum_version = \"nope\"\n").unwrap();
-        let (_, note) = describe_requirements_file(&path).unwrap();
-        assert_eq!(note.as_deref(), Some("parse error"));
-    }
-
-    #[test]
-    fn requirements_layer_contributes_requires_non_empty_post_strip_table() {
-        // A `fail_closed`-only file is kept by the loader but with an empty
-        // post-strip table, so it must not count as contributing.
-        let path = "/home/u/.grow/requirements.toml";
-        let layer = |v| crate::config::RequirementsLayer {
-            value: v,
-            source: crate::config::RequirementsSource::File(std::path::PathBuf::from(path)),
-            is_system: false,
-        };
-        let empty = layer(toml::Value::Table(toml::map::Map::new()));
-        assert!(!requirements_layer_contributes(
-            std::slice::from_ref(&empty),
-            path
-        ));
-
-        let mut tbl = toml::map::Map::new();
-        tbl.insert("diagnostics".into(), toml::Value::Boolean(true));
-        let full = layer(toml::Value::Table(tbl));
-        assert!(requirements_layer_contributes(
-            std::slice::from_ref(&full),
-            path
-        ));
     }
 
     /// Public provider/model warnings flow from an effective config through

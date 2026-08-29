@@ -1431,7 +1431,7 @@ pub(crate) struct SessionActor {
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
     pub(crate) tool_context: ToolContext,
-    /// Managed Read-deny glob patterns, resolved once at construction and
+    /// Read-deny glob patterns, resolved once at construction and
     /// (re-)injected into the ToolBridge so the Grep tool excludes policy-forbidden
     pub(crate) deny_read_globs: Vec<String>,
     /// Consolidated MCP state (configs, clients, init status) protected by a single lock.

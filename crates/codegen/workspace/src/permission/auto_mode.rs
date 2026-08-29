@@ -647,7 +647,7 @@ fn classify_bash(cmd: &str) -> ClassifierVerdict {
     // head and fail the check), else Block. BY DESIGN, project code-runners
     // (`cargo`/`make`/`pytest`/`python`/`node`, `npm test`/`run`, `uv run
     // <routine>`) execute project-controlled code; this heuristic is a fail-closed
-    // FALLBACK and the real safety boundary is the LLM side-query + managed policy.
+    // FALLBACK and the real safety boundary is the LLM side-query + permission policy.
     if !cmds.is_empty() && cmds.iter().all(|c| bash_command_is_routine(c.words())) {
         return ClassifierVerdict::Allow;
     }

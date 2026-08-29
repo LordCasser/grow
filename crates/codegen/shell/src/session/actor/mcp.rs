@@ -763,8 +763,6 @@ impl SessionActor {
             self.mcp.handshakes_done.notify_waiters();
             return;
         }
-        let cwd = std::path::Path::new(&self.session_info.cwd);
-        crate::session::mcp_servers::build_config_resolved_event(&mcp_server_configs, cwd);
         let configs_to_start: Vec<_> = mcp_server_configs
             .iter()
             .filter(|c| !existing_client_names.contains(mcp_server_name(c)))

@@ -1,5 +1,4 @@
-//! `[[campaigns]]` overlays. Priority (first id wins): requirements > remote >
-//! user > managed > system_managed. Applied after layer merge.
+//! Local `[[campaigns]]` overlays from `$GROW_HOME/config.toml`.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,14 +21,9 @@ pub struct CampaignEntry {
     pub patch: toml::Table,
 }
 
-/// Disk campaigns grouped by source layer. Merged with the remote layer (by
-/// priority, first id wins) in [`crate::loader::ConfigLayers::resolve_campaigns`].
 #[derive(Debug, Clone, Default)]
 pub struct CampaignOverrides {
-    pub requirements: Vec<CampaignEntry>,
     pub user: Vec<CampaignEntry>,
-    pub managed: Vec<CampaignEntry>,
-    pub system_managed: Vec<CampaignEntry>,
 }
 
 pub fn take_campaigns(config: &mut toml::Value) -> Vec<ConfigOverrideEntry<CampaignMeta>> {
@@ -149,7 +143,7 @@ mod tests {
             web_fetch = true
             "#,
         );
-        let entries = take_campaign_entries(&mut layer, "managed");
+        let entries = take_campaign_entries(&mut layer, "local");
         assert!(layer.get(CAMPAIGNS_KEY).is_none());
         assert_eq!(entries.len(), 1);
 
@@ -162,19 +156,19 @@ mod tests {
 
     #[test]
     fn merge_first_source_wins_duplicate_id() {
-        let req = [CampaignEntry {
+        let local = [CampaignEntry {
             id: "same".into(),
-            patch: models_default_patch("from-req"),
+            patch: models_default_patch("from-local"),
         }];
-        let remote = [CampaignEntry {
+        let lower_priority = [CampaignEntry {
             id: "same".into(),
-            patch: models_default_patch("from-remote"),
+            patch: models_default_patch("from-lower-priority"),
         }];
-        let merged = merge_campaign_entries(&[&req, &remote]);
+        let merged = merge_campaign_entries(&[&local, &lower_priority]);
         assert_eq!(merged.len(), 1);
         assert_eq!(
             merged[0].patch["models"]["default"].as_str(),
-            Some("from-req")
+            Some("from-local")
         );
     }
 
@@ -182,20 +176,20 @@ mod tests {
     fn apply_highest_priority_wins_on_leaf_conflict() {
         // Two *distinct* ids both set models.default; the higher-priority source
         // (earlier in the merged list) must win the leaf.
-        let req = [CampaignEntry {
-            id: "req".into(),
-            patch: models_default_patch("from-req"),
+        let local = [CampaignEntry {
+            id: "local".into(),
+            patch: models_default_patch("from-local"),
         }];
-        let managed = [CampaignEntry {
-            id: "managed".into(),
-            patch: models_default_patch("from-managed"),
+        let lower_priority = [CampaignEntry {
+            id: "lower-priority".into(),
+            patch: models_default_patch("from-lower-priority"),
         }];
-        let merged = merge_campaign_entries(&[&req, &managed]);
+        let merged = merge_campaign_entries(&[&local, &lower_priority]);
         assert_eq!(merged.len(), 2);
 
         let mut effective = parse("[models]\ndefault = \"user-old\"\n");
         apply_active_campaign_patches(&mut effective, &merged);
-        assert_eq!(effective["models"]["default"].as_str(), Some("from-req"));
+        assert_eq!(effective["models"]["default"].as_str(), Some("from-local"));
     }
 
     #[test]
@@ -220,7 +214,7 @@ mod tests {
                 patch: models_default_patch("kept"),
             },
         ];
-        let out = build_campaign_entries(taken, "managed");
+        let out = build_campaign_entries(taken, "local");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "valid");
         assert_eq!(out[0].patch["models"]["default"].as_str(), Some("kept"));
@@ -241,29 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn requirements_win_over_campaign() {
-        use crate::loader::ConfigLayers;
-        // A campaign (even from a lower layer) can't override a field the admin
-        // set in requirements: `apply_campaign_overrides` re-merges requirements on top.
-        let mut layers = ConfigLayers {
-            user: parse("[models]\ndefault = \"user-old\"\n"),
-            user_requirements: Some(parse("[models]\ndefault = \"pinned\"\n")),
-            ..Default::default()
-        };
-        layers.campaigns.user = vec![CampaignEntry {
-            id: "c1".into(),
-            patch: models_default_patch("campaign"),
-        }];
-        let effective =
-            layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new());
-        assert_eq!(
-            effective["models"]["default"].as_str(),
-            Some("pinned"),
-            "requirements must beat a campaign for the same field"
-        );
-    }
-
-    #[test]
     fn effective_config_honors_dismiss() {
         use crate::loader::ConfigLayers;
         // A dismissed campaign id stops overriding; the user's stored value returns.
@@ -271,17 +242,21 @@ mod tests {
             user: parse("[models]\ndefault = \"user-old\"\n"),
             ..Default::default()
         };
-        layers.campaigns.managed = vec![CampaignEntry {
+        layers.campaigns.user = vec![CampaignEntry {
             id: "c1".into(),
             patch: models_default_patch("new"),
         }];
 
         let none = std::collections::HashSet::new();
-        let active = layers.effective_config_with_campaigns(&[], &none);
+        let mut active = layers.effective_config_base();
+        let active_campaigns = layers.resolve_campaigns(&active, &none);
+        layers.apply_campaign_overrides(&mut active, &active_campaigns);
         assert_eq!(active["models"]["default"].as_str(), Some("new"));
 
         let dismissed: std::collections::HashSet<_> = ["c1".into()].into_iter().collect();
-        let off = layers.effective_config_with_campaigns(&[], &dismissed);
+        let mut off = layers.effective_config_base();
+        let active_campaigns = layers.resolve_campaigns(&off, &dismissed);
+        layers.apply_campaign_overrides(&mut off, &active_campaigns);
         assert_eq!(off["models"]["default"].as_str(), Some("user-old"));
     }
 }

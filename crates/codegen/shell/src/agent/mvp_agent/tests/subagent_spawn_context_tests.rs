@@ -6,7 +6,7 @@ use super::{build_minimal_agent_for_tests, make_test_handle};
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent_client_protocol as acp;
 
-/// Subagents inherit the parent permission handle, so a managed `Read(**/.env)`
+/// Subagents inherit the parent permission handle, so a configured `Read(**/.env)`
 /// deny still blocks the child — direct read and the `cat .env` shell equivalent.
 #[tokio::test]
 async fn subagent_spawn_context_inherits_parent_permission_handle() {

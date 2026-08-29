@@ -277,7 +277,7 @@ impl MvpAgent {
         &self.plugin_registry_handle
     }
     /// Resolved cli-chat-proxy base for session features (via
-    /// `proxy_url`). Not for the deployment-config fetch.
+    /// `proxy_url`). Not for deploy-service bundle synchronization.
     pub(crate) fn cli_chat_proxy_base_url(&self) -> String {
         self.cfg.borrow().endpoints.proxy_url()
     }
@@ -341,7 +341,7 @@ impl MvpAgent {
         Ok(ops)
     }
     pub(crate) fn deployment_key(&self) -> Option<String> {
-        self.cfg.borrow().endpoints.deployment_key.clone()
+        crate::agent::config::env_string("GROW_DEPLOYMENT_KEY")
     }
     /// Push the current, expiry-filtered local announcement configuration to
     /// connected clients. The notification is deliberately stateless: local
@@ -1828,9 +1828,7 @@ impl MvpAgent {
         };
         let ask_user_question_params_json = {
             let cfg = self.cfg.borrow();
-            let params = crate::util::config::resolve_ask_user_question_params_from_disk(
-                cfg.remote_settings.as_ref(),
-            );
+            let params = crate::util::config::resolve_ask_user_question_params_from_disk();
             match serde_json::to_value(params) {
                 Ok(serde_json::Value::Object(map)) => Some(map),
                 _ => None,

@@ -224,11 +224,6 @@ pub(crate) fn resolve_session_permission_mode(
         ))),
     }?;
     Ok(match requested {
-        crate::util::config::PermissionMode::AlwaysApprove
-            if workspace::permission::resolution::always_approve_disabled_by_policy().is_some() =>
-        {
-            crate::util::config::PermissionMode::Ask
-        }
         crate::util::config::PermissionMode::Auto
             if !crate::util::config::auto_permission_mode_enabled_from_disk() =>
         {
@@ -340,13 +335,6 @@ struct SettingsUpdateNotification {
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
     slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
-    /// Remote campaigns snapshot for the client's process-global campaign
-    /// cache. `Some` whenever settings exist (empty means campaigns were
-    /// withdrawn); `None` when the agent has no settings yet, which clients
-    /// treat as "leave the cache alone". In leader mode this push is the only
-    /// seam that seeds the TUI process, so a `/model` pick can record a remote
-    /// campaign's dismissal even when the TUI's own startup prefetch missed.
-    campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
     auto_permission_mode_enabled: Option<bool>,
     /// Soft-default permission mode for the pager (post-auth / `/new` refresh).
     permission_mode: Option<String>,
@@ -1342,9 +1330,8 @@ impl MvpAgent {
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
                 slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
-                campaigns: rs.map(|s| s.campaigns.clone()),
-                auto_permission_mode_enabled: crate::util::config::remote_auto_mode_enabled(
-                    rs,
+                auto_permission_mode_enabled: Some(
+                    crate::util::config::auto_permission_mode_enabled_from_disk(),
                 ),
                 permission_mode: rs.and_then(|s| s.permission_mode.clone()),
                 group_tool_verbs: rs.and_then(|s| s.group_tool_verbs),

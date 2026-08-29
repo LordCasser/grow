@@ -17,7 +17,7 @@ pub use terminal::{ExitStatus, LocalTerminalBackend};
 /// Per-backend enable state for the bash-harness `find`→`bfs` / `grep`→`ugrep`
 /// shadows.
 ///
-/// Resolved once by the host (config.toml `[toolset.bash]` / env / requirements)
+/// Resolved once by the host (config.toml `[toolset.bash]` / env)
 /// and baked into a [`LocalTerminalBackend`] at creation. Keeping it on the
 /// backend instead of a process-global means a subagent that reuses the parent's
 /// `LocalTerminalBackend` inherits the parent's shadows — it can't overwrite the

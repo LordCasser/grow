@@ -4246,12 +4246,12 @@ const EMPTY_LOGO_PAD: u16 = 2;
 /// `w ≥ 50 + 2·PAD && h ≥ 22 + 2·PAD` (54×26). Smaller areas render no logo —
 /// a logo that would deform is never shown.
 fn pick_empty_logo(w: u16, h: u16) -> Option<LogoSize> {
-    if w >= LogoSize::Big.width() + 2 * EMPTY_LOGO_PAD
-        && h >= LogoSize::Big.height() + 2 * EMPTY_LOGO_PAD
+    if w >= LogoSize::Big.width().saturating_add(2 * EMPTY_LOGO_PAD)
+        && h >= LogoSize::Big.height().saturating_add(2 * EMPTY_LOGO_PAD)
     {
         Some(LogoSize::Big)
-    } else if w >= LogoSize::Small.width() + 2 * EMPTY_LOGO_PAD
-        && h >= LogoSize::Small.height() + 2 * EMPTY_LOGO_PAD
+    } else if w >= LogoSize::Small.width().saturating_add(2 * EMPTY_LOGO_PAD)
+        && h >= LogoSize::Small.height().saturating_add(2 * EMPTY_LOGO_PAD)
     {
         Some(LogoSize::Small)
     } else {

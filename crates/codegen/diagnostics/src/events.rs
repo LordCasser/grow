@@ -1034,8 +1034,8 @@ pub struct PlanSubmit {
     pub action: String,
 }
 
-/// Which option the user chose in the project-directory picker (shown on the
-/// first prompt when Grow is launched from a non-project directory).
+/// Which option the user chose in the project-directory picker (shown during
+/// session creation when Grow is launched from a non-project directory).
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectPickerOutcome {

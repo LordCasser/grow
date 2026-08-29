@@ -46,8 +46,7 @@ pub fn permission_mode_from_ui_if_set(ui: &TomlValue) -> Option<PermissionMode> 
 }
 
 /// Pure resolver: effective TOML `[ui]` permission keys (if any) >
-/// remote `permission_mode` > `Ask`. CLI is applied above this by the launch
-/// helpers. Managed/requirements TOML already deep-merge into effective config.
+/// the supplied default `permission_mode` > `Ask`.
 pub fn resolve_permission_mode(
     effective_ui: Option<&TomlValue>,
     remote_permission_mode: Option<&str>,
@@ -63,9 +62,8 @@ pub fn resolve_permission_mode(
     PermissionMode::Ask
 }
 
-/// Display projection for a selected mode that did not survive policy/gate
-/// enforcement: AlwaysApprove (policy pin) and Auto (feature gate off) show
-/// as Ask so the UI never claims more than enforcement grants.
+/// Display projection for a selected mode that did not survive the feature
+/// gate: Auto shows as Ask so the UI never claims more than enforcement grants.
 pub fn clamped_display_permission_mode(mode: PermissionMode) -> &'static str {
     if mode.is_always_approve() || mode.is_auto() {
         "ask"
@@ -74,7 +72,7 @@ pub fn clamped_display_permission_mode(mode: PermissionMode) -> &'static str {
     }
 }
 
-/// Displayed mode for a non-CLI resolution (effective TOML > remote > Ask),
+/// Displayed mode for a non-CLI resolution (effective TOML > supplied default > Ask),
 /// clamped per [`clamped_display_permission_mode`].
 pub fn resolved_display_permission_mode(
     effective_ui: Option<&TomlValue>,
@@ -106,15 +104,11 @@ pub fn load_permission_mode(remote_permission_mode: Option<&str>) -> PermissionM
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectiveLaunchPermission {
     pub mode: PermissionMode,
-    /// Warning to surface when a requested bypass was neutralized by the pin.
-    pub blocked_warning: Option<&'static str>,
-    /// The pin snapshot, set even when no bypass was requested, so callers reuse it.
-    pub policy_block: Option<&'static str>,
 }
 
 /// Resolve the single permission mode for a launch. CLI `--permission-mode`
-/// beats `[ui] permission_mode`; the policy pin and Auto feature gate clamp the
-/// result to Ask at this boundary.
+/// beats `[ui] permission_mode`; the Auto feature gate clamps the result to Ask
+/// at this boundary when disabled.
 ///
 /// `remote_permission_mode` is the soft-default when no TOML permission key is
 /// set; pass `None` when remote settings are unavailable.
@@ -125,23 +119,13 @@ pub fn effective_permission_mode_for_launch(
     let requested = cli_permission_mode
         .map(parse_permission_mode_canonical)
         .unwrap_or_else(|| load_permission_mode(remote_permission_mode));
-    let policy_block = always_approve_disabled_by_policy();
-    let blocked_warning = requested
-        .is_always_approve()
-        .then_some(policy_block)
-        .flatten();
     let mode = match requested {
-        PermissionMode::AlwaysApprove if policy_block.is_some() => PermissionMode::Ask,
         PermissionMode::Auto if !crate::util::config::auto_permission_mode_enabled_from_disk() => {
             PermissionMode::Ask
         }
         mode => mode,
     };
-    EffectiveLaunchPermission {
-        mode,
-        blocked_warning,
-        policy_block,
-    }
+    EffectiveLaunchPermission { mode }
 }
 
 /// Whether a session should activate the **auto** permission mode: the feature
@@ -150,10 +134,6 @@ pub fn effective_permission_mode_for_launch(
 pub fn auto_mode_session_active(gate_enabled: bool, requested_mode: PermissionMode) -> bool {
     gate_enabled && requested_mode.is_auto()
 }
-
-/// Shared managed-policy pin predicate; canonical definition lives in
-/// `workspace`.
-use workspace::permission::resolution::always_approve_disabled_by_policy;
 
 /// Load `[ui] require_plan_approval` from config.toml.
 ///
@@ -325,24 +305,20 @@ mod tests {
         );
     }
 
-    /// CLI beats remote. The positive always-approve row is clamped when the
-    /// host has a managed policy pin.
+    /// CLI beats the remote default.
     #[test]
     fn effective_permission_mode_for_launch_cli_beats_remote() {
         assert_eq!(
             effective_permission_mode_for_launch(Some("ask"), Some("always-approve")).mode,
             PermissionMode::Ask,
         );
-        if always_approve_disabled_by_policy().is_none() {
-            assert_eq!(
-                effective_permission_mode_for_launch(Some("always-approve"), Some("ask")).mode,
-                PermissionMode::AlwaysApprove,
-            );
-        }
+        assert_eq!(
+            effective_permission_mode_for_launch(Some("always-approve"), Some("ask")).mode,
+            PermissionMode::AlwaysApprove,
+        );
     }
 
-    /// Display clamp: modes that lost enforcement (policy-pinned
-    /// AlwaysApprove, gated-off Auto) show Ask.
+    /// Display clamp: modes that are not active show Ask.
     #[test]
     fn resolved_display_permission_mode_clamps_to_enforced_mode() {
         assert_eq!(

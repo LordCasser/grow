@@ -111,28 +111,37 @@ pub(super) fn fixed_below(tip_height: u16) -> u16 {
     tip_height + tip_gap
 }
 
-/// Side-by-side gate for the big logo: logo width + padding + minimum text
-/// column (143 cols) and logo height + vertical padding (39 rows).
+/// Side-by-side gate for the big logo: active logo width + padding + minimum
+/// text column (143 cols for the built-in asset) and active logo height +
+/// vertical padding (39 rows for the built-in asset).
 fn big_gate() -> (u16, u16) {
     (
-        logo::visual_width(logo::LOGO) + 2 * logo::H_PAD + logo::RIGHT_COL_MIN,
-        logo::count_lines(logo::LOGO) + 2 * logo::V_PAD,
+        LogoSize::Big
+            .width()
+            .saturating_add(2 * logo::H_PAD)
+            .saturating_add(logo::RIGHT_COL_MIN),
+        LogoSize::Big.height().saturating_add(2 * logo::V_PAD),
     )
 }
 
-/// Side-by-side gate for the small logo: 113 cols × 26 rows.
+/// Side-by-side gate for the small logo: 113 cols × 26 rows for the built-in
+/// asset; actual values follow the active resource dimensions.
 fn small_gate() -> (u16, u16) {
     (
-        logo::visual_width(logo::LOGO_SMALL) + 2 * logo::H_PAD + logo::RIGHT_COL_MIN,
-        logo::count_lines(logo::LOGO_SMALL) + 2 * logo::V_PAD,
+        LogoSize::Small
+            .width()
+            .saturating_add(2 * logo::H_PAD)
+            .saturating_add(logo::RIGHT_COL_MIN),
+        LogoSize::Small.height().saturating_add(2 * logo::V_PAD),
     )
 }
 
-/// Stacked gate for the small logo: logo width + padding only (54 cols × 26 rows).
+/// Stacked gate for the small logo: active logo width/height + padding only
+/// (54 cols × 26 rows for the built-in asset).
 fn stacked_gate() -> (u16, u16) {
     (
-        logo::visual_width(logo::LOGO_SMALL) + 2 * logo::H_PAD,
-        logo::count_lines(logo::LOGO_SMALL) + 2 * logo::V_PAD,
+        LogoSize::Small.width().saturating_add(2 * logo::H_PAD),
+        LogoSize::Small.height().saturating_add(2 * logo::V_PAD),
     )
 }
 
@@ -149,17 +158,21 @@ fn text_group_width(content_width: u16) -> u16 {
 fn mode_geometry(mode: HeroMode, content_width: u16, base_text_height: u16) -> (u16, u16, u16) {
     match mode {
         HeroMode::SideBySide(size) => {
-            let left = (content_width / 2).max(size.width() + 2 * logo::H_PAD);
+            let left = (content_width / 2).max(size.width().saturating_add(2 * logo::H_PAD));
             (
-                content_width - left,
+                content_width.saturating_sub(left),
                 size.height(),
-                (size.height() + 2 * logo::V_PAD).max(base_text_height + 2 * logo::V_PAD),
+                size.height()
+                    .saturating_add(2 * logo::V_PAD)
+                    .max(base_text_height.saturating_add(2 * logo::V_PAD)),
             )
         }
         HeroMode::Stacked(size) => (
             text_group_width(content_width),
             size.height(),
-            size.height() + 1 + base_text_height,
+            size.height()
+                .saturating_add(1)
+                .saturating_add(base_text_height),
         ),
         HeroMode::TextOnly => (text_group_width(content_width), 0, base_text_height),
     }
@@ -271,7 +284,7 @@ pub(super) fn compute_hero(input: HeroLayoutInput<'_>) -> HeroLayout {
 
     let (logo, text) = match mode {
         HeroMode::SideBySide(size) => {
-            let left_w = (hero_slot.width / 2).max(size.width() + 2 * logo::H_PAD);
+            let left_w = (hero_slot.width / 2).max(size.width().saturating_add(2 * logo::H_PAD));
             let logo_rect = Rect {
                 x: hero_slot.x + (left_w - size.width()) / 2,
                 y: hero_slot.y + (block_h - size.height()) / 2,
@@ -281,7 +294,7 @@ pub(super) fn compute_hero(input: HeroLayoutInput<'_>) -> HeroLayout {
             let text_rect = Rect {
                 x: hero_slot.x + left_w,
                 y: hero_slot.y + (block_h - text_h) / 2,
-                width: hero_slot.width - left_w,
+                width: hero_slot.width.saturating_sub(left_w),
                 height: text_h,
             };
             (logo_rect, text_rect)
@@ -696,8 +709,8 @@ mod tests {
         crate::theme::Theme::current()
     }
 
-    /// Distinctive long managed-config message whose tail ("incidents") only
-    /// shows when expanded — mirrors the enterprise-policy case from the bug.
+    /// Distinctive long security-policy message whose tail ("incidents") only
+    /// shows when expanded — mirrors the enterprise case from the bug.
     const LONG_MSG: &str = "Enterprise security policy is now in effect for all \
 managed devices and accounts. Report security incidents";
 

@@ -149,11 +149,9 @@ fn is_local_build() -> bool {
 /// prompts, never gates repo-local MCP/LSP). Folder-trust applies only to
 /// shipped, release-stamped binaries.
 ///
-/// On a release-stamped build, normal precedence (via `BoolFlag`):
-/// env `GROW_FOLDER_TRUST` > `[folder_trust] enabled` (user) > managed >
-/// remote `folder_trust_enabled` > default **true** (on by default; the remote
-/// `folder_trust_enabled` kill-switch or a `[folder_trust] enabled = false`
-/// opt-out turns it back off).
+/// On a release-stamped build, normal precedence (via `BoolFlag`): env
+/// `GROW_FOLDER_TRUST` > `[folder_trust] enabled` (user) > remote
+/// `folder_trust_enabled` > default **true**.
 pub fn feature_enabled(remote: Option<&RemoteSettings>) -> bool {
     feature_enabled_for_build(remote, is_local_build())
 }
@@ -170,10 +168,8 @@ fn feature_enabled_for_build(remote: Option<&RemoteSettings>, is_local_build: bo
         v?.get("folder_trust")?.get("enabled")?.as_bool()
     }
     let user = config::load_from_disk().ok();
-    let managed = config::load_managed_config().ok();
     BoolFlag::env("GROW_FOLDER_TRUST")
         .config(from_toml(user.as_ref()))
-        .managed(from_toml(managed.as_ref()))
         .feature_flag(remote.and_then(|r| r.folder_trust_enabled))
         .default(true)
         .resolve()

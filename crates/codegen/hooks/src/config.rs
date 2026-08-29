@@ -175,9 +175,6 @@ pub const AGENT_HOOK_PREFIX: &str = "agent:";
 /// A hook's classified origin for display and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookOrigin {
-    SystemManaged,
-    Managed,
-    Requirements,
     UserConfig,
     UserFile,
     ProjectFile,
@@ -190,9 +187,6 @@ pub enum HookOrigin {
 /// prefix for `File`-tier hooks.
 pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     match spec.layer {
-        HookProvenance::SystemManaged => HookOrigin::SystemManaged,
-        HookProvenance::Managed => HookOrigin::Managed,
-        HookProvenance::Requirements => HookOrigin::Requirements,
         HookProvenance::User => HookOrigin::UserConfig,
         HookProvenance::Plugin => HookOrigin::Plugin,
         HookProvenance::File => {
@@ -553,13 +547,13 @@ mod tests {
     fn config_layer(source_name: &str, toml_src: &str) -> config::HookConfigLayer {
         let value: toml::Value = toml::from_str(toml_src).unwrap();
         let hooks = value.get("hooks").cloned().unwrap();
-        config::HookConfigLayer::new(config::HookProvenance::Managed, source_name, hooks)
+        config::HookConfigLayer::new(config::HookProvenance::User, source_name, hooks)
     }
 
     #[test]
     fn config_layer_hook_parses_like_the_json_path() {
         let layer = config_layer(
-            "managed",
+            "user",
             "[[hooks.pre_tool_use]]\nmatcher = \"run_terminal_cmd\"\n[[hooks.pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"bin/check.sh\"\ntimeout = 2\n",
         );
         let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
@@ -569,14 +563,14 @@ mod tests {
         assert_eq!(s.event, HookEventName::PreToolUse);
         assert_eq!(s.handler_type, HandlerType::Command);
         assert_eq!(s.timeout_ms, 2000);
-        assert_eq!(s.layer, HookProvenance::Managed);
-        assert!(s.name.starts_with("managed:"), "got {}", s.name);
+        assert_eq!(s.layer, HookProvenance::User);
+        assert!(s.name.starts_with("user:"), "got {}", s.name);
     }
 
     #[test]
     fn config_layer_rejects_all_events_when_one_is_malformed() {
         let layer = config_layer(
-            "managed",
+            "user",
             "hooks.pre_tool_use = \"oops\"\n[[hooks.post_tool_use]]\n[[hooks.post_tool_use.hooks]]\ntype = \"command\"\ncommand = \"ok.sh\"\n",
         );
         let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
@@ -599,21 +593,21 @@ mod tests {
 
         // Distinct commands are additive; an identical command dedupes to the
         // higher-authority (first-listed) copy.
-        use config::HookProvenance::{Managed, User};
+        use config::HookProvenance::{Plugin, User};
         let (additive, _) = parse_hooks_from_config_layers(&[
-            mk("managed", Managed, "m.sh"),
             mk("user", User, "u.sh"),
+            mk("plugin", Plugin, "m.sh"),
         ]);
         assert_eq!(additive.len(), 2);
 
         let (dup, _) = parse_hooks_from_config_layers(&[
-            mk("managed", Managed, "same.sh"),
             mk("user", User, "same.sh"),
+            mk("plugin", Plugin, "same.sh"),
         ]);
         let registry = crate::discovery::registry_from_specs_deduped(dup);
         let pre = registry.hooks_for(HookEventName::PreToolUse);
         assert_eq!(pre.len(), 1);
-        assert!(pre[0].name.starts_with("managed:"), "got {}", pre[0].name);
+        assert!(pre[0].name.starts_with("user:"), "got {}", pre[0].name);
     }
 
     #[test]

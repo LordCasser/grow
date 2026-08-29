@@ -26,7 +26,7 @@ pub struct SubagentInfo {
     /// Requested child decision route (`ask`, `auto`, `always-approve`, or
     /// `follow`). `follow` is projected against the live parent mode.
     pub permission_mode: Option<Arc<str>>,
-    /// Effective mode at spawn after managed-policy clamping.
+    /// Effective mode at spawn.
     pub effective_permission_mode: Option<Arc<str>>,
     pub workflow_run_id: Option<Arc<str>>,
     /// Whether the context was normalized into `<background_context>`.

@@ -105,7 +105,7 @@ Finalized tools remain truthfully discoverable. Each exact call is projected ont
 
 An allow decision signs a one-shot permit bound to the call id, exact native/MCP identity, canonical arguments, cwd, projected RWX, child epoch, and MCP transport generation. Dispatch consumes it once and revalidates every binding. Approval never changes the child's RWX, unlocks a server for later calls, or affects siblings and descendants.
 
-Managed policy, hooks, protected edits, interactive operations, Behavior/Goal ownership, and depth limits remain authoritative regardless of initial RWX or an allow decision.
+Configured permission policy, hooks, protected edits, interactive operations, Behavior/Goal ownership, and depth limits remain authoritative regardless of initial RWX or an allow decision.
 
 ---
 
@@ -119,7 +119,7 @@ classifier_input = "context"   # context | request_only
 
 - `auto` classifies a locked exact call against the configured primary-context view. Calls already inside initial RWX do not invoke the classifier unless a secondary shell-risk signal escalates them.
 - `ask` routes a locked exact call to the real child-session approval UI with only allow-once and reject-once.
-- `always-approve` still applies managed-policy clamps.
+- `always-approve` still applies configured permission-policy clamps.
 
 The child mode is resolved when the child is created and never follows later primary-session mode changes. A missing internal child route resolves to `auto`; it is not interpreted as permission inheritance.
 

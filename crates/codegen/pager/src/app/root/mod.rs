@@ -646,10 +646,6 @@ pub struct AppView {
     /// `false`, permission selectors omit Auto. See
     /// `shell::util::config::resolve_auto_permission_mode_enabled`.
     pub auto_mode_gate: bool,
-    /// Managed-policy pin (set at startup); gates every runtime always-approve enable.
-    pub always_approve_policy_block: Option<&'static str>,
-    /// One-shot notice that a launch `--permission-mode always-approve` was pinned off; shown on the first agent view.
-    pub always_approve_launch_block_notice: Option<&'static str>,
     /// One-shot switch-back toast after a screen-mode re-exec.
     pub screen_mode_switch_hint: Option<&'static str>,
     /// Require explicit plan approval via the plan viewer UI even in
@@ -907,8 +903,6 @@ impl AppView {
             default_permission_mode: shell::util::config::PermissionMode::Ask,
             permission_mode_from_soft_default: true,
             auto_mode_gate: shell::util::config::auto_permission_mode_enabled_from_disk(),
-            always_approve_policy_block: None,
-            always_approve_launch_block_notice: None,
             screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
@@ -1059,7 +1053,7 @@ impl AppView {
             _ => None,
         }
     }
-    /// Whether the project picker should intercept the next prompt.
+    /// Whether session creation must first pass through the project picker.
     pub fn needs_project_picker(&self) -> bool {
         !self.project_picker_shown
             && !self.project_picker_disabled
@@ -2395,8 +2389,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if ctx.registry.lookup(key, When::Always).is_some() {
                 return InputOutcome::Unchanged;
             }
-            // Any uncaught key (text chars, Backspace, Tab, arrows with
-            // modifiers, ...) starts a session and is forwarded to its prompt.
+            // Any uncaught key starts a session and becomes the first draft
+            // input. The event loop parks it behind a project picker when the
+            // new session is gated on directory selection.
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
     }
@@ -4043,8 +4038,6 @@ pub(crate) mod tests {
             default_permission_mode: shell::util::config::PermissionMode::Ask,
             permission_mode_from_soft_default: true,
             auto_mode_gate: true,
-            always_approve_policy_block: None,
-            always_approve_launch_block_notice: None,
             screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
@@ -6032,6 +6025,20 @@ pub(crate) mod tests {
         let mut app = test_app();
         app.cwd_has_git_ancestor = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::ActionThenForward(Action::NewSession)
+        ));
+    }
+    #[test]
+    fn welcome_input_is_forwarded_as_the_new_session_draft() {
+        let mut app = test_app();
+        app.cwd = std::env::temp_dir();
+        app.project_picker_shown = false;
+        app.project_picker_disabled = false;
+
+        let outcome = app.handle_input(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+
         assert!(matches!(
             outcome,
             InputOutcome::ActionThenForward(Action::NewSession)

@@ -90,16 +90,18 @@ pub fn merge_mcp_servers_sourced(
 
     let toml_claimed_names = crate::util::config::all_toml_mcp_server_names(cwd);
 
-    let config_source = ConfigSource::ConfigToml {
-        path: tools::util::grow_home::grow_home().join("config.toml"),
-    };
-
     let mut servers: HashMap<String, (acp::McpServer, ConfigSource)> =
         crate::util::config::load_mcp_servers(cwd)
             .into_iter()
             .map(|s| {
                 let key = mcp_server_key(&s);
-                (key, (s, config_source.clone()))
+                let source =
+                    crate::util::config::nearest_project_mcp_definition(cwd, mcp_server_name(&s))
+                        .map(|path| ConfigSource::Project { path })
+                        .unwrap_or_else(|| ConfigSource::ConfigToml {
+                            path: tools::util::grow_home::grow_home().join("config.toml"),
+                        });
+                (key, (s, source))
             })
             .collect();
     for (name, (_, source)) in &servers {
@@ -246,6 +248,29 @@ enabled = false
                 acp::McpServer::Http(acp::McpServerHttp { name, .. }) if name == "github"
             )),
             "disabled servers from .grow/config.toml must not be registered"
+        );
+    }
+
+    #[test]
+    fn project_mcp_server_reports_project_source() {
+        let cwd = tempfile::tempdir().unwrap();
+        git2::Repository::init(cwd.path()).unwrap();
+        let config_path = cwd.path().join(".grow/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[mcp_servers.source_test_unique]\nurl = \"https://source.example.com/mcp\"\n",
+        )
+        .unwrap();
+
+        let sourced = merge_mcp_servers_sourced(cwd.path(), None);
+        let (_, source) = sourced
+            .into_iter()
+            .find(|(server, _)| mcp_server_name(server) == "source_test_unique")
+            .expect("project MCP server must be discovered");
+        assert_eq!(
+            source,
+            tools::types::config_source::ConfigSource::Project { path: config_path }
         );
     }
 

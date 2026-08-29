@@ -63,15 +63,6 @@ pub fn grow_application_in(home: &std::path::Path) -> PathBuf {
     home.join("bin").join(name)
 }
 
-/// System-wide config directory: `/etc/grow/` on Unix, `None` on Windows.
-pub fn system_config_dir() -> Option<PathBuf> {
-    if cfg!(unix) {
-        Some(PathBuf::from("/etc/grow"))
-    } else {
-        None
-    }
-}
-
 /// Max bytes for a single directory name component (macOS APFS, Linux ext4,
 /// NTFS all enforce 255 bytes).
 const MAX_DIRNAME_BYTES: usize = 255;

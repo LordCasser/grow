@@ -88,8 +88,6 @@ pub(crate) fn format_hook_name(spec: &::hooks::config::HookSpec) -> String {
 fn format_hook_source(spec: &::hooks::config::HookSpec) -> &'static str {
     use ::hooks::config::HookOrigin as O;
     match ::hooks::config::hook_origin(spec) {
-        O::SystemManaged | O::Managed => "managedConfig",
-        O::Requirements => "requirementsConfig",
         O::UserConfig => "userConfig",
         O::UserFile => "userSettings",
         O::ProjectFile => "projectSettings",

@@ -150,21 +150,10 @@ pub struct EndpointsConfig {
     /// non-production feature, and only for matching first-party hosts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha_test_key: Option<String>,
-    /// Env: `GROW_DEPLOYMENT_KEY`. Management API key for enterprise deployments.
-    /// Sent on managed service requests for deployment-level attribution.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployment_key: Option<String>,
-    /// Env: `GROW_MANAGED_CONFIG_URL`. Override the managed config endpoint.
-    /// Defaults to `{proxy_url()}/deployment/config`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub managed_config_url: Option<String>,
     /// Base URL for the asset server (profile images, etc.).
     /// Env: `GROW_ASSET_SERVER_URL`.
     #[serde(default = "default_asset_server_url")]
     pub asset_server_url: String,
-    /// Read by `load_management_api_key_sync()`. Declared for `serde_ignored`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub management_api_key: Option<String>,
 }
 pub(crate) fn default_asset_server_url() -> String {
     std::env::var("GROW_ASSET_SERVER_URL").unwrap_or_else(|_| ASSET_SERVER_URL_DEFAULT.to_owned())
@@ -177,10 +166,7 @@ fn blank_as_unset(opt: &Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 impl EndpointsConfig {
-    /// `default()` plus merged managed/requirements endpoint overrides, so
-    /// startup fetches use the configured (not public) endpoints. Only merges
-    /// layers — never derives one endpoint from another. Falls back to
-    /// `default()` on load failure.
+    /// Load the endpoint settings from the effective local configuration.
     pub fn from_effective_config() -> Self {
         match crate::config::load_effective_config() {
             Ok(cfg) => Self::from_config_value(&cfg),
@@ -206,15 +192,6 @@ impl EndpointsConfig {
         blank_as_unset(&self.cli_chat_proxy_base_url)
             .unwrap_or_else(|| CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned())
     }
-    /// Managed deployment-config URL (`grow setup`): explicit `managed_config_url`,
-    /// else `proxy_url` + `/deployment/config`. Never `inference_base_url`, so the
-    /// deployment key reaches the proxy, not the inference host.
-    pub fn resolve_managed_config_url(&self) -> Option<String> {
-        blank_as_unset(&self.managed_config_url).or_else(|| {
-            blank_as_unset(&self.cli_chat_proxy_base_url)
-                .map(|proxy| format!("{}/deployment/config", proxy.trim_end_matches('/')))
-        })
-    }
 }
 impl Default for EndpointsConfig {
     fn default() -> Self {
@@ -223,44 +200,11 @@ impl Default for EndpointsConfig {
             inference_base_url: std::env::var("GROW_INFERENCE_BASE_URL")
                 .unwrap_or_else(|_| INFERENCE_BASE_URL_DEFAULT.to_owned()),
             alpha_test_key: None,
-            deployment_key: env_string("GROW_DEPLOYMENT_KEY"),
-            managed_config_url: env_string("GROW_MANAGED_CONFIG_URL"),
             asset_server_url: default_asset_server_url(),
-            management_api_key: None,
         }
     }
 }
 pub use config_types::{BoolFlag, ConfigSource, LazinessDetectorPerModelConfig, Resolved};
-/// A requirement pin from `requirements.toml`. Wins over all other sources.
-#[derive(Debug, Clone, Default)]
-pub struct Constrained<T> {
-    pin: Option<T>,
-    source: Option<crate::config::RequirementSource>,
-}
-impl<T: Clone> Constrained<T> {
-    pub fn pin(&mut self, value: T, source: crate::config::RequirementSource) {
-        self.pin = Some(value);
-        self.source = Some(source);
-    }
-    pub fn pinned(&self) -> Option<T> {
-        self.pin.clone()
-    }
-    pub fn source(&self) -> Option<&crate::config::RequirementSource> {
-        self.source.as_ref()
-    }
-}
-/// Enforced requirements from `requirements.toml`. Pinned values win over all other sources.
-#[derive(Debug, Clone, Default)]
-pub struct Requirements {
-    pub lsp_tools: Constrained<bool>,
-    pub tool_search: Constrained<bool>,
-    pub web_fetch: Constrained<bool>,
-    pub ask_user_question: Constrained<bool>,
-    pub write_file: Constrained<bool>,
-    pub sandbox_auto_allow_bash: Constrained<bool>,
-    pub sandbox_profile: Constrained<String>,
-    pub respect_gitignore: Constrained<bool>,
-}
 /// Inputs for resolving `#[serde(skip)]` runtime fields after `new_from_toml_cfg()`.
 ///
 /// Constructed by each binary from its CLI args and startup state, then passed
@@ -442,7 +386,7 @@ pub struct DiagnosticsConfig {
 pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    /// The pre-campaign `models.default` (merged user/managed/requirements)
+    /// The pre-campaign `models.default` from the local config
     /// captured when a campaign is overriding the default, so model resolution can
     /// recover if the campaign points at a model missing from the catalog. `None`
     /// when there is nothing to recover to. Runtime-only; never serialized.
@@ -548,22 +492,14 @@ impl SandboxSettingsConfig {
             .and_then(|v| v.get("sandbox")?.clone().try_into().ok())
             .unwrap_or_default()
     }
-    /// Resolve sandbox profile: requirement > CLI > env > config > "off".
-    pub fn resolve_profile(
-        &self,
-        cli_arg: Option<&str>,
-        requirement: Option<&str>,
-    ) -> Resolved<String> {
-        if let Some(val) = requirement {
-            return Resolved::new(val.to_owned(), ConfigSource::Requirement);
-        }
+    /// Resolve sandbox profile: CLI > env > config > "off".
+    pub fn resolve_profile(&self, cli_arg: Option<&str>) -> Resolved<String> {
         resolve_string_flag(cli_arg, "GROW_SANDBOX", self.profile.as_deref(), None)
             .unwrap_or_else(|| Resolved::new("off".to_owned(), ConfigSource::Default))
     }
-    /// Resolve auto_allow_bash: requirement > env > config > default (false).
-    pub fn resolve_auto_allow_bash(&self, requirement: Option<bool>) -> Resolved<bool> {
+    /// Resolve auto_allow_bash: env > config > default (false).
+    pub fn resolve_auto_allow_bash(&self) -> Resolved<bool> {
         BoolFlag::env("GROW_SANDBOX_AUTO_ALLOW_BASH")
-            .requirement(requirement)
             .config(self.auto_allow_bash)
             .resolve()
     }
@@ -894,9 +830,6 @@ pub struct Config {
     /// session configuration for diagnostics.
     #[serde(default)]
     pub path_not_found_hints: bool,
-    /// Enforced requirement pins from `requirements.toml`.
-    #[serde(skip)]
-    pub requirements: Requirements,
     /// Session title model. `None` means use the active model.
     #[serde(skip)]
     pub session_title_model: Option<String>,
@@ -1020,7 +953,7 @@ pub struct SessionConfig {
     /// When enabled, the session will parse .envrc in the workspace directory
     /// and inject the environment variables into bash commands.
     /// Defaults to `true` when unset. `Option<bool>` so `None`
-    /// round-trips as absent on disk (managed config wins over default).
+    /// round-trips as absent on disk so defaults remain distinguishable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_envrc: Option<bool>,
     /// Maximum time to wait for an interactive permission prompt response.
@@ -1158,7 +1091,6 @@ impl Default for Config {
             cli_no_memory: false,
             cli_subagents: None,
             memory_config: None,
-            requirements: Requirements::default(),
             session_title_model: None,
             image_description_model: None,
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
@@ -1462,10 +1394,7 @@ impl Config {
         self.subagents_max_depth =
             crate::config::SubagentsConfig::resolve_max_depth(env.as_deref(), toml_max, remote);
         let tools = crate::config::ToolsConfig::resolve(ctx.raw_config);
-        self.respect_gitignore = match self.requirements.respect_gitignore.pinned() {
-            Some(pinned) => pinned,
-            None => tools.respect_gitignore,
-        };
+        self.respect_gitignore = tools.respect_gitignore;
         let models = crate::config::ModelOverrideConfig::resolve(
             ctx.cli_session_title_model,
             ctx.raw_config,
@@ -1507,7 +1436,6 @@ impl Config {
             laziness_debug_log: laziness_debug_log.as_deref(),
         };
         self.resolve_runtime_fields(&ctx);
-        crate::util::config::set_remote_campaigns_from_settings(self.remote_settings.as_ref());
     }
     fn apply_env_overrides(&mut self) {}
     pub fn is_session_recap_enabled(&self) -> bool {
@@ -1571,7 +1499,6 @@ impl Config {
             .as_ref()
             .and_then(|s| s.lsp_tools_enabled);
         BoolFlag::env("GROW_LSP_TOOLS")
-            .requirement(self.requirements.lsp_tools.pinned())
             .config(self.features.lsp_tools)
             .feature_flag(ff)
             .resolve()
@@ -1582,7 +1509,6 @@ impl Config {
             .as_ref()
             .and_then(|s| s.web_fetch_enabled);
         BoolFlag::env("GROW_WEB_FETCH")
-            .requirement(self.requirements.web_fetch.pinned())
             .config(self.features.web_fetch)
             .feature_flag(ff)
             .resolve()
@@ -1597,7 +1523,6 @@ impl Config {
             .as_ref()
             .and_then(|s| s.ask_user_question_enabled);
         BoolFlag::env("GROW_ASK_USER_QUESTION")
-            .requirement(self.requirements.ask_user_question.pinned())
             .config(self.features.ask_user_question)
             .feature_flag(ff)
             .default(true)
@@ -1651,7 +1576,6 @@ impl Config {
             .as_ref()
             .and_then(|s| s.write_file_enabled);
         BoolFlag::env("GROW_WRITE_FILE")
-            .requirement(self.requirements.write_file.pinned())
             .config(self.features.write_file)
             .feature_flag(ff)
             .default(true)
@@ -1710,55 +1634,27 @@ impl Config {
     /// liveness pollers and the session-actor `StatusDispatcher`.
     ///
     /// Thin delegate to the canonical
-    /// [`resolve_mcp_liveness_watchers`] free function, which unifies
-    /// the two previous implementations so they can't drift. CLI / managed / feature-flag inputs are
-    /// `None` here because the `Config` method only has visibility
-    /// into the embedded `Features` table; richer call sites (e.g.
-    /// the session-actor spawn path) go through
-    /// [`crate::util::config::resolve_mcp_liveness_watchers`] which
-    /// stacks all 7 layers.
+    /// [`resolve_mcp_liveness_watchers`] free function.
     pub fn resolve_mcp_liveness_watchers(&self) -> Resolved<bool> {
-        resolve_mcp_liveness_watchers(None, None, self.features.mcp_liveness_watchers, None, None)
+        resolve_mcp_liveness_watchers(None, self.features.mcp_liveness_watchers, None)
     }
     /// Resolve whether the bounded stdio auto-restart task is allowed
     /// to fire. Thin delegate to
     /// [`resolve_mcp_auto_restart`]; mirrors
-    /// [`Self::resolve_mcp_liveness_watchers`]. The 7-step precedence
-    /// stack lives in the canonical free function. CLI / managed /
-    /// feature-flag inputs are `None` here because the `Config`
-    /// method only has visibility into the embedded `Features`
-    /// table; richer call sites go through
-    /// [`crate::util::config::resolve_mcp_auto_restart`] which stacks
-    /// all 7 layers.
+    /// [`Self::resolve_mcp_liveness_watchers`].
     pub fn resolve_mcp_auto_restart(&self) -> Resolved<bool> {
-        resolve_mcp_auto_restart(None, None, self.features.mcp_auto_restart, None, None)
+        resolve_mcp_auto_restart(None, self.features.mcp_auto_restart, None)
     }
     /// Resolve whether the leader's `ConfigFileWatcher` adds the two
     /// narrow non-recursive watches for `<cwd>/` and `<cwd>/.grow/`.
     ///
     /// Thin delegate to the canonical
-    /// [`resolve_mcp_recursive_config_watch`] free function — mirrors
-    /// the same delegation pattern. CLI / managed /
-    /// feature-flag inputs are `None` here because the `Config`
-    /// method only sees the embedded `Features` table; richer call
-    /// sites (notably the leader's watcher spawn path) go through
-    /// [`crate::util::config::resolve_mcp_recursive_config_watch`]
-    /// which stacks all 7 layers.
+    /// [`resolve_mcp_recursive_config_watch`] free function.
     pub fn resolve_mcp_recursive_config_watch(&self) -> Resolved<bool> {
-        resolve_mcp_recursive_config_watch(
-            None,
-            None,
-            self.features.mcp_recursive_config_watch,
-            None,
-            None,
-        )
+        resolve_mcp_recursive_config_watch(None, self.features.mcp_recursive_config_watch, None)
     }
 }
-/// Canonical resolver for `mcp.liveness_watchers`. Stacks the full
-/// 7-step `BoolFlag` precedence:
-///
-/// `requirement > cli > env (GROW_MCP_LIVENESS_WATCHERS) > config >
-/// managed > feature_flag > default (true)`.
+/// Canonical resolver for `mcp.liveness_watchers`.
 ///
 /// Both `Config::resolve_mcp_liveness_watchers` and
 /// `util::config::resolve_mcp_liveness_watchers` delegate here so the
@@ -1768,56 +1664,39 @@ impl Config {
 /// default-on, with this flag existing primarily as a kill switch
 /// during the rollout.
 pub fn resolve_mcp_liveness_watchers(
-    requirement: Option<bool>,
     cli: Option<bool>,
     config: Option<bool>,
-    managed: Option<bool>,
     feature_flag: Option<bool>,
 ) -> Resolved<bool> {
     BoolFlag::env("GROW_MCP_LIVENESS_WATCHERS")
-        .requirement(requirement)
         .cli(cli)
         .config(config)
-        .managed(managed)
         .feature_flag(feature_flag)
         .default(true)
         .resolve()
 }
-/// Canonical resolver for `mcp.auto_restart`. Stacks the full 7-step
-/// `BoolFlag` precedence:
-///
-/// `requirement > cli > env (GROW_MCP_AUTO_RESTART) > config >
-/// managed > feature_flag > default (true)`.
+/// Canonical resolver for `mcp.auto_restart`.
 ///
 /// Mirrors [`resolve_mcp_liveness_watchers`]. Both
 /// `Config::resolve_mcp_auto_restart` and
 /// `util::config::resolve_mcp_auto_restart` delegate here so the
 /// precedence is single-sourced.
 ///
-/// Recovery is on by default; opt out via `GROW_MCP_AUTO_RESTART=false`,
-/// `[features] mcp_auto_restart`, or `requirements.toml`.
+/// Recovery is on by default; opt out via `GROW_MCP_AUTO_RESTART=false`
+/// or `[features] mcp_auto_restart`.
 pub fn resolve_mcp_auto_restart(
-    requirement: Option<bool>,
     cli: Option<bool>,
     config: Option<bool>,
-    managed: Option<bool>,
     feature_flag: Option<bool>,
 ) -> Resolved<bool> {
     BoolFlag::env("GROW_MCP_AUTO_RESTART")
-        .requirement(requirement)
         .cli(cli)
         .config(config)
-        .managed(managed)
         .feature_flag(feature_flag)
         .default(true)
         .resolve()
 }
-/// Canonical resolver for `mcp.recursive_config_watch`. Stacks the
-/// same 7-step `BoolFlag` precedence as
-/// [`resolve_mcp_liveness_watchers`]:
-///
-/// `requirement > cli > env (GROW_MCP_RECURSIVE_CONFIG_WATCH) >
-/// config > managed > feature_flag > default (true)`.
+/// Canonical resolver for `mcp.recursive_config_watch`.
 ///
 /// Both `Config::resolve_mcp_recursive_config_watch` and
 /// `util::config::resolve_mcp_recursive_config_watch` delegate here
@@ -1837,54 +1716,19 @@ pub fn resolve_mcp_auto_restart(
 /// `fs.inotify.max_user_watches` on large repos). The flag name
 /// follows the rollout-gate naming convention.
 pub fn resolve_mcp_recursive_config_watch(
-    requirement: Option<bool>,
     cli: Option<bool>,
     config: Option<bool>,
-    managed: Option<bool>,
     feature_flag: Option<bool>,
 ) -> Resolved<bool> {
     BoolFlag::env("GROW_MCP_RECURSIVE_CONFIG_WATCH")
-        .requirement(requirement)
         .cli(cli)
         .config(config)
-        .managed(managed)
         .feature_flag(feature_flag)
         .default(true)
         .resolve()
 }
-/// Load `~/.grow/requirements.toml` standalone so the admin pin can beat
-/// env vars. The merged config layer can't express that — last-merge-wins
-/// loses provenance.
-pub(crate) fn read_requirements_toml() -> Option<toml::Value> {
-    let path = crate::util::grow_home::grow_home().join("requirements.toml");
-    let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok()
-}
-/// Seed free-function remote caches after writing `Config.remote_settings`.
-///
-/// Called from `init.rs` at boot and from the agent when backgrounded settings
-/// arrive later, so every side effect here must be idempotent and safe to
-/// re-apply.
+/// Apply process-wide side effects after writing `Config.remote_settings`.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
-    if let Some(s) = settings {
-        config::signed_policy::apply_remote_managed_config_signature_verification(
-            s.managed_config_signature_verification,
-            false,
-        );
-    }
-    crate::util::config::cache_remote_mcp_startup_timeout_secs(
-        settings.and_then(|s| s.mcp_startup_timeout_secs),
-    );
-    crate::util::config::cache_remote_max_mcp_output_bytes(
-        settings.and_then(|s| s.max_mcp_output_bytes),
-    );
-    crate::util::config::cache_remote_auto_mode(settings.and_then(|s| s.auto_mode.clone()));
-    crate::util::config::cache_remote_remember_tool_approvals(
-        settings.and_then(|s| s.remember_tool_approvals),
-    );
-    crate::util::config::cache_remote_crash_handler_enabled(
-        settings.and_then(|s| s.crash_handler_enabled),
-    );
     let image_normalize_cache_enabled = settings
         .and_then(|r| r.image_normalize_cache_enabled)
         .unwrap_or(false);
@@ -2416,10 +2260,6 @@ pub struct Features {
     /// precedence — `Some(false)` from remote settings overrides `true` here.
     #[serde(default)]
     pub non_git_warning: bool,
-    /// Managed config fetching (managed_config.toml + requirements.toml).
-    /// `None` = defer to env / default (true).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_config: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp_tools: Option<bool>,
     /// MCP tool search/discovery. `None` = defer to remote settings / env / default (true).
@@ -2447,7 +2287,7 @@ pub struct Features {
     pub compaction_verbatim_input: Option<bool>,
     /// Snapshot a completed subagent's isolated worktree into a durable git ref
     /// and delete its directory (resume rehydrates from the ref). This is the
-    /// per-deployment rollout lever (set in managed_config.toml `[features]`).
+    /// per-deployment rollout lever from remote settings.
     /// `None` = defer to remote settings / default (false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_worktree_snapshot: Option<bool>,
@@ -2499,7 +2339,7 @@ pub struct Features {
     /// the existence of the **cwd** watches, NOT their recursion
     /// mode. A future rename to `mcp_cwd_config_watch` would align
     /// name and behavior; deferred to a follow-up to avoid widening
-    /// the config surface across requirements.toml / managed configs.
+    /// the config surface.
     ///
     /// Resolved via [`Config::resolve_mcp_recursive_config_watch`].
     /// `None` = defer to env / default (true).
@@ -4179,17 +4019,12 @@ reasoning_effort = "low"
     /// so the cli-chat-proxy resolver tests below are deterministic regardless of
     /// the ambient environment. Gated behind `#[serial]`.
     fn unset_endpoint_env_vars() {
-        for k in [
-            "GROW_CLI_CHAT_PROXY_BASE_URL",
-            "GROW_INFERENCE_BASE_URL",
-            "GROW_MANAGED_CONFIG_URL",
-        ] {
+        for k in ["GROW_CLI_CHAT_PROXY_BASE_URL", "GROW_INFERENCE_BASE_URL"] {
             unsafe { std::env::remove_var(k) };
         }
     }
-    /// INVARIANT: auxiliary-service resolvers resolve to the cli-chat-proxy, never
-    /// `inference_base_url` — overriding ONLY inference keeps every aux endpoint on
-    /// the proxy; explicit per-service overrides win verbatim.
+    /// Auxiliary-service resolvers use the cli-chat-proxy, never
+    /// `inference_base_url`.
     #[test]
     #[serial]
     fn aux_endpoints_resolve_to_proxy_never_inference() {
@@ -4201,42 +4036,15 @@ reasoning_effort = "low"
             ..Default::default()
         };
         assert_eq!(cfg.proxy_url(), CLI_CHAT_PROXY_BASE_URL_DEFAULT);
-        assert_eq!(cfg.resolve_managed_config_url(), None);
         assert_eq!(cfg.inference_base_url, inference);
         let overridden = EndpointsConfig {
             cli_chat_proxy_base_url: Some("https://proxy.enterprise.example/v1".to_string()),
-            managed_config_url: Some(
-                "https://control.enterprise.example/deployment/config".to_string(),
-            ),
             ..Default::default()
         };
         assert_eq!(
             overridden.proxy_url(),
             "https://proxy.enterprise.example/v1"
         );
-        assert_eq!(
-            overridden.resolve_managed_config_url().as_deref(),
-            Some("https://control.enterprise.example/deployment/config")
-        );
-    }
-    /// REGRESSION: the managed-config URL never follows `inference_base_url`
-    /// through the full loader `Config::new_from_toml_cfg` — a distinct construction
-    /// path from `from_config_value`, so the deployment key never reaches the
-    /// inference host on either.
-    #[test]
-    #[serial]
-    fn loader_managed_config_url_never_follows_inference_endpoint() {
-        unset_endpoint_env_vars();
-        let cfg = Config::new_from_toml_cfg(
-            &toml::from_str(
-                r#"[endpoints]
-                inference_base_url = "https://inference.acme-corp.example/provider/v1""#,
-            )
-            .unwrap(),
-        )
-        .expect("config should parse");
-        assert!(cfg.endpoints.cli_chat_proxy_base_url.is_none());
-        assert_eq!(cfg.endpoints.resolve_managed_config_url(), None);
     }
     #[test]
     #[serial]
@@ -4699,16 +4507,15 @@ reasoning_effort = "low"
         let raw: toml::Value = toml::from_str(
             r#"
             [endpoint]
-            deployment_key = "provider-token-test"
+            proxy = "https://proxy.example"
         "#,
         )
         .unwrap();
-        let config = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert!(config.endpoints.deployment_key.is_none());
+        Config::new_from_toml_cfg(&raw).expect("should parse");
         let unused = unused_keys_from_toml(
             r#"
             [endpoint]
-            deployment_key = "provider-token-test"
+            proxy = "https://proxy.example"
         "#,
         );
         assert!(unused.iter().any(|k| k == "endpoint"), "got: {unused:?}");
@@ -5082,31 +4889,15 @@ default = "grow-4.5"
     #[serial]
     fn mcp_liveness_watchers_default_is_true() {
         unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
-        let r = resolve_mcp_liveness_watchers(None, None, None, None, None);
+        let r = resolve_mcp_liveness_watchers(None, None, None);
         assert!(r.value, "default-on by spec");
         assert_eq!(r.source, ConfigSource::Default);
     }
     #[test]
     #[serial]
-    fn mcp_liveness_watchers_requirement_wins_over_everything() {
-        unsafe { std::env::set_var("GROW_MCP_LIVENESS_WATCHERS", "true") };
-        let r = resolve_mcp_liveness_watchers(
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(true),
-            Some(true),
-        );
-        unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
-        assert!(!r.value, "requirement overrides every other layer");
-        assert_eq!(r.source, ConfigSource::Requirement);
-    }
-    #[test]
-    #[serial]
     fn mcp_liveness_watchers_cli_wins_over_env_and_below() {
         unsafe { std::env::set_var("GROW_MCP_LIVENESS_WATCHERS", "true") };
-        let r =
-            resolve_mcp_liveness_watchers(None, Some(false), Some(true), Some(true), Some(true));
+        let r = resolve_mcp_liveness_watchers(Some(false), Some(true), Some(true));
         unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Cli);
@@ -5115,32 +4906,24 @@ default = "grow-4.5"
     #[serial]
     fn mcp_liveness_watchers_env_wins_over_config_and_below() {
         unsafe { std::env::set_var("GROW_MCP_LIVENESS_WATCHERS", "false") };
-        let r = resolve_mcp_liveness_watchers(None, None, Some(true), Some(true), Some(true));
+        let r = resolve_mcp_liveness_watchers(None, Some(true), Some(true));
         unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Env);
     }
     #[test]
     #[serial]
-    fn mcp_liveness_watchers_config_wins_over_managed_and_feature_flag() {
+    fn mcp_liveness_watchers_config_wins_over_remote_feature_flag() {
         unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
-        let r = resolve_mcp_liveness_watchers(None, None, Some(false), Some(true), Some(true));
+        let r = resolve_mcp_liveness_watchers(None, Some(false), Some(true));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Config);
     }
     #[test]
     #[serial]
-    fn mcp_liveness_watchers_managed_wins_over_feature_flag() {
-        unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
-        let r = resolve_mcp_liveness_watchers(None, None, None, Some(false), Some(true));
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::ManagedConfig);
-    }
-    #[test]
-    #[serial]
     fn mcp_liveness_watchers_feature_flag_used_when_no_higher_layer() {
         unsafe { std::env::remove_var("GROW_MCP_LIVENESS_WATCHERS") };
-        let r = resolve_mcp_liveness_watchers(None, None, None, None, Some(false));
+        let r = resolve_mcp_liveness_watchers(None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
     }
@@ -5148,30 +4931,15 @@ default = "grow-4.5"
     #[serial]
     fn mcp_auto_restart_default_is_true() {
         unsafe { std::env::remove_var("GROW_MCP_AUTO_RESTART") };
-        let r = resolve_mcp_auto_restart(None, None, None, None, None);
+        let r = resolve_mcp_auto_restart(None, None, None);
         assert!(r.value, "recovery is on by default");
         assert_eq!(r.source, ConfigSource::Default);
     }
     #[test]
     #[serial]
-    fn mcp_auto_restart_requirement_wins_over_everything() {
-        unsafe { std::env::set_var("GROW_MCP_AUTO_RESTART", "false") };
-        let r = resolve_mcp_auto_restart(
-            Some(true),
-            Some(false),
-            Some(false),
-            Some(false),
-            Some(false),
-        );
-        unsafe { std::env::remove_var("GROW_MCP_AUTO_RESTART") };
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Requirement);
-    }
-    #[test]
-    #[serial]
     fn mcp_auto_restart_env_wins_over_config_and_below() {
         unsafe { std::env::set_var("GROW_MCP_AUTO_RESTART", "true") };
-        let r = resolve_mcp_auto_restart(None, None, Some(false), Some(false), Some(false));
+        let r = resolve_mcp_auto_restart(None, Some(false), Some(false));
         unsafe { std::env::remove_var("GROW_MCP_AUTO_RESTART") };
         assert!(r.value);
         assert_eq!(r.source, ConfigSource::Env);
@@ -5180,36 +4948,15 @@ default = "grow-4.5"
     #[serial]
     fn mcp_recursive_config_watch_default_is_true() {
         unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
-        let r = resolve_mcp_recursive_config_watch(None, None, None, None, None);
+        let r = resolve_mcp_recursive_config_watch(None, None, None);
         assert!(r.value, "default-on by spec");
         assert_eq!(r.source, ConfigSource::Default);
     }
     #[test]
     #[serial]
-    fn mcp_recursive_config_watch_requirement_wins_over_everything() {
-        unsafe { std::env::set_var("GROW_MCP_RECURSIVE_CONFIG_WATCH", "true") };
-        let r = resolve_mcp_recursive_config_watch(
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(true),
-            Some(true),
-        );
-        unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
-        assert!(!r.value, "requirement overrides every other layer");
-        assert_eq!(r.source, ConfigSource::Requirement);
-    }
-    #[test]
-    #[serial]
     fn mcp_recursive_config_watch_cli_wins_over_env_and_below() {
         unsafe { std::env::set_var("GROW_MCP_RECURSIVE_CONFIG_WATCH", "true") };
-        let r = resolve_mcp_recursive_config_watch(
-            None,
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(true),
-        );
+        let r = resolve_mcp_recursive_config_watch(Some(false), Some(true), Some(true));
         unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Cli);
@@ -5218,32 +4965,24 @@ default = "grow-4.5"
     #[serial]
     fn mcp_recursive_config_watch_env_wins_over_config_and_below() {
         unsafe { std::env::set_var("GROW_MCP_RECURSIVE_CONFIG_WATCH", "false") };
-        let r = resolve_mcp_recursive_config_watch(None, None, Some(true), Some(true), Some(true));
+        let r = resolve_mcp_recursive_config_watch(None, Some(true), Some(true));
         unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Env);
     }
     #[test]
     #[serial]
-    fn mcp_recursive_config_watch_config_wins_over_managed_and_feature_flag() {
+    fn mcp_recursive_config_watch_config_wins_over_remote_feature_flag() {
         unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
-        let r = resolve_mcp_recursive_config_watch(None, None, Some(false), Some(true), Some(true));
+        let r = resolve_mcp_recursive_config_watch(None, Some(false), Some(true));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Config);
     }
     #[test]
     #[serial]
-    fn mcp_recursive_config_watch_managed_wins_over_feature_flag() {
-        unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
-        let r = resolve_mcp_recursive_config_watch(None, None, None, Some(false), Some(true));
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::ManagedConfig);
-    }
-    #[test]
-    #[serial]
     fn mcp_recursive_config_watch_feature_flag_used_when_no_higher_layer() {
         unsafe { std::env::remove_var("GROW_MCP_RECURSIVE_CONFIG_WATCH") };
-        let r = resolve_mcp_recursive_config_watch(None, None, None, None, Some(false));
+        let r = resolve_mcp_recursive_config_watch(None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
     }

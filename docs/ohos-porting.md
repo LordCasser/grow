@@ -150,7 +150,7 @@ GitHub Actions / ubuntu-24.04-arm
 
 ### 4.2 `rg` 分发边界
 
-Grow 2.0.3 只维护 GitHub Release 二进制渠道。OHOS 资产不嵌入 `rg`：运行时从 `PATH` 解析，
+Grow 2.0.x 只维护 GitHub Release 二进制渠道。OHOS 资产不嵌入 `rg`：运行时从 `PATH` 解析，
 缺失时搜索工具返回安装指引。这避免在没有独立 OHOS `rg` 签名链的情况下发布不可执行的内嵌 ELF。
 其他官方目标继续嵌入并校验固定版本 `rg`。
 
@@ -168,7 +168,7 @@ build grow（一次）→ llvm-strip grow → smoke grow
 
 ### 4.4 包管理器渠道
 
-Grow 2.0.3 不维护 Harmonybrew、Homebrew 或其他包管理器 formula。仓库内旧 formula 已删除，避免与
+Grow 2.0.x 不维护 Harmonybrew、Homebrew 或其他包管理器 formula。仓库内旧 formula 已删除，避免与
 GitHub Release 形成两套版本、签名和更新契约。`distro-pm` feature 仅保留为未来受包管理器控制的
 下游构建边界，不是当前官方发布入口。
 

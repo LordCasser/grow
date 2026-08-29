@@ -78,35 +78,11 @@ fn env_version(var: &str) -> Option<String> {
     std::env::var(var).ok()
 }
 
-/// `cli.<key>` across the config layers. `managed_only` excludes the user's own
-/// `config.toml` so a user-set bound can't count as organization policy.
-fn version_candidates(
-    layers: &crate::config::ConfigLayers,
-    key: &str,
-    managed_only: bool,
-) -> Vec<String> {
-    [
-        cli_version_from_toml(&layers.system_managed, key),
-        cli_version_from_toml(&layers.managed, key),
-        (!managed_only)
-            .then(|| cli_version_from_toml(&layers.user, key))
-            .flatten(),
-        layers
-            .user_requirements
-            .as_ref()
-            .and_then(|l| cli_version_from_toml(l, key)),
-        layers
-            .system_requirements
-            .as_ref()
-            .and_then(|l| cli_version_from_toml(l, key)),
-        layers
-            .mdm_requirements
-            .as_ref()
-            .and_then(|l| cli_version_from_toml(l, key)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+/// `cli.<key>` from the local config layer.
+fn version_candidates(layers: &crate::config::ConfigLayers, key: &str) -> Vec<String> {
+    cli_version_from_toml(&layers.user, key)
+        .into_iter()
+        .collect()
 }
 
 fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<Version> {
@@ -135,23 +111,15 @@ fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<Version> {
     best
 }
 
-/// Env joins the same extreme as the layers, so it can only tighten a managed bound.
+/// Env joins the same extreme as the local config, so it can only tighten a bound.
 fn resolve_version_bound<E: Fn(&str) -> Option<String>>(
     layers: &crate::config::ConfigLayers,
     env: &E,
     knob: VersionKnob,
 ) -> Option<Version> {
-    let mut raws = version_candidates(layers, knob.toml_key(), false);
+    let mut raws = version_candidates(layers, knob.toml_key());
     raws.extend(env(knob.env_var()));
     fold_bound(raws, knob)
-}
-
-/// Org-deployed layers only (no `user` layer, no env).
-fn resolve_version_bound_managed(
-    layers: &crate::config::ConfigLayers,
-    knob: VersionKnob,
-) -> Option<Version> {
-    fold_bound(version_candidates(layers, knob.toml_key(), true), knob)
 }
 
 /// The four resolved version bounds: soft `minimum`/`maximum` steer the updater;
@@ -181,17 +149,15 @@ impl VersionPolicy {
         let get = |knob| resolve_version_bound(layers, env, knob);
         let minimum = get(VersionKnob::Minimum);
         let maximum = get(VersionKnob::Maximum);
-        let mut required_minimum = get(VersionKnob::RequiredMinimum);
-        let mut required_maximum = get(VersionKnob::RequiredMaximum);
+        let required_minimum = get(VersionKnob::RequiredMinimum);
+        let required_maximum = get(VersionKnob::RequiredMaximum);
 
-        // A contradictory required range means a user/env bound crossed it. Managed
-        // policy is authoritative, so fall back to the managed-only bounds wholesale;
-        // a purely managed contradiction still fails open below.
+        // A contradictory required range is retained and handled as fail-open by
+        // `effective_required_*`.
         if let (Some(lo), Some(hi)) = (&required_minimum, &required_maximum)
             && lo > hi
         {
-            required_minimum = resolve_version_bound_managed(layers, VersionKnob::RequiredMinimum);
-            required_maximum = resolve_version_bound_managed(layers, VersionKnob::RequiredMaximum);
+            tracing::warn!(%lo, %hi, "required_minimum_version exceeds required_maximum_version; requirement will be ignored");
         }
 
         if let (Some(lo), Some(hi)) = (&minimum, &maximum)
@@ -293,7 +259,7 @@ mod tests {
         None
     }
 
-    fn layers(managed: &str, user: &str, mdm: &str) -> crate::config::ConfigLayers {
+    fn layers(user: &str) -> crate::config::ConfigLayers {
         let parse = |s: &str| {
             if s.is_empty() {
                 TomlValue::Table(Default::default())
@@ -302,16 +268,7 @@ mod tests {
             }
         };
         crate::config::ConfigLayers {
-            system_managed: TomlValue::Table(Default::default()),
-            managed: parse(managed),
             user: parse(user),
-            user_requirements: None,
-            system_requirements: None,
-            mdm_requirements: if mdm.is_empty() {
-                None
-            } else {
-                Some(parse(mdm))
-            },
             ..Default::default()
         }
     }
@@ -322,23 +279,15 @@ mod tests {
 
     #[test]
     fn floor_is_semver_max_ceiling_is_semver_min_across_layers() {
-        let l = layers(
-            "[cli]\nminimum_version = \"0.1.100\"\nmaximum_version = \"0.2.150\"\n",
-            "[cli]\nminimum_version = \"0.1.50\"\nmaximum_version = \"0.2.130\"\n",
-            "[cli]\nminimum_version = \"0.1.200\"\nmaximum_version = \"0.2.140\"\n",
-        );
+        let l = layers("[cli]\nminimum_version = \"0.1.50\"\nmaximum_version = \"0.2.130\"\n");
         let p = VersionPolicy::from_layers(&l, &no_env);
-        assert_eq!(p.minimum, Some(v("0.1.200")));
+        assert_eq!(p.minimum, Some(v("0.1.50")));
         assert_eq!(p.maximum, Some(v("0.2.130")));
     }
 
     #[test]
     fn env_tightens_but_cannot_loosen() {
-        let l = layers(
-            "[cli]\nminimum_version = \"0.2.100\"\nmaximum_version = \"0.2.200\"\n",
-            "",
-            "",
-        );
+        let l = layers("[cli]\nminimum_version = \"0.2.100\"\nmaximum_version = \"0.2.200\"\n");
         let tighten = |var: &str| match var {
             "GROW_MINIMUM_VERSION" => Some("0.2.150".to_string()),
             "GROW_MAXIMUM_VERSION" => Some("0.2.180".to_string()),
@@ -363,55 +312,12 @@ mod tests {
         let l = layers(
             "[cli]\nminimum_version = \"nope\"\nmaximum_version = \"bad\"\n\
              required_minimum_version = \"junk\"\nrequired_maximum_version = \"0.2.150\"\n",
-            "",
-            "",
         );
         let p = VersionPolicy::from_layers(&l, &no_env);
         assert_eq!(p.minimum, None);
         assert_eq!(p.maximum, None);
         assert_eq!(p.required_minimum, None);
         assert_eq!(p.required_maximum, Some(v("0.2.150")));
-    }
-
-    #[test]
-    fn a_user_bound_cannot_cancel_a_managed_hard_bound() {
-        // Managed floor; an env ceiling below it would make the range
-        // contradictory and naively drop both. The managed floor must survive.
-        let l = layers("[cli]\nrequired_minimum_version = \"0.2.100\"\n", "", "");
-        let low_ceiling =
-            |var: &str| (var == "GROW_REQUIRED_MAXIMUM_VERSION").then(|| "0.2.50".to_string());
-        let p = VersionPolicy::from_layers(&l, &low_ceiling);
-        assert_eq!(p.required_minimum, Some(v("0.2.100")));
-        assert_eq!(p.required_maximum, None);
-
-        // Symmetric: a user floor can't cancel a managed ceiling.
-        let l = layers("[cli]\nrequired_maximum_version = \"0.2.100\"\n", "", "");
-        let high_floor =
-            |var: &str| (var == "GROW_REQUIRED_MINIMUM_VERSION").then(|| "0.2.200".to_string());
-        let p = VersionPolicy::from_layers(&l, &high_floor);
-        assert_eq!(p.required_maximum, Some(v("0.2.100")));
-        assert_eq!(p.required_minimum, None);
-
-        // Tightening BOTH sides into a contradiction must not drop the managed floor.
-        let l = layers("[cli]\nrequired_minimum_version = \"0.2.100\"\n", "", "");
-        let both = |var: &str| match var {
-            "GROW_REQUIRED_MINIMUM_VERSION" => Some("99.0.0".to_string()),
-            "GROW_REQUIRED_MAXIMUM_VERSION" => Some("0.0.1".to_string()),
-            _ => None,
-        };
-        let p = VersionPolicy::from_layers(&l, &both);
-        assert_eq!(p.required_minimum, Some(v("0.2.100")));
-        assert_eq!(p.required_maximum, None);
-        assert!(!p.has_contradictory_required_range());
-
-        // A purely managed contradiction still fails open (ignored, not reverted).
-        let l = layers(
-            "[cli]\nrequired_minimum_version = \"0.3.0\"\nrequired_maximum_version = \"0.2.0\"\n",
-            "",
-            "",
-        );
-        let p = VersionPolicy::from_layers(&l, &no_env);
-        assert!(p.has_contradictory_required_range());
     }
 
     fn pol(
@@ -505,7 +411,7 @@ mod tests {
 
     #[test]
     fn whitespace_and_empty_values_are_ignored() {
-        let l = layers("[cli]\nminimum_version = \"   \"\n", "", "");
+        let l = layers("[cli]\nminimum_version = \"   \"\n");
         let p = VersionPolicy::from_layers(&l, &no_env);
         assert_eq!(p.minimum, None);
     }

@@ -36,12 +36,6 @@ fn resolve_overrides(
     })
 }
 
-/// Build the config-resolved event data from a list of MCP server configs.
-// Event system removed — returns () instead.
-pub fn build_config_resolved_event(_configs: &[acp::McpServer], _cwd: &Path) -> () {
-    ()
-}
-
 pub async fn start_mcp_server(
     mcp_server: acp::McpServer,
     cwd: Option<&Path>,

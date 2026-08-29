@@ -103,19 +103,12 @@ fn apply_search_gate(setting: &Resolved<bool>) {
     }
 }
 
-/// Names the setting that turned search off, for a message like
-/// `off (a requirements.toml pin)`.
+/// Names the setting that turned search off for a diagnostic error.
 fn session_search_off_reason(source: ConfigSource) -> &'static str {
     match source {
-        ConfigSource::Requirement => "a requirements.toml pin or an MDM policy",
         ConfigSource::Env => "the GROW_SESSION_SEARCH environment variable",
-        ConfigSource::Config
-        | ConfigSource::UserConfig
-        | ConfigSource::ManagedConfig
-        | ConfigSource::SystemManagedConfig => "the session_search key in a Grow config file",
-        // Neither can resolve to off: the default is on and no CLI flag
-        // sets this key.
-        ConfigSource::Cli | ConfigSource::Remote | ConfigSource::Default => "a local setting",
+        ConfigSource::Config => "the session_search key in a Grow config file",
+        _ => "a local setting",
     }
 }
 
@@ -124,28 +117,18 @@ fn search_closed_by() -> Option<ConfigSource> {
     SEARCH_CLOSED_BY.get().copied()
 }
 
-/// Resolve the session search setting: requirements pin > `GROW_SESSION_SEARCH`
-/// env var > `[session_search]` config file > default (`true`).
-fn resolve_session_search_setting(
-    requirement: Option<bool>,
-    config: Option<SessionSearchConfig>,
-) -> Resolved<bool> {
+/// Resolve the session search setting: `GROW_SESSION_SEARCH` env var >
+/// `[session_search]` config file > default (`true`).
+fn resolve_session_search_setting(config: Option<SessionSearchConfig>) -> Resolved<bool> {
     BoolFlag::env("GROW_SESSION_SEARCH")
-        .requirement(requirement)
         .config(config.and_then(|c| c.enabled))
         .default(true)
         .resolve()
 }
 
-/// Read the disk tiers that stand on their own: the requirements pin and
-/// the `[session_search]` config table. A corrupt user config must not
-/// disarm a pin, so each tier is read independently.
-fn load_session_search_disk_tiers() -> (Option<bool>, Option<SessionSearchConfig>) {
-    let pin = crate::config::load_merged_requirements().and_then(|req| {
-        req.get("features")
-            .and_then(|features| features.get("session_search"))
-            .and_then(|value| value.as_bool())
-    });
+/// Read the local `[session_search]` config table. A malformed config falls
+/// back to the built-in default and never disables search implicitly.
+fn load_session_search_disk_tiers() -> Option<SessionSearchConfig> {
     let config = match crate::config::load_from_disk() {
         Ok(toml) => toml
             .get("session_search")
@@ -155,7 +138,7 @@ fn load_session_search_disk_tiers() -> (Option<bool>, Option<SessionSearchConfig
             None
         }
     };
-    (pin, config)
+    config
 }
 
 /// Cheap after the setting is resolved. The first call in a process that
@@ -168,8 +151,7 @@ fn is_index_enabled() -> bool {
         // Nothing has resolved the setting yet: resolve the disk/env tiers
         // here rather than assume on — a pin still outranks the environment.
         _ => {
-            let (pin, config) = load_session_search_disk_tiers();
-            let setting = resolve_session_search_setting(pin, config);
+            let setting = resolve_session_search_setting(load_session_search_disk_tiers());
             tracing::debug!(
                 enabled = setting.value,
                 "session search resolved from disk before anything applied the setting"
@@ -2030,31 +2012,17 @@ mod tests {
     #[test]
     fn test_session_search_off_reason_mapping() {
         assert_eq!(
-            session_search_off_reason(ConfigSource::Requirement),
-            "a requirements.toml pin or an MDM policy"
-        );
-        assert_eq!(
             session_search_off_reason(ConfigSource::Env),
             "the GROW_SESSION_SEARCH environment variable"
         );
-        for source in [
-            ConfigSource::Config,
-            ConfigSource::UserConfig,
-            ConfigSource::ManagedConfig,
-            ConfigSource::SystemManagedConfig,
-        ] {
-            assert_eq!(
-                session_search_off_reason(source),
-                "the session_search key in a Grow config file"
-            );
-        }
-        for source in [
-            ConfigSource::Cli,
-            ConfigSource::Remote,
-            ConfigSource::Default,
-        ] {
-            assert_eq!(session_search_off_reason(source), "a local setting");
-        }
+        assert_eq!(
+            session_search_off_reason(ConfigSource::Config),
+            "the session_search key in a Grow config file"
+        );
+        assert_eq!(
+            session_search_off_reason(ConfigSource::Default),
+            "a local setting"
+        );
     }
 
     #[serial_test::serial]
@@ -2062,51 +2030,29 @@ mod tests {
     fn test_resolve_session_search_precedence() {
         with_session_search_env(None, || {
             // Unset everywhere → on by default.
-            let r = resolve_session_search_setting(None, None);
+            let r = resolve_session_search_setting(None);
             assert!(r.value);
             assert_eq!(r.source, ConfigSource::Default);
 
-            // A requirements pin wins everything, including a config that
-            // says on.
-            let r = resolve_session_search_setting(
-                Some(false),
-                Some(SessionSearchConfig {
-                    enabled: Some(true),
-                }),
-            );
-            assert!(!r.value);
-            assert_eq!(r.source, ConfigSource::Requirement);
-
             // The config file tier beats the default.
-            let r = resolve_session_search_setting(
-                None,
-                Some(SessionSearchConfig {
-                    enabled: Some(false),
-                }),
-            );
+            let r = resolve_session_search_setting(Some(SessionSearchConfig {
+                enabled: Some(false),
+            }));
             assert!(!r.value);
             assert_eq!(r.source, ConfigSource::Config);
 
             // An unset config field falls through to the default.
-            let r = resolve_session_search_setting(None, Some(SessionSearchConfig::default()));
+            let r = resolve_session_search_setting(Some(SessionSearchConfig::default()));
             assert!(r.value);
             assert_eq!(r.source, ConfigSource::Default);
         });
         with_session_search_env(Some("0"), || {
             // Env off beats a config that says on.
-            let r = resolve_session_search_setting(
-                None,
-                Some(SessionSearchConfig {
-                    enabled: Some(true),
-                }),
-            );
+            let r = resolve_session_search_setting(Some(SessionSearchConfig {
+                enabled: Some(true),
+            }));
             assert!(!r.value);
             assert_eq!(r.source, ConfigSource::Env);
-
-            // A pin still outranks the environment.
-            let r = resolve_session_search_setting(Some(true), None);
-            assert!(r.value);
-            assert_eq!(r.source, ConfigSource::Requirement);
         });
     }
 

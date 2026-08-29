@@ -3,14 +3,12 @@ license = "Apache-2.0"
 name = "config"
 version.workspace = true
 edition.workspace = true
-description = "Shared config loading for Grow — grow_home, effective config (requirements > user > managed), TOML merge"
+description = "Shared loading for Grow's user and project config files"
 
 [dependencies]
-base64 = { workspace = true }
 blake3 = { workspace = true }
 dunce = { workspace = true }
 libc = { workspace = true }
-ring = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,11 +20,6 @@ urlencoding = { workspace = true }
 which = { workspace = true }
 tty-utils = { workspace = true }
 version = { workspace = true }
-
-# core-foundation: read macOS MDM managed preferences (`ai.x.grow`) for the
-# admin-deployed requirements layer.
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

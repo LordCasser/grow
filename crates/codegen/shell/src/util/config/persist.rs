@@ -387,7 +387,7 @@ mod tests {
     /// was plain `bool` with default `true` and no
     /// `skip_serializing_if`, so EVERY pager save wrote
     /// `[session].load_envrc = true` to disk — silently overriding any
-    /// managed-config `load_envrc = false` policy.
+    /// higher-priority `load_envrc = false` policy.
     ///
     /// The fix widens `load_envrc` to `Option<bool>` with
     /// `skip_serializing_if = "Option::is_none"`. After the fix, a
@@ -405,7 +405,7 @@ mod tests {
             assert!(
                 session.get("load_envrc").is_none(),
                 "PR 12 R1 Bug 1: pager-side save with default SessionConfig must \
-                 NOT serialize load_envrc — that would override managed-config \
+                 NOT serialize load_envrc — that would override higher-priority \
                  policy. Found: {:?}",
                 session.get("load_envrc"),
             );
@@ -818,7 +818,7 @@ auto_update = true
             assert!(
                 c.get("show_tips").is_none(),
                 "default show_tips: None must not serialize — \
-                 managed-config layering depends on absent-means-defer"
+                 local layering depends on absent-means-defer"
             );
         }
     }

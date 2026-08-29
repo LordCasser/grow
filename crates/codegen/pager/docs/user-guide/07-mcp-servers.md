@@ -18,7 +18,8 @@ See the [MCP specification](https://modelcontextprotocol.io) for protocol detail
 
 MCP servers are configured in `~/.grow/config.toml` under `[mcp_servers.<name>]` sections.
 
-To distribute MCP servers to a team, or to restrict which servers users may run, see [Distribute across an organization](09-plugins.md#distribute-across-an-organization) in the Plugins guide.
+To share MCP server definitions within a repository, put them in that repository's
+`.grow/config.toml`.
 
 ### stdio Transport (Local Process)
 
@@ -63,9 +64,8 @@ query/mutation servers. Plan mode uses the same trust-domain declaration.
 > max_output_bytes = 40000
 > ```
 >
-> Precedence: requirements.toml > env > repo `.grow/config.toml` >
-> user/managed config > default. Repo edits apply to running sessions in that
-> directory via config hot-reload.
+> Precedence: env > repo `.grow/config.toml` > global `$GROW_HOME/config.toml` > default.
+> Repo edits apply to running sessions in that directory via config hot-reload.
 
 ### HTTP/SSE Transport (Remote Server)
 
@@ -172,7 +172,7 @@ Grow walks from the current directory up to the git repo root, loading `.grow/co
 
 If a project defines a server with the same name as a global one, the project version replaces it entirely (fields are not merged).
 
-Project-scoped files contribute `[mcp_servers]`, `[plugins]`, and `[permission]` entries. Grow reads most other config sections only from `~/.grow/config.toml`.
+Project-scoped files contribute `[mcp_servers]`, `[plugins]`, `[permission]`, and `[mcp] max_output_bytes`. Grow reads every other config section only from `$GROW_HOME/config.toml`.
 
 ---
 

@@ -1,4 +1,4 @@
-//! Project picker: select a project directory on first prompt from a non-project dir.
+//! Project picker: select a project directory before starting from a non-project dir.
 
 pub mod detection {
     pub use workspace::file_utils::workspace_classifier::is_project_dir;

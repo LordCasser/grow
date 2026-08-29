@@ -37,8 +37,6 @@ mod folder_trust_feature_off_shows_no_question;
 mod folder_trust_home_git_repo_subdir_keys_on_subdir;
 #[path = "pty_e2e/folder_trust_question_renders_and_accept_persists_grant.rs"]
 mod folder_trust_question_renders_and_accept_persists_grant;
-#[path = "pty_e2e/managed_policy_gate_refusal_reaches_real_terminal.rs"]
-mod managed_policy_gate_refusal_reaches_real_terminal;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_non_project_dir.rs"]
 mod mcp_menu_loads_servers_in_non_project_dir;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_project_dir.rs"]

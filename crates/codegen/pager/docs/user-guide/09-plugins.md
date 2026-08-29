@@ -220,63 +220,6 @@ grow plugin marketplace add my-org/my-org-plugins   # GitHub shorthand, a git UR
 grow plugin install gdrive --trust
 ```
 
-To install it for everyone automatically instead of person by person, see [Distribute across an organization](#distribute-across-an-organization).
-
----
-
-## Distribute across an organization
-
-Admins control plugins, marketplaces, and MCP servers through two managed layers the deployment sends to each user:
-
-- **`managed_config.toml`** holds the same settings as a user's `config.toml` and merges into it. Use it to hand everyone a marketplace and turn plugins on.
-- **`managed-settings.json`** is a protected policy file for allowlists and defaults. Its values take precedence over user, project, and local config and cannot be overridden.
-
-### Roll a marketplace out to everyone
-
-Add the source, and turn on the plugins you want, in `managed_config.toml`:
-
-```toml
-[[marketplace.sources]]
-name = "My Org Plugins"
-git = "https://github.com/my-org/my-org-plugins.git"
-
-# Plugins stay off until enabled. List plugin names (from `grow plugin list`)
-# or full IDs (`<scope>/<hash>/<name>`).
-[plugins]
-enabled = ["gdrive"]
-```
-
-For a hands-off install with no per-person step, also place the plugin's files where Grow discovers and trusts them automatically: `~/.grow/plugins/`, or a directory your device-management tool manages that you point to with `[plugins].paths`. Then enable them with `[plugins].enabled`.
-
-A managed workspace can also sync skills to users directly, without a plugin. Synced skills appear with the `server` scope and are administered by the workspace; a user's own skill of the same name shadows the synced one. See [Skills](08-skills.md).
-
-### Restrict which marketplaces can be added
-
-List the only sources people may add in `managed-settings.json`. Any other marketplace is refused:
-
-```json
-{
-  "strictKnownMarketplaces": [
-    { "source": "git", "url": "git@github.enterprise.example:ACME/my-org-plugins.git" }
-  ]
-}
-```
-
-### Restrict which MCP servers can run
-
-Also in `managed-settings.json`. Each entry allows an HTTP address (with `*` wildcards) or a local command; anything unlisted is denied:
-
-```json
-{
-  "allowedMcpServers": [
-    { "serverUrl": "https://*.example.com/*" },
-    { "command": "npx" }
-  ]
-}
-```
-
-The deployment can also send MCP servers to users directly. The allowlist bounds what any configuration, managed or personal, is allowed to run.
-
 ### Require pinned versions
 
 Refuse any remote plugin install or update that is not pinned to a full commit sha:

@@ -4,7 +4,7 @@ use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::root::dispatch::ctx::{SwitchCause, switch_to_agent};
 use crate::app::root::dispatch::modes::inherit_permission_mode;
-use crate::app::root::dispatch::prompt::{dispatch_send_prompt, supersede_open_reload_window};
+use crate::app::root::dispatch::prompt::supersede_open_reload_window;
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::{AgentCommand, AgentId, AgentSession};
 use crate::scrollback::block::RenderBlock;
@@ -260,6 +260,20 @@ pub(in crate::app::root::dispatch) fn open_project_question(
     app: &mut AppView,
     prompt_text: String,
 ) -> Vec<Effect> {
+    open_project_question_with_context(app, prompt_text, None, true, false, false)
+}
+
+/// Open the project picker while parking all create-time context on the
+/// placeholder AgentView. The plain wrapper above is used by normal prompt
+/// submission; dashboard dispatches pass model/routing explicitly.
+pub(in crate::app::root::dispatch) fn open_project_question_with_context(
+    app: &mut AppView,
+    prompt_text: String,
+    model_id: Option<acp::ModelId>,
+    submit_prompt: bool,
+    return_to_dashboard: bool,
+    attach_to_dashboard: bool,
+) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -267,18 +281,66 @@ pub(in crate::app::root::dispatch) fn open_project_question(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    if agent.question_view.is_some() {
+    // A bound session (or a session whose MCP init has already started) owns
+    // its lifecycle. A stale picker flag/event must not create a second
+    // pending placeholder or session.
+    if agent.session.session_id.is_some()
+        || agent.session.mcp_init_progress().is_some()
+        || (agent.pending_project_create.is_some() && agent.question_view.is_none())
+    {
         return vec![];
     }
-    let recent_dirs = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(crate::project_picker::sources::collect_recent_dirs(10))
-    });
-    let pq = crate::project_picker::build_project_question(&recent_dirs, &app.cwd);
-    if pq.resolved_paths.len() <= 1 {
-        return dispatch_project_selected(app, app.cwd.clone(), prompt_text, false);
+    if let Some(question) = agent.question_view.as_mut() {
+        if let Some(LocalQuestionKind::ProjectSelect { stashed_prompt, .. }) =
+            question.local_kind.as_mut()
+        {
+            *stashed_prompt = prompt_text.clone();
+            let mut stash = std::mem::take(&mut question.stashed_prompt);
+            if stash.text != prompt_text {
+                stash = if stash.text.is_empty() {
+                    crate::views::prompt_widget::StashedPrompt::from_submission(
+                        prompt_text,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                } else {
+                    stash.with_transformed_text(prompt_text)
+                };
+            }
+            question.stashed_prompt = stash;
+        }
+        if submit_prompt && let Some(pending) = agent.pending_project_create.as_mut() {
+            pending.submit_prompt = true;
+        }
+        return vec![];
     }
-    let stashed = agent.prompt.stash();
+    // The production pager runs on a multi-thread Tokio runtime. Unit and
+    // embedded current-thread runtimes cannot use `block_in_place`; the picker
+    // remains useful there with its current-directory and free-form choices.
+    let recent_dirs = tokio::runtime::Handle::try_current()
+        .ok()
+        .filter(|handle| {
+            matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        })
+        .map(|handle| {
+            tokio::task::block_in_place(|| {
+                handle.block_on(crate::project_picker::sources::collect_recent_dirs(10))
+            })
+        })
+        .unwrap_or_default();
+    let pq = crate::project_picker::build_project_question(&recent_dirs, &app.cwd);
+    let prompt_fallback = prompt_text.clone();
+    let mut stashed = agent.prompt.stash();
+    if stashed.text.is_empty() && !prompt_text.is_empty() {
+        stashed = crate::views::prompt_widget::StashedPrompt::from_submission(
+            prompt_text,
+            Vec::new(),
+            Vec::new(),
+        );
+    }
     let state = QuestionViewState::new(
         format!("project-select-{}", uuid::Uuid::new_v4()),
         vec![pq.question],
@@ -287,8 +349,15 @@ pub(in crate::app::root::dispatch) fn open_project_question(
     .with_local_kind(LocalQuestionKind::ProjectSelect {
         resolved_paths: pq.resolved_paths,
         original_cwd: app.cwd.clone(),
-        stashed_prompt: prompt_text,
+        stashed_prompt: prompt_fallback,
         dont_ask_index: pq.dont_ask_index,
+    });
+    agent.pending_project_create = Some(crate::app::agent_view::PendingProjectCreate {
+        model_id,
+        prompt: None,
+        submit_prompt,
+        return_to_dashboard,
+        attach_to_dashboard,
     });
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -304,6 +373,24 @@ pub(in crate::app::root::dispatch) fn dispatch_project_selected(
     stashed_prompt: String,
     disable_picker: bool,
 ) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    // `pending_project_create` is the one-shot create capability. Validate
+    // and consume it before touching cwd, picker preferences, or effects so
+    // duplicate/late selections are pure no-ops.
+    let pending = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        if agent.session.session_id.is_some() || agent.session.mcp_init_progress().is_some() {
+            return vec![];
+        }
+        agent.pending_project_create.take()
+    };
+    let Some(pending) = pending else {
+        return vec![];
+    };
     crate::unified_log::info(
         "project_picker.selected",
         None,
@@ -324,13 +411,15 @@ pub(in crate::app::root::dispatch) fn dispatch_project_selected(
         app.show_toast("Directory not found, continuing in current directory");
         app.cwd.clone()
     };
-    app.cwd = path.clone();
-    crate::git_info::populate_from_cwd_async(path.clone());
+    super::super::dashboard::commit_cwd_snapshot(app, &path);
     effects.push(Effect::SetWorkingDir { path: path.clone() });
-    let ActiveView::Agent(id) = app.active_view else {
-        effects.extend(dispatch_send_prompt(app, stashed_prompt));
-        return effects;
-    };
+    let (model_id, prompt_stash, submit_prompt, return_to_dashboard, attach_to_dashboard) = (
+        pending.model_id,
+        pending.prompt,
+        pending.submit_prompt,
+        pending.return_to_dashboard,
+        pending.attach_to_dashboard,
+    );
     if let Some(agent) = app.agents.get_mut(&id) {
         let changed = agent.session.cwd != path;
         agent.session.cwd = path.clone();
@@ -343,14 +432,53 @@ pub(in crate::app::root::dispatch) fn dispatch_project_selected(
         agent.session.update_mcp_init_progress(0, 0);
         agent.session.prompt_history_loading = true;
     }
+    let mut prompt_effect = None;
+    if let Some(agent) = app.agents.get_mut(&id) {
+        let fallback_is_submission = prompt_stash.is_none() && !stashed_prompt.trim().is_empty();
+        let prompt_stash = prompt_stash.unwrap_or_else(|| {
+            crate::views::prompt_widget::StashedPrompt::from_submission(
+                stashed_prompt,
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+        if submit_prompt || fallback_is_submission {
+            let (prompt_text, mut images, chip_elements) = prompt_stash.into_submission();
+            if !prompt_text.trim().is_empty() || !images.is_empty() {
+                agent.session.enqueue_prompt(prompt_text);
+                if let Some(entry) = agent.session.pending_prompts.back_mut() {
+                    entry.images = std::mem::take(&mut images);
+                    entry.chip_elements = chip_elements;
+                }
+            }
+            crate::prompt_images::drain_and_cleanup(&mut images);
+        } else {
+            agent.prompt.restore(prompt_stash);
+        }
+        prompt_effect = Some((return_to_dashboard, attach_to_dashboard));
+    }
     let preferred_session_id = app.deferred_startup.preferred_session_id.take();
     effects.push(Effect::CreateSession {
         agent_id: id,
         cwd: path,
-        model_id: None,
+        model_id,
         preferred_session_id,
     });
-    effects.extend(dispatch_send_prompt(app, stashed_prompt));
+    if let Some((return_to_dashboard, attach_to_dashboard)) = prompt_effect
+        && return_to_dashboard
+    {
+        if let Some(d) = app.dashboard.as_mut() {
+            d.restore_peek_viewport(&mut app.agents);
+            d.dispatch.set_text("");
+            d.clear_feedback();
+            d.filter = crate::views::dashboard::Filter::None;
+            d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+            d.attached_agent = attach_to_dashboard.then_some(id);
+        }
+        if !attach_to_dashboard {
+            app.active_view = ActiveView::AgentDashboard;
+        }
+    }
     effects
 }
 /// Build the placeholder [`AgentView`] for a fork. Centralises the

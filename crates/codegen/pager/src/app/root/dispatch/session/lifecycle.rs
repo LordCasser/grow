@@ -1,5 +1,7 @@
 //! New, exit, cloud, and worktree session dispatchers plus trust and startup actions.
-use super::fork::{dispatch_startup_fork_session, worktree_persist_options};
+use super::fork::{
+    dispatch_startup_fork_session, open_project_question_with_context, worktree_persist_options,
+};
 use super::load::dispatch_load_session;
 use super::modal::remove_agent_and_cleanup;
 use crate::acp::model_state::{EffortTokenError, ModelState};
@@ -205,8 +207,8 @@ pub(in crate::app::root::dispatch) fn open_new_session_question(app: &mut AppVie
     agent.prompt.set_text("");
     vec![]
 }
-/// Core new-session logic: create a placeholder agent, push the
-/// `/agents` tip, and return the `CreateSession` effect.
+/// Core new-session logic: create a placeholder agent, then either open the
+/// project picker or return the `CreateSession` effect.
 ///
 /// Factored out of [`dispatch_new_session`] so the worktree-question
 /// "No" path can call it directly without re-opening the modal.
@@ -214,7 +216,32 @@ pub(in crate::app::root::dispatch) fn dispatch_new_session_inner(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
+    // A picker already owns the placeholder and the next create completion.
+    // Re-entering `/new` (including a duplicated welcome key) must not create
+    // a second placeholder or a second eventual CreateSession effect.
+    if get_active_agent(app).is_some_and(|agent| {
+        matches!(
+            agent
+                .question_view
+                .as_ref()
+                .and_then(|q| q.local_kind.as_ref()),
+            Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+        )
+    }) {
+        return vec![];
+    }
+    let model_for_picker = model_id.clone();
+    let (_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    if app.needs_project_picker() {
+        effects.extend(open_project_question_with_context(
+            app,
+            String::new(),
+            model_for_picker,
+            false,
+            false,
+            false,
+        ));
+    }
     effects
 }
 /// Sibling that returns the new `AgentId` alongside
@@ -653,7 +680,7 @@ pub(in crate::app::root::dispatch) fn dispatch_new_session_with_id(
             Some(crate::app::session_startup::DeferredSessionStartup::NewWithId { session_id });
         return vec![];
     }
-    let (agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
+    let mut effects = dispatch_new_session_inner(app, None);
     for e in &mut effects {
         if let Effect::CreateSession {
             preferred_session_id,
@@ -663,7 +690,6 @@ pub(in crate::app::root::dispatch) fn dispatch_new_session_with_id(
             *preferred_session_id = Some(session_id.clone());
         }
     }
-    let _ = agent_id;
     effects
 }
 /// Dismiss the project picker and create a session in the current directory.
@@ -671,6 +697,13 @@ pub(in crate::app::root::dispatch) fn skip_picker_and_create_session(
     app: &mut AppView,
     agent_id: AgentId,
 ) -> Vec<Effect> {
+    let pending = app
+        .agents
+        .get_mut(&agent_id)
+        .and_then(|agent| agent.pending_project_create.take());
+    if pending.is_none() && app.needs_project_picker() {
+        return vec![];
+    }
     if app
         .agents
         .get(&agent_id)
@@ -678,11 +711,18 @@ pub(in crate::app::root::dispatch) fn skip_picker_and_create_session(
     {
         return vec![];
     }
+    let model_id = pending
+        .as_ref()
+        .and_then(|pending| pending.model_id.clone());
     app.mark_project_picker_done();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.update_mcp_init_progress(0, 0);
         agent.session.prompt_history_loading = true;
-        if let Some(qv) = agent.take_question_view() {
+        if let Some(pending) = pending {
+            if let Some(prompt) = pending.prompt {
+                agent.prompt.restore(prompt);
+            }
+        } else if let Some(qv) = agent.take_question_view() {
             agent.prompt.restore(qv.stashed_prompt);
         }
     }
@@ -690,7 +730,7 @@ pub(in crate::app::root::dispatch) fn skip_picker_and_create_session(
     vec![Effect::CreateSession {
         agent_id,
         cwd: app.cwd.clone(),
-        model_id: None,
+        model_id,
         preferred_session_id,
     }]
 }

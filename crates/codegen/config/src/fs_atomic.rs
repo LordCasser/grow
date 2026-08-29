@@ -1,5 +1,5 @@
-//! Atomic file writes, shared by the managed-cache marker, the signature
-//! sidecar, and downstream identifier caches (e.g. the diagnostics agent id).
+//! Atomic file writes shared by local state and identifier caches (e.g. the
+//! diagnostics agent id).
 
 use std::path::Path;
 

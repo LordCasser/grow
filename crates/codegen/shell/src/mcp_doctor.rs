@@ -168,7 +168,7 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     (sources, servers)
 }
 
-// ── Managed (service.example.com) server discovery ─────────────────────────
+// ── Remote service server discovery ─────────────────────────
 
 // ── Check functions ─────────────────────────────────────────────
 
@@ -384,7 +384,7 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
     // `remote = None` is intentional: standalone `grow mcp doctor` has no loaded
     // `RemoteSettings`, so a remote-only org `folder_trust_enabled = false`
     // opt-out isn't seen here — gating conservatively (treating the feature as
-    // enabled) is the deliberate fail-secure direction. Local env/user/managed
+    // enabled) is the deliberate fail-secure direction. Local env/user
     // config disable is still honored by `feature_enabled`.
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let untrusted_project: std::collections::HashSet<String> =

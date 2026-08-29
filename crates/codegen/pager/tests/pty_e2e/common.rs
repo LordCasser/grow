@@ -1030,9 +1030,8 @@ pub(crate) fn wait_for_exit_status(
 
 // ── grow wrap e2e ───────────────────────────────────────────────────────
 
-/// `grow wrap` run budget. Same contention math as the requirements-version
-/// test: the child's cold exec of the huge debug binary can land its first
-/// write well past 30s under the parallel pty_e2e suite.
+/// `grow wrap` run budget: the child's cold exec of the huge debug binary can
+/// land its first write well past 30s under the parallel pty_e2e suite.
 #[cfg(unix)]
 pub(crate) const WRAP_TIMEOUT: Duration = Duration::from_secs(120);
 

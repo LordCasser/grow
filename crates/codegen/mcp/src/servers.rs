@@ -1200,8 +1200,9 @@ pub(crate) fn mcp_servers_equal(a: &[acp::McpServer], b: &[acp::McpServer]) -> b
 /// Default timeout for an MCP server's `initialize` handshake & initial tool
 /// listing, used when no override is supplied. 30s is generous enough that
 /// cold-start `uvx` / `uv run --with` stdio servers that download deps on
-/// first launch aren't killed mid-handshake. The shell resolves env / config /
-/// requirements / remote overrides and injects them via `McpClientTimeoutOverrides`.
+/// first launch aren't killed mid-handshake. The shell resolves env / local
+/// config / runtime feature settings and injects them via
+/// `McpClientTimeoutOverrides`.
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 30;
 
 /// Default timeout for individual tool calls.
@@ -2269,7 +2270,7 @@ pub enum LivenessCheck {
 /// 2. [`GrowClientHandler`] when the server pushes a notification we
 ///    care about — currently `notifications/tools/list_changed` and
 ///    `notifications/resources/list_changed`.
-/// 3. The session/managed-config layer when a server is added, removed,
+/// 3. The session config-reload layer when a server is added, removed,
 ///    or successfully (re-)initialized.
 ///
 /// Consumers fan these out to ACP `grow/mcp/server_status` after 50 ms
@@ -2568,8 +2569,9 @@ impl McpClient {
         overrides: Option<&McpClientTimeoutOverrides>,
         meta_config: Option<&McpServerMetaConfig>,
     ) -> (u64, u64, HashMap<ToolName, u64>) {
-        // _meta > overrides > default; env / config / requirements / remote are
-        // resolved by the shell and injected via `overrides.startup_timeout_sec`.
+        // _meta > overrides > default; env / local config / runtime feature
+        // settings are resolved by the shell and injected via
+        // `overrides.startup_timeout_sec`.
         let startup = meta_config
             .and_then(|mc| mc.startup_timeout_ms)
             .map(|ms| ms.div_ceil(1000))

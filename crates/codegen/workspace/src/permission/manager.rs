@@ -253,9 +253,6 @@ pub enum PermissionHandle {
         /// True when the installed auto classifier has a live `ClassifyTextFn`
         /// (session sampling side-query). False for heuristic-only fallbacks.
         side_query_wired: Arc<AtomicBool>,
-        /// Managed-policy pin cached at spawn. When `Some`, the agent re-clamps
-        /// every client-supplied always-approve to non-always-approve; `None` = no pin.
-        always_approve_pin: Option<&'static str>,
         /// Grep Read-deny globs, carried so subagents inherit the parent's excludes.
         deny_read_globs: Arc<Vec<String>>,
         /// Concurrent in-flight permission requests. Shared across handle clones
@@ -859,14 +856,10 @@ impl PermissionHandle {
     /// Atomically select the permission manager's canonical mode.
     pub fn set_mode(&self, mode: diagnostics::enums::PermissionMode) {
         if let PermissionHandle::Actor {
-            cmd_tx,
-            mode_state,
-            always_approve_pin,
-            ..
+            cmd_tx, mode_state, ..
         } = self
         {
-            let effective = clamp_permission_mode(mode, *always_approve_pin);
-            mode_state.store(encode_permission_mode(effective), Ordering::Relaxed);
+            mode_state.store(encode_permission_mode(mode), Ordering::Relaxed);
             if let Err(e) = cmd_tx.send(PermissionCommand::SetMode(mode)) {
                 tracing::error!(?e, "failed to send permission mode command");
             }
@@ -952,22 +945,17 @@ impl PermissionHandle {
     }
 
     /// Resolve an explicit child route, or the live primary mode when the
-    /// request has no child route, with the actor's managed-policy clamp.
+    /// request has no child route.
     pub fn effective_request_mode(
         &self,
         request_mode: Option<RequestPermissionMode>,
     ) -> EffectivePermissionMode {
         match self {
             PermissionHandle::AllowAll => EffectivePermissionMode::AlwaysApprove,
-            PermissionHandle::Actor {
-                mode_state,
-                always_approve_pin,
-                ..
-            } => {
+            PermissionHandle::Actor { mode_state, .. } => {
                 match resolve_request_mode(
                     request_mode,
                     decode_permission_mode(mode_state.load(Ordering::Relaxed)),
-                    *always_approve_pin,
                 ) {
                     diagnostics::enums::PermissionMode::AlwaysApprove => {
                         EffectivePermissionMode::AlwaysApprove
@@ -1185,28 +1173,15 @@ impl PermissionHandle {
     }
 }
 
-fn clamp_permission_mode(
-    requested: diagnostics::enums::PermissionMode,
-    always_approve_pin: Option<&'static str>,
-) -> diagnostics::enums::PermissionMode {
-    if requested.is_always_approve() && always_approve_pin.is_some() {
-        diagnostics::enums::PermissionMode::Ask
-    } else {
-        requested
-    }
-}
-
 fn resolve_request_mode(
     request_mode: Option<crate::permission::types::RequestPermissionMode>,
     primary_mode: diagnostics::enums::PermissionMode,
-    always_approve_pin: Option<&'static str>,
 ) -> diagnostics::enums::PermissionMode {
     use crate::permission::types::RequestPermissionMode;
     match request_mode {
-        Some(RequestPermissionMode::AlwaysApprove) => clamp_permission_mode(
-            diagnostics::enums::PermissionMode::AlwaysApprove,
-            always_approve_pin,
-        ),
+        Some(RequestPermissionMode::AlwaysApprove) => {
+            diagnostics::enums::PermissionMode::AlwaysApprove
+        }
         Some(RequestPermissionMode::Auto) => diagnostics::enums::PermissionMode::Auto,
         Some(RequestPermissionMode::Ask) => diagnostics::enums::PermissionMode::Ask,
         None => primary_mode,
@@ -1265,16 +1240,9 @@ fn auto_prompt_blocks_allow(access: &AccessKind) -> bool {
     !matches!(access, AccessKind::Bash(_))
 }
 
-/// Whether persisted state auto-approves bash `cmd`. The user-writable
-/// `allow_bash_execute` is clamped under the pin so it can't substitute for
-/// `--permission-mode always-approve`; explicit `allowed_bash_commands` grants still apply.
-fn persisted_bash_auto_allows(
-    state: &PermissionState,
-    cmd: &str,
-    always_approve_pin: Option<&'static str>,
-) -> bool {
-    (state.allow_bash_execute && always_approve_pin.is_none())
-        || state.allowed_bash_commands.contains(cmd)
+/// Whether persisted state auto-approves bash `cmd`.
+fn persisted_bash_auto_allows(state: &PermissionState, cmd: &str) -> bool {
+    state.allow_bash_execute || state.allowed_bash_commands.contains(cmd)
 }
 
 fn bash_write_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
@@ -1350,7 +1318,6 @@ fn bash_grant_pre_decision(
     cmd: &str,
     evaluation: &BashEvaluation,
     state: &PermissionState,
-    always_approve_pin: Option<&'static str>,
     opts: BashGrantOpts,
 ) -> Option<(Decision, &'static str)> {
     if let SegmentEvaluation::Reject(reason) = &evaluation.segments {
@@ -1376,7 +1343,7 @@ fn bash_grant_pre_decision(
             if !opts.allow_blanket || (*any_dangerous && opts.conservative_blanket) {
                 None
             } else {
-                persisted_bash_auto_allows(state, cmd, always_approve_pin)
+                persisted_bash_auto_allows(state, cmd)
                     .then_some((Decision::Allow, reasons::SESSION_GRANT))
             }
         }
@@ -1387,7 +1354,7 @@ fn bash_grant_pre_decision(
                 let allowed = if opts.conservative_blanket {
                     evaluation.exact_grant
                 } else {
-                    persisted_bash_auto_allows(state, cmd, always_approve_pin)
+                    persisted_bash_auto_allows(state, cmd)
                 };
                 allowed.then_some((Decision::Allow, reasons::SESSION_GRANT))
             }
@@ -1409,7 +1376,6 @@ fn session_grant_pre_decision(
     allow_edits_for_session: bool,
     static_domain_matcher: &DomainMatcher,
     honor_static_web_allowlist: bool,
-    always_approve_pin: Option<&'static str>,
 ) -> Option<(Decision, &'static str)> {
     match access {
         AccessKind::MCPTool { name, .. } => {
@@ -1430,13 +1396,9 @@ fn session_grant_pre_decision(
             }
         }
         AccessKind::Edit(_) if allow_edits_for_session => grant_allow(reasons::SESSION_GRANT),
-        AccessKind::Bash(cmd) => bash_grant_pre_decision(
-            cmd,
-            bash_evaluation?,
-            state,
-            always_approve_pin,
-            BashGrantOpts::PRE_CLASSIFIER,
-        ),
+        AccessKind::Bash(cmd) => {
+            bash_grant_pre_decision(cmd, bash_evaluation?, state, BashGrantOpts::PRE_CLASSIFIER)
+        }
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::Edit(_)
@@ -1460,7 +1422,7 @@ pub fn spawn_permission_manager(
     client_identifier: Option<String>,
     remember_tool_approvals: bool,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
-    spawn_permission_manager_with_pin(
+    spawn_permission_manager_inner(
         session_id,
         gateway,
         cwd,
@@ -1472,12 +1434,10 @@ pub fn spawn_permission_manager(
         initial_mode,
         client_identifier,
         remember_tool_approvals,
-        crate::permission::resolution::always_approve_disabled_by_policy(),
     )
 }
-/// `always_approve_pin` threaded for testability; production passes the live pin.
 #[allow(clippy::too_many_arguments)]
-fn spawn_permission_manager_with_pin(
+fn spawn_permission_manager_inner(
     session_id: acp::SessionId,
     gateway: GatewaySender,
     cwd: AbsPathBuf,
@@ -1489,11 +1449,9 @@ fn spawn_permission_manager_with_pin(
     initial_mode: diagnostics::enums::PermissionMode,
     client_identifier: Option<String>,
     remember_tool_approvals: bool,
-    always_approve_pin: Option<&'static str>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<PermissionCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<PermissionEvent>();
-    let initial_mode = clamp_permission_mode(initial_mode, always_approve_pin);
     let mode_state = Arc::new(AtomicU8::new(encode_permission_mode(initial_mode)));
     let mode_state_actor = mode_state.clone();
     if initial_mode.is_always_approve()
@@ -1503,9 +1461,7 @@ fn spawn_permission_manager_with_pin(
     {
         tracing::warn!(
             "always-approve is active while prompt_policy is dontAsk (Deny); \
-             unapproved tools will not be auto-denied until always-approve is off. \
-             Pin always-approve off with requirements.toml \
-             ([ui] disable_bypass_permissions_mode = true) to enforce managed dontAsk."
+             unapproved tools will not be auto-denied until always-approve is off."
         );
     }
     let side_query_wired = Arc::new(AtomicBool::new(false));
@@ -1538,8 +1494,6 @@ fn spawn_permission_manager_with_pin(
         let mut root_auto_runtime = AutoRuntimeState::default();
         let mut child_auto_runtimes: HashMap<String, AutoRuntimeState> = HashMap::new();
         let mut project_instructions: Option<String> = None;
-        // Log a refused always-approve selection once per session.
-        let mut pin_refusal_logged = false;
         let mut allow_edits_for_session = false;
         // Child remembered grants are intentionally actor-local. They are keyed by the
         // concrete child session, never initialized from the parent's persisted state,
@@ -1565,21 +1519,10 @@ fn spawn_permission_manager_with_pin(
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 PermissionCommand::SetMode(mode) => {
-                    // Authoritative re-clamp: no client can enable
-                    // always-approve under
-                    // the pin, whatever ingestion path set it.
-                    let effective = clamp_permission_mode(mode, always_approve_pin);
-                    if mode.is_always_approve()
-                        && !effective.is_always_approve()
-                        && !pin_refusal_logged
-                    {
-                        tracing::warn!("always-approve enable refused: disabled by managed policy");
-                        pin_refusal_logged = true;
-                    }
                     tracing::info!(?mode, "permission mode selected");
-                    primary_mode = effective;
-                    mode_state_actor.store(encode_permission_mode(effective), Ordering::Relaxed);
-                    if effective.is_auto() {
+                    primary_mode = mode;
+                    mode_state_actor.store(encode_permission_mode(mode), Ordering::Relaxed);
+                    if mode.is_auto() {
                         // Ensure a conversation-aware classifier is installed
                         // (tests may have cleared it; production always has one).
                         if auto_classifier.is_none() {
@@ -1630,8 +1573,7 @@ fn spawn_permission_manager_with_pin(
                     let within_capability_fence =
                         context.within_capability_fence && child_permission_key.is_some();
                     let request_cwd = context.execution_cwd.as_deref().unwrap_or(cwd.as_path());
-                    let permission_mode =
-                        resolve_request_mode(request_mode, primary_mode, always_approve_pin);
+                    let permission_mode = resolve_request_mode(request_mode, primary_mode);
                     let effective_always_approve = permission_mode.is_always_approve();
                     let effective_auto_mode = permission_mode.is_auto();
                     // Extract tool info for diagnostics
@@ -1912,7 +1854,7 @@ fn spawn_permission_manager_with_pin(
                         _ => None,
                     };
 
-                    // Evaluate managed policy (direct access + per-segment Bash command
+                    // Evaluate the permission policy (direct access + per-segment Bash command
                     // rules + Bash shell-file args) up front so the always-approve/sandbox fast
                     // paths below honor a deny or forced prompt. The preflight also
                     // resolves every managed Ask before any mode-specific fast path.
@@ -1986,7 +1928,6 @@ fn spawn_permission_manager_with_pin(
                             *request_allow_edits_for_session,
                             &static_domain_matcher,
                             !(effective_auto_mode && web_fetch_allowlist_is_default),
-                            always_approve_pin,
                         )
                     {
                         tracing::debug!(
@@ -2422,7 +2363,7 @@ fn spawn_permission_manager_with_pin(
                                 "permission policy decision"
                             );
                             // Deny was already handled above; a `Some(decision)` here
-                            // is a managed policy allow.
+                            // is a permission policy allow.
                             emit_event(&decision, true, false, None, Some(reasons::POLICY_ALLOW));
                             let _ = respond_to.send(decision);
                             continue;
@@ -2489,7 +2430,6 @@ fn spawn_permission_manager_with_pin(
                                             .as_ref()
                                             .expect("Bash access has evaluation"),
                                         request_state,
-                                        always_approve_pin,
                                         BashGrantOpts::ASK_FLOOR_REMEMBER,
                                     )
                                 } else {
@@ -2502,7 +2442,6 @@ fn spawn_permission_manager_with_pin(
                                         .as_ref()
                                         .expect("Bash access has evaluation"),
                                     request_state,
-                                    always_approve_pin,
                                     BashGrantOpts::post_classify(auto_forced_prompt),
                                 )
                             }
@@ -2917,7 +2856,6 @@ fn spawn_permission_manager_with_pin(
             cmd_tx: tx,
             mode_state,
             side_query_wired,
-            always_approve_pin,
             deny_read_globs: Arc::new(deny_read_globs),
             in_flight,
             shutdown,
@@ -2933,29 +2871,10 @@ mod tests {
     use crate::permission::bash_command_splitting::primary_command_from_script;
     use diagnostics::enums::PermissionMode;
 
-    // ── Managed-policy pin: permission-mode + persisted bash clamp ──
-
-    const PIN: &str = crate::permission::resolution::ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS;
     const UNSAFE_GIT_STATUS: &str = concat!(
         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor ",
         "GIT_CONFIG_VALUE_0=/tmp/pwn git status"
     );
-
-    #[test]
-    fn clamp_permission_mode_respects_pin() {
-        assert_eq!(
-            clamp_permission_mode(PermissionMode::AlwaysApprove, Some(PIN)),
-            PermissionMode::Ask
-        );
-        assert_eq!(
-            clamp_permission_mode(PermissionMode::Auto, Some(PIN)),
-            PermissionMode::Auto
-        );
-        assert_eq!(
-            clamp_permission_mode(PermissionMode::AlwaysApprove, None),
-            PermissionMode::AlwaysApprove
-        );
-    }
 
     #[test]
     fn child_request_mode_override_is_independent_from_primary() {
@@ -2964,16 +2883,15 @@ mod tests {
             resolve_request_mode(
                 Some(RequestPermissionMode::Auto),
                 PermissionMode::AlwaysApprove,
-                None,
             ),
             PermissionMode::Auto
         );
         assert_eq!(
-            resolve_request_mode(Some(RequestPermissionMode::Ask), PermissionMode::Auto, None,),
+            resolve_request_mode(Some(RequestPermissionMode::Ask), PermissionMode::Auto),
             PermissionMode::Ask
         );
         assert_eq!(
-            resolve_request_mode(None, PermissionMode::Auto, None),
+            resolve_request_mode(None, PermissionMode::Auto),
             PermissionMode::Auto
         );
     }
@@ -2989,19 +2907,6 @@ mod tests {
         assert_eq!(
             explicit_request_mode(&source, None),
             Some(RequestPermissionMode::Auto)
-        );
-    }
-
-    #[test]
-    fn child_always_approve_is_clamped_by_managed_policy() {
-        use crate::permission::types::RequestPermissionMode;
-        assert_eq!(
-            resolve_request_mode(
-                Some(RequestPermissionMode::AlwaysApprove),
-                PermissionMode::Auto,
-                Some(PIN),
-            ),
-            PermissionMode::Ask
         );
     }
 
@@ -3025,33 +2930,24 @@ mod tests {
     }
 
     #[test]
-    fn persisted_bash_auto_allow_clamped_by_pin() {
+    fn persisted_bash_auto_allow_uses_saved_state() {
         let mut state = PermissionState {
             allow_bash_execute: true,
             ..Default::default()
         };
-        // No pin: persisted "approve all bash" auto-approves any command.
-        assert!(persisted_bash_auto_allows(&state, "rm -rf /", None));
-        // Pin: the flag is neutralized — no blanket auto-approve.
-        assert!(!persisted_bash_auto_allows(&state, "rm -rf /", Some(PIN)));
-        // Explicit per-command grants are honored regardless of the pin.
+        assert!(persisted_bash_auto_allows(&state, "rm -rf /"));
         state.allow_bash_execute = false;
         state.allowed_bash_commands.insert("cargo test".to_string());
-        assert!(persisted_bash_auto_allows(&state, "cargo test", Some(PIN)));
-        assert!(!persisted_bash_auto_allows(
-            &state,
-            "cargo build",
-            Some(PIN)
-        ));
+        assert!(persisted_bash_auto_allows(&state, "cargo test"));
+        assert!(!persisted_bash_auto_allows(&state, "cargo build"));
     }
 
     fn test_manager(
         cwd: &AbsPathBuf,
         initial_mode: PermissionMode,
-        always_approve_pin: Option<&'static str>,
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
         let (tx, _rx) = mpsc::unbounded_channel();
-        spawn_permission_manager_with_pin(
+        spawn_permission_manager_inner(
             acp::SessionId::new(Arc::from("test-session")),
             GatewaySender::new(tx),
             cwd.clone(),
@@ -3063,7 +2959,6 @@ mod tests {
             initial_mode,
             None,
             true,
-            always_approve_pin,
         )
     }
 
@@ -3073,7 +2968,7 @@ mod tests {
         initial_mode: PermissionMode,
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
         let (tx, _rx) = mpsc::unbounded_channel();
-        spawn_permission_manager_with_pin(
+        spawn_permission_manager_inner(
             acp::SessionId::new(Arc::from("test-session")),
             GatewaySender::new(tx),
             cwd.clone(),
@@ -3085,7 +2980,6 @@ mod tests {
             initial_mode,
             None,
             true,
-            None,
         )
     }
 
@@ -3582,33 +3476,6 @@ mod tests {
             .await;
     }
 
-    /// Construction clamps a requested initial always-approve off under the pin (passes
-    /// through without it); the Arc is set before the actor runs.
-    #[tokio::test]
-    async fn always_approve_pin_clamps_initial_mode_at_construction() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                assert!(
-                    !test_manager(&cwd, PermissionMode::AlwaysApprove, Some(PIN))
-                        .0
-                        .mode()
-                        .is_always_approve(),
-                    "pin must clamp a requested initial always-approve"
-                );
-                assert!(
-                    test_manager(&cwd, PermissionMode::AlwaysApprove, None)
-                        .0
-                        .mode()
-                        .is_always_approve(),
-                    "no pin: requested initial always-approve passes through"
-                );
-            })
-            .await;
-    }
-
     /// Deny globs travel with the handle, so subagents inherit the parent's
     /// excludes; `AllowAll` carries none.
     #[tokio::test]
@@ -3620,7 +3487,7 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (tx, _rx) = mpsc::unbounded_channel();
                 let globs = vec!["**/*.pem".to_string(), "**/cli-denied.txt".to_string()];
-                let (handle, _events) = spawn_permission_manager_with_pin(
+                let (handle, _events) = spawn_permission_manager_inner(
                     acp::SessionId::new(Arc::from("test-session")),
                     GatewaySender::new(tx),
                     cwd,
@@ -3632,7 +3499,6 @@ mod tests {
                     PermissionMode::Ask,
                     None,
                     true,
-                    None,
                 );
                 assert_eq!(
                     handle.deny_read_globs(),
@@ -3647,85 +3513,7 @@ mod tests {
             .await;
     }
 
-    /// AlwaysApprove is refused under the pin; `set_mode` clamps the Arc
-    /// synchronously, so `is_always_approve_mode()` needs no actor round-trip.
-    #[tokio::test]
-    async fn always_approve_pin_clamps_runtime_mode() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-
-                let (pinned, _e1) = test_manager(&cwd, PermissionMode::Ask, Some(PIN));
-                pinned.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
-                assert!(
-                    !pinned.mode().is_always_approve(),
-                    "pin must refuse a runtime enable of always-approve"
-                );
-
-                let (unpinned, _e2) = test_manager(&cwd, PermissionMode::Ask, None);
-                unpinned.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
-                assert!(
-                    unpinned.mode().is_always_approve(),
-                    "no pin: runtime enable works"
-                );
-                unpinned.set_mode(diagnostics::enums::PermissionMode::Ask);
-                assert!(!unpinned.mode().is_always_approve());
-            })
-            .await;
-    }
-
-    /// Persisted `allow_bash_execute = true` auto-approves non-dangerous bash
-    /// without the pin but is neutralized under it.
-    #[tokio::test]
-    async fn always_approve_pin_neutralizes_persisted_allow_bash_execute() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                // Benign unknown binary: not safe-listed, not dangerous, not
-                // disallowed — only the blanket grant can auto-approve it.
-                let benign = "my-custom-build --release";
-                let state = PermissionState {
-                    allow_bash_execute: true,
-                    ..Default::default()
-                };
-                persist_state(&cwd, &state, None).await;
-
-                let bash = || {
-                    acp::ToolCallUpdate::new(
-                        acp::ToolCallId::new(Arc::from("tc")),
-                        acp::ToolCallUpdateFields::default(),
-                    )
-                };
-
-                let (unpinned, _e1) = test_manager(&cwd, PermissionMode::Ask, None);
-                let allow = unpinned
-                    .request(AccessKind::Bash(benign.into()), bash(), None, None, None)
-                    .await;
-                assert_eq!(
-                    allow,
-                    Decision::Allow,
-                    "no pin: persisted allow_bash_execute auto-approves benign unknown cmds"
-                );
-
-                let (pinned, _e2) = test_manager(&cwd, PermissionMode::Ask, Some(PIN));
-                let neutralized = pinned
-                    .request(AccessKind::Bash(benign.into()), bash(), None, None, None)
-                    .await;
-                // Gateway receiver is dropped in test_manager — a prompt attempt
-                // surfaces as non-Allow (same pattern as neighboring Ask tests).
-                assert!(
-                    !matches!(neutralized, Decision::Allow),
-                    "pin: flag neutralized → must not auto-allow, got {neutralized:?}"
-                );
-            })
-            .await;
-    }
-
-    // ── Prompt-loop regression: a managed `Ask Bash(...)` rule on an
+    // ── Prompt-loop regression: a configured `Ask Bash(...)` rule on an
     //    auto-allowed command must reach the user prompt, never silently
     //    auto-allow ──
     //
@@ -3793,7 +3581,7 @@ mod tests {
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
         let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
         tokio::task::spawn_local(receiver.run());
-        spawn_permission_manager_with_pin(
+        spawn_permission_manager_inner(
             acp::SessionId::new(Arc::from("test-session")),
             gateway,
             cwd.clone(),
@@ -3805,7 +3593,6 @@ mod tests {
             PermissionMode::Ask,
             None,
             remember_tool_approvals,
-            None,
         )
     }
 
@@ -3945,7 +3732,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask);
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
 
@@ -3999,7 +3786,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask);
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
                 let accesses = [
@@ -4055,7 +3842,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 let (classifier, seen) =
                     capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Block);
                 manager.set_classifier(Some(classifier));
@@ -4189,7 +3976,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 manager.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"outside the assigned task"}"#,
                 )));
@@ -4241,7 +4028,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 manager.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     "not valid judgment json",
                 )));
@@ -4283,7 +4070,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 manager.set_classifier(Some(Arc::new(LlmPermissionClassifier {
                     classify_text: Some(Arc::new(|_messages: Vec<ClassifierMessage>| {
                         Box::pin(async { Err(ClassifierFailure::Timeout) })
@@ -4619,7 +4406,7 @@ mod tests {
 
                 let tmp2 = tempfile::tempdir().unwrap();
                 let cwd2 = AbsPathBuf::new(tmp2.path().to_path_buf()).unwrap();
-                let (mgr2, _e2) = test_manager(&cwd2, PermissionMode::Ask, None);
+                let (mgr2, _e2) = test_manager(&cwd2, PermissionMode::Ask);
                 let d = mgr2
                     .request(
                         AccessKind::Bash("my-custom-build --release".into()),
@@ -4954,7 +4741,7 @@ mod tests {
         ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
             let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
             tokio::task::spawn_local(receiver.run());
-            spawn_permission_manager_with_pin(
+            spawn_permission_manager_inner(
                 acp::SessionId::new(Arc::from("test-session")),
                 gateway,
                 cwd.clone(),
@@ -4966,7 +4753,6 @@ mod tests {
                 PermissionMode::Ask,
                 None,
                 true,
-                None,
             )
         }
 
@@ -5042,7 +4828,7 @@ mod tests {
                     let d = request(&mgr, AccessKind::Bash("echo \"build $(date)\"".into())).await;
                     assert!(
                         matches!(d, Decision::Reject(_)),
-                        "managed Ask must prompt (answered reject-once), got {d:?}"
+                        "configured Ask must prompt (answered reject-once), got {d:?}"
                     );
                     assert_eq!(prompts.borrow().len(), 1);
                     assert_eq!(seen.lock().unwrap().len(), 0);
@@ -5055,7 +4841,7 @@ mod tests {
                     assert_eq!(
                         ev.auto_denials_total,
                         Some(0),
-                        "managed Ask must not consume denial budget"
+                        "configured Ask must not consume denial budget"
                     );
                 })
                 .await;
@@ -6115,7 +5901,7 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let started = Arc::new(AtomicBool::new(false));
-                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(Arc::new(HangingClassifier {
                     started: started.clone(),
@@ -6166,7 +5952,7 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let started = Arc::new(AtomicBool::new(false));
-                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 manager.set_classifier(Some(Arc::new(HangingClassifier {
                     started: started.clone(),
                 })));
@@ -6256,7 +6042,7 @@ mod tests {
                 };
                 let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
                 tokio::task::spawn_local(receiver.run());
-                let (mgr, _events) = spawn_permission_manager_with_pin(
+                let (mgr, _events) = spawn_permission_manager_inner(
                     acp::SessionId::new(Arc::from("test-session")),
                     gateway,
                     cwd.clone(),
@@ -6268,7 +6054,6 @@ mod tests {
                     PermissionMode::Ask,
                     None,
                     true,
-                    None,
                 );
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("manager must be actor-backed");
@@ -6333,7 +6118,7 @@ mod tests {
                 let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
                 tokio::task::spawn_local(receiver.run());
                 let timeout = std::time::Duration::from_secs(5);
-                let (mgr, mut events) = spawn_permission_manager_with_pin(
+                let (mgr, mut events) = spawn_permission_manager_inner(
                     acp::SessionId::new(Arc::from("test-session")),
                     gateway,
                     cwd,
@@ -6345,7 +6130,6 @@ mod tests {
                     PermissionMode::Ask,
                     None,
                     true,
-                    None,
                 );
 
                 let first = mgr
@@ -6393,7 +6177,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, PermissionMode::AlwaysApprove, None);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::AlwaysApprove);
                 let d = mgr
                     .request(
                         AccessKind::Bash("echo hi".into()),
@@ -6510,7 +6294,7 @@ mod tests {
                 };
                 let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
                 tokio::task::spawn_local(receiver.run());
-                let (mgr, mut events) = spawn_permission_manager_with_pin(
+                let (mgr, mut events) = spawn_permission_manager_inner(
                     acp::SessionId::new(Arc::from("test-session")),
                     gateway,
                     cwd.clone(),
@@ -6522,7 +6306,6 @@ mod tests {
                     PermissionMode::Ask,
                     None,
                     true,
-                    None,
                 );
 
                 // Request A parks in the gated prompt; B then arrives and overlaps it.
@@ -6593,7 +6376,7 @@ mod tests {
             .await;
     }
 
-    /// Build an `ask Bash(<glob>)` config (the customer's managed-policy shape)
+    /// Build an `ask Bash(<glob>)` permission config.
     /// for the remember-gate floor tests below.
     fn ask_bash_config(glob: &str) -> crate::permission::types::PermissionConfig {
         use crate::permission::types::{
@@ -7616,7 +7399,6 @@ mod tests {
                 compress,
                 &evaluate_bash(compress, &broad, true),
                 &broad,
-                None,
                 BashGrantOpts::PRE_CLASSIFIER,
             )
             .is_none()
@@ -7630,7 +7412,6 @@ mod tests {
                 compress,
                 &evaluate_bash(compress, &exact, true),
                 &exact,
-                None,
                 BashGrantOpts::PRE_CLASSIFIER,
             )
             .is_some()
@@ -8070,14 +7851,8 @@ mod tests {
             let evaluation = evaluate_bash(cmd, &state, true);
             assert_ne!(evaluation.env_risk, EnvRisk::Safe);
             assert_eq!(
-                bash_grant_pre_decision(
-                    cmd,
-                    &evaluation,
-                    &state,
-                    None,
-                    BashGrantOpts::PRE_CLASSIFIER,
-                )
-                .is_some(),
+                bash_grant_pre_decision(cmd, &evaluation, &state, BashGrantOpts::PRE_CLASSIFIER,)
+                    .is_some(),
                 allowed
             );
         }
@@ -8116,14 +7891,8 @@ mod tests {
         ] {
             let evaluation = evaluate_bash(cmd, &state, true);
             assert_eq!(
-                bash_grant_pre_decision(
-                    cmd,
-                    &evaluation,
-                    &state,
-                    None,
-                    BashGrantOpts::PRE_CLASSIFIER,
-                )
-                .is_some(),
+                bash_grant_pre_decision(cmd, &evaluation, &state, BashGrantOpts::PRE_CLASSIFIER,)
+                    .is_some(),
                 allowed
             );
         }
@@ -8143,7 +7912,6 @@ mod tests {
                     cmd,
                     &evaluation,
                     &state,
-                    None,
                     BashGrantOpts::ASK_FLOOR_REMEMBER,
                 )
                 .is_some(),
@@ -8582,7 +8350,7 @@ mod tests {
                 );
 
                 // Allowlist: Read under auto without classifier.
-                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 assert!(mgr.mode().is_auto());
                 assert!(!mgr.mode().is_always_approve());
@@ -8661,7 +8429,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let mk = |id: &str| {
                     acp::ToolCallUpdate::new(
@@ -8705,7 +8473,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 // Simulates SessionCommand::SetPermissionMode at spawn / ACP notify.
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 assert!(mgr.mode().is_auto());
@@ -8775,7 +8543,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"dev"}"#,
@@ -8815,7 +8583,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 assert!(
                     !mgr.has_llm_side_query(),
@@ -8905,7 +8673,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask);
                 mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"exfil"}"#,
@@ -9320,7 +9088,7 @@ mod tests {
                         .await;
                     assert!(
                         matches!(decision, Decision::Allow),
-                        "managed policy allow must resolve before child {mode:?} handling"
+                        "permission policy allow must resolve before child {mode:?} handling"
                     );
                     let event = events.try_recv().expect("policy event");
                     let expected_reason = match mode {
@@ -9643,7 +9411,7 @@ mod tests {
                 };
                 persist_state(&cwd, &state, None).await;
 
-                let (mgr, _e) = test_manager(&cwd, PermissionMode::Ask, None);
+                let (mgr, _e) = test_manager(&cwd, PermissionMode::Ask);
                 let rejected = mgr
                     .request(
                         AccessKind::Bash("rm -rf /tmp/zzz".into()),

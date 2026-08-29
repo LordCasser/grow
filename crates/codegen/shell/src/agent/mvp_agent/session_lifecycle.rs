@@ -183,10 +183,7 @@ impl MvpAgent {
             .clone()
     }
     /// Close a session in response to an explicit terminal close.
-    pub(crate) async fn close_session_explicit(
-        &self,
-        id: &acp::SessionId,
-    ) -> Result<bool, String> {
+    pub(crate) async fn close_session_explicit(&self, id: &acp::SessionId) -> Result<bool, String> {
         let _lifecycle = self.lock_session_lifecycle(id).await;
         if !self.has_live_or_draining_session(id) {
             return Ok(false);

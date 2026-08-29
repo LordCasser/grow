@@ -212,7 +212,41 @@ impl AgentView {
         if completion == ClipboardPasteCompletion::FullMiss && ctx.source.is_clipboard_key() {
             crate::clipboard::log_paste_key_empty_host_clipboard(ctx.target.surface_str());
         }
+        self.restash_project_picker_prompt_after_deferred_paste();
         completion
+    }
+
+    /// A welcome/prompt paste can finish while the project picker owns the
+    /// visible composer. Rebase the completed attachment onto the snapshot
+    /// parked in the picker instead of leaving it in the hidden live prompt,
+    /// where choosing a directory would overwrite it.
+    fn restash_project_picker_prompt_after_deferred_paste(&mut self) {
+        let Some(mut question) = self.take_question_view() else {
+            return;
+        };
+        if !matches!(
+            question.local_kind,
+            Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+        ) {
+            self.replace_question_view(Some(question));
+            return;
+        }
+
+        let mut late = self.prompt.stash();
+        self.prompt
+            .restore(std::mem::take(&mut question.stashed_prompt));
+        if !late.images.is_empty() {
+            for image in std::mem::take(&mut late.images) {
+                if let Err(msg) = self.prompt.insert_image(image) {
+                    self.show_toast_for(&msg, std::time::Duration::from_millis(4_950));
+                }
+            }
+        } else if !late.text.is_empty() {
+            let _ = self.prompt.handle_paste(&late.text);
+            self.prompt.refresh_slash(&self.session.models);
+        }
+        question.stashed_prompt = self.prompt.stash();
+        self.replace_question_view(Some(question));
     }
     /// After a deferred paste probe completes, take the kind of any send
     /// stashed while the probe(s) were in flight. Returns `None` while probes

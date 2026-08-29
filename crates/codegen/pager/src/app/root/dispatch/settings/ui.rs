@@ -161,11 +161,17 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
                 );
                 existing
             } else {
-                let (new_id, create_effects) =
-                    crate::app::root::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
-                        app, None,
-                    );
-                effects.extend(create_effects);
+                // Use the high-level startup path so a Welcome settings
+                // open observes the same project-picker gate as `/new`.
+                // The lower-level constructor intentionally only builds the
+                // placeholder and would leave a non-project cwd with no
+                // picker and no eventual CreateSession.
+                effects.extend(
+                    crate::app::root::dispatch::session::lifecycle::dispatch_new_session(app),
+                );
+                let ActiveView::Agent(new_id) = app.active_view else {
+                    return effects;
+                };
                 new_id
             }
         }
@@ -932,7 +938,7 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
         // the default cache and never mutates the active session or its queue.
         ("permission_mode", SettingValue::Enum(s)) => {
             use crate::app::actions::PermissionModeKind;
-            let mut kind = match PermissionModeKind::from_canonical(s) {
+            let kind = match PermissionModeKind::from_canonical(s) {
                 Some(k) => k,
                 None => {
                     tracing::warn!(
@@ -944,16 +950,6 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
                     PermissionModeKind::Ask
                 }
             };
-            if super::super::modes::always_approve_enable_blocked(app, kind.is_always_approve())
-                .is_some()
-            {
-                tracing::warn!(
-                    target: "settings",
-                    key = "permission_mode",
-                    "rollback refused always-approve because managed policy disables it",
-                );
-                kind = PermissionModeKind::Ask;
-            }
             app.default_permission_mode = kind.as_runtime();
             app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
         }

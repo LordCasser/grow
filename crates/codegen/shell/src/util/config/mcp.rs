@@ -362,7 +362,7 @@ pub fn collect_mcp_setup_configs(
 /// Persist `disabled_tools` for a server under `[disabled_mcp_tools]` in config.toml.
 ///
 /// Uses a dedicated top-level section (not `[mcp_servers]`) to avoid creating
-/// incomplete server entries that fail to deserialize for managed servers.
+/// incomplete server entries that fail to deserialize for configured servers.
 pub async fn save_mcp_disabled_tools(server_name: &str, disabled_tools: &[String]) -> Result<()> {
     let path = config_path();
     let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
@@ -462,7 +462,10 @@ pub async fn save_user_mcp_server_enabled(server_name: &str, enabled: bool) -> R
 }
 
 /// Nearest project config defining `server_name` (cwd last → reverse; nearest wins).
-fn nearest_project_mcp_definition(cwd: &std::path::Path, server_name: &str) -> Option<PathBuf> {
+pub(crate) fn nearest_project_mcp_definition(
+    cwd: &std::path::Path,
+    server_name: &str,
+) -> Option<PathBuf> {
     crate::config::find_project_configs(cwd)
         .into_iter()
         .rev()
@@ -786,32 +789,33 @@ pub fn get_all_mcp_disabled_tools(
 /// Single source of truth for the plan-mode read-only MCP classification:
 /// while a Plan is in a non-executing phase, tools from a listed server are
 /// allowed through the edit gate; every other MCP tool is rejected. MCP
-/// `annotations`/`readOnlyHint` are never consulted. Mirrors
-/// `get_all_mcp_disabled_tools` (whole-set, config-derived; the session caches
-/// the result in `McpState` at init instead of re-reading per tool call).
+/// `annotations`/`readOnlyHint` are never consulted. The session caches the
+/// trust-filtered result in `McpState` at init instead of re-reading per tool
+/// call.
 pub fn get_mcp_server_max_access(
-    _cwd: &std::path::Path,
+    cwd: &std::path::Path,
 ) -> std::collections::HashMap<String, tool_protocol::ToolAccess> {
-    mcp_server_max_access_from_config(&load_mcp_server_configs())
+    let project_allowed = crate::agent::folder_trust::project_scope_allowed(cwd);
+    let servers = load_mcp_server_configs_with_project(cwd);
+    mcp_server_max_access_from_scoped_config(&servers, project_allowed)
 }
 
-/// Pure filter over parsed server configs; split out so the classification
-/// rule is unit-testable without the process-cached config home.
-fn mcp_server_max_access_from_config(
-    servers: &IndexMap<String, McpServerConfig>,
+fn mcp_server_max_access_from_scoped_config(
+    servers: &IndexMap<String, (McpServerConfig, &'static str)>,
+    project_allowed: bool,
 ) -> std::collections::HashMap<String, tool_protocol::ToolAccess> {
     servers
         .iter()
-        .map(|(name, config)| (name.clone(), config.max_access))
+        .filter(|(_, (_, scope))| *scope != MCP_SCOPE_PROJECT || project_allowed)
+        .map(|(name, (config, _))| (name.clone(), config.max_access))
         .collect()
 }
 
 /// Load all configured MCP servers as `(name, config)` pairs.
 ///
-/// Reads from `load_effective_config()`, which merges the system-managed,
-/// managed, and user config layers only. Use
-/// [`load_mcp_server_configs_with_project`] for a view that also includes
-/// project-scoped `.grow/config.toml` files.
+/// Reads from `load_effective_config()`, which loads the user config layer
+/// only. Use [`load_mcp_server_configs_with_project`] for a view that also
+/// includes project-scoped `.grow/config.toml` files.
 pub fn load_mcp_server_configs() -> IndexMap<String, McpServerConfig> {
     let root =
         crate::config::load_effective_config().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
@@ -1366,13 +1370,40 @@ command = ""
                 "max_access": max_access,
             }))
             .unwrap();
-            servers.insert(name.to_string(), config);
+            servers.insert(name.to_string(), (config, MCP_SCOPE_USER));
         }
-        // `get_mcp_server_max_access` itself reads the process-cached config
-        // home (`grow_home()` OnceLock), so the pure filter is tested here.
-        let access = mcp_server_max_access_from_config(&servers);
+        let access = mcp_server_max_access_from_scoped_config(&servers, true);
         assert_eq!(access["docs"], tool_protocol::ToolAccess::ReadWrite);
         assert_eq!(access["linear"], tool_protocol::ToolAccess::All);
+    }
+
+    #[test]
+    fn mcp_server_max_access_includes_trusted_project_winner() {
+        let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx",
+            "max_access": "read_write",
+        }))
+        .unwrap();
+        let servers = IndexMap::from([("linear".to_owned(), (config, MCP_SCOPE_PROJECT))]);
+
+        let access = mcp_server_max_access_from_scoped_config(&servers, true);
+        assert_eq!(access["linear"], tool_protocol::ToolAccess::ReadWrite);
+    }
+
+    #[test]
+    fn mcp_server_max_access_drops_untrusted_project_winner_without_global_fallback() {
+        let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx",
+            "max_access": "read_write",
+        }))
+        .unwrap();
+        // The scoped map represents the final winner: a project definition
+        // shadows the global entry, so an untrusted project must not fall back
+        // to the shadowed global ceiling.
+        let servers = IndexMap::from([("linear".to_owned(), (config, MCP_SCOPE_PROJECT))]);
+
+        let access = mcp_server_max_access_from_scoped_config(&servers, false);
+        assert!(!access.contains_key("linear"));
     }
 
     #[test]

@@ -2727,31 +2727,6 @@ fn rollback_reverts_thread_local_cache_too() {
     .unwrap();
 }
 
-/// `set_always_approve_mode_inner` is the backstop: even a (stale) rollback
-/// value of "always-approve" must not re-enable always-approve under the pin.
-#[test]
-fn rollback_to_always_approve_blocked_by_policy_pin() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
-    app.always_approve_policy_block = Some(POLICY_WARNING);
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SettingPersistFailed {
-            key: "permission_mode",
-            rollback_value: SettingValue::Enum("always-approve"),
-            error: "permission denied".into(),
-        }),
-        &mut app,
-    );
-
-    assert!(effects.is_empty(), "rollback path never re-emits effects");
-    assert!(
-        !app.agents[&AgentId(0)].session.is_always_approve(),
-        "inner backstop must hold on the rollback path"
-    );
-    assert!(!app.default_permission_mode.is_always_approve());
-}
-
 /// Notice fires once per relaxed run; survives search, re-arms on a cwd-scoped browse.
 #[test]
 fn session_list_relax_surfaces_notice_once() {

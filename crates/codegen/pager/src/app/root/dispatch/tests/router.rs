@@ -1914,8 +1914,8 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
 }
 /// If the user picks the regular "Yes, proceed" option (NOT
 /// enable-always-approve), the dispatcher must behave exactly as
-/// before — no PersistPermissionMode effect, no always-approve flip. Pins
-/// that the new code path is gated strictly on the id check.
+/// before — no PersistPermissionMode effect, no always-approve flip. This
+/// ensures the new code path is gated strictly on the id check.
 #[test]
 fn regular_allow_once_does_not_trigger_always_approve_persist() {
     use std::sync::Arc;
@@ -1940,48 +1940,6 @@ fn regular_allow_once_does_not_trigger_always_approve_persist() {
         !app.default_permission_mode.is_always_approve(),
         "app.default_permission_mode.is_always_approve() must remain OFF when the regular AllowOnce option is picked",
     );
-}
-/// Launch-time blocked `--permission-mode always-approve` in the TUI: the one-shot notice is
-/// surfaced (toast + durable system line) on the first agent view and
-/// consumed so later switches stay quiet.
-#[test]
-fn switch_to_agent_surfaces_launch_block_notice_once() {
-    let mut app = test_app();
-    app.always_approve_launch_block_notice = Some(POLICY_WARNING);
-    let id = AgentId(0);
-    let session = make_test_agent_session(&app, id, "test-session");
-    app.agents
-        .insert(id, AgentView::new(session, ScrollbackState::new()));
-    switch_to_agent(&mut app, id, SwitchCause::New);
-    let agent = &app.agents[&id];
-    assert_eq!(
-        agent.toast.as_ref().map(|(s, _)| s.as_str()),
-        Some(POLICY_WARNING),
-    );
-    let system_texts: Vec<&str> = agent
-        .scrollback
-        .iter_entries()
-        .filter_map(|(_, e)| match &e.block {
-            crate::scrollback::block::RenderBlock::Notice(s) => Some(s.text.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        system_texts,
-        vec![POLICY_WARNING],
-        "warning must land in the transcript exactly once",
-    );
-    assert_eq!(
-        app.always_approve_launch_block_notice, None,
-        "one-shot must be consumed"
-    );
-    let id2 = AgentId(1);
-    let session2 = make_test_agent_session(&app, id2, "test-session-2");
-    app.agents
-        .insert(id2, AgentView::new(session2, ScrollbackState::new()));
-    switch_to_agent(&mut app, id2, SwitchCause::New);
-    assert!(app.agents[&id2].toast.is_none());
-    assert_eq!(app.agents[&id2].scrollback.iter_entries().count(), 0);
 }
 /// Switching to a non-auto/non-always-approve agent re-anchors a stale global
 /// `"auto"` mirror (left by a different agent) to `"ask"`, so the cycle's

@@ -1138,62 +1138,6 @@ fn set_always_approve_mode_toast_format() {
     assert_eq!(toast, "\u{2713} Permission mode: Ask");
 }
 
-#[test]
-fn set_always_approve_mode_on_blocked_by_policy_pin() {
-    let mut app = test_app_with_agent();
-    app.always_approve_policy_block = Some(POLICY_WARNING);
-
-    let effects = dispatch(
-        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
-        &mut app,
-    );
-
-    assert!(
-        effects.is_empty(),
-        "blocked enable must not emit any Effect (no persist), got {effects:?}",
-    );
-    assert!(
-        !app.agents[&AgentId(0)].session.is_always_approve(),
-        "session.always_approve_mode must stay off under the pin"
-    );
-    assert!(
-        !app.default_permission_mode.is_always_approve(),
-        "app.default_permission_mode.is_always_approve() must stay off"
-    );
-    assert_eq!(
-        app.current_ui.permission_mode, None,
-        "canonical mirror must stay untouched"
-    );
-    assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
-}
-
-#[test]
-fn set_always_approve_mode_off_allowed_under_policy_pin() {
-    let mut app = test_app_with_agent();
-    // ON while unpinned (e.g. state restored from before the pin landed).
-    let _ = dispatch(
-        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
-        &mut app,
-    );
-    assert!(app.agents[&AgentId(0)].session.is_always_approve());
-    app.always_approve_policy_block = Some(POLICY_WARNING);
-
-    let effects = dispatch(Action::SetPermissionMode(PermissionModeKind::Ask), &mut app);
-
-    assert!(
-        !app.agents[&AgentId(0)].session.is_always_approve(),
-        "the pin must not block flipping always-approve OFF"
-    );
-    assert_eq!(effects.len(), 1, "OFF notifies the active session");
-    assert!(matches!(
-        &effects[0],
-        Effect::NotifySessionPermissionMode {
-            canonical: "ask",
-            ..
-        }
-    ));
-}
-
 /// Leaving Plan while already in Auto must keep the classifier. It must not
 /// fall to the reset that clears Auto back to Ask.
 

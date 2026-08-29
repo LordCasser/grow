@@ -5,19 +5,15 @@
     fn settings_update_clearing_group_tool_verbs_reverts_to_default() {
         // Expected values come from the same chain the handler resolves, so the
         // test holds regardless of host config/env (a local `[ui]` or env
-        // override legitimately beats the remote tier on both legs).
-        let requirements = shell::config::load_merged_requirements();
+        // override legitimately beats the backend tier on both legs).
         let user_config = shell::config::load_from_disk().ok();
-        let managed_config = shell::config::load_managed_config().ok();
         let resolve = |remote_val: Option<bool>| {
             let remote = shell::util::config::RemoteSettings {
                 group_tool_verbs: remote_val,
                 ..Default::default()
             };
             shell::util::config::resolve_group_tool_verbs(
-                requirements.as_ref(),
                 user_config.as_ref(),
-                managed_config.as_ref(),
                 Some(&remote),
             )
             .value
@@ -380,21 +376,9 @@
         );
     }
 
-    /// Policy pin and auto gate clamp a soft re-arm to Ask enforcement/display.
+    /// The auto gate clamps a soft re-arm to Ask enforcement/display.
     #[test]
-    fn permission_mode_soft_default_respects_pin_and_gate() {
-        let mut app = make_app_with_agent("sess-pin-pm");
-        app.permission_mode_from_soft_default = true;
-        app.always_approve_policy_block = Some("pinned");
-        app.default_permission_mode = shell::util::config::PermissionMode::Ask;
-        super::super::settings::apply_soft_default_permission_mode(
-            &mut app,
-            None,
-            Some("always-approve"),
-        );
-        assert!(!app.default_permission_mode.is_always_approve(), "policy pin must block a remote always-approve");
-        assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
-
+    fn permission_mode_soft_default_respects_auto_gate() {
         let mut app = make_app_with_agent("sess-gate-pm");
         app.permission_mode_from_soft_default = true;
         app.auto_mode_gate = false;

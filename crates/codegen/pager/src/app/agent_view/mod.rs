@@ -166,6 +166,20 @@ mod workflow_ingest;
 mod workflows_overlay;
 use super::actions;
 use crate::app::root::dispatch;
+
+/// Context parked on a placeholder while the project picker owns input.
+/// Keeping it on the placeholder makes directory selection complete only
+/// that one pending create operation, including its prompt and routing.
+#[derive(Debug)]
+pub(crate) struct PendingProjectCreate {
+    pub model_id: Option<agent_client_protocol::ModelId>,
+    pub prompt: Option<StashedPrompt>,
+    /// Whether the parked composer is an already-submitted prompt or merely
+    /// a draft that must be restored after the directory is chosen.
+    pub submit_prompt: bool,
+    pub return_to_dashboard: bool,
+    pub attach_to_dashboard: bool,
+}
 pub(super) fn active_contexts_for_pane(pane: ActivePane) -> Vec<crate::actions::When> {
     use crate::actions::When;
     match pane {
@@ -974,6 +988,8 @@ pub struct AgentView {
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the
     /// prompt area shows a structured question UI and input is modal.
     pub(crate) question_view: Option<QuestionViewState>,
+    /// Session-create context parked while the local project picker is open.
+    pub(crate) pending_project_create: Option<PendingProjectCreate>,
     /// Scrollbar hit area for the question view (set during render).
     pub(crate) hit_question_scrollbar: HitArea,
     /// Hovered question item index (visual highlight only).

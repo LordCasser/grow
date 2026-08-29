@@ -793,37 +793,6 @@ fn dashboard_second_stash_does_not_overwrite_first() {
         "the stashed peek reply must reach the peeked agent with the image; effects = {effects:?}"
     );
 }
-/// The staged-mode write sits outside `set_always_approve_mode_inner`; its own
-/// backstop must downgrade Always-Approve under the pin and stay the
-/// identity without one.
-#[test]
-fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    apply_pending_dispatch_config(
-        agent,
-        None,
-        tools::types::BehaviorId::Normal,
-        crate::app::actions::PermissionModeKind::AlwaysApprove,
-        Some(POLICY_WARNING),
-    );
-    assert!(
-        !agent.session.is_always_approve(),
-        "staged Always-Approve must not enable always-approve under the pin"
-    );
-    assert_eq!(
-        agent.toast.as_ref().map(|(s, _)| s.as_str()),
-        Some(POLICY_WARNING),
-    );
-    apply_pending_dispatch_config(
-        agent,
-        None,
-        tools::types::BehaviorId::Normal,
-        crate::app::actions::PermissionModeKind::AlwaysApprove,
-        None,
-    );
-    assert!(agent.session.is_always_approve());
-}
 /// Leader-mode independence: opening the dashboard works even when NOT in
 /// leader mode. The dashboard renders local sessions regardless; leader
 /// mode only adds the roster poll. Every entry point funnels through
@@ -1413,30 +1382,6 @@ fn dashboard_dispatch_always_approve_sets_always_approve() {
     assert!(
         app.agents[&new_id].session.is_always_approve(),
         "Always-Approve must spawn the agent in auto-approve"
-    );
-}
-/// Always-Approve staged but pinned off: plain-Send (stays on the
-/// dashboard) must clamp always-approve off AND surface the warning on the
-/// dashboard's OWN error slot — the new agent's toast is invisible here.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
-    let mut app = test_app();
-    app.always_approve_policy_block = Some(POLICY_WARNING);
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
-    }
-    let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
-    let new_id = *app.agents.keys().next().unwrap();
-    assert!(
-        !app.agents[&new_id].session.is_always_approve(),
-        "pinned always-approve must spawn the agent in Normal"
-    );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().feedback.as_deref(),
-        Some(POLICY_WARNING),
-        "warning must land on the dashboard feedback slot when the view stays on the dashboard",
     );
 }
 /// A freshly dispatched agent (queued prompt, session not yet created)

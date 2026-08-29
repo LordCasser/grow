@@ -647,12 +647,7 @@ pub(super) async fn run_session(
     }
     let liveness_watchers_enabled = {
         let user_cfg = crate::config::load_effective_config().ok();
-        let requirements = crate::agent::config::read_requirements_toml();
-        crate::util::config::resolve_mcp_liveness_watchers(
-            requirements.as_ref(),
-            user_cfg.as_ref(),
-            None,
-        )
+        crate::util::config::resolve_mcp_liveness_watchers(user_cfg.as_ref())
     };
     if !session.startup_hints.is_subagent && liveness_watchers_enabled {
         let (event_tx, event_rx) =
@@ -668,12 +663,7 @@ pub(super) async fn run_session(
         let shutdown_state = crate::session::mcp_dispatcher::new_shutdown_state();
         let auto_restart_enabled = {
             let user_cfg = crate::config::load_effective_config().ok();
-            let requirements = crate::agent::config::read_requirements_toml();
-            crate::util::config::resolve_mcp_auto_restart(
-                requirements.as_ref(),
-                user_cfg.as_ref(),
-                None,
-            )
+            crate::util::config::resolve_mcp_auto_restart(user_cfg.as_ref())
         };
         let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
             if auto_restart_enabled {

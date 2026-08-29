@@ -94,35 +94,23 @@ impl DisplayRefreshLayer {
     }
 }
 
-/// Priority: 0 requirements (highest) … 4 default (lowest).
+/// Priority: 0 local config (highest) … 2 default (lowest).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Picked {
     value: u32,
     prio: u8,
 }
 
-fn pick_u32(
-    requirements: Option<u32>,
-    user: Option<u32>,
-    managed: Option<u32>,
-    remote: Option<u32>,
-    default: u32,
-) -> Picked {
-    if let Some(v) = requirements {
+fn pick_u32(user: Option<u32>, remote: Option<u32>, default: u32) -> Picked {
+    if let Some(v) = user {
         return Picked { value: v, prio: 0 };
     }
-    if let Some(v) = user {
-        return Picked { value: v, prio: 1 };
-    }
-    if let Some(v) = managed {
-        return Picked { value: v, prio: 2 };
-    }
     if let Some(v) = remote {
-        return Picked { value: v, prio: 3 };
+        return Picked { value: v, prio: 1 };
     }
     Picked {
         value: default,
-        prio: 4,
+        prio: 2,
     }
 }
 
@@ -146,56 +134,44 @@ fn order_bounds(lo: Picked, hi: Picked, def_lo: u32, def_hi: u32) -> (u32, u32) 
 
 /// Resolve display-refresh probe + auto-cadence policy.
 ///
-/// Precedence per field: requirements > env (bools only) > user TOML >
-/// managed > remote `display_refresh` object > compiled defaults.
+/// Precedence per field: env (bools only) > user TOML > remote
+/// `display_refresh` object > compiled defaults.
 ///
 /// TOML/remote use tolerant [`DisplayRefreshSettings`]. Floor/ceiling clamp
 /// `1..=100`; inverted bounds keep the higher-priority side.
 pub fn resolve_display_refresh(
-    requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
     remote: Option<&RemoteSettings>,
 ) -> DisplayRefreshPolicy {
     use crate::agent::config::BoolFlag;
 
-    let req = DisplayRefreshLayer::from_toml(requirements);
     let usr = DisplayRefreshLayer::from_toml(user);
-    let mng = DisplayRefreshLayer::from_toml(managed);
 
     let remote_obj = remote.and_then(|r| r.display_refresh.as_ref());
     let remote_probe = remote_obj.and_then(|d| d.probe_enabled);
     let remote_auto = remote_obj.and_then(|d| d.auto_cadence_enabled);
 
     let probe_enabled = BoolFlag::env(ENV_DISPLAY_REFRESH_PROBE_ENABLED)
-        .requirement(req.settings.probe_enabled)
         .config(usr.settings.probe_enabled)
-        .managed(mng.settings.probe_enabled)
         .feature_flag(remote_probe)
         .default(DISPLAY_REFRESH_DEFAULT_PROBE_ENABLED)
         .resolve()
         .value;
 
     let auto_cadence_enabled = BoolFlag::env(ENV_DISPLAY_REFRESH_AUTO_CADENCE)
-        .requirement(req.settings.auto_cadence_enabled)
         .config(usr.settings.auto_cadence_enabled)
-        .managed(mng.settings.auto_cadence_enabled)
         .feature_flag(remote_auto)
         .default(DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED)
         .resolve()
         .value;
 
     let floor = pick_u32(
-        req.settings.floor_ms,
         usr.settings.floor_ms,
-        mng.settings.floor_ms,
         remote_obj.and_then(|d| d.floor_ms),
         DISPLAY_REFRESH_DEFAULT_FLOOR_MS,
     );
     let ceiling = pick_u32(
-        req.settings.ceiling_ms,
         usr.settings.ceiling_ms,
-        mng.settings.ceiling_ms,
         remote_obj.and_then(|d| d.ceiling_ms),
         DISPLAY_REFRESH_DEFAULT_CEILING_MS,
     );
@@ -215,16 +191,12 @@ pub fn resolve_display_refresh(
     );
 
     let min_hz = pick_u32(
-        req.settings.min_hz,
         usr.settings.min_hz,
-        mng.settings.min_hz,
         remote_obj.and_then(|d| d.min_hz),
         DISPLAY_REFRESH_DEFAULT_MIN_HZ,
     );
     let max_hz = pick_u32(
-        req.settings.max_hz,
         usr.settings.max_hz,
-        mng.settings.max_hz,
         remote_obj.and_then(|d| d.max_hz),
         DISPLAY_REFRESH_DEFAULT_MAX_HZ,
     );
@@ -367,7 +339,7 @@ mod tests {
     #[test]
     fn defaults_probe_on_auto_off() {
         let _g = guard();
-        let p = resolve_display_refresh(None, None, None, None);
+        let p = resolve_display_refresh(None, None);
         assert_eq!(p, DisplayRefreshPolicy::default());
         assert!(p.probe_enabled);
         assert!(!p.auto_cadence_enabled);
@@ -381,13 +353,13 @@ mod tests {
     fn nested_toml_and_remote_probe_kill() {
         let _g = guard();
         let off = toml_nested("probe_enabled = false\n");
-        assert!(!resolve_display_refresh(None, Some(&off), None, None).probe_enabled);
+        assert!(!resolve_display_refresh(Some(&off), None).probe_enabled);
         let remote = remote_object(DisplayRefreshSettings {
             probe_enabled: Some(false),
             auto_cadence_enabled: Some(true),
             ..Default::default()
         });
-        let p = resolve_display_refresh(None, None, None, Some(&remote));
+        let p = resolve_display_refresh(None, Some(&remote));
         assert!(!p.probe_enabled);
         assert!(p.auto_cadence_enabled);
     }
@@ -401,7 +373,7 @@ mod tests {
             max_hz: Some(200),
             ..Default::default()
         });
-        let p = resolve_display_refresh(None, Some(&user), None, Some(&remote));
+        let p = resolve_display_refresh(Some(&user), Some(&remote));
         assert!(p.auto_cadence_enabled);
         assert_eq!(p.floor_ms, 7);
         assert_eq!(p.ceiling_ms, 12);
@@ -417,9 +389,7 @@ mod tests {
             auto_cadence_enabled: Some(true),
             ..Default::default()
         });
-        assert!(
-            !resolve_display_refresh(None, Some(&user), None, Some(&remote)).auto_cadence_enabled
-        );
+        assert!(!resolve_display_refresh(Some(&user), Some(&remote)).auto_cadence_enabled);
     }
 
     #[test]
@@ -435,25 +405,8 @@ mod tests {
             auto_cadence_enabled: Some(false),
             ..Default::default()
         });
-        let p = resolve_display_refresh(None, Some(&on), None, Some(&remote));
+        let p = resolve_display_refresh(Some(&on), Some(&remote));
         assert!(!p.probe_enabled);
-        assert!(p.auto_cadence_enabled);
-        unsafe {
-            std::env::remove_var(ENV_DISPLAY_REFRESH_PROBE_ENABLED);
-            std::env::remove_var(ENV_DISPLAY_REFRESH_AUTO_CADENCE);
-        }
-    }
-
-    #[test]
-    fn requirement_beats_env() {
-        let _g = guard();
-        unsafe {
-            std::env::set_var(ENV_DISPLAY_REFRESH_PROBE_ENABLED, "0");
-            std::env::set_var(ENV_DISPLAY_REFRESH_AUTO_CADENCE, "0");
-        }
-        let req = toml_nested("probe_enabled = true\nauto_cadence_enabled = true\n");
-        let p = resolve_display_refresh(Some(&req), None, None, None);
-        assert!(p.probe_enabled);
         assert!(p.auto_cadence_enabled);
         unsafe {
             std::env::remove_var(ENV_DISPLAY_REFRESH_PROBE_ENABLED);
@@ -466,19 +419,19 @@ mod tests {
         let _g = guard();
         // same-layer inverted → compiled defaults
         let user = toml_nested("floor_ms = 20\nceiling_ms = 10\n");
-        let p = resolve_display_refresh(None, Some(&user), None, None);
+        let p = resolve_display_refresh(Some(&user), None);
         assert_eq!(p.floor_ms, DISPLAY_REFRESH_DEFAULT_FLOOR_MS);
         assert_eq!(p.ceiling_ms, DISPLAY_REFRESH_DEFAULT_CEILING_MS);
 
         // 0 → clamp to 1
         let zero = toml_nested("floor_ms = 0\nceiling_ms = 0\n");
-        let p = resolve_display_refresh(None, Some(&zero), None, None);
+        let p = resolve_display_refresh(Some(&zero), None);
         assert_eq!(p.floor_ms, 1);
         assert_eq!(p.ceiling_ms, 1);
 
         // above env band → clamp to 100
         let hi = toml_nested("floor_ms = 200\nceiling_ms = 500\n");
-        let p = resolve_display_refresh(None, Some(&hi), None, None);
+        let p = resolve_display_refresh(Some(&hi), None);
         assert_eq!(p.floor_ms, 100);
         assert_eq!(p.ceiling_ms, 100);
     }
@@ -486,13 +439,13 @@ mod tests {
     #[test]
     fn higher_priority_bound_wins_when_inverted() {
         let _g = guard();
-        // requirements min_hz=100 beats remote max_hz=90 → keep 100..=100
-        let req = toml_nested("min_hz = 100\n");
+        // local min_hz=100 beats remote max_hz=90 → keep 100..=100
+        let user = toml_nested("min_hz = 100\n");
         let remote = remote_object(DisplayRefreshSettings {
             max_hz: Some(90),
             ..Default::default()
         });
-        let p = resolve_display_refresh(Some(&req), None, None, Some(&remote));
+        let p = resolve_display_refresh(Some(&user), Some(&remote));
         assert_eq!(p.min_hz, 100);
         assert_eq!(p.max_hz, 100);
     }
@@ -509,7 +462,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let p = resolve_display_refresh(None, Some(&toml), None, None);
+        let p = resolve_display_refresh(Some(&toml), None);
         assert!(!p.probe_enabled);
         assert!(p.auto_cadence_enabled);
         assert_eq!(p.floor_ms, DISPLAY_REFRESH_DEFAULT_FLOOR_MS);

@@ -273,7 +273,7 @@ pub struct WelcomeRenderParams<'a> {
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's session group to the top of the picker.
     pub cwd: &'a std::path::Path,
-    /// Whether a long managed-config announcement is expanded inline (vs the
+    /// Whether a long security announcement is expanded inline (vs the
     /// default 2-line collapsed view with a trailing `…`).
     pub welcome_announcement_expanded: bool,
     /// Promo announcement CTA `[label]` to paint below the hero announcement: `Some`

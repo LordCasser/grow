@@ -84,8 +84,8 @@ impl BashToolConfig {
 ///
 /// Consumed out-of-band by
 /// `crate::util::config::resolve_ask_user_question_params_from_disk`, which
-/// reads the raw config layers so the documented precedence (requirements >
-/// env > user > managed > remote) holds — this struct exists so the keys are
+/// reads the raw user config layer so the documented local precedence (env >
+/// config > default) holds — this struct exists so the keys are
 /// recognized in `config.toml` and round-trip through `AgentConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]

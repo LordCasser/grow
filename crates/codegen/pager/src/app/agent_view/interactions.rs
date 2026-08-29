@@ -216,6 +216,32 @@ impl AgentView {
         self.replace_question_view(None)
     }
 
+    /// Forward the Welcome page's session-starting input into the composer
+    /// parked behind a newly-opened project picker, rather than into the
+    /// picker's free-form path field.
+    pub(crate) fn handle_project_picker_backing_prompt_input(
+        &mut self,
+        ev: &crossterm::event::Event,
+        registry: &crate::actions::ActionRegistry,
+        effects: &mut Vec<super::actions::Effect>,
+    ) -> Option<crate::app::root::InputOutcome> {
+        let mut question = self.take_question_view()?;
+        if !matches!(
+            &question.local_kind,
+            Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+        ) {
+            self.replace_question_view(Some(question));
+            return None;
+        }
+
+        self.prompt
+            .restore(std::mem::take(&mut question.stashed_prompt));
+        let outcome = self.handle_input(ev, registry, effects);
+        question.stashed_prompt = self.prompt.stash();
+        self.replace_question_view(Some(question));
+        Some(outcome)
+    }
+
     /// Handle key input when the permission view is active.
     ///
     /// Two modes (mirrors question view pattern):
@@ -1318,13 +1344,15 @@ impl AgentView {
     /// view opened, so typed "additional context" doesn't leak into the
     /// main prompt. Also clears any stashed (tab-hidden) question view.
     fn dismiss_question_view(&mut self) -> InputOutcome {
-        let is_doctor_fix = self.question_view.as_ref().is_some_and(|qv| {
-            matches!(
-                qv.local_kind,
-                Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
-            )
-        });
-        if is_doctor_fix {
+        let local_kind = self
+            .question_view
+            .as_ref()
+            .and_then(|qv| qv.local_kind.as_ref());
+        if matches!(
+            local_kind,
+            Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
+                | Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+        ) {
             return self.submit_question_answers(true);
         }
         if let Some(qv) = self.take_question_view() {
@@ -1401,8 +1429,21 @@ impl AgentView {
         };
         self.session.turn_paused_duration += qv.opened_at.elapsed();
         if let Some(kind) = qv.local_kind.take() {
+            let is_project_select = matches!(
+                &kind,
+                crate::views::question_view::LocalQuestionKind::ProjectSelect { .. }
+            );
+            if is_project_select {
+                // Transfer the complete composer snapshot (including images
+                // and chips) to the placeholder. It must survive until the
+                // directory choice emits the sole CreateSession effect.
+                let prompt = std::mem::take(&mut qv.stashed_prompt);
+                if let Some(pending) = self.pending_project_create.as_mut() {
+                    pending.prompt = Some(prompt);
+                }
+            }
             let is_doctor_fix = matches!(
-                kind,
+                &kind,
                 crate::views::question_view::LocalQuestionKind::DoctorFix { .. }
             );
             let outcome = if skipped && is_doctor_fix {
@@ -1414,7 +1455,9 @@ impl AgentView {
             } else {
                 translate_local_submit(&qv, kind, skipped)
             };
-            self.prompt.restore(qv.stashed_prompt);
+            if !is_project_select {
+                self.prompt.restore(qv.stashed_prompt);
+            }
             self.cleanup_question_state();
             return outcome;
         }

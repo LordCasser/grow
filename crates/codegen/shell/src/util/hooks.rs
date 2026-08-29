@@ -2,9 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ::hooks::discovery::HookSource;
-use ::hooks::error::HookError;
 use config::resolve_global_hook_sources;
+use hooks::discovery::HookSource;
+use hooks::error::HookError;
 
 /// Owned paths for hook sources. Callers borrow via `as_sources()`.
 pub struct HookSourcePaths {
@@ -78,9 +78,9 @@ pub fn discover_hooks(
     trusted: bool,
 ) -> (::hooks::discovery::HookRegistry, Vec<HookError>) {
     // Read fresh each call (not cached): a mid-session `/hooks` reload must see an
-    // updated `config.toml` / `managed_config.toml`. This is lighter than
-    // `ConfigLayers::load` (only the small per-layer files, no campaigns, version
-    // overrides, or MDM).
+    // updated `config.toml`. This is lighter than
+    // `ConfigLayers::load` (only the small user config file, with no campaigns
+    // or version overrides).
     let config_layers = config::hook_config_layers();
     assemble_hooks(&config_layers, git_root, trusted)
 }

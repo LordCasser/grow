@@ -1,17 +1,17 @@
 //! Canonical permission resolution.
 //!
-//! Permission policy has three native layers: system/user requirements,
-//! managed Grow TOML, and global/project .grow/config.toml. Project rules are
-//! admitted only after folder trust. Evaluation is deny > ask > allow.
+//! Permission policy is loaded from global/project `.grow/config.toml` files.
+//! Project rules are admitted only after folder trust. Evaluation is deny > ask
+//! > allow.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracing::{debug, info, warn};
 
 use crate::permission::rules::parse_permission_rule;
 use crate::permission::types::{
-    PatternMode, PermissionConfig, PermissionRule, PromptPolicy, RequirementSource, RuleAction,
-    Sourced, ToolFilter,
+    PermissionConfig, PermissionRule, PermissionSource, PromptPolicy, RuleAction, Sourced,
+    ToolFilter,
 };
 
 fn parse_toml_permission_section(
@@ -76,7 +76,7 @@ fn toml_type_name(value: &toml::Value) -> &'static str {
 
 fn extract_toml_permissions(
     config: &toml::Value,
-    source: RequirementSource,
+    source: PermissionSource,
 ) -> Vec<Sourced<PermissionRule>> {
     let Some(permission) = config.get("permission") else {
         return Vec::new();
@@ -101,35 +101,6 @@ fn extract_toml_permissions(
     }
 }
 
-fn load_requirements_permissions() -> Vec<Sourced<PermissionRule>> {
-    config::requirements_layers()
-        .into_iter()
-        .flat_map(|layer| {
-            let path = PathBuf::from(layer.source.label().as_ref());
-            let source = if layer.is_system {
-                RequirementSource::SystemRequirements { path }
-            } else {
-                RequirementSource::Requirements { path }
-            };
-            extract_toml_permissions(&layer.value, source)
-        })
-        .collect()
-}
-
-fn load_managed_permissions() -> Vec<Sourced<PermissionRule>> {
-    config::managed_config_layers()
-        .into_iter()
-        .flat_map(|layer| {
-            extract_toml_permissions(
-                &layer.value,
-                RequirementSource::ManagedConfig {
-                    path: layer.path.clone(),
-                },
-            )
-        })
-        .collect()
-}
-
 fn load_config_permissions(cwd: &Path, project_trusted: bool) -> Vec<Sourced<PermissionRule>> {
     let mut rules = Vec::new();
 
@@ -139,7 +110,7 @@ fn load_config_permissions(cwd: &Path, project_trusted: bool) -> Vec<Sourced<Per
         match config::load_config_file(&path) {
             Ok(value) => rules.extend(extract_toml_permissions(
                 &value,
-                RequirementSource::Config { path: path.clone() },
+                PermissionSource::Config { path: path.clone() },
             )),
             Err(error) => {
                 warn!(path = %path.display(), %error, "failed to load global config.toml");
@@ -152,7 +123,7 @@ fn load_config_permissions(cwd: &Path, project_trusted: bool) -> Vec<Sourced<Per
             match config::load_config_file(&path) {
                 Ok(value) => rules.extend(extract_toml_permissions(
                     &value,
-                    RequirementSource::Config { path: path.clone() },
+                    PermissionSource::Config { path: path.clone() },
                 )),
                 Err(error) => {
                     warn!(path = %path.display(), %error, "failed to load project config.toml");
@@ -175,7 +146,7 @@ pub async fn resolve_permission_config(
 
 pub struct ResolvedPermissions {
     pub config: PermissionConfig,
-    pub sources: Vec<RequirementSource>,
+    pub sources: Vec<PermissionSource>,
     pub skipped: Vec<SkippedPermission>,
 }
 
@@ -188,14 +159,9 @@ pub async fn resolve_permissions_with_provenance(
     cwd: &Path,
     project_trusted: bool,
 ) -> Option<ResolvedPermissions> {
-    let policy_block = always_approve_disabled_by_policy();
-    let mut skipped = Vec::new();
-    let mut rules = load_requirements_permissions();
-    rules.extend(load_managed_permissions());
-    rules.extend(load_config_permissions(cwd, project_trusted));
-    let rules = drop_untrusted_catchall_allows(rules, policy_block, &mut skipped);
+    let rules = load_config_permissions(cwd, project_trusted);
 
-    if rules.is_empty() && skipped.is_empty() {
+    if rules.is_empty() {
         return None;
     }
 
@@ -211,7 +177,7 @@ pub async fn resolve_permissions_with_provenance(
             prompt_policy: PromptPolicy::Ask,
         },
         sources,
-        skipped,
+        skipped: Vec::new(),
     })
 }
 
@@ -230,105 +196,10 @@ pub fn deny_read_globs_from_config(config: &PermissionConfig) -> Vec<String> {
         .collect()
 }
 
-pub fn is_catchall_allow(rule: &PermissionRule) -> bool {
-    if rule.action != RuleAction::Allow {
-        return false;
-    }
-    if matches!(
-        rule.tool,
-        ToolFilter::Read | ToolFilter::Edit | ToolFilter::Grep
-    ) {
-        return false;
-    }
-    crate::permission::policy::rule_is_catchall(rule)
-}
-
-fn is_admin_source(source: &RequirementSource) -> bool {
-    matches!(source, RequirementSource::SystemRequirements { .. })
-}
-
-fn drop_untrusted_catchall_allows(
-    rules: Vec<Sourced<PermissionRule>>,
-    policy_block: Option<&'static str>,
-    skipped: &mut Vec<SkippedPermission>,
-) -> Vec<Sourced<PermissionRule>> {
-    let Some(reason) = policy_block else {
-        return rules;
-    };
-    rules
-        .into_iter()
-        .filter(|rule| {
-            if is_catchall_allow(&rule.value) && !is_admin_source(&rule.source) {
-                skipped.push(SkippedPermission {
-                    rule: format!(
-                        "allow {} (catch-all)",
-                        rule.value.pattern.as_deref().unwrap_or("*"),
-                    ),
-                    reason: reason.to_owned(),
-                });
-                warn!(
-                    source = %rule.source,
-                    "catch-all allow ignored: always-approve disabled by managed policy",
-                );
-                false
-            } else {
-                true
-            }
-        })
-        .collect()
-}
-
-pub const ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS: &str = "always-approve disabled by managed policy ([ui] disable_bypass_permissions_mode = true in requirements.toml)";
-
-pub fn always_approve_disabled_by_policy() -> Option<&'static str> {
-    let layers = config::requirements_layers();
-    let labeled: Vec<(PathBuf, &toml::Value)> = layers
-        .iter()
-        .map(|layer| (PathBuf::from(layer.source.label().as_ref()), &layer.value))
-        .collect();
-    resolve_always_approve_policy_block(
-        labeled.iter().map(|(path, value)| (path.as_path(), *value)),
-    )
-}
-
-fn requirements_lock_bool(ui: Option<&toml::Value>, key: &str, path: &Path) -> Option<bool> {
-    let value = ui?.get(key)?;
-    match value.as_bool() {
-        Some(value) => Some(value),
-        None => {
-            warn!(
-                path = %path.display(),
-                key,
-                "[ui] {key} must be a boolean; ignoring this requirements lock",
-            );
-            None
-        }
-    }
-}
-
-fn resolve_always_approve_policy_block<'a>(
-    requirement_layers: impl Iterator<Item = (&'a Path, &'a toml::Value)>,
-) -> Option<&'static str> {
-    for (path, layer) in requirement_layers {
-        if requirements_lock_bool(layer.get("ui"), "disable_bypass_permissions_mode", path)
-            == Some(true)
-        {
-            return Some(ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sourced(rule: PermissionRule, source: RequirementSource) -> Sourced<PermissionRule> {
-        Sourced {
-            value: rule,
-            source,
-        }
-    }
+    use crate::permission::types::PatternMode;
 
     #[test]
     fn compact_permission_parser_is_canonical() {
@@ -346,41 +217,6 @@ allow = ["Read(src/**)"]
         assert_eq!(rules[0].action, RuleAction::Deny);
         assert_eq!(rules[1].action, RuleAction::Allow);
         assert_eq!(rules[2].action, RuleAction::Ask);
-    }
-
-    #[test]
-    fn catchall_pin_keeps_only_root_owned_grant() {
-        let catchall = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Any,
-            pattern: None,
-            pattern_mode: PatternMode::Glob,
-        };
-        let mut skipped = Vec::new();
-        let kept = drop_untrusted_catchall_allows(
-            vec![
-                sourced(
-                    catchall.clone(),
-                    RequirementSource::Config {
-                        path: "/repo/.grow/config.toml".into(),
-                    },
-                ),
-                sourced(
-                    catchall,
-                    RequirementSource::SystemRequirements {
-                        path: "/etc/grow/requirements.toml".into(),
-                    },
-                ),
-            ],
-            Some(ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS),
-            &mut skipped,
-        );
-        assert_eq!(kept.len(), 1);
-        assert_eq!(skipped.len(), 1);
-        assert!(matches!(
-            kept[0].source,
-            RequirementSource::SystemRequirements { .. },
-        ));
     }
 
     #[test]
@@ -403,27 +239,5 @@ allow = ["Read(src/**)"]
             prompt_policy: PromptPolicy::Ask,
         };
         assert_eq!(deny_read_globs_from_config(&config), vec!["**/.env"]);
-    }
-
-    #[test]
-    fn requirements_lock_is_exact() {
-        let enabled: toml::Value =
-            toml::from_str("[ui]\ndisable_bypass_permissions_mode = true\n").unwrap();
-        assert_eq!(
-            resolve_always_approve_policy_block(std::iter::once((
-                Path::new("/etc/grow/requirements.toml"),
-                &enabled
-            )),),
-            Some(ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS),
-        );
-
-        let unrelated: toml::Value = toml::from_str("[ui]\ntheme = \"dark\"\n").unwrap();
-        assert_eq!(
-            resolve_always_approve_policy_block(std::iter::once((
-                Path::new("/etc/grow/requirements.toml"),
-                &unrelated
-            )),),
-            None,
-        );
     }
 }

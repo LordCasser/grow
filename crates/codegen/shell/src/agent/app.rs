@@ -573,7 +573,6 @@ pub async fn run_leader(
     let local_set = tokio::task::LocalSet::new();
     let mut agent_config_for_spawn = agent_config.clone();
     agent_config_for_spawn.remote_settings = remote_settings;
-    crate::util::config::sync_campaign_fields(&mut agent_config_for_spawn);
     let agent_to_ipc_tx_clone = agent_to_ipc_tx.clone();
     let cancel_clone = cancel.clone();
 
@@ -592,12 +591,7 @@ pub async fn run_leader(
     // into a never-drained channel.
     let recursive_config_watch_enabled = {
         let user_cfg = crate::config::load_from_disk().ok();
-        let requirements = crate::agent::config::read_requirements_toml();
-        crate::util::config::resolve_mcp_recursive_config_watch(
-            requirements.as_ref(),
-            user_cfg.as_ref(),
-            /* managed */ None,
-        )
+        crate::util::config::resolve_mcp_recursive_config_watch(user_cfg.as_ref())
     };
 
     local_set

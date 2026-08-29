@@ -65,13 +65,8 @@ struct StartupTel {
 
 /// Resolve policy, pin motion clocks, and spawn terminal + display-refresh
 /// diagnostics off the first-paint path.
-pub fn start(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-    remote: Option<&RemoteSettings>,
-) -> MotionClocks {
-    let policy = resolve_display_refresh(requirements, user, managed, remote);
+pub fn start(user: Option<&TomlValue>, remote: Option<&RemoteSettings>) -> MotionClocks {
+    let policy = resolve_display_refresh(user, remote);
     let default_cadence_ms = DISPLAY_REFRESH_DEFAULT_CADENCE_MS;
     let (min_draw_env_set, min_draw_env_ms) =
         cadence_ms_from_env("GROW_MIN_DRAW_MS", default_cadence_ms);

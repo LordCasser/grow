@@ -898,10 +898,7 @@ pub(super) fn set_contextual_hint_inner(
     new: bool,
 ) {
     write(&mut app.current_ui.contextual_hints, Some(new));
-    let resolved = shell::util::config::resolve_contextual_hints(
-        &app.current_ui.contextual_hints,
-        app.remote_contextual_hints.as_ref(),
-    );
+    let resolved = shell::util::config::resolve_contextual_hints(&app.current_ui.contextual_hints);
     app.apply_contextual_hints(resolved);
 }
 

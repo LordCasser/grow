@@ -386,32 +386,6 @@ mod plan_restore_validation_tests {
         ));
     }
 }
-/// Partition CLI `--allow` rules under the pin: blanket catch-all allows
-/// (`Allow(Any)` `*` / `**`, plus bare/match-all Bash/MCP/WebFetch grants — see
-/// `resolution::is_catchall_allow`) substitute for the blocked `--permission-mode always-approve`, so drop them when
-/// `policy_block` is set; keep everything else (and everything without a pin).
-/// Pure (no I/O) so the wiring is unit-testable; the caller surfaces `dropped`.
-fn drop_cli_catchall_allows(
-    rules: Vec<workspace::permission::types::PermissionRule>,
-    policy_block: Option<&'static str>,
-) -> (
-    Vec<workspace::permission::types::PermissionRule>,
-    Vec<workspace::permission::types::PermissionRule>,
-) {
-    if policy_block.is_none() {
-        return (rules, Vec::new());
-    }
-    let mut kept = Vec::with_capacity(rules.len());
-    let mut dropped = Vec::new();
-    for rule in rules {
-        if workspace::permission::resolution::is_catchall_allow(&rule) {
-            dropped.push(rule);
-        } else {
-            kept.push(rule);
-        }
-    }
-    (kept, dropped)
-}
 /// Build the per-session current-thread tokio runtime.
 ///
 /// Construction acquires fds (epoll/kqueue, waker) and fails with
@@ -515,55 +489,6 @@ mod runtime_containment_tests {
             stdout.contains(PASS_MARK),
             "no pass/skip marker (filter matched nothing?)\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
-    }
-}
-#[cfg(test)]
-mod cli_catchall_drop_tests {
-    use super::drop_cli_catchall_allows;
-    use workspace::permission::resolution::ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS;
-    use workspace::permission::rules::parse_permission_rule;
-    use workspace::permission::types::{PermissionRule, RuleAction, ToolFilter};
-    fn allow(rule: &str) -> PermissionRule {
-        parse_permission_rule(rule, RuleAction::Allow).expect("rule parses")
-    }
-    /// Under the pin, CLI catch-all `--allow` rules (`*`, `**`) are dropped while
-    /// a scoped rule (`Bash(touch *)`) survives.
-    #[test]
-    fn pin_drops_cli_catchalls_keeps_scoped() {
-        let rules = vec![allow("*"), allow("Bash(touch *)"), allow("**")];
-        let (kept, dropped) =
-            drop_cli_catchall_allows(rules, Some(ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS));
-        assert_eq!(kept.len(), 1, "only the scoped Bash rule survives");
-        assert_eq!(kept[0].tool, ToolFilter::Bash);
-        assert_eq!(dropped.len(), 2, "both catch-alls are dropped");
-    }
-    /// Without the pin nothing is dropped, even catch-alls.
-    #[test]
-    fn no_pin_keeps_everything() {
-        let rules = vec![allow("*"), allow("Bash(touch *)"), allow("**")];
-        let (kept, dropped) = drop_cli_catchall_allows(rules, None);
-        assert_eq!(kept.len(), 3);
-        assert!(dropped.is_empty());
-    }
-    /// FIX 2: a bare `--allow Bash` and a `?*` Bash pattern are `--permission-mode always-approve`
-    /// substitutes on the freeform-execution dimension, so the pin drops them
-    /// while a scoped `Bash(git *)` survives.
-    #[test]
-    fn pin_drops_cli_bare_and_prefix_bash_keeps_scoped() {
-        let rules = vec![
-            allow("Bash"),        // bare {Allow, Bash, None}
-            allow("Bash(?*)"),    // prefix-regime catch-all
-            allow("Bash(git *)"), // scoped — survives
-        ];
-        let (kept, dropped) =
-            drop_cli_catchall_allows(rules, Some(ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS));
-        assert_eq!(kept.len(), 1, "only the scoped Bash rule survives");
-        assert_eq!(kept[0].pattern.as_deref(), Some("git *"));
-        assert_eq!(dropped.len(), 2, "bare Bash and ?* are dropped");
-        let rules = vec![allow("Bash"), allow("Bash(?*)"), allow("Bash(git *)")];
-        let (kept, dropped) = drop_cli_catchall_allows(rules, None);
-        assert_eq!(kept.len(), 3);
-        assert!(dropped.is_empty());
     }
 }
 /// Spawns a session actor. The permission-event receiver, when this session
@@ -865,22 +790,6 @@ pub(crate) async fn spawn_session_actor(
             project_trusted,
         )
         .await;
-        let always_approve_pin =
-            workspace::permission::resolution::always_approve_disabled_by_policy();
-        let (cli_permission_rules, dropped_catchalls) =
-            drop_cli_catchall_allows(cli_permission_rules, always_approve_pin);
-        if let Some(reason) = always_approve_pin
-            && !dropped_catchalls.is_empty()
-        {
-            tracing::warn!(
-                reason,
-                dropped = dropped_catchalls.len(),
-                "CLI --allow catch-all ignored: always-approve disabled by managed policy"
-            );
-            if startup_hints.non_interactive {
-                eprintln!("grow: --allow catch-all ignored: {reason}");
-            }
-        }
         if !cli_permission_rules.is_empty() {
             match &mut permission_config {
                 Some(config) => {
@@ -1134,12 +1043,8 @@ pub(crate) async fn spawn_session_actor(
     .then(crate::config::load_effective_config)
     .and_then(Result::ok);
     let resolve_search_shadows = || {
-        let requirements = crate::config::load_merged_requirements();
-        let (find_bfs, grep_ugrep) = crate::util::config::resolve_search_tools_enabled(
-            requirements.as_ref(),
-            effective_cfg.as_ref(),
-            None,
-        );
+        let (find_bfs, grep_ugrep) =
+            crate::util::config::resolve_search_tools_enabled(effective_cfg.as_ref());
         tools::computer::local::SearchShadowConfig {
             find_bfs,
             grep_ugrep,
@@ -1157,9 +1062,8 @@ pub(crate) async fn spawn_session_actor(
                 )) as std::sync::Arc<dyn tools::computer::types::TerminalBackend>
             }
             TerminalBackendKind::LocalNonPersistent => {
-                let login_shell_capture = crate::util::config::resolve_login_shell_capture(
-                    remote_settings.as_ref().and_then(|r| r.login_shell_capture),
-                );
+                let login_shell_capture =
+                    crate::util::config::resolve_login_shell_capture(effective_cfg.as_ref());
                 std::sync::Arc::new(LocalTerminalBackend::new_local_with_login_shell_capture(
                     resolve_search_shadows(),
                     login_shell_capture,

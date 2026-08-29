@@ -633,6 +633,63 @@ fn dispatch_open_settings_opens_then_close_on_reentry() {
         );
     }
 }
+
+#[test]
+fn welcome_settings_on_non_project_cwd_keeps_picker_until_one_create() {
+    use crate::app::root::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::question_view::QuestionSelection;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app();
+    app.cwd = std::env::temp_dir();
+    app.project_picker_shown = false;
+
+    let effects = dispatch(Action::OpenSettings, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateSession { .. }))
+    );
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        other => panic!("settings must mount on a new agent, got {other:?}"),
+    };
+    let agent = &app.agents[&id];
+    assert!(matches!(
+        agent.active_modal,
+        Some(ActiveModal::Settings { .. })
+    ));
+    assert!(matches!(
+        agent
+            .question_view
+            .as_ref()
+            .and_then(|question| question.local_kind.as_ref()),
+        Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+    ));
+
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(app.agents[&id].active_modal.is_none());
+    assert!(app.agents[&id].question_view.is_some());
+
+    let outcome = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.question_view.as_mut().unwrap().selections[0] = QuestionSelection::Single(Some(0));
+        agent.submit_question_answers_for_test(false)
+    };
+    let InputOutcome::Action(action) = outcome else {
+        panic!("project picker selection must produce an action");
+    };
+    let effects = dispatch(action, &mut app);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::CreateSession { .. }))
+            .count(),
+        1,
+        "closing settings must leave a picker that creates exactly once"
+    );
+}
 /// A focused open landing on an agent whose settings modal is already open
 /// must reopen focused on the requested row rather than toggling it closed.
 #[test]
@@ -1207,7 +1264,7 @@ fn pr13_set_show_tips_idempotent_re_commit() {
 /// (mirror of `set_auto_compact_threshold_percent_first_commit_of_default_persists`).
 /// Without this special case, a user opting in to the default
 /// would see no Effect but the on-disk state would stay `None` —
-/// the next session's managed-config layer could then override
+/// the next session's higher-priority source could then override
 /// silently.
 #[test]
 fn pr13_set_show_tips_first_commit_of_default_persists() {

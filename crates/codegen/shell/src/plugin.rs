@@ -704,7 +704,7 @@ fn bullet_list(items: &[String]) -> String {
 }
 
 /// The require-sha pin policy for remote plugin code. Disk-only config + env,
-/// both tighten-only: a remote campaign overlay must not be able to relax a
+/// both tighten-only: a local campaign overlay must not be able to relax a
 /// local security policy, and an unreadable config falls back to the env knob.
 pub fn marketplace_require_sha() -> bool {
     config::load_effective_config_disk_only()

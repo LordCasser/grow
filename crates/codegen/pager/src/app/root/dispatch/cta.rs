@@ -16,7 +16,7 @@ pub(super) const CTA_MCP_POLL_MAX_ATTEMPTS: u32 = 15;
 /// at all. A plugin's servers are config-loaded during the awaited reload that
 /// precedes the first read, so an empty plugin section means it ships none
 /// (skills-only): settle quickly instead of polling the full budget (and paying
-/// the per-read managed-config fetch each time).
+/// the per-read config fetch each time).
 pub(super) const CTA_MCP_ABSENT_MAX_ATTEMPTS: u32 = 1;
 
 /// Settle the CTA into its brief "installed" confirmation: schedule the auto-

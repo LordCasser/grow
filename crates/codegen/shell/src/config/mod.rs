@@ -9,8 +9,8 @@ pub use config_types::{
 use serde::Deserialize;
 /// Full configuration for the memory system.
 ///
-/// Parsed from the `[memory]` section of `~/.grow/config.toml` or
-/// `.grow/config.toml`. Disabled by default; enabled via
+/// Parsed from the `[memory]` section of `$GROW_HOME/config.toml`. Disabled by
+/// default; enabled via
 /// `--experimental-memory` CLI flag or `GROW_MEMORY=1` env var.
 /// Force-disabled via `GROW_MEMORY=0` (overrides TOML and remote settings).
 ///
@@ -187,8 +187,8 @@ impl MemoryConfig {
 }
 /// Configuration for subagent (task tool) support.
 ///
-/// Parsed from the `[subagents]` section of `~/.grow/config.toml` or
-/// `.grow/config.toml`. Enabled by default; can be disabled via
+/// Parsed from the `[subagents]` section of `$GROW_HOME/config.toml`. Enabled
+/// by default; can be disabled via
 /// `GROW_SUBAGENTS=0` env var or `[subagents] enabled = false`
 /// in config.toml.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -482,40 +482,17 @@ impl ToolsConfig {
     }
 }
 pub use config::ConfigLayers;
-pub use config::{
-    MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
-    is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
-    load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
-    load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity, requirements_layers, system_config_dir, user_grow_home,
-};
+pub use config::{load_config_file, load_from_disk, load_toml_file, user_grow_home};
 /// Map of "dotted.path" to which config file the value came from.
 pub fn config_origins(
     layers: &ConfigLayers,
 ) -> std::collections::HashMap<String, crate::agent::config::ConfigSource> {
     use crate::agent::config::ConfigSource;
     let mut origins = std::collections::HashMap::new();
-    if layers.has_system_managed() {
-        walk_toml(
-            &layers.system_managed,
-            &mut vec![],
-            ConfigSource::SystemManagedConfig,
-            &mut origins,
-        );
-    }
-    if layers.has_managed() {
-        walk_toml(
-            &layers.managed,
-            &mut vec![],
-            ConfigSource::ManagedConfig,
-            &mut origins,
-        );
-    }
     walk_toml(
         &layers.user,
         &mut vec![],
-        ConfigSource::UserConfig,
+        ConfigSource::Config,
         &mut origins,
     );
     origins
@@ -542,230 +519,11 @@ fn walk_toml(
 /// The `[skills]` table from an effective config, shared by the reload
 /// dispatch and `grow inspect`.
 pub(crate) use crate::config::reloader::parse_skills_config;
-/// Effective config: layers + campaign overlay (remote cache + `GROW_CAMPAIGNS_OVERRIDE`).
+/// Effective config: the user layer plus local campaign overlay.
 pub use crate::util::config::load_effective_config;
 /// Effective config with disk campaigns only — for one-shot entrypoints that
-/// never fetch remote settings (avoids resolving against a never-seeded cache).
+/// never load runtime settings.
 pub use crate::util::config::load_effective_config_disk_only;
-/// Where a requirement or permission rule was loaded from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequirementSource {
-    Unknown,
-    Requirements { path: std::path::PathBuf },
-    Config { path: std::path::PathBuf },
-}
-impl RequirementSource {
-    pub fn path(&self) -> Option<&std::path::Path> {
-        match self {
-            Self::Unknown => None,
-            Self::Requirements { path } | Self::Config { path } => Some(path),
-        }
-    }
-}
-impl std::fmt::Display for RequirementSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unknown => f.write_str("<unknown>"),
-            Self::Requirements { path } => write!(f, "{} (requirements)", path.display()),
-            Self::Config { path } => write!(f, "{} (config)", path.display()),
-        }
-    }
-}
-/// A value paired with the source it came from.
-#[derive(Debug, Clone)]
-pub struct Sourced<T> {
-    pub value: T,
-    pub source: RequirementSource,
-}
-/// A config field clamped by requirements.
-#[derive(Debug, Clone)]
-pub struct EnforcedField {
-    pub path: &'static str,
-    pub value: String,
-    pub source: RequirementSource,
-}
-impl std::fmt::Display for EnforcedField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} = {} ({})", self.path, self.value, self.source)
-    }
-}
-/// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
-/// System pins win over user pins on conflict.
-pub fn apply_requirements(config: &mut crate::agent::config::Config) -> Vec<EnforcedField> {
-    requirements_layers()
-        .into_iter()
-        .flat_map(|layer| {
-            apply_requirements_inner(
-                config,
-                &layer.value,
-                &RequirementSource::Requirements {
-                    path: std::path::PathBuf::from(layer.source.label().as_ref()),
-                },
-            )
-        })
-        .collect()
-}
-fn apply_requirements_inner(
-    config: &mut crate::agent::config::Config,
-    req: &toml::Value,
-    source: &RequirementSource,
-) -> Vec<EnforcedField> {
-    fn req_bool(req: &toml::Value, section: &str, key: &str) -> Option<bool> {
-        req.get(section)?.get(key)?.as_bool()
-    }
-    fn req_str<'a>(req: &'a toml::Value, section: &str, key: &str) -> Option<&'a str> {
-        req.get(section)?.get(key)?.as_str()
-    }
-    let mut enforced: Vec<EnforcedField> = Vec::new();
-    let mut push = |path: &'static str, value: String| {
-        enforced.push(EnforcedField {
-            path,
-            value,
-            source: source.clone(),
-        });
-    };
-    macro_rules! pin_feature {
-        ($name:ident) => {
-            if let Some(val) = req_bool(req, "features", stringify!($name)) {
-                config.requirements.$name.pin(val, source.clone());
-                if config.features.$name != Some(val) {
-                    config.features.$name = Some(val);
-                    push(concat!("features.", stringify!($name)), format!("{val}"));
-                }
-            }
-        };
-    }
-    macro_rules! enforce_opt {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_bool(req, $section, $key)
-                && $field != Some(val)
-            {
-                $field = Some(val);
-                push(concat!($section, ".", $key), format!("{val}"));
-            }
-        };
-    }
-    macro_rules! enforce_val {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_bool(req, $section, $key)
-                && $field != val
-            {
-                $field = val;
-                push(concat!($section, ".", $key), format!("{val}"));
-            }
-        };
-    }
-    pin_feature!(lsp_tools);
-    pin_feature!(tool_search);
-    pin_feature!(web_fetch);
-    pin_feature!(ask_user_question);
-    pin_feature!(write_file);
-    enforce_opt!("cli", "auto_update", config.cli.auto_update);
-    enforce_opt!("cli", "use_leader", config.cli.use_leader);
-    enforce_opt!("cli", "show_tips", config.cli.show_tips);
-    enforce_val!("memory", "enabled", config.memory.enabled);
-    enforce_val!("subagents", "enabled", config.subagents.enabled);
-    if let Some(val) = req_bool(req, "tools", "respect_gitignore") {
-        config
-            .requirements
-            .respect_gitignore
-            .pin(val, source.clone());
-        push("tools.respect_gitignore", format!("{val}"));
-    }
-    macro_rules! enforce_str {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_str(req, $section, $key)
-                && $field.as_deref() != Some(val)
-            {
-                $field = Some(val.to_owned());
-                push(concat!($section, ".", $key), val.to_owned());
-            }
-        };
-        ($section:expr, $key:expr, $field:expr, redacted) => {
-            if let Some(val) = req_str(req, $section, $key)
-                && $field.as_deref() != Some(val)
-            {
-                $field = Some(val.to_owned());
-                push(concat!($section, ".", $key), "[redacted]".to_owned());
-            }
-        };
-    }
-    enforce_str!("models", "default", config.models.default);
-    enforce_str!("cli", "channel", config.cli.channel);
-    enforce_str!("cli", "minimum_version", config.cli.minimum_version);
-    enforce_str!("cli", "maximum_version", config.cli.maximum_version);
-    enforce_str!(
-        "cli",
-        "required_minimum_version",
-        config.cli.required_minimum_version
-    );
-    enforce_str!(
-        "cli",
-        "required_maximum_version",
-        config.cli.required_maximum_version
-    );
-    if let Some(val) = req_str(req, "endpoints", "inference_base_url")
-        && config.endpoints.inference_base_url != val
-    {
-        config.endpoints.inference_base_url = val.to_owned();
-        push("endpoints.inference_base_url", val.to_owned());
-    }
-    if let Some(val) = req_str(req, "endpoints", "cli_chat_proxy_base_url")
-        && config.endpoints.cli_chat_proxy_base_url.as_deref() != Some(val)
-    {
-        config.endpoints.cli_chat_proxy_base_url = Some(val.to_owned());
-        push("endpoints.cli_chat_proxy_base_url", val.to_owned());
-    }
-    if let Some(val) = req_str(req, "sandbox", "profile") {
-        config
-            .requirements
-            .sandbox_profile
-            .pin(val.to_owned(), source.clone());
-        if config.sandbox.profile.as_deref() != Some(val) {
-            config.sandbox.profile = Some(val.to_owned());
-            push("sandbox.profile", val.to_owned());
-        }
-    }
-    if let Some(val) = req_bool(req, "sandbox", "auto_allow_bash") {
-        config
-            .requirements
-            .sandbox_auto_allow_bash
-            .pin(val, source.clone());
-        if config.sandbox.auto_allow_bash != Some(val) {
-            config.sandbox.auto_allow_bash = Some(val);
-            push("sandbox.auto_allow_bash", format!("{val}"));
-        }
-    }
-    enforce_str!(
-        "endpoints",
-        "deployment_key",
-        config.endpoints.deployment_key,
-        redacted
-    );
-    if let Some(val) = req.get("features").and_then(|f| f.get("codebase_indexing")) {
-        use crate::agent::config::CodebaseIndexingSetting;
-        match val {
-            toml::Value::Boolean(b) => {
-                config.features.codebase_indexing = CodebaseIndexingSetting::Enabled(*b);
-                push("features.codebase_indexing", format!("{b}"));
-            }
-            toml::Value::Array(_) => {
-                if let Ok(patterns) = val.clone().try_into::<Vec<String>>() {
-                    push("features.codebase_indexing", format!("{patterns:?}"));
-                    config.features.codebase_indexing = CodebaseIndexingSetting::Patterns(patterns);
-                }
-            }
-            _ => {}
-        }
-    }
-    if !enforced.is_empty() {
-        tracing::info!(
-            enforced = ?enforced.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
-            "deployment requirements enforced"
-        );
-    }
-    enforced
-}
 /// Resolve sandbox profile and apply OS-level enforcement. Called once at startup.
 ///
 /// `cli_profile` is the resumed/forced base profile (a resumed session's saved
@@ -783,15 +541,8 @@ pub fn apply_sandbox(
             &owned
         }
     };
-    let req = load_merged_requirements();
-    let profile_req = req
-        .as_ref()
-        .and_then(|v| v.get("sandbox")?.get("profile")?.as_str());
-    let auto_allow_req = req
-        .as_ref()
-        .and_then(|v| v.get("sandbox")?.get("auto_allow_bash")?.as_bool());
-    let resolved = config.resolve_profile(cli_profile, profile_req);
-    sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash(auto_allow_req).value);
+    let resolved = config.resolve_profile(cli_profile);
+    sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash().value);
     let sandbox_profile: sandbox::ProfileName = resolved.value.parse().unwrap_or_else(|e| {
         eprintln!("warning: {e}, defaulting to no sandbox");
         sandbox::ProfileName::Off

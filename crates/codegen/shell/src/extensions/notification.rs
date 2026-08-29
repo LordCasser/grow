@@ -737,8 +737,7 @@ pub enum SessionUpdate {
         /// Independent permission decision route used by this child.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<String>,
-        /// Effective independent child permission mode after applying
-        /// managed-policy clamps at spawn time.
+        /// Effective independent child permission mode at spawn time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effective_permission_mode: Option<String>,
         /// Effective model ID used by the subagent (may differ from the parent).

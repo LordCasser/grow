@@ -284,7 +284,6 @@ fn apply_mock_url(env: &mut BTreeMap<OsString, OsString>, url: String) {
         "GROW_INFERENCE_BASE_URL",
         "GROW_MODELS_BASE_URL",
         "GROW_FEEDBACK_BASE_URL",
-        "GROW_MANAGED_CONFIG_URL",
         "GROW_CONVERSATIONS_BASE_URL",
     ] {
         env.insert(key.into(), url.clone().into());

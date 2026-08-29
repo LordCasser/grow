@@ -1,30 +1,16 @@
-//! Config file loading for Grow.
+//! Grow configuration loaded from `$GROW_HOME/config.toml`.
 //!
-//! Merge order (lowest → highest priority):
-//! 1. `/etc/grow/managed_config.toml`
-//! 2. `$GROW_HOME/managed_config.toml`
-//! 3. `$GROW_HOME/config.toml`
-//! 4. `$GROW_HOME/requirements.toml` (cloud cache; Ed25519-signed at rest once a
-//!    key is embedded — see [`signed_policy`] — below the OS-protected layers)
-//! 5. `/etc/grow/requirements.toml`
-//! 6. macOS MDM managed preferences (`ai.x.grow`, admin-forced) — macOS only
-//!
-//! Each layer applies its own [`[[version_overrides]]`](version_overrides)
-//! before merge. Requirements layers (#4–#6) may opt into fail-closed startup;
-//! see [`validate_requirements`].
+//! Trusted project `.grow/config.toml` files are discovered and overlaid by
+//! workspace-aware consumers because their merge semantics are subsystem-specific.
 
 pub mod campaigns;
 pub mod config_override;
 pub mod fs_atomic;
 pub mod global_hook_sources;
 mod loader;
-mod macos_managed;
-mod managed_cache;
 pub mod managed_text;
 mod paths;
 pub mod shell;
-pub mod signed_policy;
-mod validation;
 pub mod version_overrides;
 
 // Only the cross-crate campaign surface is re-exported at the root; the rest stays
@@ -44,30 +30,15 @@ pub use global_hook_sources::{
     validate_direct_hook_json_file, validated_hook_json_files_for_sources,
 };
 pub use loader::{
-    CampaignsState, ConfigLayers, HookConfigLayer, HookProvenance, MANAGED_CONFIG_FILENAME,
-    ManagedConfigLayer, REQUIREMENTS_FILENAME, USER_CONFIG_FILENAME,
+    CampaignsState, ConfigLayers, HookConfigLayer, HookProvenance, USER_CONFIG_FILENAME,
     apply_version_overrides_with_registered, campaigns_application_disabled, campaigns_state_path,
     deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml, hook_config_layers,
     hook_config_layers_at, load_config_file, load_dismissed_ids_from_home,
-    load_effective_config_disk_only, load_from_disk, load_managed_config,
-    load_system_managed_config, load_toml_file, managed_config_layers, managed_config_layers_at,
-    toml_error_detail,
-};
-pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
-pub use managed_cache::{
-    MANAGED_CONFIG_CACHE_FILE, ServingIdentity, SyncMarker, bump_rollback_floor,
-    bump_rollback_floor_with_now, fail_closed_policy_armed_at, is_managed_config_hard_stale_for,
-    is_managed_config_stale_for, managed_config_identity_changed_at, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity,
+    load_effective_config_disk_only, load_from_disk, load_toml_file, toml_error_detail,
 };
 pub use paths::{
     decode_cwd_from_dirname, default_grow_home, encode_cwd_dirname, grow_application,
-    grow_application_in, grow_home, sessions_cwd_dir, system_config_dir, user_grow_home,
-};
-pub use validation::{
-    RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,
-    requirements_layers, validate_requirements,
+    grow_application_in, grow_home, sessions_cwd_dir, user_grow_home,
 };
 pub use version_overrides::{VersionOverrideError, apply_version_overrides};
 

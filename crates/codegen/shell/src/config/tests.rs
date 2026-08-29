@@ -1902,23 +1902,6 @@ fn add_dismissed_plugin_cta_preserves_other_config() {
         );
     assert!(dismissed_plugin_ctas_in_file(&config_path).contains("figma"));
 }
-#[test]
-fn config_layers_user_overrides_managed() {
-    let layers = ConfigLayers {
-        system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
-        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
-        user_requirements: None,
-        system_requirements: None,
-        mdm_requirements: None,
-        ..Default::default()
-    };
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &layers.effective_config_disk_only(),
-        )
-        .unwrap();
-    assert_eq!(Some(true), cfg.features.lsp_tools);
-}
 /// A provider in a trusted disk layer resolves through the real
 /// `ConfigLayers` → `effective_config_disk_only` → parse seam that the
 /// direct-TOML parse tests bypass. (`ConfigLayers` has no project slot, so
@@ -1926,7 +1909,7 @@ fn config_layers_user_overrides_managed() {
 #[test]
 fn auth_provider_honored_only_from_trusted_disk_layers() {
     let layers = ConfigLayers {
-        managed: toml::from_str(
+        user: toml::from_str(
                 "[auth_provider.corp]\ncommand = \"/usr/local/bin/corp-token\"\n",
             )
             .unwrap(),
@@ -1945,7 +1928,7 @@ fn auth_provider_honored_only_from_trusted_disk_layers() {
 #[test]
 fn provider_catalog_honored_only_from_trusted_disk_layers() {
     let layers = ConfigLayers {
-        managed: toml::from_str(
+        user: toml::from_str(
                 "[provider.gateway]\napi_backend = \"responses\"\n\
                  [provider.gateway.options]\nbase_url = \"https://gateway.example/v1\"\n\
                  [provider.gateway.options.auth]\ntype = \"command\"\ncommand = \"/usr/local/bin/gw-token\"\n\
@@ -1970,218 +1953,17 @@ fn provider_catalog_honored_only_from_trusted_disk_layers() {
             "its inline auth registers as a synthetic auth provider"
         );
 }
-/// REGRESSION: the real enterprise two-file merge —
-/// `managed_config.toml` (proxy + BYO model host) layered with
-/// `requirements.toml` (deployment key) via the actual
-/// `ConfigLayers::effective_config()` path — must resolve the deployment-config
-/// fetch to cli-chat-proxy, never the model host, and must preserve the
-#[test]
-#[serial_test::serial]
-fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
-    for k in [
-        "GROW_MANAGED_CONFIG_URL",
-        "GROW_CLI_CHAT_PROXY_BASE_URL",
-    ] {
-        unsafe { std::env::remove_var(k) };
-    }
-    let managed = toml::from_str(
-            r#"
-[endpoints]
-inference_base_url = "https://inference.acme-corp.example/provider/v1"
-cli_chat_proxy_base_url = "https://service.example.com/v1"
-
-[provider.acme.options]
-base_url = "https://inference.acme-corp.example/provider/v1"
-env_key = "ANTHROPIC_AUTH_TOKEN"
-[provider.acme.models.grow-build]
-model = "grow-4.5"
-
-[models]
-default = "acme/grow-build"
-"#,
-        )
-        .unwrap();
-    let requirements = toml::from_str(
-            r#"
-[endpoints]
-deployment_key = "provider-token-ENTERPRISE"
-inference_base_url = "https://inference.acme-corp.example/provider/v1"
-"#,
-        )
-        .unwrap();
-    let layers = ConfigLayers {
-        system_managed: toml::Value::Table(Default::default()),
-        managed,
-        user: toml::Value::Table(Default::default()),
-        user_requirements: Some(requirements),
-        system_requirements: None,
-        mdm_requirements: None,
-        ..Default::default()
-    };
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &layers.effective_config_disk_only(),
-        )
-        .unwrap();
-    assert_eq!(
-            cfg.endpoints.resolve_managed_config_url().as_deref(),
-            Some("https://service.example.com/v1/deployment/config")
-        );
-    assert!(
-            !cfg.endpoints
-                .resolve_managed_config_url()
-                .is_some_and(|url| url.contains("acme-corp"))
-        );
-    assert!(cfg.endpoints.deployment_key.is_some());
-}
 #[test]
 fn config_layers_origins_tracks_source() {
     use crate::agent::config::ConfigSource;
     let layers = ConfigLayers {
-        system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
-        user: toml::from_str("[ui]\ntheme = \"dark\"\n").unwrap(),
-        user_requirements: None,
-        system_requirements: None,
-        mdm_requirements: None,
+        user: toml::from_str("[features]\nlsp_tools = false\n[ui]\ntheme = \"dark\"\n")
+            .unwrap(),
         ..Default::default()
     };
     let origins = config_origins(&layers);
-    assert_eq!(origins["features.lsp_tools"], ConfigSource::ManagedConfig);
-    assert_eq!(origins["ui.theme"], ConfigSource::UserConfig);
-}
-#[test]
-fn config_layers_origins_user_wins() {
-    use crate::agent::config::ConfigSource;
-    let layers = ConfigLayers {
-        system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
-        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
-        user_requirements: None,
-        system_requirements: None,
-        mdm_requirements: None,
-        ..Default::default()
-    };
-    let origins = config_origins(&layers);
-    assert_eq!(origins["features.lsp_tools"], ConfigSource::UserConfig);
-}
-#[test]
-fn config_layers_system_managed_lowest_priority() {
-    let layers = ConfigLayers {
-        system_managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
-        managed: toml::Value::Table(Default::default()),
-        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
-        user_requirements: None,
-        system_requirements: None,
-        mdm_requirements: None,
-        ..Default::default()
-    };
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &layers.effective_config_disk_only(),
-        )
-        .unwrap();
-    assert_eq!(Some(true), cfg.features.lsp_tools);
-}
-#[test]
-fn apply_requirements_value_overrides_user_settings() {
-    let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\n",
-        )
-        .unwrap();
-    let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
-    let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
-        )
-        .unwrap();
-    let source = RequirementSource::Requirements {
-        path: std::path::PathBuf::from("/test/requirements.toml"),
-    };
-    let enforced = apply_requirements_inner(&mut cfg, &requirements, &source);
-    assert_eq!(Some(false), cfg.features.lsp_tools);
-    assert_eq!(Some(false), cfg.features.web_fetch);
-    assert_eq!(Some(false), cfg.features.write_file);
-    assert_eq!(Some(false), cfg.cli.auto_update);
-    assert_eq!(Some("managed-model"), cfg.models.default.as_deref());
-    assert_eq!(Some("stable"), cfg.cli.channel.as_deref());
-    assert_eq!(
-            Some("https://managed-proxy.example/v1"),
-            cfg.endpoints.cli_chat_proxy_base_url.as_deref()
-        );
-    assert_eq!(
-            "https://managed-api.example/v1",
-            cfg.endpoints.inference_base_url
-        );
-    assert_eq!(
-            Some("enterprise-deploy-key-should-not-log"),
-            cfg.endpoints.deployment_key.as_deref()
-        );
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "endpoints.deployment_key" && e.value == "[redacted]"),
-            "deployment_key must use the redacted enforce_str variant"
-        );
-    assert!(
-            enforced
-                .iter()
-                .all(|e| e.path != "endpoints.deployment_key"
-                    || e.value != "enterprise-deploy-key-should-not-log"),
-            "raw deployment_key must not appear in enforced audit entries"
-        );
-}
-/// Strict precedence: requirement always wins (covers from-None and
-/// from-higher-user cases). The enforced floor lives in
-/// `VersionPolicy`, not this field.
-#[test]
-fn apply_requirements_pins_minimum_version() {
-    let source = RequirementSource::Requirements {
-        path: std::path::PathBuf::from("/test/requirements.toml"),
-    };
-    let req: toml::Value = toml::from_str("[cli]\nminimum_version = \"0.1.150\"\n")
-        .unwrap();
-    let mut cfg_a = crate::agent::config::Config::new_from_toml_cfg(
-            &toml::from_str::<toml::Value>("").unwrap(),
-        )
-        .unwrap();
-    apply_requirements_inner(&mut cfg_a, &req, &source);
-    assert_eq!(cfg_a.cli.minimum_version.as_deref(), Some("0.1.150"));
-    let mut cfg_b = crate::agent::config::Config::new_from_toml_cfg(
-            &toml::from_str::<toml::Value>("[cli]\nminimum_version = \"0.1.200\"\n")
-                .unwrap(),
-        )
-        .unwrap();
-    apply_requirements_inner(&mut cfg_b, &req, &source);
-    assert_eq!(cfg_b.cli.minimum_version.as_deref(), Some("0.1.150"));
-}
-/// Requirements enforcement beats a campaign-supplied default. The on-disk
-/// `Config` arrives campaign-overlaid (`models.default` = a campaign value);
-/// a requirements layer enforcing `[models] default` clamps it back.
-#[test]
-fn apply_requirements_default_beats_campaign_default() {
-    let raw: toml::Value = toml::from_str("[models]\ndefault = \"campaign-model\"\n")
-        .unwrap();
-    let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
-    assert_eq!(
-            cfg.models.default.as_deref(),
-            Some("campaign-model"),
-            "precondition: config carries the campaign default"
-        );
-    let req: toml::Value = toml::from_str("[models]\ndefault = \"enforced-model\"\n")
-        .unwrap();
-    let source = RequirementSource::Requirements {
-        path: std::path::PathBuf::from("/test/requirements.toml"),
-    };
-    let enforced = apply_requirements_inner(&mut cfg, &req, &source);
-    assert_eq!(
-            cfg.models.default.as_deref(),
-            Some("enforced-model"),
-            "requirements default must beat the campaign default"
-        );
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "models.default" && e.value == "enforced-model"),
-            "the enforcement must be reported in the audit trail"
-        );
+    assert_eq!(origins["features.lsp_tools"], ConfigSource::Config);
+    assert_eq!(origins["ui.theme"], ConfigSource::Config);
 }
 #[test]
 fn validate_hooks_path_rejects_relative_path() {

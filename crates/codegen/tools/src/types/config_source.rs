@@ -25,11 +25,6 @@ pub enum ConfigSource {
     ConfigToml { path: PathBuf },
     /// CLI override (`--plugin-dir`, `--mcp-server`).
     Cli { path: PathBuf },
-    /// Managed (server-managed / IT-deployed).
-    Managed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<PathBuf>,
-    },
 }
 
 impl ConfigSource {
@@ -44,7 +39,6 @@ impl ConfigSource {
             Self::Plugin { plugin_name, .. } => format!("plugin: {plugin_name}"),
             Self::ConfigToml { path } => format!("config: {}", path.display()),
             Self::Cli { .. } => "cli".into(),
-            Self::Managed { .. } => "managed".into(),
         }
     }
 
@@ -59,7 +53,6 @@ impl ConfigSource {
             Self::Plugin { plugin_name, .. } => format!("plugin: {plugin_name}"),
             Self::ConfigToml { .. } => "config".into(),
             Self::Cli { .. } => "cli".into(),
-            Self::Managed { .. } => "managed".into(),
         }
     }
 
@@ -82,7 +75,6 @@ impl ConfigSource {
             | Self::Plugin { path, .. }
             | Self::ConfigToml { path }
             | Self::Cli { path } => Some(path),
-            Self::Managed { path } => path.as_deref(),
         }
     }
 }

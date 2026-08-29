@@ -1,4 +1,4 @@
-# Grow 1.1.1 完整配置示例
+# Grow 2.x 完整配置示例
 #
 # 用法：
 #   1. 复制到 ~/.grow/config.toml。
@@ -9,8 +9,10 @@
 # 本文件覆盖 Grow 面向用户的 config.toml 配置。运行时状态、内部服务字段、已弃用别名和
 # pager.toml 外观细节不在这里重复。项目级 .grow/config.toml 只应放 MCP、插件、权限规则和
 # [mcp] 输出上限；其他设置放在 ~/.grow/config.toml。
+# 项目覆盖单位由子系统决定：MCP 同名 entry 整体替换，插件 paths/disabled 累积，权限规则累积，
+# 并按 deny > ask > allow 收敛。
 #
-# 一般优先级：CLI > 环境变量 > config.toml > 受管理配置 > 内置默认值。
+# 一般优先级：CLI > 环境变量 > 全局 config.toml > 内置默认值；项目项按上面的子系统规则叠加。
 # 已存在的 session 恢复退出时的模型和思考强度；新 session 使用这里的全局默认值。
 
 # 若要彻底关闭本地公告，请取消下一行注释，并删除文件末尾的 [[announcements]] 示例。
@@ -280,7 +282,6 @@ explore = "deepseek/deepseek-chat"
 support_permission = true
 codebase_indexing = true             # 也可为 ["src/**", "!vendor/**"]
 non_git_warning = false
-managed_config = false               # 本地个人使用通常关闭受管理配置获取
 lsp_tools = false
 tool_search = true                   # MCP tool search/discovery
 web_fetch = true
@@ -299,8 +300,7 @@ mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监
 # -----------------------------------------------------------------------------
 # 会话搜索索引开关（默认开启）。关闭后本进程不再读写搜索索引，且本进程内不可
 # 重新打开（避免用关闭期间缺失写入的半索引服务搜索）。诊断信息会说明关闭来源。
-# 优先级：requirements.toml 的 [features] session_search > GROW_SESSION_SEARCH
-# 环境变量 > 本表 > 默认开启。
+# 优先级：环境变量 > 本表 > 默认开启。
 # -----------------------------------------------------------------------------
 
 # [session_search]

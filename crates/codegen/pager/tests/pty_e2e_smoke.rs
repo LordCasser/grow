@@ -27,8 +27,6 @@ mod input_echoes_at_idle_prompt;
 mod plan_revise_empty_enter_does_not_approve;
 #[path = "pty_e2e/renders_on_action.rs"]
 mod renders_on_action;
-#[path = "pty_e2e/requirements_version_failure_exits_2_with_guidance.rs"]
-mod requirements_version_failure_exits_2_with_guidance;
 #[path = "pty_e2e/small_screen_tip_survives_slow_turn.rs"]
 mod small_screen_tip_survives_slow_turn;
 #[path = "pty_e2e/tab_focuses_scrollback_in_vim_and_default_modes.rs"]

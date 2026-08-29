@@ -92,15 +92,6 @@ pub enum Event {
         reason: &'static str,
     },
     // ── MCP Diagnostics ──────────────────────────────────────────
-    McpConfigResolved {
-        servers: Vec<McpConfigServer>,
-        disabled: Vec<String>,
-    },
-    McpManagedConfigResult {
-        server_count: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
     McpServerStarting {
         server_name: String,
         transport: String,
@@ -242,14 +233,6 @@ pub enum McpErrorCategory {
     HandshakeFailed,
     AuthRequired,
     ClientError,
-}
-
-/// Server entry in `McpConfigResolved`.
-#[derive(Debug, Clone, Serialize)]
-pub struct McpConfigServer {
-    pub name: String,
-    pub transport: String,
-    pub source: String,
 }
 
 /// Outcome of a single tool call. More granular than a boolean -- distinguishes

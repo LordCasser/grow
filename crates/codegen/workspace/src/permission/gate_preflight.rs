@@ -1,4 +1,4 @@
-//! Managed-policy preflight for one permission request.
+//! Permission-policy preflight for one permission request.
 //!
 //! Evaluates the direct rule pass and both bash security gates once and keeps
 //! each gate's `Ask` provenance. Both a matched Ask and a fail-closed Ask bind
@@ -12,7 +12,7 @@ use crate::permission::policy::{CompiledPolicy, GateDecision};
 use crate::permission::shell_access::combine_decisions;
 use crate::permission::types::{AccessKind, Decision};
 
-/// One request's managed-policy evaluation, computed before any fast path.
+/// One request's permission-policy evaluation, computed before any fast path.
 pub(crate) struct GatePreflight {
     direct: Option<Decision>,
     bash_command: Option<GateDecision>,
@@ -40,7 +40,7 @@ impl GatePreflight {
         }
     }
 
-    /// Combined managed decision (deny > ask > allow), as the manager applied
+    /// Combined policy decision (deny > ask > allow), as the manager applied
     /// it before provenance existed.
     pub(crate) fn policy_decision(&self) -> Option<Decision> {
         let bash_command = self.bash_command.clone().map(GateDecision::into_decision);
@@ -67,7 +67,7 @@ impl GatePreflight {
         self.shell_file.as_ref().is_some_and(GateDecision::is_ask)
     }
 
-    /// The auto classifier is only admissible when managed policy has not
+    /// The auto classifier is only admissible when the permission policy has not
     /// required a prompt. This includes parser/gate uncertainty.
     pub(crate) fn admits_auto_classifier(&self) -> bool {
         !self.policy_forced_prompt()

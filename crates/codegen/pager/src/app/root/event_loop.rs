@@ -813,16 +813,6 @@ pub(crate) async fn run(
         .and_then(shell::util::config::permission_mode_from_ui_if_set)
         .is_some();
     app.permission_mode_from_soft_default = !cli_owns_mode && !toml_owns_mode;
-    // Cached pin snapshot gating dispatch's runtime always-approve toggles. A
-    // mid-session pin change is missed here, but only cosmetically: the agent's
-    // permission manager re-clamps always-approve authoritatively at decision time.
-    app.always_approve_policy_block = launch_permission.policy_block;
-    if let Some(warning) = launch_permission.blocked_warning {
-        tracing::warn!("{warning}");
-        crate::unified_log::warn(warning, None, None);
-        // Consumed by `switch_to_agent` once the first agent view opens.
-        app.always_approve_launch_block_notice = Some(warning);
-    }
     app.require_plan_approval = shell::util::config::load_require_plan_approval();
     app.plan_mode = !args.no_plan;
     app.subagents = !args.no_subagents;
@@ -897,10 +887,8 @@ pub(crate) async fn run(
     // Load persisted per-ID hidden state
     app.hidden_announcement_ids = announcements::read_hidden_announcement_ids().await;
 
-    // Load config layers once, resolve announcements, tips, and feature flags.
-    let requirements = shell::config::load_merged_requirements();
-    let user_config = shell::config::load_from_disk().ok();
-    let managed_config = shell::config::load_managed_config().ok();
+    // Load the effective local configuration once for announcements, tips,
+    // and feature flags.
 
     // Full merge when every layer parses; partial merge below if any layer fails.
     let effective_config = match shell::config::load_effective_config() {
@@ -917,21 +905,17 @@ pub(crate) async fn run(
         );
     }
 
-    // Full layered resolve (env/requirements/remote may beat plain `[ui]`).
+    // Resolve the local config together with environment and backend settings.
     crate::appearance::cache::set_show_thinking_blocks(
         shell::util::config::resolve_show_thinking_blocks(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
+            effective_config.as_ref(),
             remote_settings.as_ref(),
         )
         .value,
     );
     crate::appearance::cache::set_group_tool_verbs(
         shell::util::config::resolve_group_tool_verbs(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
+            effective_config.as_ref(),
             remote_settings.as_ref(),
         )
         .value,
@@ -953,35 +937,20 @@ pub(crate) async fn run(
         }
         app.sync_session_announcement_slash_gate();
 
-        let remote_tips = remote_settings.as_ref().and_then(|s| s.tips.as_deref());
-        app.tips = resolve_tips(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            remote_tips,
-        );
+        app.tips = resolve_tips(effective_config.as_ref());
 
         if !app.tips.is_empty() {
             let grow_home = tools::util::grow_home::grow_home();
             app.tip = shell::util::tips::pick_and_advance(&app.tips, &grow_home);
         }
 
-        // Slash-command dropdown tags: remote base, local [slash_command_tags]
-        // wins per key. Mutate the shared map in place so every adopter sees it.
-        let remote_slash_tags = remote_settings
-            .as_ref()
-            .and_then(|s| s.slash_command_tags.as_ref());
+        // Mutate the shared map in place so every adopter sees the local result.
         let empty_toml = toml::Value::Table(Default::default());
         let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
-        *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config, remote_slash_tags);
+        *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config);
     }
 
-    let hints = shell::util::config::resolve_hints(
-        effective_config.as_ref(),
-        requirements.as_ref(),
-        user_config.as_ref(),
-        managed_config.as_ref(),
-    );
+    let hints = shell::util::config::resolve_hints(effective_config.as_ref());
     app.project_picker_disabled = hints.project_picker_disabled;
     // Per-tip contextual hints resolve from `[ui.contextual_hints]` (loaded into
     // `app.current_ui` further below) + the remote tier; the resolve + prompt
@@ -999,9 +968,7 @@ pub(crate) async fn run(
 
     // Probe / auto-cadence / terminal diagnostics — see `display_refresh_startup`.
     let motion = crate::app::display_refresh_startup::start(
-        requirements.as_ref(),
-        user_config.as_ref(),
-        managed_config.as_ref(),
+        effective_config.as_ref(),
         remote_settings.as_ref(),
     );
     let min_draw_interval = motion.min_draw_interval;
@@ -1118,10 +1085,8 @@ pub(crate) async fn run(
     // Resolve the per-tip contextual hints now that `current_ui` is hydrated and
     // propagate the prompt-relevant tips to any agents built at startup. New
     // agents adopt the gates at creation; settings toggles re-apply at runtime.
-    let resolved_hints = shell::util::config::resolve_contextual_hints(
-        &app.current_ui.contextual_hints,
-        app.remote_contextual_hints.as_ref(),
-    );
+    let resolved_hints =
+        shell::util::config::resolve_contextual_hints(&app.current_ui.contextual_hints);
     app.apply_contextual_hints(resolved_hints);
 
     // Resolve visibility of the explicit `/toggle-mouse-reporting` command.
@@ -2848,15 +2813,37 @@ async fn drain_and_process(
                 // Dispatch the action (e.g. create session), then re-process
                 // the same event through the now-active view so the input
                 // (character, paste) lands in the session's prompt.
+                let starts_new_session = matches!(&action, Action::NewSession);
                 let effs = dispatch::dispatch(action, app);
                 if process_effects(effs, tasks, app) {
                     return true;
                 }
-                if let InputOutcome::Action(follow_up) = app.handle_input_at_with_paste_provenance(
-                    ev,
-                    routed.arrived_at,
-                    routed.paste_provenance,
-                ) {
+                let forwarded = if starts_new_session {
+                    let registry = &app.registry;
+                    let mut child_effects = Vec::new();
+                    let outcome = match app.active_view {
+                        ActiveView::Agent(id) => app.agents.get_mut(&id).and_then(|agent| {
+                            agent.handle_project_picker_backing_prompt_input(
+                                ev,
+                                registry,
+                                &mut child_effects,
+                            )
+                        }),
+                        _ => None,
+                    };
+                    app.pending_effects.append(&mut child_effects);
+                    outcome
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    app.handle_input_at_with_paste_provenance(
+                        ev,
+                        routed.arrived_at,
+                        routed.paste_provenance,
+                    )
+                });
+                if let InputOutcome::Action(follow_up) = forwarded {
                     let effs = dispatch::dispatch(follow_up, app);
                     if process_effects(effs, tasks, app) {
                         return true;

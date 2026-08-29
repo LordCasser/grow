@@ -55,8 +55,8 @@ pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROW_AUTO_COMPACT_T
 /// Precedence (highest first):
 ///   1. env `GROW_AUTO_COMPACT_THRESHOLD_PERCENT`
 ///   2. user TOML `[provider.<id>.models.<model>].auto_compact_threshold_percent`
-///      (read from `cfg.config_models`; the effective merge of user +
-///      managed provider-model entries)
+///      (read from `cfg.config_models`; the effective local provider-model
+///      entries)
 ///   3. user TOML `[session].auto_compact_threshold_percent`
 ///      (read from `cfg.session.auto_compact_threshold_percent: Option<u8>`)
 ///   4. remote settings per-model `ModelInfo.auto_compact_threshold_percent`

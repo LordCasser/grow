@@ -6,13 +6,26 @@ Grow reads settings from config files, environment variables, and CLI flags. Thi
 
 ## Precedence
 
-Settings resolve highest-priority first:
+Global settings resolve highest-priority first:
 
 1. **CLI flags** (e.g. `--permission-mode always-approve`, `--model`, `--sandbox`)
 2. **Environment variables** (e.g. `GROW_API_KEY`, `GROW_MEMORY`)
-3. **config.toml** (`~/.grow/config.toml`)
-4. **Managed / requirements config** (files your org may deploy, e.g. `managed_config.toml` / `requirements.toml`)
-5. **Built-in defaults**
+3. **Global config** (`$GROW_HOME/config.toml`)
+4. **Built-in defaults**
+
+Project `.grow/config.toml` files are not deep-merged into the global config. Grow discovers them
+from the repository root toward the current directory and only the following subsystem loaders read
+them:
+
+| Project section | Overlay unit | Trust behavior |
+|-----------------|--------------|----------------|
+| `[mcp_servers.<name>]` | Same-name entry is replaced as a whole; the nearest definition wins | Project winner is admitted only after folder trust |
+| `[plugins].paths` | Paths accumulate from root to cwd | Project paths are admitted only after folder trust |
+| `[plugins].disabled` | Disabled IDs accumulate | Tightening-only; remains effective for an untrusted project |
+| `[permission]` rules | Global and trusted-project rules accumulate; evaluation resolves `deny > ask > allow` | Project rules require folder trust |
+| `[mcp].max_output_bytes` | Nearest project value wins when no environment override is set | Project value requires folder trust |
+
+All other `config.toml` sections load only from `$GROW_HOME/config.toml`.
 
 ---
 
@@ -209,7 +222,12 @@ allow_local = false                            # true = allow localhost / 127.0.
 
 `allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROW_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
 
-`[toolset.ask_user_question]` is honored across **requirements.toml**, **managed config**, and your user **`config.toml`**. Precedence: requirements → env (`GROW_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `GROW_ASK_USER_QUESTION_TIMEOUT_SECS`) → user config → managed → defaults. Set `timeout_enabled = false` in your user config to disable the automatic questionnaire timeout for yourself; `timeout_secs` must be a positive integer. You can also toggle `timeout_enabled` from `/settings` → **Ask-Question timeout** (under Agent & Approval); changes apply to newly started sessions.
+`[toolset.ask_user_question]` is read from your config files, with environment variables
+(`GROW_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `GROW_ASK_USER_QUESTION_TIMEOUT_SECS`) taking
+precedence. Set `timeout_enabled = false` in your config to disable the automatic questionnaire
+timeout; `timeout_secs` must be a positive integer. You can also toggle `timeout_enabled` from
+`/settings` → **Ask-Question timeout** (under Agent & Approval); changes apply to newly started
+sessions.
 
 ### Authentication
 
@@ -301,9 +319,11 @@ url = "https://mcp.example.com/api/mcp"  # HTTP/SSE transport
 headers = { "x-mcp-session-id" = "{{session_id}}" }
 ```
 
-MCP servers can also be set per-project in `.grow/config.toml`. Project-scoped config contributes `[mcp_servers]`, `[plugins]`, and `[permission]` rules; every other section loads only from `~/.grow/config.toml`.
+MCP servers can also be set per-project in `.grow/config.toml`. Project-scoped config contributes `[mcp_servers]`, `[plugins]`, `[permission]`, and `[mcp] max_output_bytes`; every other section loads only from `$GROW_HOME/config.toml`.
 
-Priority for `[mcp_servers]` and `[plugins]`: `.grow/config.toml` (current dir) > `<repo-root>/.grow/config.toml` > `~/.grow/config.toml`. `[permission]` rules aren't overridden by priority — they merge across all files with `deny` > `ask` > `allow` (see [22-permissions-and-safety.md](22-permissions-and-safety.md)).
+Contributions that can start project code or services take effect only after folder trust. Project plugin `disabled` IDs remain effective as tightening-only input; project permission rules require trust.
+
+For the exact replacement and accumulation units, see [Precedence](#precedence). Permission rule evaluation is described in [Permissions and Safety](22-permissions-and-safety.md).
 
 ### Memory
 
@@ -389,7 +409,8 @@ disabled = ["user/a1b2c3d4/noisy-plugin"]
 
 `[hints]` holds small persisted UI preferences — mostly "stop asking me" opt-outs. Grow writes these for you when you pick a "don't ask again" option in the TUI, but you can edit or delete them by hand; removing a key restores the default.
 
-`[hints]` is read from the **effective config merge**, with the usual precedence: system managed → user `managed_config.toml` → user `config.toml` → user `requirements.toml` → system `requirements.toml`, higher layers winning. The TUI only ever **writes** opt-outs to your user `~/.grow/config.toml`.
+`[hints]` is read from the applicable local config. The TUI writes opt-outs to your global
+`$GROW_HOME/config.toml`.
 
 ```toml
 [hints]
@@ -401,7 +422,7 @@ fork_worktree_mode = "ask"             # /fork worktree prompt: "ask" | "always"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `project_picker_disabled` | bool | `false` | When `true`, skips the picker that asks you to choose a project directory on the first prompt when Grow launches from a non-project directory (home, Desktop, Downloads, `/tmp`). Set automatically when you choose **"Don't ask me again"** in that picker. Teams can pin it in `managed_config.toml` or `requirements.toml`. |
+| `project_picker_disabled` | bool | `false` | When `true`, skips the picker that asks you to choose a project directory on the first prompt when Grow launches from a non-project directory (home, Desktop, Downloads, `/tmp`). Set automatically when you choose **"Don't ask me again"** in that picker. |
 | `memory_modal_fullscreen` | bool | `false` | Remembers whether the memory modal was last opened fullscreen. |
 | `new_session_worktree_mode` | string | `"never"` | Worktree prompt for `/new`: `ask` shows the popup, `always` creates a worktree, `never` skips it. |
 | `fork_worktree_mode` | string | `"ask"` | Worktree prompt for `/fork`: `ask`, `always`, or `never`. |
@@ -505,8 +526,8 @@ See [Local Diagnostics](24-monitoring-usage.md).
 ### Version pinning
 
 Control which versions the CLI may auto-update to and which versions may run. Set
-these in `[cli]`, or in a managed layer for fleet-wide policy. Each has an
-environment override that can only tighten the bound, for CI and testing.
+these in `[cli]` in `$GROW_HOME/config.toml`. Each has an environment override
+that combines with the local value by tightening the bound, for CI and testing.
 
 > **Changed:** `minimum_version` no longer blocks startup. It is now a soft
 > anti-downgrade floor for the updater. For a hard floor that prevents old
@@ -530,10 +551,9 @@ required_maximum_version = "1.9.0" # refuse to start above this
   the running version is outside the range, the CLI exits at startup and instructs
   the user to install an approved version. `grow update` and `grow --version` keep
   working so an out-of-range install can recover.
-- Bounds resolve across config layers by tightening only: a floor takes the
-  highest value and a ceiling the lowest, so a managed bound can't be loosened,
-  and a user or environment bound can't cancel a managed hard bound. An invalid
-  value is ignored so a bad policy can't block startup.
+- The global config and environment value combine by tightening only: a floor
+  takes the highest value and a ceiling the lowest. An invalid value is ignored
+  so a bad local setting can't block startup.
 - An explicit `grow update --version X` is allowed above the ceiling, to recover
   from a too-new install, and rejected below the hard floor.
 
@@ -743,7 +763,7 @@ Common variables are listed below.
 | `~/.grow/agents/` | User-scoped agent definitions |
 | `~/.grow/lsp.json` | LSP server configuration (user-scoped) |
 | `~/.grow/logs/` | Internal log files (e.g. `unified.jsonl`, MCP server logs) |
-| `.grow/config.toml` | Project-scoped MCP servers, plugins, and permission rules |
+| `.grow/config.toml` | Project-scoped MCP servers, plugins, permission rules, and MCP output cap |
 | `.grow/skills/` | Project-scoped skill definitions |
 | `.grow/plugins/` | Project-scoped plugins |
 | `.grow/agents/` | Project-scoped agent definitions |

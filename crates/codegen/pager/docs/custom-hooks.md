@@ -49,7 +49,7 @@ Hooks are discovered from several places (all are merged):
 |-----------|-----------------------------------|--------------|-------|
 | Global    | `~/.grow/hooks/*.json`            | Always       | Best for personal hooks |
 | Project   | `<project>/.grow/hooks/*.json`    | Requires trust | Per-repo automation |
-| Config    | `config.toml`, `managed_config.toml`, `requirements.toml` | Always | Hooks shipped in your (or your organization's) config |
+| Config    | `config.toml` | Always | Hooks shipped in your global or project config |
 | Plugin    | Bundled inside installed plugins  | Per-plugin   | Shared team hooks |
 
 Config-file hooks use the same schema in TOML form; see the [Hooks user guide](user-guide/10-hooks.md#hooks-in-config-files) for details.

@@ -270,7 +270,7 @@ impl InstallRegistry {
     /// Resolve the install directory from config or default.
     ///
     /// Resolution order:
-    /// 1. `[plugins].install_dir` from effective config (requirements > config > managed)
+    /// 1. `[plugins].install_dir` from the effective global config
     /// 2. Default: `~/.grow/installed-plugins/`
     pub fn resolve_install_dir() -> PathBuf {
         if let Some(dir) = Self::read_install_dir_from_config() {
@@ -280,8 +280,7 @@ impl InstallRegistry {
         config::grow_home().join(DEFAULT_INSTALL_DIR_NAME)
     }
 
-    /// Read `[plugins].install_dir` from the effective config
-    /// (managed_config.toml merged under config.toml — user wins).
+    /// Read `[plugins].install_dir` from the effective global config.
     fn read_install_dir_from_config() -> Option<PathBuf> {
         let root = config::load_effective_config_disk_only().ok()?;
         let value = root.get("plugins")?.get("install_dir")?.as_str()?;

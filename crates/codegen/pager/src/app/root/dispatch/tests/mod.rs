@@ -20,10 +20,9 @@ use super::cta::{
 };
 use super::ctx::{find_agent_by_session_id, get_active_agent, get_active_agent_mut};
 use super::dashboard::{
-    apply_pending_dispatch_config, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
-    dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
-    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_commit_rename,
+    dispatch_dashboard_confirm_worktree, dispatch_dashboard_create_new_agent_with_detail,
+    dispatch_dashboard_delete, dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
     dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
     dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
     dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
@@ -107,8 +106,6 @@ fn test_app() -> AppView {
         default_permission_mode: shell::util::config::PermissionMode::Ask,
         permission_mode_from_soft_default: true,
         auto_mode_gate: true,
-        always_approve_policy_block: None,
-        always_approve_launch_block_notice: None,
         screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
@@ -621,8 +618,6 @@ fn enqueue_permission_with_enable_always_approve(
     });
     response_rx
 }
-const POLICY_WARNING: &str =
-    workspace::permission::resolution::ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS;
 fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast

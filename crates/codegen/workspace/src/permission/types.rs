@@ -484,39 +484,16 @@ pub enum ToolFilter {
     Mcp,
     WebFetch,
 }
-/// Where a requirement or permission was loaded from.
+/// Where a permission rule was loaded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequirementSource {
+pub enum PermissionSource {
     Unknown,
-    /// User-writable `~/.grow/requirements.toml` — untrusted for keeping a
-    /// catch-all allow under the pin (a restricted user can edit it).
-    Requirements {
-        path: std::path::PathBuf,
-    },
-    /// Root-owned system-dir `requirements.toml`. Distinguished at load time
-    /// (`RequirementsLayer::is_system`), never inferred from `path`.
-    SystemRequirements {
-        path: std::path::PathBuf,
-    },
-    /// Defaults tier; never an admin source.
-    ManagedConfig {
-        path: std::path::PathBuf,
-    },
-    Config {
-        path: std::path::PathBuf,
-    },
+    Config { path: std::path::PathBuf },
 }
-impl std::fmt::Display for RequirementSource {
+impl std::fmt::Display for PermissionSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unknown => f.write_str("<unknown>"),
-            Self::Requirements { path } => write!(f, "{} (requirements)", path.display()),
-            Self::SystemRequirements { path } => {
-                write!(f, "{} (system requirements)", path.display())
-            }
-            Self::ManagedConfig { path } => {
-                write!(f, "{} (managed config)", path.display())
-            }
             Self::Config { path } => write!(f, "{} (config)", path.display()),
         }
     }
@@ -525,7 +502,7 @@ impl std::fmt::Display for RequirementSource {
 #[derive(Debug, Clone)]
 pub struct Sourced<T> {
     pub value: T,
-    pub source: RequirementSource,
+    pub source: PermissionSource,
 }
 #[cfg(test)]
 mod tests {

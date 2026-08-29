@@ -110,69 +110,6 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         .with(diagnostics::hooks_log::layer());
     diagnostics::debug_log::install_firehose(registry, app_entrypoint);
 }
-/// `grow setup`: rendering + exit codes only; fetch logic lives in `shell::managed_config`.
-/// `json` prints the served configuration instead of installing it.
-async fn run_setup_command(json: bool) {
-    use shell::managed_config::{self, SetupOutcome};
-    if !managed_config::has_principal() {
-        eprintln!("No deployment key found.");
-        eprintln!();
-        eprintln!("To install managed configuration, set a deployment key:");
-        eprintln!();
-        if cfg!(unix) {
-            eprintln!("  export GROW_DEPLOYMENT_KEY=<your-key>");
-        } else {
-            eprintln!("  $env:GROW_DEPLOYMENT_KEY=\"<your-key>\"");
-        }
-        eprintln!("  grow setup");
-        eprintln!();
-        eprintln!("Or add the key to ~/.grow/config.toml:");
-        eprintln!();
-        eprintln!("  [endpoints]");
-        eprintln!("  deployment_key = \"<your-key>\"");
-        eprintln!();
-        eprintln!(
-            "If you don't have a deployment key, contact your organization's Grow administrator."
-        );
-        std::process::exit(1);
-    }
-    if json {
-        match managed_config::fetch_setup_report().await {
-            Ok(report) => {
-                let out = serde_json::to_string_pretty(&report)
-                    .expect("setup report has no non-serializable values");
-                println!("{out}");
-                if !report.configured {
-                    eprintln!(
-                        "Your team doesn't have a managed configuration yet. Ask an administrator of the configured service backend to create one."
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Couldn't fetch managed configuration. {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-    match managed_config::run_setup().await {
-        SetupOutcome::Installed => eprintln!("Applied managed configuration."),
-        SetupOutcome::NothingConfigured => {
-            eprintln!(
-                "Your team doesn't have a managed configuration yet. Ask an administrator of the configured service backend to create one."
-            );
-        }
-        SetupOutcome::Skipped => {
-            eprintln!(
-                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `grow setup` again."
-            );
-        }
-        SetupOutcome::Failed(e) => {
-            eprintln!("Couldn't apply managed configuration. {e}");
-            std::process::exit(1);
-        }
-    }
-}
 async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
     match args.command {
         LeaderMgmtCommand::Kill => kill_leaders().await,
@@ -759,9 +696,6 @@ async fn run_agent_command(
         permission_mode_flag.as_deref(),
         None,
     );
-    if let Some(warning) = launch_permission.blocked_warning {
-        eprintln!("grow: {warning}");
-    }
     agent_config.default_permission_mode = launch_permission.mode;
     agent_config.agent_profile_path = agent_args
         .agent_profile
@@ -983,53 +917,47 @@ async fn run_agent_command(
             shell::agent::run_agent_server(server_config, agent_config.clone()).await
         }
         Some(AgentCmd::Leader(a)) => {
-            let leader_auto_update = if !should_check_for_updates(
-                no_auto_update || a.no_auto_update,
-            ) {
-                tracing::info!("Leader auto-update disabled");
-                None
-            } else {
-                let update_config_for_leader = update_config.clone();
-                Some(shell::agent::app::LeaderAutoUpdateConfig {
-                    check_interval: std::time::Duration::from_secs(60 * 60),
-                    check_fn: Box::new(move || {
-                        let uc = update_config_for_leader.clone();
-                        Box::pin(async move {
-                            let current_config = shell::util::config::load_config().await;
-                            if current_config.cli.auto_update == Some(false) {
-                                return false;
-                            }
-                            match auto_update::ensure_latest_on_disk(&uc).await {
-                                Ok(outcome) => {
-                                    if let Some(v) = &outcome.installed {
-                                        if let Err(e) = shell::managed_config::sync().await {
-                                            tracing::warn!(
-                                                "Leader auto-update: managed config refresh failed: {e}"
+            let leader_auto_update =
+                if !should_check_for_updates(no_auto_update || a.no_auto_update) {
+                    tracing::info!("Leader auto-update disabled");
+                    None
+                } else {
+                    let update_config_for_leader = update_config.clone();
+                    Some(shell::agent::app::LeaderAutoUpdateConfig {
+                        check_interval: std::time::Duration::from_secs(60 * 60),
+                        check_fn: Box::new(move || {
+                            let uc = update_config_for_leader.clone();
+                            Box::pin(async move {
+                                let current_config = shell::util::config::load_config().await;
+                                if current_config.cli.auto_update == Some(false) {
+                                    return false;
+                                }
+                                match auto_update::ensure_latest_on_disk(&uc).await {
+                                    Ok(outcome) => {
+                                        if let Some(v) = &outcome.installed {
+                                            tracing::info!(
+                                                "Leader auto-update: v{v} installed successfully"
+                                            );
+                                        } else if outcome.relaunch_needed {
+                                            tracing::info!(
+                                                "Leader auto-update: newer binary already on disk, \
+                                             relaunching without download"
                                             );
                                         }
-                                        tracing::info!(
-                                            "Leader auto-update: v{v} installed successfully"
-                                        );
-                                    } else if outcome.relaunch_needed {
-                                        tracing::info!(
-                                            "Leader auto-update: newer binary already on disk, \
-                                             relaunching without download"
-                                        );
+                                        outcome.relaunch_needed
                                     }
-                                    outcome.relaunch_needed
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Leader auto-update: check/download failed, \
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Leader auto-update: check/download failed, \
                                          staying alive: {e:#}"
-                                    );
-                                    false
+                                        );
+                                        false
+                                    }
                                 }
-                            }
-                        })
-                    }),
-                })
-            };
+                            })
+                        }),
+                    })
+                };
             run_leader(
                 &agent_config,
                 a.no_exit_on_disconnect,
@@ -1387,15 +1315,6 @@ fn main() {
     install_heap_profile_hooks();
     pager::memory_trace::start(shell::util::grow_home::grow_home().join("memtrace"));
     raise_fd_limit();
-    if let Err(e) = config::validate_requirements() {
-        eprintln!("Couldn't start Grow: {e}");
-        eprintln!();
-        eprintln!(
-            "Update Grow to a version the policy allows, or ask your administrator \
-             to fix the managed requirements."
-        );
-        std::process::exit(2);
-    }
     pager::docs::extract_user_guide_docs(&shell::util::grow_home::grow_home());
     crash_handler::install_terminal_restore_only();
     if shell::util::config::load_crash_handler_enabled_sync() {
@@ -1543,11 +1462,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 shell::inspect::inspect(&cwd, json).await?;
                 return Ok(());
             }
-            Command::Setup { json } => {
-                init_tracing_simple("cli");
-                run_setup_command(json).await;
-                return Ok(());
-            }
             Command::Mcp(mcp_args) => {
                 init_tracing_simple("cli");
                 return pager::mcp_cmd::run(mcp_args).await;
@@ -1649,9 +1563,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             args.permission_mode_flag.as_deref(),
             None,
         );
-        if let Some(warning) = launch_permission.blocked_warning {
-            eprintln!("grow: {warning}");
-        }
         let json_schema = args
             .json_schema
             .as_deref()

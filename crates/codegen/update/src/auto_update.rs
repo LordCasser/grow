@@ -2690,7 +2690,6 @@ pub async fn run_update(
         );
         eprintln!();
         let landed = run_install_script(installer, Some(version), update_config).await?;
-        refresh_deployment_config().await;
         if let Err(e) = config::update_config(|st| {
             st.cli.auto_update = Some(false);
         })
@@ -2726,7 +2725,6 @@ pub async fn run_update(
                 "The latest release ({latest}) is not an allowed update; \
                  keeping the current version ({current_version})."
             );
-            refresh_deployment_config().await;
             return Ok(None);
         }
         UpdatePlan::Unavailable { latest, target } => {
@@ -2773,8 +2771,6 @@ pub async fn run_update(
                     let stable_ptr = try_fetch_stable_pointer().await;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
                     eprintln!("Already up to date ({}).", effective_current);
-                    // Retry if a prior sync failed.
-                    refresh_deployment_config().await;
                     // The target is on disk even though this call installed
                     // nothing — report it so the caller still signals stale
                     // leaders to relaunch onto it (signalling is directional
@@ -2832,7 +2828,6 @@ pub async fn run_update(
     // TTL-gated update check (~30 min).
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
-    refresh_deployment_config().await;
     eprintln!(
         "  ✓ grow v{} installed successfully! → {}",
         target_version,
@@ -2843,35 +2838,6 @@ pub async fn run_update(
         eprintln!("  Please restart Grow.");
     }
     Ok(Some(target_version.to_string()))
-}
-
-/// Refresh managed config post-update (best-effort, staleness-gated), for
-/// deployment-key and team principals alike.
-async fn refresh_deployment_config() {
-    if !shell::managed_config::has_principal() {
-        return;
-    }
-    if !shell::managed_config::is_fetch_enabled() {
-        return;
-    }
-    // Clear a logged-out team's files before deciding to fetch (mirrors the loop).
-    shell::managed_config::clear_orphan();
-    if !shell::config::is_managed_config_stale_for(
-        &shell::managed_config::current_serving_identity(),
-    ) {
-        return;
-    }
-    match shell::managed_config::sync().await {
-        Ok(true) => eprintln!("  Applied managed configuration."),
-        Ok(false) => tracing::debug!("no managed configuration to apply"),
-        // Auth issues aren't actionable mid-update: quiet here, loud on `grow setup`.
-        Err(e) if e.is_auth_rejection() => tracing::debug!("managed config not applied: {e}"),
-        Err(e) if e.is_retryable() => {
-            tracing::debug!("managed config refresh failed: {e}");
-            eprintln!("  Couldn't apply managed configuration. Run `grow setup` to retry.");
-        }
-        Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
-    }
 }
 
 #[cfg(test)]

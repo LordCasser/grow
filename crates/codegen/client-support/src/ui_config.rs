@@ -141,8 +141,8 @@ pub struct UiConfig {
     pub cancel_subagents_on_turn_cancel: Option<String>,
     /// User knob for the `remember_tool_approvals` gate: when `true`, permission
     /// prompts show the granular per-tool "Always allow …" options. Written by
-    /// the settings modal; requirements/env/managed/remote settings also feed the
-    /// effective gate.
+    /// the settings modal; environment and runtime feature settings also feed
+    /// the effective gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember_tool_approvals: Option<bool>,
     /// In-app drag selection highlight: `flash` | `hold` | `word_select`.

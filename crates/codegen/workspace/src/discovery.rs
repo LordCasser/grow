@@ -186,7 +186,7 @@ fn toml_to_json(v: &toml::Value) -> Value {
 ///
 /// Delegates to
 /// [`resolution::resolve_permissions_with_provenance`] which
-/// merges rules from requirements.toml, managed_config.toml, and config.toml.
+/// merges rules from the global and trusted project config.toml files.
 ///
 /// `project_trusted` gates project-tier permission sources (same contract as
 /// env/hooks/plugins).
@@ -516,11 +516,6 @@ mod tests {
     }
 
     // ---- Permissions tests ----
-
-    // Note: `resolve_permissions_with_provenance` checks system-managed
-    // settings and requirements.toml from the global config, so on a
-    // developer machine with Grow installed it may return non-Null even
-    // for a temp directory. Both branches assert a concrete condition.
 
     #[tokio::test]
     async fn load_permissions_returns_valid_json() {

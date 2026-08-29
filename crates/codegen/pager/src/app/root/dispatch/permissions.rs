@@ -41,9 +41,7 @@ pub(crate) fn respond_permission(
 /// option, this dispatcher (a) sends the standard `Selected` response so the
 /// in-flight request is allowed once, then (b) selects Always Approve for this
 /// session, drains any remaining queued permissions, and notifies the shell.
-/// It never changes the default permission for future sessions. Under a
-/// managed-policy pin step (b) is refused with a toast — the request is still
-/// allowed once.
+/// It never changes the default permission for future sessions.
 pub(super) fn dispatch_permission_select(
     app: &mut AppView,
     option_id: acp::PermissionOptionId,

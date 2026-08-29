@@ -300,8 +300,8 @@ impl SubagentSpawnContext {
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual
     /// model id (the one selected by `resolve_subagent_sampling_config`,
     /// not the parent's). Walks the same precedence as the main session's
-    /// resolver: env > provider model > user [session] > managed per-model
-    /// > GB global > 85.
+    /// resolver: env > provider model > user [session] > GB per-model > GB
+    /// global > 85.
     ///
     /// The GB per-model tier is read from `available_models` (the same
     /// catalog used to pick the subagent's `SamplerConfig`); user TOML and
@@ -381,9 +381,7 @@ impl SubagentSpawnContext {
     }
     /// Whether a completed subagent's worktree is snapshotted into a durable ref
     /// and its directory deleted. Resolution mirrors the other subagent gates
-    /// (env > config > remote settings > default). Default `false` so it ships dark;
-    /// `managed_config.toml` `[features] subagent_worktree_snapshot` is the
-    /// per-deployment rollout lever.
+    /// (env > config > remote settings > default). Default `false` so it ships dark.
     pub fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         crate::agent::config::BoolFlag::env("GROW_SUBAGENT_WORKTREE_SNAPSHOT")
             .config(
@@ -402,15 +400,13 @@ impl SubagentSpawnContext {
     }
     /// Per-tool params for the child's spawn. The ask_user_question timeout is
     /// session-level config, so it is resolved from the same tiers as the
-    /// parent (requirements/env/user/managed from disk; remote from the
-    /// parent's snapshot) and follows the session into subagents. Bash stays
+    /// parent (env/user from disk; remote from the parent's snapshot) and follows
+    /// the session into subagents. Bash stays
     /// on tool defaults, as before that knob existed.
     pub fn resolve_tool_params_json(
         &self,
     ) -> crate::session::agent_rebuild::ResolvedToolParamsJson {
-        let params = crate::util::config::resolve_ask_user_question_params_from_disk(
-            self.remote_settings.as_ref(),
-        );
+        let params = crate::util::config::resolve_ask_user_question_params_from_disk();
         crate::session::agent_rebuild::ResolvedToolParamsJson {
             bash: None,
             ask_user_question: match serde_json::to_value(params) {
@@ -1627,9 +1623,6 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
 fn parent_source_cwd(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
     ctx.parent_cwd.clone()
 }
-/// Effective permission mode for a spawned subagent. Plugin agents never honor
-/// `always-approve`; under the pin it downgrades to `ask` so a repo, profile, or
-/// `--agents` definition cannot restore unattended approval. Caller logs it.
 /// Main repo root for a subagent's source: the durable repo a completion snapshot is transferred into and the repo a resume rehydrates from — both arms MUST resolve this identically.
 fn resolve_subagent_source_repo(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
     let source_cwd = parent_source_cwd(ctx);

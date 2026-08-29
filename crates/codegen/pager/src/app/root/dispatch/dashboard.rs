@@ -1,13 +1,13 @@
 //! Dashboard dispatchers: attach, overlays, rows, renames, and permissions.
 
-use super::ctx::{show_welcome, surface_always_approve_launch_block_notice};
+use super::ctx::{show_welcome, surface_screen_mode_switch_hint};
 use super::dashboard_diagnostics::{
     log_dashboard_attached, log_dashboard_closed, log_dashboard_launched, log_dashboard_opened,
 };
-use super::modes::always_approve_enable_blocked;
 use super::permissions::resolve_permission_queue_transition;
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
+use super::session::fork::open_project_question_with_context;
 use super::session::lifecycle::{
     dispatch_new_session_inner_with_id, dispatch_new_worktree_session,
 };
@@ -258,7 +258,7 @@ pub(super) fn dispatch_exit_dashboard(app: &mut AppView) -> Vec<Effect> {
         if rearm_overlay {
             rearm_session_overlay(app, id);
         }
-        surface_always_approve_launch_block_notice(app, id);
+        surface_screen_mode_switch_hint(app, id);
     } else {
         show_welcome(app);
     }
@@ -339,7 +339,7 @@ pub(super) fn dispatch_dashboard_attach(
             }
             app.active_view = ActiveView::Agent(agent_id);
             log_dashboard_attached(&DashboardRowId::TopLevel(agent_id));
-            surface_always_approve_launch_block_notice(app, agent_id);
+            surface_screen_mode_switch_hint(app, agent_id);
         }
         DashboardRowId::Subagent {
             parent,
@@ -371,7 +371,7 @@ pub(super) fn dispatch_dashboard_attach(
             }
             app.active_view = ActiveView::Agent(parent);
             log_dashboard_attached(&row_id);
-            surface_always_approve_launch_block_notice(app, parent);
+            surface_screen_mode_switch_hint(app, parent);
         }
         DashboardRowId::Roster { session_id } => {
             // A roster row is a leader-hosted session this client is not
@@ -607,15 +607,14 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         ));
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
-    let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    let policy_block = app.always_approve_policy_block;
+    let picker_needed = app.needs_project_picker();
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id.clone());
     if let Some(agent) = app.agents.get_mut(&new_id) {
         apply_pending_dispatch_config(
             agent,
             pending_model.as_ref(),
             pending_behavior,
             pending_permission,
-            policy_block,
         );
     }
     if let Some(d) = app.dashboard.as_mut() {
@@ -632,8 +631,19 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(new_id));
         d.attached_agent = Some(new_id);
     }
+    if picker_needed {
+        effects.extend(open_project_question_with_context(
+            app,
+            String::new(),
+            model_id,
+            false,
+            true,
+            true,
+        ));
+        return effects;
+    }
     app.active_view = ActiveView::Agent(new_id);
-    surface_always_approve_launch_block_notice(app, new_id);
+    surface_screen_mode_switch_hint(app, new_id);
     effects
 }
 
@@ -823,25 +833,11 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
         Some(serde_json::json!({ "path": path.display().to_string() })),
     );
 
-    let changed = app.cwd != path;
+    let changed = commit_cwd_snapshot(app, &path);
     let display = crate::project_picker::sources::display_path(&path);
-    app.cwd = path.clone();
-    // Keep the git-repo flag in sync with the new cwd (it's otherwise only
-    // computed at startup). Worktree dispatch reads it.
-    app.cwd_has_git_ancestor = path.ancestors().any(|p| p.join(".git").exists());
-    // Warm the per-cwd git cache the header / top bar read (keyed on the
-    // new cwd) so the new branch + worktree label show on the next frame
-    // instead of waiting for the first lazy refresh (no git spawn on the
-    // render path).
-    crate::git_info::populate_from_cwd_async(path.clone());
 
     let has_git = app.cwd_has_git_ancestor;
     if let Some(d) = app.dashboard.as_mut() {
-        // Keep the dashboard's cwd + git-repo snapshot in sync with the new
-        // cwd so the header tracks it immediately (the process cwd changes
-        // later, via `Effect::SetWorkingDir`).
-        d.cwd = path.clone();
-        d.cwd_has_git_ancestor = has_git;
         // Carry the picker's worktree toggle onto the dashboard so the next
         // dispatched agent honors it after the modal closes — but only when
         // the destination is a git repo. Worktrees require one, so navigating
@@ -854,11 +850,6 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
         }
         d.location_picker = None;
         if changed {
-            // Re-root the dispatch box's `@` file-context picker at the new
-            // cwd so completions walk the same tree that newly dispatched
-            // sessions run in (both keyed off `app.cwd`). Cheap: the walk
-            // only spawns once the user actually types `@`.
-            d.dispatch.file_search.retarget(&path);
             d.set_info(format!("Working directory: {display}"));
         }
     }
@@ -867,6 +858,31 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
     // stays side-effect free and parallel tests don't leak the process
     // cwd into each other.
     vec![Effect::SetWorkingDir { path }]
+}
+
+/// Commit the application/dashboard view of a working-directory change.
+///
+/// Session creation and dashboard location selection must observe the same
+/// cwd/git snapshot. Keep this reducer-side update together; the process cwd
+/// is still changed later by the returned `SetWorkingDir` effect.
+pub(super) fn commit_cwd_snapshot(app: &mut AppView, path: &std::path::Path) -> bool {
+    let changed = app.cwd != path;
+    app.cwd = path.to_path_buf();
+    app.cwd_has_git_ancestor = path.ancestors().any(|p| p.join(".git").exists());
+    crate::git_info::populate_from_cwd_async(path.to_path_buf());
+
+    let has_git = app.cwd_has_git_ancestor;
+    if let Some(d) = app.dashboard.as_mut() {
+        d.cwd = path.to_path_buf();
+        d.cwd_has_git_ancestor = has_git;
+        if !has_git {
+            d.dispatch_worktree = false;
+        }
+        // Keep dashboard `@` completion rooted at the same directory as a
+        // session selected through the project picker.
+        d.dispatch.file_search.retarget(path);
+    }
+    changed
 }
 
 /// Confirm the dashboard worktree-label dialog: create the next dashboard
@@ -924,14 +940,12 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         // worktree agent (base model is seeded via the effect's `model_id`),
         // then carry any pasted images onto the replayed prompt — both mirror
         // `dispatch_dashboard_dispatch`.
-        let policy_block = app.always_approve_policy_block;
         if let Some(agent) = app.agents.get_mut(&new_id) {
             apply_pending_dispatch_config(
                 agent,
                 pending_model.as_ref(),
                 pending_behavior,
                 pending_permission,
-                policy_block,
             );
             if let Some(entry) = agent.session.pending_prompts.back_mut() {
                 entry.images = std::mem::take(&mut images);
@@ -1022,7 +1036,7 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
         d.focus_row(DashboardRowId::TopLevel(next_id));
     }
     app.active_view = ActiveView::Agent(next_id);
-    surface_always_approve_launch_block_notice(app, next_id);
+    surface_screen_mode_switch_hint(app, next_id);
     vec![]
 }
 
@@ -1121,25 +1135,40 @@ pub(super) fn dispatch_dashboard_dispatch(
                 Vec::new(),
             )
         });
-    let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
+    let picker_needed = app.needs_project_picker();
+    let (prompt_text, mut pasted_images, chip_elements, pending_stash) = if picker_needed {
+        // The complete stash is restored into the placeholder below and is
+        // immediately re-stashed by the picker. This preserves image/chip
+        // ownership while the question view owns input.
+        (
+            prompt_state.text.clone(),
+            Vec::new(),
+            Vec::new(),
+            Some(prompt_state),
+        )
+    } else {
+        let (text, images, chips) = prompt_state.into_submission();
+        (text, images, chips, None)
+    };
     log_dashboard_launched("prompt");
-    let saved_shown = app.project_picker_shown;
-    app.project_picker_shown = true;
-    let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    app.project_picker_shown = saved_shown;
-    let policy_block = app.always_approve_policy_block;
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id.clone());
     if let Some(agent) = app.agents.get_mut(&new_id) {
-        agent.session.enqueue_prompt(prompt_text);
-        if let Some(entry) = agent.session.pending_prompts.back_mut() {
-            entry.images = std::mem::take(&mut pasted_images);
-            entry.chip_elements = chip_elements;
+        if picker_needed {
+            agent
+                .prompt
+                .restore(pending_stash.expect("picker keeps the prompt stash"));
+        } else {
+            agent.session.enqueue_prompt(prompt_text.clone());
+            if let Some(entry) = agent.session.pending_prompts.back_mut() {
+                entry.images = std::mem::take(&mut pasted_images);
+                entry.chip_elements = chip_elements;
+            }
         }
         apply_pending_dispatch_config(
             agent,
             pending_model.as_ref(),
             pending_behavior,
             pending_permission,
-            policy_block,
         );
     }
     crate::prompt_images::drain_and_cleanup(&mut pasted_images);
@@ -1150,6 +1179,17 @@ pub(super) fn dispatch_dashboard_dispatch(
         d.dispatch.set_text("");
         d.clear_feedback();
         d.filter = crate::views::dashboard::Filter::None;
+    }
+    if picker_needed {
+        effects.extend(open_project_question_with_context(
+            app,
+            prompt_text,
+            model_id,
+            true,
+            true,
+            attach,
+        ));
+        return effects;
     }
     if attach {
         // Ctrl+S (Send+Open) — walk into the new agent's
@@ -1165,7 +1205,7 @@ pub(super) fn dispatch_dashboard_dispatch(
             d.attached_agent = Some(new_id);
         }
         app.active_view = ActiveView::Agent(new_id);
-        surface_always_approve_launch_block_notice(app, new_id);
+        surface_screen_mode_switch_hint(app, new_id);
     } else {
         // Plain Enter (Send) stays on the dashboard, no auto-select.
         // The freshly-created row is left unselected so the overview
@@ -1173,15 +1213,6 @@ pub(super) fn dispatch_dashboard_dispatch(
         // always dispatches a NEW session regardless of selection, so
         // there's no reply state to worry about here.
         app.active_view = ActiveView::AgentDashboard;
-        // `apply_pending_dispatch_config` clamps a pinned always-approve to
-        // Normal and toasts the new agent, but that toast is invisible while the
-        // view stays on the dashboard — mirror it on the dashboard's error slot.
-        let enabling = pending_permission.is_always_approve();
-        if let Some(warning) = always_approve_enable_blocked(app, enabling)
-            && let Some(d) = app.dashboard.as_mut()
-        {
-            d.set_warning(warning);
-        }
     }
     effects
 }
@@ -1441,15 +1472,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             vec![]
         }
         CommandResult::Action(Action::SetPermissionMode(permission)) => {
-            if permission.is_always_approve()
-                && let Some(warning) = always_approve_enable_blocked(app, true)
-            {
-                if let Some(d) = app.dashboard.as_mut() {
-                    d.dispatch.set_text("");
-                    d.set_warning(warning);
-                }
-                return vec![];
-            }
             let permission = if permission.is_auto() && !app.auto_mode_gate {
                 crate::app::actions::PermissionModeKind::Ask
             } else {
@@ -1540,7 +1562,6 @@ pub(super) fn apply_pending_dispatch_config(
     pending_model: Option<&crate::views::dashboard::PendingDispatchModel>,
     pending_behavior: tools::types::BehaviorId,
     pending_permission: crate::app::actions::PermissionModeKind,
-    policy_block: Option<&'static str>,
 ) {
     if let Some(m) = pending_model {
         // The base model is seeded via `CreateSession.model_id`; only stash a
@@ -1555,14 +1576,7 @@ pub(super) fn apply_pending_dispatch_config(
     agent.session.permission_mode = match pending_permission {
         crate::app::actions::PermissionModeKind::Auto => shell::util::config::PermissionMode::Auto,
         crate::app::actions::PermissionModeKind::AlwaysApprove => {
-            // Backstop: staging is already gated, but this write sits outside
-            // the session-mode setter, so re-check managed policy here.
-            if let Some(warning) = policy_block {
-                agent.show_toast(warning);
-                shell::util::config::PermissionMode::Ask
-            } else {
-                shell::util::config::PermissionMode::AlwaysApprove
-            }
+            shell::util::config::PermissionMode::AlwaysApprove
         }
         crate::app::actions::PermissionModeKind::Ask => shell::util::config::PermissionMode::Ask,
     };
@@ -1675,7 +1689,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
             d.attached_agent = Some(agent_id);
         }
         app.active_view = ActiveView::Agent(agent_id);
-        surface_always_approve_launch_block_notice(app, agent_id);
+        surface_screen_mode_switch_hint(app, agent_id);
     }
 
     effects

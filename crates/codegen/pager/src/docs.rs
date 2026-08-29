@@ -146,6 +146,11 @@ pub static USER_GUIDE: &[Doc] = &[
         "Local Diagnostics and Usage",
         "Inspect local logs and usage without telemetry uploads"
     ),
+    guide!(
+        "25-custom-logo.md",
+        "Customizing the Grow Logo",
+        "Replace the built-in character-art logo with UTF-8 files"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they

@@ -7,12 +7,8 @@ use config::env_bool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum ConfigSource {
-    Requirement,
     Cli,
     Env,
-    SystemManagedConfig,
-    ManagedConfig,
-    UserConfig,
     Config,
     Remote,
     Default,
@@ -36,13 +32,11 @@ impl<T: std::fmt::Display> std::fmt::Display for Resolved<T> {
         write!(f, "{} ({})", self.value, self.source)
     }
 }
-/// Resolve a boolean feature flag: requirement > cli > env > config > managed > feature flag > default.
+/// Resolve a boolean feature flag: cli > env > config > feature flag > default.
 pub struct BoolFlag<'a> {
-    requirement: Option<bool>,
     cli: Option<bool>,
     env_var: &'a str,
     config: Option<bool>,
-    managed: Option<bool>,
     feature_flag: Option<bool>,
     default: bool,
 }
@@ -50,30 +44,20 @@ pub struct BoolFlag<'a> {
 impl<'a> BoolFlag<'a> {
     pub fn env(env_var: &'a str) -> Self {
         Self {
-            requirement: None,
             cli: None,
             env_var,
             config: None,
-            managed: None,
             feature_flag: None,
             default: false,
         }
     }
 
-    pub fn requirement(mut self, v: Option<bool>) -> Self {
-        self.requirement = v;
-        self
-    }
     pub fn cli(mut self, v: Option<bool>) -> Self {
         self.cli = v;
         self
     }
     pub fn config(mut self, v: Option<bool>) -> Self {
         self.config = v;
-        self
-    }
-    pub fn managed(mut self, v: Option<bool>) -> Self {
-        self.managed = v;
         self
     }
     pub fn feature_flag(mut self, v: Option<bool>) -> Self {
@@ -87,11 +71,9 @@ impl<'a> BoolFlag<'a> {
 
     pub fn resolve(self) -> Resolved<bool> {
         resolve_bool_flag(
-            self.requirement,
             self.cli,
             self.env_var,
             self.config,
-            self.managed,
             self.feature_flag,
             self.default,
         )
@@ -99,17 +81,12 @@ impl<'a> BoolFlag<'a> {
 }
 
 fn resolve_bool_flag(
-    requirement: Option<bool>,
     cli_arg: Option<bool>,
     env_var: &str,
     config_val: Option<bool>,
-    managed_val: Option<bool>,
     feature_flag_val: Option<bool>,
     default: bool,
 ) -> Resolved<bool> {
-    if let Some(val) = requirement {
-        return Resolved::new(val, ConfigSource::Requirement);
-    }
     if let Some(val) = cli_arg {
         return Resolved::new(val, ConfigSource::Cli);
     }
@@ -118,9 +95,6 @@ fn resolve_bool_flag(
     }
     if let Some(val) = config_val {
         return Resolved::new(val, ConfigSource::Config);
-    }
-    if let Some(val) = managed_val {
-        return Resolved::new(val, ConfigSource::ManagedConfig);
     }
     if let Some(val) = feature_flag_val {
         return Resolved::new(val, ConfigSource::Remote);
@@ -131,12 +105,12 @@ fn resolve_bool_flag(
 ///
 /// The session search index is ON by default. `enabled = false` turns the
 /// index off for the current process; the gate resolves
-/// `GROW_SESSION_SEARCH` (env) and a `requirements.toml` `[features]
-/// session_search` pin above this table, mirroring [`BoolFlag`] precedence.
+/// `GROW_SESSION_SEARCH` (env) above this table, mirroring [`BoolFlag`]
+/// precedence.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct SessionSearchConfig {
-    /// Master switch. `None` (unset) defers to env / requirements / default
+    /// Master switch. `None` (unset) defers to env / default
     /// (`true`). `Some(false)` turns the index off for the process.
     pub enabled: Option<bool>,
 }

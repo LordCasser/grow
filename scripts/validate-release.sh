@@ -7,7 +7,21 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-release_tag="${1:-v2.0.2}"
+usage() {
+  cat >&2 <<'USAGE'
+Usage: bash scripts/validate-release.sh <release-tag>
+
+Validate an annotated local release tag against the current committed tree,
+workspace version, release notes, and workflow contracts.
+USAGE
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+release_tag="$1"
 release_workflow=".github/workflows/release.yml"
 build_workflow=".github/workflows/build-one.yml"
 

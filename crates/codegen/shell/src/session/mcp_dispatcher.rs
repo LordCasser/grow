@@ -6,7 +6,7 @@
 //! - the [`::mcp::servers::GrowClientHandler`] (server-pushed
 //!   `tools/list_changed` and `resources/list_changed`),
 //! - the `ensure_initialized` success/failure path,
-//! - the session/managed-config diff path.
+//! - the session config-reload diff path.
 //!
 //! Coalesces events in a **50 ms tumbling window** keyed by
 //! `(server_name, McpClientEventKind)`. Two events with the same key

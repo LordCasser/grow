@@ -13,8 +13,8 @@
 //!    `[mcp] max_output_bytes`, seeded per session by the shell) / default,
 //!    when present in resources
 //! 2. Host-seeded effective limit via [`set_mcp_max_output_bytes`] (host
-//!    resolves requirements > env > config > remote config > default once at
-//!    bootstrap / remote-config refresh and stores the result)
+//!    resolves env > global config > default once at bootstrap and stores the
+//!    result)
 //! 3. When host has not seeded (`0`): env
 //!    [`ENV_GROW_MAX_MCP_OUTPUT_BYTES`] / [`ENV_MAX_MCP_OUTPUT_BYTES`]
 //! 4. Built-in default
@@ -47,8 +47,8 @@ static EFFECTIVE_MCP_MAX_OUTPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Host (shell) sets the fully-resolved MCP output cap in bytes.
 ///
-/// Pass the already-resolved limit (requirements > env > config > remote config >
-/// default). Pass `0` only in tests to clear and fall through to env / default.
+/// Pass the already-resolved limit (env > global config > default). Pass `0`
+/// only in tests to clear and fall through to env / default.
 pub fn set_mcp_max_output_bytes(bytes: usize) {
     EFFECTIVE_MCP_MAX_OUTPUT_BYTES.store(bytes, Ordering::Relaxed);
 }

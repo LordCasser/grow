@@ -16,15 +16,6 @@ pub use permission::*;
 mod pool;
 pub use pool::*;
 use serde::{Deserialize, Serialize};
-/// A remote `campaigns[]` entry: an `id` gate plus a full-power
-/// flattened config patch (the JSON sibling of a `[[campaigns]]` TOML override).
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct CampaignOverride {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(flatten, default)]
-    pub patch: serde_json::Map<String, serde_json::Value>,
-}
 /// Doom-loop recovery settings: ONE struct serves both the local
 /// `[doom_loop_recovery]` TOML table and the remote settings
 /// `doom_loop_recovery` JSON object, so the two stay 1:1. All fields are
@@ -504,7 +495,7 @@ pub struct RemoteSettings {
     /// a per-folder trust decision before they are spawned. `Some(true)`
     /// enables, `Some(false)` is a kill-switch, `None` falls back to the client
     /// default (on). Sits below env `GROW_FOLDER_TRUST`, user
-    /// `[folder_trust] enabled`, and managed config in the resolver chain. See
+    /// `[folder_trust] enabled`, and remote settings in the resolver chain. See
     /// `agent::folder_trust::feature_enabled`.
     #[serde(default)]
     pub folder_trust_enabled: Option<bool>,
@@ -520,11 +511,11 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub inference_idle_timeout_secs: Option<u64>,
     /// Global default MCP startup-handshake timeout (seconds); lowest-precedence
-    /// fallback (per-server config, env, and requirements/managed override it).
+    /// fallback (per-server config, env, and remote settings override it).
     #[serde(default)]
     pub mcp_startup_timeout_secs: Option<u64>,
     /// remote settings `grow_build_settings.max_mcp_output_bytes` — global default
-    /// MCP tool-result inline cap (bytes). Overridden by requirements, env,
+    /// MCP tool-result inline cap (bytes). Overridden by env,
     /// and `config.toml [mcp] max_output_bytes`. Built-in default 20_000.
     #[serde(default)]
     pub max_mcp_output_bytes: Option<u64>,
@@ -547,9 +538,6 @@ pub struct RemoteSettings {
     pub goal_enabled: Option<bool>,
     #[serde(default)]
     pub workflows_enabled: Option<bool>,
-    /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
-    #[serde(default)]
-    pub managed_config_signature_verification: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries,
     /// one tip is shown at startup (rotated daily by UTC day).
     /// `None` or `[]` = no tips shown.
@@ -584,8 +572,6 @@ pub struct RemoteSettings {
     /// Server-recommended default model ID for new sessions.
     #[serde(default)]
     pub default_model: Option<String>,
-    #[serde(default)]
-    pub campaigns: Vec<CampaignOverride>,
     /// When `Some(true)`, foreground commands that hit the default timeout are
     /// auto-backgrounded instead of killed. Fallback when no local
     /// `[toolset.bash] auto_background_on_timeout` is set in config.toml.
@@ -598,7 +584,7 @@ pub struct RemoteSettings {
     pub allow_background_operator: Option<bool>,
     /// remote settings fallback for `[toolset.ask_user_question] timeout_enabled`.
     /// When `Some(false)`, questionnaires wait forever unless a higher tier
-    /// (requirements / env / user / managed config) sets otherwise.
+    /// (env / user / remote settings) sets otherwise.
     #[serde(default)]
     pub ask_user_question_timeout_enabled: Option<bool>,
     /// remote settings fallback for `[toolset.ask_user_question] timeout_secs`
@@ -679,15 +665,14 @@ pub struct RemoteSettings {
     /// Whether the TUI shows agent thinking/reasoning blocks in scrollback.
     /// `None` defers to local config / env / default (`true`).
     /// `Some(false)` is a remote kill-switch. Resolved via
-    /// `resolve_show_thinking_blocks` (requirements > env > user > managed >
-    /// remote > default true).
+    /// `resolve_show_thinking_blocks` (env > user > remote > default true).
     #[serde(default)]
     pub show_thinking_blocks: Option<bool>,
     /// Whether the TUI folds runs of consecutive non-destructive tool calls
     /// (reads/searches/lists) into one transcript row. `None` defers to local
     /// config / env / default (`true`). `Some(false)` is a remote
-    /// kill-switch. Resolved via `resolve_group_tool_verbs` (requirements >
-    /// env > user > managed > remote > default true).
+    /// kill-switch. Resolved via `resolve_group_tool_verbs` (env > user >
+    /// remote > default true).
     #[serde(default)]
     pub group_tool_verbs: Option<bool>,
     /// Display-refresh probe + auto-cadence. See [`DisplayRefreshSettings`].

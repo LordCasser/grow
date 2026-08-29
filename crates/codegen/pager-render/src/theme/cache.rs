@@ -229,8 +229,7 @@ pub fn resolve_initial_theme_no_osc11() -> ThemeKind {
 // friends) via `Effect::PersistSetting`. This module only READS from the
 // shell's layered effective config.
 
-/// Read the theme from the effective config (managed_config.toml merged
-/// under config.toml — user wins).
+/// Read the theme from the effective global config.
 ///
 /// Reads the canonical `[ui].theme` key.
 fn load_from_disk() -> Option<ThemeKind> {

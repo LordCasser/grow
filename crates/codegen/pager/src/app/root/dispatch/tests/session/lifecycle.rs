@@ -1482,14 +1482,104 @@ fn entry_title_falls_back_to_short_session_id_when_no_prompt() {
     assert_eq!(title, "session abcdef01");
 }
 #[test]
-fn new_session_defers_create_session_for_non_project_dir() {
+fn new_session_opens_project_picker_before_creating_session_for_non_project_dir() {
     let mut app = project_picker_app();
     let effects = dispatch(Action::NewSession, &mut app);
-    assert!(app.agents.contains_key(&AgentId(0)));
+    let agent = app.agents.get(&AgentId(0)).expect("placeholder agent");
+    assert!(matches!(
+        agent
+            .question_view
+            .as_ref()
+            .and_then(|q| q.local_kind.as_ref()),
+        Some(crate::views::question_view::LocalQuestionKind::ProjectSelect { .. })
+    ));
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::CreateSession { .. })),
+    );
+}
+
+#[test]
+fn initial_prompt_is_attached_to_the_already_open_project_picker() {
+    let mut app = project_picker_app();
+    dispatch(Action::NewSession, &mut app);
+
+    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+
+    let agent = app.agents.get(&AgentId(0)).expect("placeholder agent");
+    let Some(crate::views::question_view::LocalQuestionKind::ProjectSelect {
+        stashed_prompt, ..
+    }) = agent
+        .question_view
+        .as_ref()
+        .and_then(|q| q.local_kind.as_ref())
+    else {
+        panic!("project picker must remain open");
+    };
+    assert_eq!(stashed_prompt, "hello");
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn welcome_draft_survives_picker_with_model_and_preferred_session_id() {
+    use crate::views::question_view::QuestionSelection;
+
+    let mut app = project_picker_app();
+    let model_id = acp::ModelId::new("picker-model");
+    app.deferred_startup.preferred_session_id = Some("preferred-picker-session".into());
+    let effects = dispatch_new_session_inner(&mut app, Some(model_id.clone()));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateSession { .. }))
+    );
+
+    let registry = crate::actions::ActionRegistry::defaults();
+    let mut child_effects = Vec::new();
+    let agent = app.agents.get_mut(&AgentId(0)).expect("placeholder agent");
+    agent
+        .handle_project_picker_backing_prompt_input(
+            &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('h'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &registry,
+            &mut child_effects,
+        )
+        .expect("project picker owns the backing prompt");
+    agent
+        .handle_project_picker_backing_prompt_input(
+            &crossterm::event::Event::Paste("ello".into()),
+            &registry,
+            &mut child_effects,
+        )
+        .expect("paste is parked behind the picker");
+    agent
+        .question_view
+        .as_mut()
+        .expect("project picker")
+        .selections[0] = QuestionSelection::Single(Some(0));
+    let outcome = agent.submit_question_answers_for_test(false);
+    let crate::app::root::InputOutcome::Action(action) = outcome else {
+        panic!("project selection must dispatch an action");
+    };
+
+    let effects = dispatch(action, &mut app);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CreateSession {
+            model_id: Some(actual_model),
+            preferred_session_id: Some(preferred),
+            ..
+        } if actual_model == &model_id && preferred == "preferred-picker-session"
+    )));
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.prompt.text(), "hello");
+    assert_eq!(
+        agent.session.queue_len(),
+        0,
+        "a Welcome draft is not submitted"
     );
 }
 #[test]
@@ -1532,6 +1622,74 @@ async fn project_selected_creates_session_and_sends_prompt() {
             .any(|e| matches!(e, Effect::CreateSession { cwd, .. } if cwd == &selected))
     );
     assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+#[test]
+fn duplicate_project_selected_consumes_one_create_token() {
+    let mut app = project_picker_app();
+    dispatch(Action::NewSession, &mut app);
+    let id = AgentId(0);
+    let first = dunce::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    let effects = dispatch(
+        Action::ProjectSelected {
+            path: first.clone(),
+            stashed_prompt: String::new(),
+            disable_picker: false,
+        },
+        &mut app,
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::CreateSession { .. }))
+            .count(),
+        1
+    );
+    let cwd_after_first = app.cwd.clone();
+    let second = dunce::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let late = dispatch(
+        Action::ProjectSelected {
+            path: second,
+            stashed_prompt: "late".into(),
+            disable_picker: true,
+        },
+        &mut app,
+    );
+    assert!(late.is_empty(), "late selection must be a pure no-op");
+    assert_eq!(
+        app.cwd, cwd_after_first,
+        "late selection must not change cwd"
+    );
+    assert_eq!(app.agents[&id].session.cwd, cwd_after_first);
+    assert!(!app.project_picker_disabled, "late disable must not apply");
+}
+
+#[test]
+fn project_selection_updates_dashboard_cwd_and_git_snapshot() {
+    let mut app = project_picker_app();
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    dispatch(Action::NewSession, &mut app);
+    let tmp = tempfile::tempdir().expect("temporary git directory");
+    std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
+    let selected = dunce::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
+    let effects = dispatch(
+        Action::ProjectSelected {
+            path: selected.clone(),
+            stashed_prompt: String::new(),
+            disable_picker: false,
+        },
+        &mut app,
+    );
+    let dashboard = app.dashboard.as_ref().expect("dashboard snapshot");
+    assert_eq!(app.cwd, selected);
+    assert_eq!(dashboard.cwd, selected);
+    assert!(app.cwd_has_git_ancestor);
+    assert!(dashboard.cwd_has_git_ancestor);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SetWorkingDir { path } if path == &selected
+    )));
 }
 #[test]
 fn bg_task_killed_no_op_for_unknown_session() {

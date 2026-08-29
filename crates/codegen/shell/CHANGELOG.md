@@ -1,5 +1,13 @@
 # Changelog
 
+# 2.0.4 — 2026-08-30
+
+2.0.4 收敛为全局与项目两级本地配置，明确各子系统的项目覆盖单位与 folder-trust 边界；新 session 在创建前显示项目选择器，保留
+Welcome 草稿与 session 路由；并支持按终端尺寸动态选择可替换的字符 Logo。Timeline v21、Sideband v6、Trajectory v3
+均未变更，2.0.1 及之后的 session 无需迁移。
+
+完整发布说明见 [changelogs/2.0.4.md](changelogs/2.0.4.md)。
+
 # 2.0.3 — 2026-08-29
 
 ## Context pressure and compaction recovery

@@ -63,7 +63,7 @@ CLI overrides configuration for that process.
 
 ### Always-approve
 
-Skips ordinary permission prompts so tools run without waiting for a click. `deny` rules, hooks, and some shell `ask` rules still apply. Admins can lock the mode off (below).
+Skips ordinary permission prompts so tools run without waiting for a click. `deny` rules, hooks, and some shell `ask` rules still apply.
 
 | Mechanism | Example |
 | --------- | ------- |
@@ -77,10 +77,13 @@ Skips ordinary permission prompts so tools run without waiting for a click. `den
 Keep always-approve for automation, and add deny rules for paths or commands you never want run:
 
 ```toml
-# project .grow/config.toml
+# $GROW_HOME/config.toml
 [ui]
 permission_mode = "always-approve"
+```
 
+```toml
+# <project>/.grow/config.toml
 [permission]
 deny = [
   "Bash(rm -rf *)",
@@ -115,24 +118,13 @@ classifier unavailable and uses the normal user-approval fallback. If `classifie
 the current primary-session model is used. With no explicit effort, Grow uses model configuration
 when present and otherwise omits the field for the upstream service.
 
-Subagent Auto is not a classifier on every tool call. A child receives immutable initial RWX from its Agent definition and delegated ceiling. Ordinary Bash, edit, read, and MCP calls covered by that RWX do not invoke the primary model and do not produce approval audit rows. A hard-eligible exact call outside initial RWX is invoked directly and sent through the primary-context judgment branch; allowing it signs only one permit bound to the frozen arguments and does not widen the child session. A secondary shell-risk signal can request the same decision even for an in-RWX call. Ask displays locked calls on the owning primary task with allow-once/reject-once only. Managed deny/ask rules and protected or interactive human boundaries remain binding.
+Subagent Auto is not a classifier on every tool call. A child receives immutable initial RWX from its Agent definition and delegated ceiling. Ordinary Bash, edit, read, and MCP calls covered by that RWX do not invoke the primary model and do not produce approval audit rows. A hard-eligible exact call outside initial RWX is invoked directly and sent through the primary-context judgment branch; allowing it signs only one permit bound to the frozen arguments and does not widen the child session. A secondary shell-risk signal can request the same decision even for an in-RWX call. Ask displays locked calls on the owning primary task with allow-once/reject-once only. Configured deny/ask rules and protected or interactive human boundaries remain binding.
 
 An unresolved Auto boundary request is judged by the primary session's current model. `[subagents].classifier_input = "context"` (the default) uses a read-only authorization view of the primary task: genuine user prompts and user interjections are retained, while assistant text, tool results, compaction summaries, and synthetic user-role messages are excluded. `"request_only"` sends only the structured proposed action to reduce token use. The temporary judgment message and its structured result are never added to chat history, memory, compaction, or future subagent context. `classifier_model` does not override this child path. Responses and Messages use their native JSON Schema output; the provider-neutral Chat Completions path uses JSON Object mode so OpenAI-compatible providers such as DeepSeek and BigModel receive the wire shape they support, followed by the same strict local schema check. The response must be exactly `{"decision":"allow"|"deny","reason":"..."}` with a non-empty reason and no extra fields, Markdown fence, prose, or trailing content. An empty response, schema-invalid response, recoverable API/transport failure, or per-attempt timeout is retransmitted at most once; both attempts share one total judgment deadline, so retry cannot double the time the child waits. Authentication, invalid-request, and other non-retryable errors fail immediately. Exhaustion fails closed for that exact call without opening an ordinary approval prompt or terminating the child.
 
 The parent TUI persists these decisions as structured UI-only audit rows. Every permission received before the primary agent's next real `TurnCompleted` joins one stable summary even when status and tool rows appear between events. Expand the group to see one line per decision, then double-click a row for the complete live request, complete classifier reason, outcome, and latency. The durable replay copy deliberately contains only a labeled, redacted replay-safe summary so commands, MCP arguments, and URL secrets never enter `updates.jsonl`. Audit details do not become conversation items.
 
 For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
-
-### Disable always-approve (administrators)
-
-Organizations can prevent always-approve from being enabled via CLI, TUI, or `/always-approve`. Set this in `requirements.toml` (user-level under `~/.grow/`, or system-wide under `/etc/grow/` for enforcement users cannot remove):
-
-```toml
-[ui]
-disable_bypass_permissions_mode = true
-```
-
-Do not use `permission_mode` for this lock; that key is a switchable default.
 
 ---
 
@@ -275,8 +267,6 @@ The structured `tool` field accepts the lowercase names `bash`, `read`, `edit`, 
 Because `deny` always wins, you cannot combine these `allow` rules with a catch-all `deny` on `bash` to mean "only allow git/gh"; a `deny tool = "bash"` rule would block `git` and `gh` too. For a procedural deny-by-default policy, use a `pre_tool_use` hook (below).
 
 Rules from the global `~/.grow/config.toml` and every project `.grow/config.toml` from the repo root down to the working directory are merged into one rule set.
-
-Managed configuration deployed by your organization also contributes `[permission]` rules: the system `/etc/grow/managed_config.toml`, and a user-level copy that Grow maintains automatically at `~/.grow/managed_config.toml`. Managed rules merge like rules from any other source, with two properties specific to managed `allow` rules: your own `deny` and `ask` rules win over a managed `allow` (severity ordering), and a catch-all managed `allow` is ignored when always-approve is locked off. For rules that users cannot edit away, use the root-owned system `/etc/grow/requirements.toml`.
 
 Permission rules from every source are read once, when a session starts. Changes apply to the next session.
 

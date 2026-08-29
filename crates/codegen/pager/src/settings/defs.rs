@@ -584,7 +584,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned `[ui].remember_tool_approvals`. Gates the per-tool
         // "Always allow …" prompt options. `restart_required` — resolved at
-        // permission-manager spawn (also fed by env/requirements/managed/remote settings).
+        // permission-manager spawn (also fed by environment and runtime feature settings).
         SettingMeta {
             key: "remember_tool_approvals",
             category: SettingCategory::Agent,
@@ -915,8 +915,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         // SHELL-owned `[toolset.ask_user_question].timeout_enabled`. Surfaces
-        // the user-config layer of the tiered timeout gate (requirements/env/
-        // managed/remote settings feed the effective value at agent build); the
+        // the user-config layer of the timeout gate (environment and runtime
+        // feature settings feed the effective value at agent build); the
         // default is the resolver-shared const. `restart_required` — resolved
         // when an agent is built, like `remember_tool_approvals`.
         SettingMeta {

@@ -166,26 +166,6 @@ pub(super) fn dispatch_set_behavior_mode(
     }
 }
 
-/// The single gate for client paths that ENABLE always-approve: `Some(reason)`
-/// iff `enabling` and the pin (`app.always_approve_policy_block`) is set. Every enabling
-/// path routes through here (or [`refuse_if_always_approve_locked`]) so new paths stay
-/// gated by default; callers must NOT persist on a refusal.
-pub(super) fn always_approve_enable_blocked(app: &AppView, enabling: bool) -> Option<&'static str> {
-    if enabling {
-        app.always_approve_policy_block
-    } else {
-        None
-    }
-}
-
-/// `Vec<Effect>` wrapper for the persisting setters: on a refusal, toast and
-/// return `Some(vec![])` (no persist); `None` means proceed.
-fn refuse_if_always_approve_locked(app: &mut AppView, enabling: bool) -> Option<Vec<Effect>> {
-    let warning = always_approve_enable_blocked(app, enabling)?;
-    app.show_toast(warning);
-    Some(vec![])
-}
-
 /// When the auto gate is off, force the displayed permission mode off Auto and
 /// clamp every agent's per-session mode, so the UI, selectors, settings
 /// snapshot, and each tab's badge never show Auto while the feature is
@@ -206,16 +186,11 @@ pub(crate) fn downgrade_displayed_auto_if_gated(app: &mut AppView) {
     }
 }
 
-/// Canonical mode inherited by a newly created session. Runtime policy gates
-/// clamp stale settings projections at this boundary.
+/// Canonical mode inherited by a newly created session. The auto feature gate
+/// clamps stale settings projections at this boundary.
 pub(crate) fn inherit_permission_mode(app: &AppView) -> shell::util::config::PermissionMode {
     match app.default_permission_mode {
         shell::util::config::PermissionMode::Auto if !app.auto_mode_gate => {
-            shell::util::config::PermissionMode::Ask
-        }
-        shell::util::config::PermissionMode::AlwaysApprove
-            if app.always_approve_policy_block.is_some() =>
-        {
             shell::util::config::PermissionMode::Ask
         }
         mode => mode,
@@ -223,10 +198,6 @@ pub(crate) fn inherit_permission_mode(app: &AppView) -> shell::util::config::Per
 }
 
 fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config::PermissionMode) {
-    if always_approve_enable_blocked(app, mode.is_always_approve()).is_some() {
-        tracing::warn!("always-approve enable blocked by managed policy");
-        return;
-    }
     let ActiveView::Agent(id) = app.active_view else {
         return;
     };
@@ -322,11 +293,6 @@ pub(super) fn set_permission_mode(
         } else {
             kind
         };
-    // Managed policy pins always-approve off — keep the modal on live state.
-    if let Some(blocked) = refuse_if_always_approve_locked(app, kind.is_always_approve()) {
-        refresh_open_settings_modals(app);
-        return blocked;
-    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -371,9 +337,6 @@ pub(super) fn set_default_permission_mode(
     if matches!(kind, crate::app::actions::PermissionModeKind::Auto) && !app.auto_mode_gate {
         app.show_toast("Auto permission mode is unavailable");
         return vec![];
-    }
-    if let Some(blocked) = refuse_if_always_approve_locked(app, kind.is_always_approve()) {
-        return blocked;
     }
     let previous = shell::util::config::permission_mode_canonical_str(app.default_permission_mode);
     if previous == kind.as_canonical() {

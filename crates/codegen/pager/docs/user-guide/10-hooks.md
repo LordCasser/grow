@@ -64,12 +64,10 @@ Hooks are discovered from several places (all are merged):
 |-------|------|----------|-------|
 | Global | `~/.grow/hooks/*.json` | Always | Personal hooks |
 | Project | `<project>/.grow/hooks/*.json` | Requires trust | Per-repo automation |
-| Config | `~/.grow/config.toml` | Always | Your hooks alongside the rest of your config |
-| Config | `managed_config.toml` (`$GROW_HOME` and `/etc/grow`) | Always | Organization-distributed hooks (server-synced and on-device) |
-| Config | `requirements.toml` (user and system) | Always | Organization-distributed hooks in the requirements layer |
+| Config | `$GROW_HOME/config.toml` | Always | Hooks declared alongside the rest of your config |
 | Plugin | Bundled inside installed plugins | Per-plugin | Shared team hooks |
 
-Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format.
+Config-file hooks live in the same TOML as the rest of your Grow settings; see [Hooks in Config Files](#hooks-in-config-files) for the format.
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run -- until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grow/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grow/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
@@ -139,13 +137,12 @@ Each `.json` file can define hooks for multiple events:
 
 ## Hooks in Config Files
 
-Hooks can also live directly in your Grow config, so a team can distribute them with the rest of their configuration instead of shipping separate JSON files. The same `hooks` object is read from three TOML files:
+Hooks can also live directly in your Grow config instead of shipping separate JSON files. The
+`hooks` object is read from the global config:
 
 | File | Tier | Who sets it |
 |------|------|-------------|
-| `~/.grow/config.toml` | User | You |
-| `managed_config.toml` (`$GROW_HOME`, `/etc/grow`) | Managed / system | Your organization |
-| `requirements.toml` (user and system) | Requirements | Your organization |
+| `$GROW_HOME/config.toml` | Global | You |
 
 The TOML is structurally identical to the JSON hook object, so an existing hook transliterates directly:
 
@@ -172,8 +169,8 @@ timeout = 10
 
 Prefer the inline form to avoid repeating the `[[hooks.<Event>.hooks]]` header for each handler.
 
-- **Additive across layers.** Every layer's hooks run; a lower-priority layer adds hooks but never replaces another layer's block. A hook defined identically in more than one layer is deduplicated, keeping the highest-authority copy.
-- **Provenance labels.** Config hooks appear in `/hooks` tagged by origin (`managed:`, `requirements/user:`, `user:`, and so on) so you can see which layer contributed each one.
+- **Additive across sources.** Config-file hooks and file-based hooks both run. A hook defined identically in more than one source is deduplicated, keeping the config copy.
+- **Provenance labels.** Config hooks appear in `/hooks` tagged by origin (`user:`) so you can see which source contributed each one.
 - **No read-time expansion.** A literal `${VAR}` in a `command` or `url` reaches the hook runner unchanged, matching JSON hook-file semantics; the runner performs the single expansion.
 
 ---

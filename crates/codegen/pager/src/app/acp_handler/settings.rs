@@ -107,28 +107,10 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         return false;
     };
 
-    // Reseed this process's remote-campaign cache. In leader mode no in-process
-    // agent seeds the TUI process, and the bounded startup prefetch can miss —
-    // without this reseed a remote campaign stays invisible to
-    // `resolve_dismissable_campaigns`, so a `/model` pick never records its
-    // dismissal and the leader re-nudges every new session. Idempotent in
-    // embedded mode, where the in-process agent seeds the same cache.
-    if let Some(campaigns) = update.campaigns.clone() {
-        let rs = shell::util::config::RemoteSettings {
-            campaigns,
-            ..Default::default()
-        };
-        shell::util::config::set_remote_campaigns_from_settings(Some(&rs));
-    }
-
     if let Some(v) = update.auto_permission_mode_enabled {
-        // Keep the pager's auto-permission-mode gate live with the remote settings
-        // remote tier (the leader caches it agent-side; the pager process needs
-        // its own copy). Refresh the startup snapshot so permission selectors
-        // and the settings modal both reflect a remote-only enablement/kill-switch
-        // without a restart.
-        shell::util::config::cache_remote_auto_permission_mode_enabled(Some(v));
-        app.auto_mode_gate = shell::util::config::auto_permission_mode_enabled_from_disk();
+        // The agent resolves the local config and publishes the effective gate
+        // after reload; the pager keeps that snapshot without another cache tier.
+        app.auto_mode_gate = v;
         // Mid-session kill switch: when the gate just went off, drop displayed
         // Auto to Ask + clear every agent's per-session flag (shared with the
         // startup reconcile), AND tell live sessions to leave Auto. Clearing only
@@ -188,33 +170,19 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             .unwrap_or(remote_val);
         app.session_picker_grouped = resolved;
     }
-    // Load config layers once for tips + group_tool_verbs resolution. Loaded
-    // unconditionally because updates are rare (post-auth refresh, `/new`).
-    let (requirements, user_config, managed_config) = (
-        shell::config::load_merged_requirements(),
-        shell::config::load_from_disk().ok(),
-        shell::config::load_managed_config().ok(),
-    );
+    // Load the local config once for tips + group_tool_verbs resolution.
+    // Updates are rare (post-auth refresh, `/new`).
+    let user_config = shell::config::load_from_disk().ok();
 
-    // Local layers may beat remote — re-resolve the full chain into the render
-    // cache (mirrors the event_loop.rs startup resolve). Runs on None too: the
-    // shell always publishes this field from its live remote tier, so None
-    // means remote settings cleared it (or an older shell that cannot deliver the
-    // remote tier at all) — either way resolving without a remote value is
-    // correct, and it reverts a previously cached remote enable back to the
-    // local/default (off) resolution instead of leaving Some(true) stuck
-    // until restart.
+    // Re-resolve the local config plus the live backend setting into the render
+    // cache. Runs on None too, so clearing the backend value reverts a previous
+    // remote enable to the local/default resolution.
     let remote = shell::util::config::RemoteSettings {
         group_tool_verbs: update.group_tool_verbs,
         ..Default::default()
     };
-    let resolved = shell::util::config::resolve_group_tool_verbs(
-        requirements.as_ref(),
-        user_config.as_ref(),
-        managed_config.as_ref(),
-        Some(&remote),
-    )
-    .value;
+    let resolved =
+        shell::util::config::resolve_group_tool_verbs(user_config.as_ref(), Some(&remote)).value;
     // On a real flip, re-fold every live transcript (mirrors dispatch's
     // set_group_tool_verbs_inner); unchanged values keep `/new` cheap.
     // Stale expansion ids describe the old grouping shape — drop them so the
@@ -232,16 +200,11 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         }
     }
 
-    // Re-resolve tips from config layers + the updated remote tips.
-    if let Some(remote_tips) = update.tips {
+    // A tips update invalidates the cached local tip selection.
+    if update.tips.is_some() {
         use shell::util::config::resolve_tips;
 
-        app.tips = resolve_tips(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            Some(&remote_tips),
-        );
+        app.tips = resolve_tips(user_config.as_ref());
         if !app.tips.is_empty() {
             let grow_home = tools::util::grow_home::grow_home();
             app.tip = shell::util::tips::pick_and_advance(&app.tips, &grow_home);
@@ -250,17 +213,13 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         }
     }
 
-    // Re-resolve dropdown tags only when the update carries the field. Some(None) =
-    // remote cleared (drop remote layer); Some(Some(map)) = set; outer None = field
-    // absent (older shell) → keep the tags resolved at startup. Env + local
-    // [slash_command_tags] always apply via resolve_slash_command_tags.
-    if let Some(remote_tags) = update.slash_command_tags.as_ref() {
+    // Re-resolve dropdown tags when the update carries the field.
+    if update.slash_command_tags.is_some() {
         use shell::util::config::resolve_slash_command_tags;
         let effective_config = shell::config::load_effective_config().ok();
         let empty_toml = toml::Value::Table(Default::default());
         let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
-        *app.command_tags.borrow_mut() =
-            resolve_slash_command_tags(tags_config, remote_tags.as_ref());
+        *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config);
     }
 
     tracing::info!("settings updated via grow/settings/update");
@@ -270,9 +229,8 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
 /// Re-arm the soft-defaulted launch mode from a pushed `permission_mode`
 /// (TOML `[ui]` > remote > Ask), for the next `/new` only — live sessions are
 /// untouched and nothing is persisted. `effective_ui` is injected so the
-/// resolve is deterministic under test. Enforcement gating reuses the app's
-/// startup snapshots (`always_approve_policy_block`, `auto_mode_gate`); the agent's
-/// permission manager re-clamps authoritatively at decision time.
+/// resolve is deterministic under test. The auto-mode feature gate is reused
+/// from the app's startup snapshot.
 pub(super) fn apply_soft_default_permission_mode(
     app: &mut AppView,
     effective_ui: Option<&toml::Value>,
@@ -280,11 +238,6 @@ pub(super) fn apply_soft_default_permission_mode(
 ) {
     let requested = shell::util::config::resolve_permission_mode(effective_ui, remote);
     let mode = match requested {
-        shell::util::config::PermissionMode::AlwaysApprove
-            if app.always_approve_policy_block.is_some() =>
-        {
-            shell::util::config::PermissionMode::Ask
-        }
         shell::util::config::PermissionMode::Auto if !app.auto_mode_gate => {
             shell::util::config::PermissionMode::Ask
         }
@@ -392,11 +345,6 @@ pub(super) struct PagerSettingsUpdate {
     slash_command_tags: Option<Option<std::collections::BTreeMap<String, String>>>,
     // `announcements` is deliberately not consumed. Grow announcements come
     // from local configuration, not the upstream vendor promotion feed.
-    /// Remote campaigns snapshot. `Some` whenever the shell has settings
-    /// (empty = campaigns withdrawn); `None`/omitted (settings-less push,
-    /// older shell) must leave this process's campaign cache untouched.
-    #[serde(default)]
-    campaigns: Option<Vec<shell::util::config::CampaignOverride>>,
     #[serde(default)]
     auto_permission_mode_enabled: Option<bool>,
     /// Soft-default permission mode. Presence-aware: omit = no update,

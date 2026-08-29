@@ -188,7 +188,7 @@ allow/ask/deny 规则可以按工具、命令或路径细化策略；Hooks 可�
 ### 数据与网络边界
 
 - 模型调用走用户配置的 Provider/model routes；Grow 不提供默认模型或默认推理端点。
-- MCP、Plugin、更新检查和 managed-config 在对应配置启用或部署时可能联网。
+- MCP、Plugin 和更新检查在对应功能使用时可能联网。
 - Grow 不主动上传 session 或 diagnostics；会话、状态和本地诊断留在本地文件中。
 
 ## 文档导航

@@ -678,9 +678,8 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     None
 }
 
-/// Grow config files that alter permissions (`config.toml`, the
-/// `managed_config.toml` defaults tier, the user `requirements.toml` layer) or
-/// sandbox restrictions (`sandbox.toml`) in the running and later sessions; a
+/// Grow config files that alter permissions (`config.toml`) or sandbox
+/// restrictions (`sandbox.toml`) in the running and later sessions; a
 /// silent edit would let the agent loosen its own guardrails. Matched directly
 /// inside any `.grow` dir (user-global default and workspace overlays) and
 /// directly under a custom `$GROW_HOME`, which the component match cannot see.
@@ -694,11 +693,7 @@ fn protected_config_file_with_home(
     user_grow_home: Option<&Path>,
 ) -> Option<ProtectedEditReason> {
     let reason = match components.last().copied() {
-        Some(
-            config::USER_CONFIG_FILENAME
-            | config::MANAGED_CONFIG_FILENAME
-            | config::REQUIREMENTS_FILENAME,
-        ) => ProtectedEditReason::GrowConfig,
+        Some(config::USER_CONFIG_FILENAME) => ProtectedEditReason::GrowConfig,
         Some("sandbox.toml") => ProtectedEditReason::GrowSandbox,
         _ => return None,
     };
@@ -1617,8 +1612,6 @@ mod tests {
             "/work/src/main.rs",
             "/work/project/.grow/config.toml/backup",
             "/work/project/sandbox.toml",
-            "/work/project/requirements.toml",
-            "/work/project/managed_config.toml",
         ] {
             assert!(
                 edit_target_protection(Path::new(path)).is_none(),
@@ -1676,14 +1669,6 @@ mod tests {
             (
                 "/work/project/.grow/sandbox.toml",
                 ProtectedEditReason::GrowSandbox,
-            ),
-            (
-                "/home/user/.grow/managed_config.toml",
-                ProtectedEditReason::GrowConfig,
-            ),
-            (
-                "/home/user/.grow/requirements.toml",
-                ProtectedEditReason::GrowConfig,
             ),
         ];
         for (path, reason) in cases {
@@ -1804,8 +1789,6 @@ mod tests {
         let home_path = home.path();
         for (file, reason) in [
             ("config.toml", ProtectedEditReason::GrowConfig),
-            ("managed_config.toml", ProtectedEditReason::GrowConfig),
-            ("requirements.toml", ProtectedEditReason::GrowConfig),
             ("sandbox.toml", ProtectedEditReason::GrowSandbox),
         ] {
             let path = home_path.join(file);
@@ -1858,17 +1841,12 @@ mod tests {
     }
 
     /// `protected_edit_reason` lowercases path components before matching, so
-    /// the canonical filename constants must stay lowercase or the const
-    /// patterns silently stop firing.
+    /// the canonical filename constant must stay lowercase or the const
+    /// pattern silently stops firing.
     #[test]
     fn protected_config_filename_constants_are_lowercase() {
-        for name in [
-            config::USER_CONFIG_FILENAME,
-            config::MANAGED_CONFIG_FILENAME,
-            config::REQUIREMENTS_FILENAME,
-        ] {
-            assert_eq!(name, name.to_ascii_lowercase(), "{name}");
-        }
+        let name = config::USER_CONFIG_FILENAME;
+        assert_eq!(name, name.to_ascii_lowercase(), "{name}");
     }
 
     #[test]
@@ -2805,9 +2783,9 @@ mod tests {
         }
     }
 
-    /// Representative enterprise deny/ask fixture for managed-policy tests
-    /// `[permission]` tier. Tool mapping: `Read`→Read, `Write`/`Edit`→Edit, `Bash`→Bash.
-    fn enterprise_requirements_policy() -> CompiledPolicy {
+    /// Representative deny/ask fixture for `[permission]` policy tests. Tool
+    /// mapping: `Read`→Read, `Write`/`Edit`→Edit, `Bash`→Bash.
+    fn enterprise_policy() -> CompiledPolicy {
         compiled(vec![
             // ── ask = [...] ──
             bash_rule(RuleAction::Ask, "kubectl *"),
@@ -2877,7 +2855,7 @@ mod tests {
     /// fd-prefixed/glued READ redirects must still hit the Read deny via the AST walk.
     #[test]
     fn adversarial_fd_and_glued_read_redirects_denied() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in [
             "cat 0<.env",
             "cat 0< .env",
@@ -2900,7 +2878,7 @@ mod tests {
     /// must hit the Edit deny.
     #[test]
     fn adversarial_fd_and_glued_write_redirects_denied() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in [
             "echo x 1>.env",
             "echo x 1> .env",
@@ -2961,7 +2939,7 @@ mod tests {
     /// literal read (incl. inside `<(…)`) is a hard deny.
     #[test]
     fn adversarial_substitution_readers_do_not_bypass() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in [
             "cat $(echo .env)",
             "xxd `echo .env`",
@@ -2997,7 +2975,7 @@ mod tests {
     /// globs, wrappers, path normalization/traversal, chaining, case, ask-via-shell.
     #[test]
     fn adversarial_enterprise_matrix_denies_and_asks() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in [
             // readers only covered here
             "tail -n1 .env",
@@ -3047,7 +3025,7 @@ mod tests {
         }
     }
 
-    /// Decision-level mirror of the managed-config e2e: asserts the `Decision` the
+    /// Decision-level mirror of the enterprise policy e2e: asserts the `Decision` the
     /// manager computes across all four entry points (read tool, write/edit tools,
     /// bash rules, shell gate) on the real sentinel paths, no inference.
     #[test]
@@ -3076,7 +3054,7 @@ mod tests {
         use Expect::{Allowed, Ask, Deny};
         use Vector::{Bash, EditTool, ReadTool, Shell};
 
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         let matrix: &[(&str, Vector, Expect)] = &[
             // ── file-read tool: real sentinel files (setup.sh) ──
             ("read .env", ReadTool(".env"), Deny),
@@ -3274,7 +3252,7 @@ mod tests {
     /// Negative controls: legit reads/writes and lookalike names aren't blocked.
     #[test]
     fn adversarial_legitimate_commands_not_overblocked() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in [
             "cat README.md",
             "head -n 5 README.md",
@@ -3394,7 +3372,7 @@ mod tests {
     /// it targets dotfile `.env`/`.env.<x>` and real cert globs, not any `env`/`pem`.
     #[test]
     fn h2_enterprise_policy_does_not_over_match_legit_paths() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for path in [
             "environment.txt",
             "foo.env",
@@ -3447,7 +3425,7 @@ mod tests {
     /// recursion, unpinnable substitution) `Ask`, not `Reject`.
     #[test]
     fn h3_enterprise_gate_never_false_blocks_legit() {
-        let policy = enterprise_requirements_policy();
+        let policy = enterprise_policy();
         for cmd in ["cat README.md", "grep foo src/main.py", "wc -l src/main.py"] {
             assert!(
                 policy.evaluate_shell_file_access(cmd, cwd()).is_none(),
@@ -3465,7 +3443,7 @@ mod tests {
         }
     }
 
-    /// A deployment that ships managed config with no `[permission]` rules must see
+    /// A deployment with no `[permission]` rules must see
     /// zero gating (no secrets embedded, only the empty rule set).
     #[test]
     fn unrestricted_enterprise_has_no_file_restrictions() {
