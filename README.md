@@ -11,94 +11,73 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `2.0.2`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
-## Fork 之后改了什么
+## 核心能力与边界
 
-这里不按内部 commit 罗列，直接看会影响使用方式的变化。
+下面只列出会影响使用方式的当前行为。
 
 | 领域 | Grow 当前行为 |
 | --- | --- |
 | 模型 | 不提供内置模型目录。用户显式配置 Provider、模型和默认模型，支持 Chat Completions、Responses、Messages 三类后端。 |
 | 认证 | 只接受用户自己的 API key、环境变量或本地密钥 helper；没有 OAuth/OIDC、设备登录和全局产品登录态。 |
 | Agent | Agent 是平级 Markdown 定义，不绑定 Provider、模型或权限；同一份定义既可以作为主 Agent，也可以被当作子 Agent 调用。 |
-| 交互模式 | Agent Role、Behavior 和 Permission 是三条独立轴。换 Plan/Goal 不会暗中换 Agent，换 Agent 也不会改变权限。 |
+| 交互模式 | Agent Role、Behavior 和 Permission 是三条独立轴。切换 Behavior 不会暗中换 Agent，换 Agent 也不会改变 Behavior 或 Permission。 |
 | 稳定性 | 支持截断续写、context overflow 自动压缩恢复、子进程树回收、leader 重连交互恢复，以及权限提示强制超时。 |
 | 扩展 | 支持项目/用户级 Agent、Skill、MCP、Hook、Plugin 和可替换 Marketplace；Web Search 通过用户配置的 MCP 提供。 |
-| 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
-| 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
+| 数据与网络 | 不包含遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
+| 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌目标平台的 `rg`。 |
 
-### 2.0.2 重点
+Session runtime 以 Timeline 作为单一事实源，控制、界面、sideband、回忆和上下文压缩共享同一套因果坐标。
+Model、reasoning effort、Agent、Behavior 和 Permission 是相互独立的状态轴；切换在明确的 step 或 turn
+边界生效，并通过 pending 与终态反馈呈现。Goal 是可编辑、可暂停、可重启和可清理的长期目标，Workflow
+Run 会固定本次运行所需的 Agent、采样和授权边界。
 
-- TUI 提示收敛为 UI-only `Notice` 与临时 live status 两层：Fullscreen/Inline 在状态区原位更新，
-  Minimal 只把终态提交到原生 Scrollback；提示、命令结果和控制反馈不会混入模型上下文。
-- Model/effort 组成一个 Sampling 目标，Agent 与 Behavior 各自独立；每个域只保留最新 pending 目标。
-  Sampling 与 Agent 在下一次 step 边界生效，Behavior 保持原有 ownership、确认与 turn admission 语义。
-- 用户发起的 Model、effort、Agent、Behavior 切换现在都有明确的 pending 与终态反馈。Session resume、
-  初始化和自动恢复只水合权威状态，不再伪装成新的 “switched” 用户动作；断线前仍在途的真实请求会正常结算。
-- Subagent 完成、失败与取消使用独立不可变终态行，模型结果与主视图提示各投影一次；root、child、重连和
-  Minimal commit 使用同一事件身份去重。
-- 斜杠菜单增加用途分类，移除生产命令的全部 alias（保留扩展机制），回退只保留 `/rewind`。长文件路径
-  与链接显示 basename、跳转仍使用完整目标；CJK 多行选择与窄终端布局同步修正。
+Workflow 是 primary session 的 Behavior/control-plane capability，不由 AgentDefinition 的 tool list 决定。
+进入 Workflow 后按 name、description、when_to_use search-first：唯一匹配直接使用，歧义时询问，无匹配时
+才创建 session draft；每个 Run 都是 Definition 与 args 组成的不可变快照。
 
-版本级变更见 [2.0.2 release notes](crates/codegen/shell/changelogs/2.0.2.md)。
-
-### 2.0.1 重点
-
-- Model、reasoning effort 与 Agent 控制收敛为 exact-session FIFO：当前 stream 与工具批次保持不可变，
-  选择在随后 `StepEnded` 与下一次采样之间按用户顺序生效，root 与 child 使用同一套权威协议。
-  Behavior 独立保持 turn-bound，由 turn admission 决定，不能在运行中重标已有 turn。
-- Stop 不再等待 actor 自己的 mailbox，Timeline terminal 仍是唯一 durability barrier；Goal 完成、取消与
-  后续 continuation 不会跨越尚未闭合的 turn。
-- Workflow Run 冻结 sampler、完整 Agent 定义与授权边界；项目 Agent 文件、插件或 catalog 的后续变化
-  只影响新 Run，旧 2.0.0 manifest 不兼容并直接 fail closed。
-- Pager 的 Behavior/prompt barrier、重连 generation、child event 高水位与异步 metadata 统一按 session
-  因果收敛，不再乐观回滚或用全局 catalog 改写 Workflow-pinned child。
-
-版本级变更见 [2.0.1 release notes](crates/codegen/shell/changelogs/2.0.1.md)。
-
-### 2.0.0 重点
-
-- Session runtime 重构为 Timeline 单一事实源；Control、Surface、Sideband、回忆与压缩共享稳定因果坐标，
-  旧 Timeline schema 和请求拷贝修剪机制已移除，不保留兼容投影。
-- Goal 收敛为用户可编辑、暂停、重启和清理的长期目标。每次 continuation 先审计目标是否完成，
-  再使用普通 task/todo 拆分当前小步；旧 planner/verifier board 体系已删除。
-- Behavior、Agent Role 和 Permission 继续是三条独立轴，切换以原子 Timeline Control 事实持久化。
-- Trajectory 面向长会话重建了 turn/step 分层、因果导航、过滤和按需展开；流式 phase 噪声不再持久化。
-- Shell actor 与 Pager 的 session/effect/terminal 所有权边界重新分层，保留原有任务、loop、monitor 和 Workflow
-  的运行效果，并修复了已保存 Workflow 在 async runtime 中执行同步预检的 panic。
-
-版本级变更见 [2.0.0 release notes](crates/codegen/shell/changelogs/2.0.0.md)。
+TUI 提示只投影到界面，不混入模型上下文；子 Agent 的完成、失败和取消各自形成不可变终态。Trajectory
+支持按 turn/step 重建、因果导航、过滤和按需展开，适合检查长会话的实际执行过程。
 
 ## 安装
 
 ### 下载 Release 二进制
 
-[GitHub Releases](https://github.com/LordCasser/grow/releases) 提供以下资产。每个压缩包只包含一个
+[GitHub Releases](https://github.com/LordCasser/grow/releases) 的 Latest Release 提供以下资产。每个压缩包只包含一个
 可执行文件：Unix 为 `grow`，Windows 为 `grow.exe`。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-2.0.2-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-2.0.2-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-2.0.2-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-2.0.2-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-2.0.2-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-2.0.2-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-2.0.2-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-2.0.2-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-2.0.2-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-2.0.2-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-*-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-*-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-*-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-*-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-*-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-*-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-*-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-*-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-*-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-*-ohos-aarch64.tar.gz` |
 
-选择对应资产后安装：
+选择一个平台 pattern 后，在新的空目录中下载并安装。下面示例使用 GitHub CLI 下载 Latest
+Release；替换 pattern 时只应保留一个平台匹配，避免旧归档参与校验。
 
 ```sh
-GROW_VERSION=2.0.2
-GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
+GROW_DOWNLOAD_DIR="$(mktemp -d)"
+cd "$GROW_DOWNLOAD_DIR"
 
-curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
-curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/SHA256SUMS"
+gh release download --repo LordCasser/grow \
+  --pattern 'grow-*-macos-aarch64.tar.gz' \
+  --pattern SHA256SUMS --clobber
+
+set -- grow-*-macos-aarch64.tar.gz
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+  echo "expected exactly one Grow archive in $GROW_DOWNLOAD_DIR" >&2
+  exit 1
+fi
+GROW_ASSET="$1"
 GROW_CHECKSUM_LINE="$(
   awk -v asset="$GROW_ASSET" 'length($1) == 64 && NF == 2 && $2 == asset { print }' SHA256SUMS
 )"
@@ -120,20 +99,22 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "2.0.2"
-$GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
+$DownloadDir = Join-Path ([System.IO.Path]::GetTempPath()) ("grow-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $DownloadDir | Out-Null
+Set-Location $DownloadDir
 
-Invoke-WebRequest `
-  "https://github.com/LordCasser/grow/releases/download/v$GrowVersion/$GrowAsset" `
-  -OutFile $GrowAsset
-Invoke-WebRequest `
-  "https://github.com/LordCasser/grow/releases/download/v$GrowVersion/SHA256SUMS" `
-  -OutFile SHA256SUMS
-$ChecksumMatches = @(Select-String -Path SHA256SUMS -Pattern "^[0-9a-f]{64}  $([regex]::Escape($GrowAsset))$")
+gh release download --repo LordCasser/grow `
+  --pattern "grow-*-windows-x86_64.tar.gz" `
+  --pattern SHA256SUMS --clobber
+
+$Assets = @(Get-ChildItem -File -Filter "grow-*-windows-x86_64.tar.gz")
+if ($Assets.Count -ne 1) { throw "expected exactly one Grow archive in $DownloadDir" }
+$GrowAsset = $Assets[0].Name
+$ChecksumMatches = @(Select-String -Path SHA256SUMS -Pattern "^[0-9a-fA-F]{64}\s+$([regex]::Escape($GrowAsset))$")
 if ($ChecksumMatches.Count -ne 1) { throw "SHA256SUMS must contain exactly one entry for $GrowAsset" }
 $ExpectedHash = (($ChecksumMatches[0].Line -split '\s+')[0])
 $ActualHash = (Get-FileHash -Algorithm SHA256 $GrowAsset).Hash.ToLowerInvariant()
-if (-not $ExpectedHash -or $ActualHash -ne $ExpectedHash) { throw "SHA-256 verification failed" }
+if (-not $ExpectedHash -or $ActualHash -ne $ExpectedHash.ToLowerInvariant()) { throw "SHA-256 verification failed" }
 tar -xzf $GrowAsset
 New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
 Move-Item -Force grow.exe "$HOME\bin\grow.exe"
@@ -226,9 +207,8 @@ grow -m deepseek/deepseek-chat
 grow -p "检查当前仓库并输出 JSON 风格结论"
 ```
 
-Headless 输出格式、stdin 和退出码见
-[Headless Mode](crates/codegen/pager/docs/user-guide/14-headless-mode.md)。ACP stdio/WebSocket 集成见
-[Agent Mode](crates/codegen/pager/docs/user-guide/15-agent-mode.md)。
+非交互输出、stdin 和退出码见 [Headless Mode](crates/codegen/pager/docs/user-guide/14-headless-mode.md)；
+ACP stdio/WebSocket 集成见 [Agent Mode](crates/codegen/pager/docs/user-guide/15-agent-mode.md)。
 
 ### TUI 中最常用的入口
 
@@ -245,6 +225,12 @@ Headless 输出格式、stdin 和退出码见
 
 同样可以使用 `/model`、`/agent`、`/effort`、`/permission` 和 `/behavior`。`/agents` 打开
 Agent Dashboard，`/resume` 恢复 session，`/compact` 主动压缩上下文。
+
+进入 Workflow Behavior 可在 TUI 中按 `Ctrl+X`，然后 `B` 选择 Workflow，或使用 `/workflow [prompt]`。
+也可以直接说“执行 xxx workflow”，由 Behavior 按 name、description、when_to_use search-first：唯一匹配时使用，
+歧义时询问，无匹配时引导创建 session draft。`/workflow-run` 打开选择器，
+`/workflow-run <definition-name> [args]` 或动态 `/<definition-name> [args]` 显式启动已注册 Definition；
+`/workflows` 打开 Workspace，管理 Definition 和 Run。
 
 完整快捷键和命令见 [Keyboard Shortcuts](crates/codegen/pager/docs/user-guide/03-keyboard-shortcuts.md)
 与 [Slash Commands](crates/codegen/pager/docs/user-guide/04-slash-commands.md)。
@@ -421,51 +407,6 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 2.0.2 发布准备
-
-Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
-版本。tag 必须与 `cli` / workspace 版本一致。
-
-发布前至少执行：
-
-```sh
-cargo metadata --locked --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.name == "cli") | .version'
-
-cargo fmt --all -- --check
-cargo check --locked -p workspace -p shell -p pager -p cli
-cargo test --locked -p workspace --lib
-cargo test --locked -p shell --lib -- --test-threads=4
-cargo test --locked -p pager --lib
-cargo test --locked -p shell --test test_mcp_permission_persistence
-
-GROW_VERSION=2.0.2 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
-  cargo build --locked --profile release-dist --features release-dist -p cli --bin grow
-./target/release-dist/grow --version
-```
-
-release commit 完成且工作区干净后，先创建本地 annotated tag，再用
-`scripts/validate-release.sh v2.0.2` 静态校验 tag/version、不可变 commit、平台矩阵、资产集合、
-attestation 和 updater 契约。该门禁不模拟 GitHub Actions，也不进行跨平台编译；正式 workflow
-是唯一的发布执行机制。
-
-正式发布流程：
-
-1. 提交版本、lockfile、release notes 和文档，创建本地 annotated tag `v2.0.2`，运行
-   `scripts/validate-release.sh v2.0.2`。
-2. 推送已验证的 tag，不要提前创建公开 Release；然后从默认分支手动运行
-   [release workflow](.github/workflows/release.yml)，传入这个已有 tag。workflow checkout 精确 tag，
-   但让 Cargo 缓存保留在默认分支作用域以供后续版本复用。
-3. workflow 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
-   固定版本 `rg`。OHOS 产物按 build → strip → smoke → self-sign 顺序处理，并对 stripped
-   状态、`.codesign` 段和最终资产大小执行两阶段门禁。
-4. workflow 先创建隐藏 draft Release，验证全部平台资产和 `SHA256SUMS` 均已上传后再一次性公开。
-
-Release 页面发布 10 个最终 `.tar.gz` 与一份 `SHA256SUMS`。内置 updater 在解压和执行前强制
-校验目标资产的 SHA-256；校验文件缺失、重复或不匹配都会中止安装。稳定版与带 SemVer 预发布段的
-版本分别进入 stable / prerelease 更新通道。每个平台归档同时生成 GitHub Artifact Attestation，该 provenance 与
-同源 checksum 的完整性检查是两个不同边界。
-
 ## 文档与源码边界
 
 - [完整配置](config.example.toml)
@@ -483,8 +424,8 @@ CLI composition root 位于 `crates/codegen/cli`，TUI 位于 `pager`，Agent/se
 
 ## 来源与许可证
 
-Grow 基于 xAI Grok Build 的开源代码分叉。上游名称只保留在来源说明、许可证和历史
-changelog 中。
+Grow 基于 xAI Grok Build 的开源代码分叉；上游名称仅用于说明来源。README 只描述当前产品行为，
+不承载变更记录。
 
 第一方代码使用 Apache License 2.0，见 [LICENSE](LICENSE)。第三方与 vendored 代码沿用各自
 许可证，见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) 和
