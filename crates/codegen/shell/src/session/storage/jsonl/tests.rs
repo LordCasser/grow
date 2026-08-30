@@ -1559,6 +1559,69 @@ async fn test_grow_session_update_round_trip() {
         _ => panic!("Expected ACP update as second item"),
     }
 }
+#[tokio::test]
+async fn coordination_notices_survive_symmetric_session_reload() {
+    use crate::extensions::notification::{
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
+        UiNotice,
+        UiNoticeCategory,
+        UiNoticeTone,
+    };
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("coordination-source"),
+        cwd: "/repo".to_owned(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("coordination-target"),
+        cwd: "/repo".to_owned(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    adapter.init_session(&target, default_model_id()).await.unwrap();
+    let inquiry_id = uuid::Uuid::now_v7().to_string();
+    for (info, subject, details) in [
+        (&source, "outgoing inquiry", "Question:\nWhich files are you changing?"),
+        (&target, "incoming inquiry", "Answer:\nI am changing src/lib.rs"),
+    ] {
+        let notification = GrowSessionNotification {
+            session_id: info.id.clone(),
+            update: GrowSessionUpdateType::UiNotice(UiNotice {
+                correlation_id: inquiry_id.clone(),
+                category: UiNoticeCategory::Coordination,
+                subject: Some(subject.to_owned()),
+                description: Some("Local coordination audit".to_owned()),
+                message: subject.to_owned(),
+                tone: UiNoticeTone::Info,
+                details: Some(details.to_owned()),
+            }),
+            meta: None,
+        };
+        adapter
+            .append_update(info, &SessionUpdate::Grow(Box::new(notification)))
+            .await
+            .unwrap();
+    }
+
+    let source_loaded = adapter.load_session(&source).await.unwrap();
+    let target_loaded = adapter.load_session(&target).await.unwrap();
+    for (loaded, expected_subject, expected_content) in [
+        (source_loaded, "outgoing inquiry", "Which files"),
+        (target_loaded, "incoming inquiry", "src/lib.rs"),
+    ] {
+        let SessionUpdate::Grow(notification) = &loaded.updates[0] else {
+            panic!("expected Grow coordination notice");
+        };
+        let GrowSessionUpdateType::UiNotice(notice) = &notification.update else {
+            panic!("expected UiNotice");
+        };
+        assert_eq!(notice.correlation_id, inquiry_id);
+        assert_eq!(notice.category, UiNoticeCategory::Coordination);
+        assert_eq!(notice.subject.as_deref(), Some(expected_subject));
+        assert!(notice.details.as_deref().unwrap().contains(expected_content));
+    }
+}
 /// SubagentSpawned and SubagentFinished must survive JSONL round-trip
 /// with exact field preservation.
 #[tokio::test]
