@@ -519,10 +519,15 @@ impl MvpAgent {
         );
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
+        let coordination = crate::coordination::CoordinationRuntime::new(
+            crate::util::grow_home::grow_home(),
+        );
         Self {
             sessions: RefCell::new(HashMap::new()),
             active_child_sessions: Default::default(),
             activity,
+            coordination,
+            coordination_publisher_started: std::cell::Cell::new(false),
             loading_sessions: RefCell::new(HashMap::new()),
             session_lifecycle_gates: RefCell::new(HashMap::new()),
             retained_resources: RefCell::new(HashMap::new()),

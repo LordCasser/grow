@@ -154,6 +154,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let auth_methods = built.methods;
         let default_auth_method_id_wire = Some(built.default_auth_method_id.0.to_string());
         self.set_auth_method(built.default_auth_method_id);
+        self.ensure_coordination_started().await;
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();

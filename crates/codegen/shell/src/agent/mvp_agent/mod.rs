@@ -396,6 +396,11 @@ pub struct MvpAgent {
     /// leader's auto-update checker, which cannot read the `!Send` maps. Expires
     /// when the actor exits. See [`crate::agent::activity::AgentActivity`].
     pub(crate) activity: crate::agent::activity::AgentActivity,
+    /// Process-level local coordination runtime. It owns discovery identity,
+    /// lease publication, and the authenticated IPC endpoint; session actors
+    /// remain owned by `sessions` and are represented here only as snapshots.
+    pub(crate) coordination: crate::coordination::CoordinationRuntime,
+    coordination_publisher_started: std::cell::Cell<bool>,
     /// LEADER-SAFE(per-session): in-flight `session/load` guards. Lets a racing
     /// `session/prompt` wait via [`Self::wait_for_in_flight_session_load`] instead
     /// of failing "unknown session id"; the RAII guard's drop wakes waiters.
@@ -800,6 +805,7 @@ impl Drop for SessionLifecycleGuard<'_> {
     }
 }
 mod code_nav;
+mod coordination;
 mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;

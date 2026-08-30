@@ -14,6 +14,7 @@ pub mod builtin;
 pub mod bundle;
 pub mod cli_models;
 pub mod config;
+pub mod coordination;
 pub use shell_base::cpu_profile;
 pub use shell_base::env;
 pub mod extensions;
