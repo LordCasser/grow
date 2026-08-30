@@ -58,7 +58,7 @@ if [[ ! -s "$release_notes" ]]; then
   exit 1
 fi
 
-python3 - "$release_workflow" "$build_workflow" <<'PY'
+python3 - "$release_workflow" "$build_workflow" "$release_notes" <<'PY'
 import json
 import pathlib
 import re
@@ -67,8 +67,17 @@ import textwrap
 
 release_path = pathlib.Path(sys.argv[1])
 build_path = pathlib.Path(sys.argv[2])
+release_notes_path = pathlib.Path(sys.argv[3])
 release = release_path.read_text()
 build = build_path.read_text()
+release_notes = release_notes_path.read_text()
+
+# Release notes are rendered from the GitHub Release page, not from their
+# repository path. Repository-relative Markdown links therefore resolve to
+# the wrong URL; require a stable absolute destination (or an in-page anchor).
+relative_links = re.findall(r"\]\((?!https?://|mailto:|#)([^)]+)\)", release_notes)
+if relative_links:
+    raise SystemExit(f"release notes contain relative links: {relative_links!r}")
 
 expected_platforms = [
     "linux-x86_64",
