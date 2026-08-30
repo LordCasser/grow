@@ -4013,6 +4013,16 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
 
+    #[test]
+    fn output_schema_rejects_external_references() {
+        let error = compile_output_schema(&serde_json::json!({
+            "$ref": "https://example.invalid/schema.json"
+        }))
+        .expect_err("external schema references must not be resolved");
+
+        assert!(error.contains("external JSON Schema references are disabled"));
+    }
+
     fn goal_directive(goal_id: &str, revision: u64, text: &str) -> ConversationItem {
         let mut item = ConversationItem::user(text);
         let ConversationItem::User(user) = &mut item else {

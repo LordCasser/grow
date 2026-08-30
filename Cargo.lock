@@ -599,7 +599,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "rand 0.9.5",
- "reqwest 0.13.4",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
@@ -759,7 +759,7 @@ dependencies = [
  "diagnostics",
  "http",
  "mockito",
- "reqwest 0.13.4",
+ "reqwest",
  "reqwest-middleware",
  "tokio",
  "tracing",
@@ -2776,9 +2776,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.14.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -2787,9 +2787,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.16.2"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+checksum = "476de73bddf2ef8490aa4ee8f1cf40b430bf1d56c48c22080e5186952cd580e6"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -2986,9 +2986,9 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
 name = "fluent-uri"
-version = "0.3.2"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1918b65d96df47d3591bed19c5cca17e3fa5d0707318e4b5ef2eae01764df7e5"
+checksum = "bc74ac4d8359ae70623506d512209619e5cf8f347124910440dbc221714b328e"
 dependencies = [
  "borrow-or-share",
  "ref-cast",
@@ -3047,12 +3047,12 @@ dependencies = [
 
 [[package]]
 name = "fraction"
-version = "0.15.4"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
+checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
- "lazy_static",
  "num",
+ "num-bigint",
 ]
 
 [[package]]
@@ -4163,7 +4163,7 @@ dependencies = [
  "auth",
  "ctor",
  "diagnostics",
- "reqwest 0.13.4",
+ "reqwest",
  "reqwest-middleware",
  "sampler",
  "serde_json",
@@ -4311,7 +4311,7 @@ dependencies = [
  "diagnostics",
  "fastrand",
  "regex",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "shellexpand",
@@ -5010,29 +5010,54 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.30.0"
+version = "0.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1b46a0365a611fbf1d2143104dcf910aada96fafd295bab16c60b802bf6fa1d"
+checksum = "93e842fa72fd1e50ca4676a527641c13f5ee0d423ac699bfe1cd2afa3a4fdbac"
 dependencies = [
  "ahash",
- "base64",
  "bytecount",
+ "data-encoding",
  "email_address",
- "fancy-regex 0.14.0",
+ "fancy-regex 0.19.0",
  "fraction",
- "idna",
+ "getrandom 0.3.4",
  "itoa",
+ "jsonschema-regex",
+ "jsonschema-value",
  "num-cmp",
  "num-traits",
- "once_cell",
  "percent-encoding",
  "referencing",
  "regex",
- "regex-syntax",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "strum",
+ "unicode-general-category",
  "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema-regex"
+version = "0.52.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5d90ea83fa606c96f0b4737ecedf1fa6b624272022edc42039565f8d8af0b78"
+dependencies = [
+ "regex-syntax",
+]
+
+[[package]]
+name = "jsonschema-value"
+version = "0.52.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da4ab4cbe58181a117d8c3582844ce20b07184319b51ba6d756596c1c451aebc"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "fraction",
+ "num-cmp",
+ "num-traits",
+ "serde_json",
+ "zmij",
 ]
 
 [[package]]
@@ -5435,7 +5460,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "regex",
- "reqwest 0.13.4",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",
@@ -5525,7 +5550,7 @@ dependencies = [
  "grow-http",
  "nix 0.31.3",
  "notify",
- "reqwest 0.13.4",
+ "reqwest",
  "reqwest-middleware",
  "rusqlite",
  "serde_json",
@@ -5568,6 +5593,12 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.0",
 ]
+
+[[package]]
+name = "micromap"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a86d3146ed3995b5913c414f6664344b9617457320782e64f0bb44afd49d74"
 
 [[package]]
 name = "mid"
@@ -6375,7 +6406,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "ptyctl",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -7116,7 +7147,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "ptyctl",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -7487,13 +7518,16 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.30.0"
+version = "0.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8eff4fa778b5c2a57e85c5f2fe3a709c52f0e60d23146e2151cbef5893f420e"
+checksum = "d38a014525040cdc9893361b7419bcf1f43b7ba7055eabaf6d91d6b75caa8b3f"
 dependencies = [
  "ahash",
  "fluent-uri",
- "once_cell",
+ "getrandom 0.3.4",
+ "hashbrown 0.17.1",
+ "itoa",
+ "micromap",
  "parking_lot",
  "percent-encoding",
  "serde_json",
@@ -7552,40 +7586,6 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64",
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
@@ -7636,7 +7636,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "http",
- "reqwest 0.13.4",
+ "reqwest",
  "thiserror 2.0.19",
  "tower-service",
 ]
@@ -7724,7 +7724,7 @@ dependencies = [
  "futures",
  "http",
  "pin-project-lite",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "sse-stream",
@@ -7980,7 +7980,7 @@ dependencies = [
  "eventsource-stream",
  "futures-util",
  "indexmap",
- "reqwest 0.13.4",
+ "reqwest",
  "sampling-types",
  "serde",
  "serde_json",
@@ -8002,7 +8002,7 @@ dependencies = [
  "compaction",
  "indexmap",
  "jsonschema",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -8502,7 +8502,7 @@ dependencies = [
  "process-wrap",
  "prompt-queue",
  "regex",
- "reqwest 0.13.4",
+ "reqwest",
  "ring",
  "rusqlite",
  "rustls",
@@ -8563,7 +8563,7 @@ dependencies = [
  "libc",
  "nix 0.31.3",
  "pprof",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -9211,7 +9211,7 @@ dependencies = [
  "futures-util",
  "libc",
  "portable-pty",
- "reqwest 0.13.4",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -9669,7 +9669,7 @@ dependencies = [
  "pretty_assertions",
  "pulldown-cmark",
  "regex",
- "reqwest 0.13.4",
+ "reqwest",
  "sandbox",
  "schemars 1.2.2",
  "scraper",
@@ -10120,6 +10120,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
 
 [[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10222,7 +10228,7 @@ dependencies = [
  "flate2",
  "futures",
  "indicatif",
- "reqwest 0.13.4",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
@@ -10321,7 +10327,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
 dependencies = [
  "outref",
- "uuid",
  "vsimd",
 ]
 

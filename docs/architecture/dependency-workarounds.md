@@ -83,9 +83,7 @@ upstream 0.41.3 (which uses `reqwest = "0.13"`) with the `ReasoningEffort::Max`
 patch re-applied (fork: `https://github.com/LordCasser/async-openai`, rev
 `a2bae99`); the workspace's 13 reqwest crates migrated to reqwest 0.13.4 with
 `rustls-no-provider` (see §1), and `reqwest-middleware` moved 0.4.x → 0.5.x.
-`Cargo.lock` contains a single production reqwest 0.13.4. The only remaining
-`reqwest 0.12.28` entry is jsonschema 0.30's dev-dependency (locked but never
-compiled; disappears when jsonschema is upgraded).
+`Cargo.lock` contains a single reqwest 0.13.4.
 
 **Note**: the fork upgrade does NOT remove `rand 0.9` (async-openai 0.41.3
 still requires `rand = "0.9"`) or `nom 7.1` (still `eventsource-stream =
