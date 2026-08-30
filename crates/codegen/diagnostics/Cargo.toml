@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true, features = [
     "time",
 ] }
 chrono = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 config = { workspace = true }
 uuid = { workspace = true, features = ["v5", "v7"] }
 mid = "4.0.0"
