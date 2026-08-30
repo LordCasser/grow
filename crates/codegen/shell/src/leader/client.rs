@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use super::transport::LeaderStream;
+use crate::local_ipc::transport::LocalStream;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -281,10 +281,10 @@ impl LeaderClient {
     }
 }
 
-async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LeaderStream, ClientError> {
+async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LocalStream, ClientError> {
     let mut attempts = 0;
     loop {
-        match tokio::time::timeout(CONNECT_TIMEOUT, LeaderStream::connect(socket_path.as_ref()))
+        match tokio::time::timeout(CONNECT_TIMEOUT, LocalStream::connect(socket_path.as_ref()))
             .await
         {
             Ok(Ok(stream)) => return Ok(stream),
@@ -306,8 +306,8 @@ async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LeaderStre
 }
 
 async fn register(
-    mut writer: WriteHalf<LeaderStream>,
-    mut reader: ReadHalf<LeaderStream>,
+    mut writer: WriteHalf<LocalStream>,
+    mut reader: ReadHalf<LocalStream>,
     client_type: &str,
     mode: ClientMode,
     capabilities: ClientCapabilities,

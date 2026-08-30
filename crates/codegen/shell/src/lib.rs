@@ -22,6 +22,7 @@ pub use grow_http as http;
 pub mod inspect;
 pub mod instrumentation;
 pub mod leader;
+pub mod local_ipc;
 pub mod mcp_doctor;
 pub mod plugin;
 pub mod remote;

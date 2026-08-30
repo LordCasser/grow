@@ -17,12 +17,12 @@ use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
     LEADER_PROTOCOL_VERSION, ProtocolError, ServerMessage, read_message, write_message,
 };
-use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
 use crate::cpu_profile::{
     ControlError, ControlErrorCode, CpuProfileManager, CpuProfileStartOptions, CpuProfileStatus,
     ShutdownStopDisposition,
 };
+use crate::local_ipc::transport::{LocalListener, LocalStream};
 use agent_client_protocol::schema::v1::AGENT_METHOD_NAMES;
 use kanal::{AsyncReceiver, AsyncSender};
 use parking_lot::Mutex;
@@ -48,7 +48,7 @@ enum ServerEvent {
 }
 enum LeaderServerPoll {
     Cancelled,
-    Accept(std::io::Result<LeaderStream>),
+    Accept(std::io::Result<LocalStream>),
     Event(ServerEvent),
     Response(String),
 }
@@ -1058,7 +1058,7 @@ pub async fn run_leader_server(
 ) -> Result<(), ServerError> {
     let _ = std::fs::remove_file(&socket_path);
     let shutdown_reason_rx = shutdown_tx.subscribe();
-    let listener = LeaderListener::bind(&socket_path)?;
+    let listener = LocalListener::bind(&socket_path)?;
     info!("Leader server listening");
     let (event_tx, event_rx) = kanal::unbounded_async::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
@@ -1844,7 +1844,7 @@ pub async fn run_leader_server(
 }
 fn spawn_client_handler(
     client_id: ClientId,
-    stream: LeaderStream,
+    stream: LocalStream,
     server_rx: AsyncReceiver<ClientOutbound>,
     event_tx: AsyncSender<ServerEvent>,
     cancel: CancellationToken,
@@ -1870,7 +1870,7 @@ fn spawn_client_handler(
 }
 async fn run_client_session(
     client_id: ClientId,
-    stream: LeaderStream,
+    stream: LocalStream,
     server_rx: AsyncReceiver<ClientOutbound>,
     event_tx: AsyncSender<ServerEvent>,
     cancel: CancellationToken,
@@ -2437,8 +2437,8 @@ mod tests {
         sock_path: &std::path::Path,
         client_type: &str,
     ) -> (
-        tokio::io::ReadHalf<LeaderStream>,
-        tokio::io::WriteHalf<LeaderStream>,
+        tokio::io::ReadHalf<LocalStream>,
+        tokio::io::WriteHalf<LocalStream>,
     ) {
         connect_and_register_with_mode(sock_path, client_type, ClientMode::Stdio).await
     }
@@ -2448,10 +2448,10 @@ mod tests {
         client_type: &str,
         mode: ClientMode,
     ) -> (
-        tokio::io::ReadHalf<LeaderStream>,
-        tokio::io::WriteHalf<LeaderStream>,
+        tokio::io::ReadHalf<LocalStream>,
+        tokio::io::WriteHalf<LocalStream>,
     ) {
-        let stream = LeaderStream::connect(sock_path).await.unwrap();
+        let stream = LocalStream::connect(sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2471,7 +2471,7 @@ mod tests {
     async fn client_registration_flow() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, _acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2512,7 +2512,7 @@ mod tests {
         let sock_path = temp.path().join("test.sock");
         let mut handle = spawn_leader_server(sock_path.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2670,7 +2670,7 @@ mod tests {
     async fn ping_pong() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, _acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2695,7 +2695,7 @@ mod tests {
     async fn acp_message_forwarding() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, mut acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2726,7 +2726,7 @@ mod tests {
     async fn initialize_gets_client_identifier_injected() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, mut acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -2763,7 +2763,7 @@ mod tests {
     async fn initialize_preserves_existing_client_identifier() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, mut acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -3715,7 +3715,7 @@ mod tests {
     async fn set_model_does_not_update_default_for_next_session_new() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, mut acp_rx) = setup_test_server(&temp).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -3874,7 +3874,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (_sock_path, cancel, _acp_rx, client_count) =
             setup_test_server_with_client_count(&temp).await;
-        let _stream = LeaderStream::connect(&_sock_path).await.unwrap();
+        let _stream = LocalStream::connect(&_sock_path).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             client_count.load(Ordering::Relaxed),
@@ -3913,7 +3913,7 @@ mod tests {
             .await;
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -4186,7 +4186,7 @@ mod tests {
             !handle.agent_busy.load(Ordering::Relaxed),
             "agent_busy should be false initially"
         );
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -4222,7 +4222,7 @@ mod tests {
         let sock_path = temp.path().join("busy_clear.sock");
         let mut handle = spawn_leader_server(sock_path.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -4268,7 +4268,7 @@ mod tests {
         let sock_path = temp.path().join("busy_multi.sock");
         let mut handle = spawn_leader_server(sock_path.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -4370,7 +4370,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         let namespaced_id = {
-            let stream = LeaderStream::connect(&sock_path).await.unwrap();
+            let stream = LocalStream::connect(&sock_path).await.unwrap();
             let (mut reader, mut writer) = tokio::io::split(stream);
             write_message(
                 &mut writer,
@@ -4587,7 +4587,7 @@ mod tests {
     }
     /// Read the next `ServerMessage::Acp` payload for a client, ignoring other
     /// server messages, with a short deadline. Returns `None` on timeout.
-    async fn next_acp_payload(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Option<String> {
+    async fn next_acp_payload(reader: &mut tokio::io::ReadHalf<LocalStream>) -> Option<String> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
         loop {
             let remaining = deadline - tokio::time::Instant::now();
@@ -4605,7 +4605,7 @@ mod tests {
     /// Returns it if found within the window, else `None` (so a "must NOT
     /// receive" assertion can use `.is_none()`).
     async fn next_acp_payload_matching(
-        reader: &mut tokio::io::ReadHalf<LeaderStream>,
+        reader: &mut tokio::io::ReadHalf<LocalStream>,
         needle: &str,
     ) -> Option<String> {
         for _ in 0..8 {
@@ -4617,7 +4617,7 @@ mod tests {
         }
         None
     }
-    async fn load_session(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_id: &str) {
+    async fn load_session(writer: &mut tokio::io::WriteHalf<LocalStream>, session_id: &str) {
         let msg = format!(
             r#"{{"jsonrpc":"2.0","method":"session/load","id":1,"params":{{"sessionId":"{session_id}"}}}}"#
         );
@@ -4817,11 +4817,11 @@ mod tests {
         sock_path: &std::path::Path,
         client_type: &str,
     ) -> (
-        tokio::io::ReadHalf<LeaderStream>,
-        tokio::io::WriteHalf<LeaderStream>,
+        tokio::io::ReadHalf<LocalStream>,
+        tokio::io::WriteHalf<LocalStream>,
         ClientId,
     ) {
-        let stream = LeaderStream::connect(sock_path).await.unwrap();
+        let stream = LocalStream::connect(sock_path).await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
         write_message(
             &mut writer,
@@ -5925,11 +5925,11 @@ mod tests {
             sock_path: &std::path::Path,
             client_type: &str,
         ) -> (
-            tokio::io::ReadHalf<LeaderStream>,
-            tokio::io::WriteHalf<LeaderStream>,
+            tokio::io::ReadHalf<LocalStream>,
+            tokio::io::WriteHalf<LocalStream>,
             u64,
         ) {
-            let stream = LeaderStream::connect(sock_path).await.unwrap();
+            let stream = LocalStream::connect(sock_path).await.unwrap();
             let (mut reader, mut writer) = tokio::io::split(stream);
             write_message(
                 &mut writer,
@@ -5976,7 +5976,7 @@ mod tests {
     async fn leader_client_id_dropped_when_target_disconnected() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
-        let stream_a = LeaderStream::connect(&sock_path).await.unwrap();
+        let stream_a = LocalStream::connect(&sock_path).await.unwrap();
         let (mut reader_a, mut writer_a) = tokio::io::split(stream_a);
         write_message(
             &mut writer_a,

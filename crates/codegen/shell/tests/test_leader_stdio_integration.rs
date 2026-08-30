@@ -4,9 +4,9 @@
 //! including message routing, multiple client connections, and proper cleanup.
 //!
 //! Currently Unix-only: the tests use `tokio::net::UnixStream` directly
-//! (rather than the leader's `LeaderStream` transport abstraction) so they
+//! (rather than the shared `LocalStream` transport abstraction) so they
 //! exercise the on-disk socket path. Equivalent Windows coverage would
-//! need to go through `LeaderStream`/`LeaderListener` and is tracked as a
+//! need to go through `LocalStream`/`LocalListener` and is tracked as a
 //! follow-up.
 
 #![cfg(unix)]

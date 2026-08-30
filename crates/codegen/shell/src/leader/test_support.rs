@@ -72,7 +72,7 @@ pub(crate) async fn spawn_fake_leader(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let _ = fs::remove_file(&socket_path);
-        let listener = match super::transport::LeaderListener::bind(&socket_path) {
+        let listener = match crate::local_ipc::transport::LocalListener::bind(&socket_path) {
             Ok(listener) => listener,
             Err(_) => return,
         };
@@ -94,7 +94,7 @@ pub(crate) async fn spawn_fake_leader(
     FakeLeaderHandle { cancel }
 }
 async fn serve_client(
-    stream: super::transport::LeaderStream,
+    stream: crate::local_ipc::transport::LocalStream,
     behavior: &FakeLeaderBehavior,
     cancel: &CancellationToken,
 ) {
