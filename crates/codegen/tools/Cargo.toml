@@ -19,7 +19,7 @@ token-estimation = { workspace = true }
 async-lsp = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-anydoc = "0.1.7"
+anydoc = "0.2.4"
 base64 = { workspace = true }
 cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
