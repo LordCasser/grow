@@ -2,8 +2,6 @@
 //! Chained autocomplete: pick a reasoning-supported model → trailing space
 //! re-opens the dropdown into a `low|medium|high|xhigh` sub-menu.
 
-use agent_client_protocol as acp;
-
 use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
@@ -100,11 +98,11 @@ impl SlashCommand for ModelCommand {
 }
 
 /// Look up a model by case-insensitive catalog id only.
-fn resolve_model(models: &ModelState, id: &str) -> Option<acp::ModelId> {
+fn resolve_model(models: &ModelState, id: &str) -> Option<shell::agent::models::ModelId> {
     models.resolve_by_id(id)
 }
 
-fn supports_reasoning_effort(info: &acp::ModelInfo) -> bool {
+fn supports_reasoning_effort(info: &shell::agent::models::ModelInfo) -> bool {
     shell::sampling::types::parse_reasoning_efforts_meta(info.meta.as_ref()).is_some()
 }
 
@@ -123,8 +121,11 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
 /// Returns the matched model id when `args_query` is `"<catalog-id> ..."`.
 /// Matches only stable catalog ids (`provider/model`). Longest id first so
 /// shared prefixes do not steal the match.
-fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
-    let mut candidates: Vec<(&acp::ModelId, &str)> = models
+fn detect_effort_phase(
+    models: &ModelState,
+    args_query: &str,
+) -> Option<shell::agent::models::ModelId> {
+    let mut candidates: Vec<(&shell::agent::models::ModelId, &str)> = models
         .available
         .iter()
         .filter(|(_, info)| supports_reasoning_effort(info))
@@ -184,7 +185,10 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
 
 /// One row per effort level for the `/model` chained effort phase.
 /// `insert_text` is `"<catalog-id> high"` so selecting a row completes both tokens.
-fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgItem> {
+fn build_effort_items(
+    models: &ModelState,
+    model_id: &shell::agent::models::ModelId,
+) -> Vec<ArgItem> {
     if models.available.get(model_id).is_none() {
         return Vec::new();
     }
@@ -205,21 +209,33 @@ mod tests {
     use shell::sampling::types::ReasoningEffort;
     use std::sync::Arc;
 
-    fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
+    fn model_with_reasoning(
+        id: &str,
+        name: &str,
+    ) -> (
+        shell::agent::models::ModelId,
+        shell::agent::models::ModelInfo,
+    ) {
+        let id = shell::agent::models::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
         meta.insert(
             "reasoningEfforts".into(),
             serde_json::json!(["xhigh", "high", "medium", "low"]),
         );
-        let info = acp::ModelInfo::new(id.clone(), name.to_string())
+        let info = shell::agent::models::ModelInfo::new(id.clone(), name.to_string())
             .meta(serde_json::Value::Object(meta).as_object().cloned());
         (id, info)
     }
 
-    fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
-        let info = acp::ModelInfo::new(id.clone(), name.to_string());
+    fn plain_model(
+        id: &str,
+        name: &str,
+    ) -> (
+        shell::agent::models::ModelId,
+        shell::agent::models::ModelInfo,
+    ) {
+        let id = shell::agent::models::ModelId::new(Arc::from(id));
+        let info = shell::agent::models::ModelInfo::new(id.clone(), name.to_string());
         (id, info)
     }
 

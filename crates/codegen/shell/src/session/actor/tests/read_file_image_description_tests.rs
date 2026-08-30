@@ -257,7 +257,7 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
                 .insert("deployment".into(), "next".into());
 
             let catalog = SessionActor::published_catalog_for_test(
-                acp::ModelId::new("provider/reloaded"),
+                crate::agent::models::ModelId::new("provider/reloaded"),
                 sampling,
                 Some("provider/vision".into()),
                 std::time::Duration::from_secs(77),
@@ -306,7 +306,7 @@ async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
             sampling.model = "deferred-model".into();
             sampling.context_window = 32_000;
             let catalog = SessionActor::published_catalog_for_test(
-                acp::ModelId::new("provider/deferred"),
+                crate::agent::models::ModelId::new("provider/deferred"),
                 sampling,
                 None,
                 std::time::Duration::from_secs(88),

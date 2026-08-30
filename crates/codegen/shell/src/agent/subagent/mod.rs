@@ -23,8 +23,8 @@ use crate::session::{
 use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
+use acp_transport::protocol as acp;
 use agent::config::McpInheritance;
-use agent_client_protocol as acp;
 use hunk_tracker::HunkTrackerHandle;
 use sampling_types::conversation::ConversationItem;
 use std::collections::HashMap;
@@ -119,7 +119,7 @@ pub(crate) struct SubagentSpawnContext {
     /// and for `inject_url_derived_headers` in the construction helpers.
     pub alpha_test_key: Option<String>,
     pub auth_method_id: acp::AuthMethodId,
-    pub model_id: acp::ModelId,
+    pub model_id: crate::agent::models::ModelId,
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
     /// Session that directly owns this delegation's security boundary. It is
@@ -281,7 +281,9 @@ pub(crate) struct SubagentSpawnContext {
 }
 
 pub(crate) type ActiveChildSessions = std::rc::Rc<
-    std::cell::RefCell<std::collections::HashMap<agent_client_protocol::SessionId, SessionHandle>>,
+    std::cell::RefCell<
+        std::collections::HashMap<agent_client_protocol::schema::v1::SessionId, SessionHandle>,
+    >,
 >;
 impl SubagentSpawnContext {
     pub fn resolve_inference_idle_timeout_secs(&self, subagent_model_id: &str) -> u64 {
@@ -693,7 +695,7 @@ pub(super) async fn admit_completion_receipt_before_result(
 async fn resolve_subagent_sampling_config(
     agent_name: &str,
     ctx: &SubagentSpawnContext,
-) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
+) -> Result<(sampler::SamplerConfig, crate::agent::models::ModelId), String> {
     let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
     if let Some(model_id) = ctx.subagent_model_overrides.get(agent_name) {
         let Some((config, canonical_id)) = resolve_model_override_to_config(model_id, ctx) else {
@@ -738,7 +740,7 @@ async fn resolve_effective_model_config(
     runtime_override_model: Option<&str>,
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
-) -> Result<(sampler::SamplerConfig, acp::ModelId), String> {
+) -> Result<(sampler::SamplerConfig, crate::agent::models::ModelId), String> {
     if let Some(model_id) = runtime_override_model {
         if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
             return Ok(resolved);
@@ -765,7 +767,7 @@ fn log_subagent_model_resolution(
     agent_name: &str,
     priority: &str,
     resolved: &sampler::SamplerConfig,
-    resolved_id: &acp::ModelId,
+    resolved_id: &crate::agent::models::ModelId,
     parent: &sampler::SamplerConfig,
 ) {
     let child_key = key_prefix(&resolved.api_key);
@@ -792,7 +794,7 @@ fn log_subagent_model_resolution(
 /// projection is never combined with a separately-read catalog identity.
 async fn read_parent_sampling_config(
     ctx: &SubagentSpawnContext,
-) -> (sampler::SamplerConfig, acp::ModelId) {
+) -> (sampler::SamplerConfig, crate::agent::models::ModelId) {
     let mut inherited = ctx.sampling_config.clone();
     if let Some(ref chat_state) = ctx.delegation_chat_state {
         let creds = chat_state.get_credentials().await;
@@ -822,10 +824,10 @@ async fn read_parent_sampling_config(
 fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
-) -> Option<(sampler::SamplerConfig, acp::ModelId)> {
+) -> Option<(sampler::SamplerConfig, crate::agent::models::ModelId)> {
     let entry =
         crate::agent::config::find_model_by_catalog_id(&ctx.available_models, model_id).cloned()?;
-    let canonical_model_id = acp::ModelId::new(model_id);
+    let canonical_model_id = crate::agent::models::ModelId::new(model_id);
     let credentials = resolve_credentials(&entry);
     let config = sampling_config_for_model(&entry, credentials, ctx.alpha_test_key.clone());
     ::diagnostics::unified_log::debug(

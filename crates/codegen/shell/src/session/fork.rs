@@ -7,7 +7,7 @@ const FORK_LOG: &str = "grow_fork";
 use crate::session::info::Info;
 use crate::session::storage::{CopySessionOptions, JsonlStorageAdapter};
 use crate::util::grow_home::grow_home;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::io;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

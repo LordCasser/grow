@@ -6,9 +6,9 @@ use super::*;
 /// catalog identity. Both maps must contain the same `provider/model` key.
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
-    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
-    id: &acp::ModelId,
-) -> Option<acp::ModelId> {
+    available: &IndexMap<crate::agent::models::ModelId, crate::agent::models::ModelInfo>,
+    id: &crate::agent::models::ModelId,
+) -> Option<crate::agent::models::ModelId> {
     (models.contains_key(id.0.as_ref()) && available.contains_key(id)).then(|| id.clone())
 }
 
@@ -16,7 +16,7 @@ pub(crate) fn selectable_catalog_key_for_persisted(
 /// cannot be resolved to a catalog key and the new session falls back to the
 /// default model instead (never a silent fallback).
 pub(crate) struct ModelFallbackNotice {
-    pub requested: acp::ModelId,
+    pub requested: crate::agent::models::ModelId,
     pub reason: String,
 }
 
@@ -30,12 +30,12 @@ pub(crate) struct ModelFallbackNotice {
 pub(crate) fn resolve_new_session_model_id(
     models: &IndexMap<String, ModelEntry>,
     resolved_custom_model: Option<&str>,
-    current_default: &acp::ModelId,
-) -> (acp::ModelId, Option<ModelFallbackNotice>) {
+    current_default: &crate::agent::models::ModelId,
+) -> (crate::agent::models::ModelId, Option<ModelFallbackNotice>) {
     let Some(requested) = resolved_custom_model else {
         return (current_default.clone(), None);
     };
-    let requested_id = acp::ModelId::new(requested.to_string());
+    let requested_id = crate::agent::models::ModelId::new(requested.to_string());
     match models.contains_key(requested) {
         true => (requested_id, None),
         false => (
@@ -151,7 +151,7 @@ pub(crate) fn resolve_default_model(
 /// Filter hidden and auth-gated entries out of `catalog` and convert to ACP wire format.
 pub fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
-) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+) -> IndexMap<crate::agent::models::ModelId, crate::agent::models::ModelInfo> {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
         .filter(|(_, e)| !e.info.hidden)
@@ -324,7 +324,7 @@ mod tests {
     fn available_for(
         models: &IndexMap<String, ModelEntry>,
         keys: &[&str],
-    ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    ) -> IndexMap<crate::agent::models::ModelId, crate::agent::models::ModelInfo> {
         let subset: IndexMap<String, ModelEntry> = keys
             .iter()
             .filter_map(|k| models.get(*k).map(|e| (k.to_string(), e.clone())))
@@ -336,7 +336,7 @@ mod tests {
     fn persisted_exact_key_match_returns_the_key() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
         let available = available_for(&models, &["deepseek/deepseek-v4-flash"]);
-        let id = acp::ModelId::new("deepseek/deepseek-v4-flash");
+        let id = crate::agent::models::ModelId::new("deepseek/deepseek-v4-flash");
         assert_eq!(
             selectable_catalog_key_for_persisted(&models, &available, &id),
             Some(id)
@@ -354,7 +354,7 @@ mod tests {
             selectable_catalog_key_for_persisted(
                 &models,
                 &available,
-                &acp::ModelId::new("deepseek/deepseek-v4-flash"),
+                &crate::agent::models::ModelId::new("deepseek/deepseek-v4-flash"),
             ),
             None
         );
@@ -368,7 +368,7 @@ mod tests {
             selectable_catalog_key_for_persisted(
                 &models,
                 &available,
-                &acp::ModelId::new("deepseek-v4-flash"),
+                &crate::agent::models::ModelId::new("deepseek-v4-flash"),
             ),
             None
         );
@@ -382,7 +382,7 @@ mod tests {
             selectable_catalog_key_for_persisted(
                 &models,
                 &available,
-                &acp::ModelId::new("totally-unknown"),
+                &crate::agent::models::ModelId::new("totally-unknown"),
             ),
             None
         );
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn new_session_model_rejects_bare_routing_slug() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
-        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let default = crate::agent::models::ModelId::new("deepseek/deepseek-v4-pro");
         let (model_id, notice) =
             resolve_new_session_model_id(&models, Some("deepseek-v4-flash"), &default);
         assert_eq!(model_id, default);
@@ -401,17 +401,20 @@ mod tests {
     #[test]
     fn new_session_model_keeps_an_already_qualified_key() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
-        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let default = crate::agent::models::ModelId::new("deepseek/deepseek-v4-pro");
         let (model_id, notice) =
             resolve_new_session_model_id(&models, Some("deepseek/deepseek-v4-flash"), &default);
-        assert_eq!(model_id, acp::ModelId::new("deepseek/deepseek-v4-flash"));
+        assert_eq!(
+            model_id,
+            crate::agent::models::ModelId::new("deepseek/deepseek-v4-flash")
+        );
         assert!(notice.is_none());
     }
 
     #[test]
     fn new_session_model_without_custom_request_uses_default() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
-        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let default = crate::agent::models::ModelId::new("deepseek/deepseek-v4-pro");
         let (model_id, notice) = resolve_new_session_model_id(&models, None, &default);
         assert_eq!(model_id, default);
         assert!(notice.is_none());
@@ -420,7 +423,7 @@ mod tests {
     #[test]
     fn new_session_model_unresolvable_request_signals_fallback_notice() {
         let models = catalog(&[("other/other-model", "other-model")]);
-        let default = acp::ModelId::new("other/other-model");
+        let default = crate::agent::models::ModelId::new("other/other-model");
         let (model_id, notice) =
             resolve_new_session_model_id(&models, Some("deepseek-v4-flash"), &default);
         assert_eq!(
@@ -428,7 +431,10 @@ mod tests {
             "an unresolvable request must fall back to the default model"
         );
         let notice = notice.expect("an unresolvable request must surface a fallback notice");
-        assert_eq!(notice.requested, acp::ModelId::new("deepseek-v4-flash"));
+        assert_eq!(
+            notice.requested,
+            crate::agent::models::ModelId::new("deepseek-v4-flash")
+        );
         assert!(
             notice.reason.contains("deepseek-v4-flash"),
             "reason should name the requested model: {}",

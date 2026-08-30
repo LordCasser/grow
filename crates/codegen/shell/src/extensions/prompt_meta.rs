@@ -21,7 +21,7 @@ impl PromptBlockMeta {
     }
 
     /// Try to parse from a freeform `_meta` map.
-    pub fn from_value(value: &agent_client_protocol::Meta) -> Option<Self> {
+    pub fn from_value(value: &agent_client_protocol::schema::v1::Meta) -> Option<Self> {
         serde_json::from_value(serde_json::Value::Object(value.clone())).ok()
     }
 }

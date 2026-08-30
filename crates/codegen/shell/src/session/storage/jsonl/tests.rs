@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use crate::session::info::Info;
 use crate::session::persistence::{SessionLineage, Summary, default_model_id};
 use crate::session::storage::{CopySessionOptions, SessionUpdate};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tempfile::TempDir;
 fn create_test_info() -> Info {
     Info {
@@ -577,7 +577,7 @@ async fn test_jsonl_round_trip() {
         .append_update(&info, &SessionUpdate::Acp(Box::new(notification)))
         .await
         .unwrap();
-    let new_model = acp::ModelId::new("grow-4.3");
+    let new_model = crate::agent::models::ModelId::new("grow-4.3");
     adapter
         .update_current_model_and_agent(&info, &new_model, None, None)
         .await
@@ -1038,7 +1038,7 @@ async fn sideband_writer_rejects_symlinked_directory_roots() {
 /// chunks.
 #[tokio::test]
 async fn updates_do_not_rebuild_timeline_surface() {
-    use agent_client_protocol::{
+    use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, SessionUpdate as Acp, TextContent,
     };
     let temp_dir = TempDir::new().unwrap();
@@ -3569,8 +3569,8 @@ async fn model_change_repairs_selection_summary_from_timeline() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let old_model = acp::ModelId::new("provider/old");
-    let new_model = acp::ModelId::new("provider/new");
+    let old_model = crate::agent::models::ModelId::new("provider/old");
+    let new_model = crate::agent::models::ModelId::new("provider/new");
     adapter.init_session(&info, old_model.clone()).await.unwrap();
     let events = adapter.read_timeline_events_sync(&info).unwrap();
     let mut timeline = chat_state::Timeline::from_events(events).unwrap();
@@ -3639,8 +3639,8 @@ async fn malformed_model_change_bricks_session_load() {
 
 #[test]
 fn model_change_fold_rejects_transport_discontinuity() {
-    let old_model = acp::ModelId::new("catalog/old");
-    let current_model = acp::ModelId::new("catalog/current");
+    let old_model = crate::agent::models::ModelId::new("catalog/old");
+    let current_model = crate::agent::models::ModelId::new("catalog/current");
     let old_route = sampling_types::ModelImageInputKey::new(
         "old-wire",
         "responses",
@@ -3699,7 +3699,7 @@ fn model_change_fold_rejects_transport_discontinuity() {
 
 #[test]
 fn model_change_folds_its_atomic_sampling_receipt() {
-    let model = acp::ModelId::new("catalog/current");
+    let model = crate::agent::models::ModelId::new("catalog/current");
     let route = sampling_types::ModelImageInputKey::new(
         "wire-model",
         "responses",

@@ -9,9 +9,9 @@ use futures_util::FutureExt as _;
 enum PendingControlSettlement {
     Sampling {
         respond_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
-        result: Result<acp::ModelId, acp::Error>,
+        result: Result<crate::agent::models::ModelId, acp::Error>,
         intent: Option<crate::session::ControlIntent>,
     },
     Agent {
@@ -353,7 +353,7 @@ impl SessionActor {
     }
     #[cfg(test)]
     pub(super) fn selection_route_for_test(
-        model_id: acp::ModelId,
+        model_id: crate::agent::models::ModelId,
         sampling_config: sampler::SamplerConfig,
         auto_compact_threshold_percent: u8,
     ) -> crate::agent::models::PublishedSessionRoute {
@@ -371,7 +371,7 @@ impl SessionActor {
 
     #[cfg(test)]
     pub(super) fn published_catalog_for_test(
-        model_id: acp::ModelId,
+        model_id: crate::agent::models::ModelId,
         sampling_config: sampler::SamplerConfig,
         image_description_model: Option<String>,
         inference_idle_timeout: std::time::Duration,
@@ -424,7 +424,7 @@ impl SessionActor {
 
     async fn commit_model_change(
         &self,
-        model_id: &acp::ModelId,
+        model_id: &crate::agent::models::ModelId,
         sampling_config: &sampler::SamplerConfig,
         reason: &str,
         control_intent: Option<&crate::session::ControlIntent>,
@@ -479,7 +479,7 @@ impl SessionActor {
         &self,
         workflow_admission: &mut crate::session::workflow::manager::WorkflowManager,
         catalog_authority: &crate::agent::models::PublishedModelCatalog,
-        model_id: acp::ModelId,
+        model_id: crate::agent::models::ModelId,
         sampling_config: sampler::SamplerConfig,
         image_description_model: Option<String>,
         inference_idle_timeout: std::time::Duration,
@@ -676,7 +676,7 @@ impl SessionActor {
         route: crate::agent::models::PublishedSessionRoute,
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         control_intent: Option<&crate::session::ControlIntent>,
-    ) -> Result<(acp::ModelId, bool), acp::Error> {
+    ) -> Result<(crate::agent::models::ModelId, bool), acp::Error> {
         let crate::agent::models::PublishedSessionRoute {
             model_id,
             sampling_config,
@@ -853,7 +853,10 @@ impl SessionActor {
         intent: &Option<crate::session::ControlIntent>,
         responds_to: &mut Option<
             tokio::sync::oneshot::Sender<
-                Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+                Result<
+                    crate::session::DesiredStateOutcome<crate::agent::models::ModelId>,
+                    acp::Error,
+                >,
             >,
         >,
     ) -> Option<tokio::sync::MutexGuard<'a, AdmissionState>> {
@@ -921,7 +924,7 @@ impl SessionActor {
                                     .data("persisted Sampling receipt has a non-Sampling target"));
                             };
                             Ok(crate::session::DesiredStateOutcome::Applied(
-                                acp::ModelId::new(model_id),
+                                crate::agent::models::ModelId::new(model_id),
                             ))
                         }
                         crate::extensions::notification::ControlPhase::Rejected => Err(
@@ -955,7 +958,7 @@ impl SessionActor {
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         intent: Option<crate::session::ControlIntent>,
         responds_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) {
         let (revision, superseded) =
@@ -1025,7 +1028,7 @@ impl SessionActor {
         authority: crate::session::SessionEffortAuthority,
         intent: Option<crate::session::ControlIntent>,
         responds_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) {
         let mut gate = Some(self.step_control_gate.lock().await);
@@ -1044,7 +1047,7 @@ impl SessionActor {
         let model_id = admission
             .pending_step_controls
             .desired_sampling_model_id()
-            .unwrap_or_else(|| acp::ModelId::new(self.current_catalog_model_id()));
+            .unwrap_or_else(|| crate::agent::models::ModelId::new(self.current_catalog_model_id()));
         let resolved = match authority {
             crate::session::SessionEffortAuthority::Catalog {
                 catalog,
@@ -1137,7 +1140,7 @@ impl SessionActor {
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         intent: Option<crate::session::ControlIntent>,
         responds_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) {
         let mut gate = Some(self.step_control_gate.lock().await);
@@ -2578,14 +2581,14 @@ mod tests {
                 catalog_config.image_description_model = None;
                 let manager = crate::agent::models::ModelsManager::new(
                     indexmap::IndexMap::from([("provider/new".to_owned(), selected)]),
-                    acp::ModelId::new("provider/new"),
+                    crate::agent::models::ModelId::new("provider/new"),
                     catalog_config,
                 );
                 let catalog = std::sync::Arc::new(manager.published_catalog());
                 let mut selected_config = sampler::SamplerConfig::default();
                 selected_config.model = "new-wire-model".to_owned();
                 let selected_route = SessionActor::selection_route_for_test(
-                    acp::ModelId::new("provider/new"),
+                    crate::agent::models::ModelId::new("provider/new"),
                     selected_config,
                     85,
                 );
@@ -2668,7 +2671,7 @@ mod tests {
                 let old_route = actor.model_route.snapshot();
                 let previous_key = actor.chat_state_handle.get_credentials().await.api_key;
                 actor.model_route.replace(
-                    acp::ModelId::new("provider/new-model"),
+                    crate::agent::models::ModelId::new("provider/new-model"),
                     old_route.sampling_config,
                 );
 
@@ -2717,9 +2720,10 @@ mod tests {
                 let mut route = actor.model_route.snapshot().sampling_config;
                 route.auth_scheme = sampler::AuthScheme::XApiKey;
                 route.bearer_resolver = Some(std::sync::Arc::new(EmptyBearerResolver));
-                actor
-                    .model_route
-                    .replace(acp::ModelId::new("removed-provider/frozen-model"), route);
+                actor.model_route.replace(
+                    crate::agent::models::ModelId::new("removed-provider/frozen-model"),
+                    route,
+                );
 
                 let rebuilt = actor.reconstruct_full_config().await;
 
@@ -2747,9 +2751,10 @@ mod tests {
                 .await;
                 let mut route = actor.model_route.snapshot().sampling_config;
                 route.model = "glm-5.3".into();
-                actor
-                    .model_route
-                    .replace(acp::ModelId::new("bigmodel/glm-5.3"), route);
+                actor.model_route.replace(
+                    crate::agent::models::ModelId::new("bigmodel/glm-5.3"),
+                    route,
+                );
 
                 assert_eq!(actor.current_catalog_model_id(), "bigmodel/glm-5.3");
                 assert_eq!(
@@ -2770,7 +2775,7 @@ mod tests {
                 let mut first = actor.model_route.snapshot().sampling_config;
                 first.model = "first-wire".into();
                 let first_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("provider/first"),
+                    crate::agent::models::ModelId::new("provider/first"),
                     first.clone(),
                     None,
                     std::time::Duration::from_secs(60),
@@ -2781,7 +2786,7 @@ mod tests {
                 actor
                     .admit_session_model_selection(
                         SessionActor::selection_route_for_test(
-                            acp::ModelId::new("provider/first"),
+                            crate::agent::models::ModelId::new("provider/first"),
                             first,
                             80,
                         ),
@@ -2794,7 +2799,7 @@ mod tests {
                 let mut final_route = actor.model_route.snapshot().sampling_config;
                 final_route.model = "final-wire".into();
                 let final_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("provider/final"),
+                    crate::agent::models::ModelId::new("provider/final"),
                     final_route.clone(),
                     None,
                     std::time::Duration::from_secs(90),
@@ -2805,7 +2810,7 @@ mod tests {
                 actor
                     .admit_session_model_selection(
                         SessionActor::selection_route_for_test(
-                            acp::ModelId::new("provider/final"),
+                            crate::agent::models::ModelId::new("provider/final"),
                             final_route,
                             70,
                         ),
@@ -2928,7 +2933,7 @@ mod tests {
         let (first_tx, first_rx) = tokio::sync::oneshot::channel();
         controls.admit_sampling(
             SessionActor::selection_route_for_test(
-                acp::ModelId::new("provider/first"),
+                crate::agent::models::ModelId::new("provider/first"),
                 sampler::SamplerConfig::default(),
                 85,
             ),
@@ -2941,7 +2946,7 @@ mod tests {
         let (next_tx, _next_rx) = tokio::sync::oneshot::channel();
         let (_, superseded) = controls.admit_sampling(
             SessionActor::selection_route_for_test(
-                acp::ModelId::new("provider/next"),
+                crate::agent::models::ModelId::new("provider/next"),
                 sampler::SamplerConfig::default(),
                 85,
             ),
@@ -2968,7 +2973,7 @@ mod tests {
         let (next_tx, _next_rx) = tokio::sync::oneshot::channel();
         controls.admit_sampling(
             SessionActor::selection_route_for_test(
-                acp::ModelId::new("provider/next"),
+                crate::agent::models::ModelId::new("provider/next"),
                 sampler::SamplerConfig::default(),
                 85,
             ),
@@ -3134,7 +3139,7 @@ mod tests {
                 first.base_url = "https://first.example/v1".into();
                 first.context_window = 32_000;
                 let first_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("first/catalog"),
+                    crate::agent::models::ModelId::new("first/catalog"),
                     first,
                     None,
                     std::time::Duration::from_secs(60),
@@ -3151,7 +3156,7 @@ mod tests {
                 latest.base_url = "https://latest.example/v1".into();
                 latest.context_window = 64_000;
                 let latest_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("latest/catalog"),
+                    crate::agent::models::ModelId::new("latest/catalog"),
                     latest,
                     None,
                     std::time::Duration::from_secs(90),
@@ -3210,7 +3215,7 @@ mod tests {
                 first_reload.model = "reload-one-wire".into();
                 first_reload.context_window = 32_000;
                 let first_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("reload/one"),
+                    crate::agent::models::ModelId::new("reload/one"),
                     first_reload,
                     None,
                     std::time::Duration::from_secs(60),
@@ -3227,7 +3232,7 @@ mod tests {
                 selected.context_window = 64_000;
                 let (selection_tx, selection_rx) = tokio::sync::oneshot::channel();
                 let selection_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("user/selection"),
+                    crate::agent::models::ModelId::new("user/selection"),
                     selected.clone(),
                     None,
                     std::time::Duration::from_secs(300),
@@ -3237,7 +3242,7 @@ mod tests {
                 actor
                     .admit_session_model_selection(
                         SessionActor::selection_route_for_test(
-                            acp::ModelId::new("user/selection"),
+                            crate::agent::models::ModelId::new("user/selection"),
                             selected,
                             80,
                         ),
@@ -3251,7 +3256,7 @@ mod tests {
                 second_reload.model = "user-wire-refreshed".into();
                 second_reload.context_window = 96_000;
                 let second_catalog = SessionActor::published_catalog_for_test(
-                    acp::ModelId::new("user/selection"),
+                    crate::agent::models::ModelId::new("user/selection"),
                     second_reload,
                     None,
                     std::time::Duration::from_secs(120),
@@ -3364,7 +3369,7 @@ mod tests {
                 route.model = "provider-alias".into();
                 actor
                     .model_route
-                    .replace(acp::ModelId::new("catalog-alias"), route);
+                    .replace(crate::agent::models::ModelId::new("catalog-alias"), route);
                 actor.compaction.threshold_percent.set(73);
                 actor.compaction.memory_flush_enabled = true;
                 actor.compaction.wall_clock_budget_secs = 41;
@@ -3658,13 +3663,13 @@ mod tests {
                         ("catalog/next".to_owned(), selected_entry),
                         ("catalog/vision".to_owned(), vision_entry),
                     ]),
-                    acp::ModelId::new("catalog/next"),
+                    crate::agent::models::ModelId::new("catalog/next"),
                     config,
                 );
                 let selection_catalog = std::sync::Arc::new(selected_manager.published_catalog());
                 let selected_route = selection_catalog
                     .resolve_session_route(
-                        &acp::ModelId::new("catalog/next"),
+                        &crate::agent::models::ModelId::new("catalog/next"),
                         Some(sampling_types::ReasoningEffort::High),
                     )
                     .unwrap();

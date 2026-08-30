@@ -815,7 +815,7 @@ mod tests {
     use std::time::Duration;
 
     use acp_transport::acp_gateway;
-    use agent_client_protocol as acp;
+    use acp_transport::protocol as acp;
 
     type RecordedNotifications = Rc<RefCell<Vec<(String, serde_json::Value)>>>;
 
@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for RecordingClient {
+    impl acp_transport::AcpClientHandler for RecordingClient {
         async fn request_permission(
             &self,
             _: acp::RequestPermissionRequest,

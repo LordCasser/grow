@@ -1185,7 +1185,7 @@ mod configuration_shortcut_tests {
         let mut agent = super::test_fixtures::make_agent();
         agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
         agent.session.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
-        let commands = vec![agent_client_protocol::AvailableCommand::new(
+        let commands = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "goal".to_string(),
             "Manage the current goal".to_string(),
         )];

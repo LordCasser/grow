@@ -16,7 +16,7 @@ use crate::app::session::{AgentCommand, AgentId, AgentState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone, SessionEvent};
 use crate::slash::command::DoctorRequest;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use diagnostics::session_ctx::log_event;
 
 fn scrollback_has_recent_context_too_large(

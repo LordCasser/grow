@@ -308,7 +308,9 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
 ///    using line numbers from `meta` when available (pre-execution previews).
 ///
 /// Returns `(hunks, edit_count)`.
-pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk>, usize) {
+pub fn extract_edit_hunks(
+    tc: &agent_client_protocol::schema::v1::ToolCall,
+) -> (Vec<DiffHunk>, usize) {
     use tools::types::output::{
         SearchReplaceEditContextInformation, SearchReplaceOutput, ToolOutput,
     };
@@ -337,7 +339,7 @@ pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk
 
     // Strategy 2 & 3: ACP Diff content
     for content in &tc.content {
-        if let agent_client_protocol::ToolCallContent::Diff(diff) = content {
+        if let agent_client_protocol::schema::v1::ToolCallContent::Diff(diff) = content {
             // Strategy 2: structured edit details from Diff.meta
             // acp_conversion embeds SearchReplaceEditContextInformation here.
             if let Some(meta) = &diff.meta
@@ -1020,7 +1022,7 @@ mod tests {
 
     #[test]
     fn extract_edit_hunks_from_raw_output() {
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use tools::types::output::{
             SearchReplaceEditContextInformation, SearchReplaceEditsApplied, SearchReplaceOutput,
@@ -1079,7 +1081,7 @@ mod tests {
 
     #[test]
     fn extract_edit_hunks_fallback_to_content_diff() {
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
 
         let tc = acp::ToolCall::new(
@@ -1101,7 +1103,7 @@ mod tests {
 
     #[test]
     fn extract_edit_hunks_empty_when_no_data() {
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
 
         let tc = acp::ToolCall::new(
@@ -1122,7 +1124,7 @@ mod tests {
     fn extract_edit_hunks_from_diff_meta_structured() {
         // Strategy 2: structured edit details from Diff.meta
         // (acp_conversion embeds SearchReplaceEditContextInformation).
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use tools::types::output::SearchReplaceEditContextInformation;
 
@@ -1175,7 +1177,7 @@ mod tests {
     #[test]
     fn extract_edit_hunks_from_diff_meta_start_line() {
         // Strategy 3: pre-execution preview with simple {old_line, new_line} meta.
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
 
         let tc = acp::ToolCall::new(

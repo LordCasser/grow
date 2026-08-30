@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use parking_lot::Mutex;
 use workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
 

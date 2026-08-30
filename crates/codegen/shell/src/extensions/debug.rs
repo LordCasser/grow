@@ -8,7 +8,7 @@
 //!   auto-compaction, regardless of context window usage.
 //! - `agent`: agent-process diagnostics (registry counts).
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;

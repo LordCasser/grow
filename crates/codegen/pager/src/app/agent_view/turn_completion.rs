@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use crate::notifications::NotificationEventKind;
 use crate::scrollback::blocks::SessionEvent;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::AgentView;
 use crate::app::root::dispatch::drain_root_permission_queue;
@@ -342,7 +342,12 @@ impl AgentView {
     ) {
         let incoming = match result {
             Ok(pr) => FinalizedPrMeta {
-                usage: pr.usage.clone(),
+                usage: pr
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("usage"))
+                    .cloned()
+                    .and_then(|usage| serde_json::from_value(usage).ok()),
                 structured_output: pr
                     .meta
                     .as_ref()

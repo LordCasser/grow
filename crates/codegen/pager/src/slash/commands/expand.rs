@@ -62,7 +62,7 @@ mod tests {
 
     fn ctx<'a>(
         models: &'a ModelState,
-        session_id: Option<&'a agent_client_protocol::SessionId>,
+        session_id: Option<&'a agent_client_protocol::schema::v1::SessionId>,
         screen_mode: crate::app::ScreenMode,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn minimal_with_session_dispatches_expand_action() {
         let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("s1".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("s1".to_string());
         let mut c = ctx(&models, Some(&sid), crate::app::ScreenMode::Minimal);
         assert!(matches!(
             ExpandCommand.run(&mut c, ""),

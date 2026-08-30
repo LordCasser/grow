@@ -4,7 +4,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView, WelcomeAnnouncementState};
 use crate::app::session::AgentId;
 use crate::scrollback::state::ScrollbackState;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// The active agent's root session id, if any. Used to scope server-queue
 /// edit Effects to the foregrounded session.

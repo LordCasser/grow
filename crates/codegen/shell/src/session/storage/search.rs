@@ -30,7 +30,7 @@ use super::search_recovery;
 use super::{StorageAdapter, TimelineLedgerReader};
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chat_state::Timeline;
 use sampling_types::ConversationItem;
 
@@ -1540,7 +1540,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             num_messages: 0,
-            current_model_id: acp::ModelId::new("test"),
+            current_model_id: crate::agent::models::ModelId::new("test"),
             parent_session_id: None,
             forked_at: None,
             session_format_version: crate::session::persistence::SESSION_FORMAT_VERSION,
@@ -2135,7 +2135,7 @@ mod tests {
             cwd: "/ws".to_string(),
         };
         storage
-            .init_session(&info, acp::ModelId::new("test"))
+            .init_session(&info, crate::agent::models::ModelId::new("test"))
             .await
             .unwrap();
 

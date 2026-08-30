@@ -7,7 +7,7 @@
 use crate::session::normalize_cache::{
     NormalizeCache, NormalizeError, NormalizedEntry, run_blocking,
 };
-use agent_client_protocol::ImageContent;
+use agent_client_protocol::schema::v1::ImageContent;
 use base64::Engine as _;
 use bytes::Bytes;
 use std::borrow::Cow;

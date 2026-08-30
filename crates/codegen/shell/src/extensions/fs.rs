@@ -5,7 +5,7 @@
 use super::{Empty, ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
 use crate::session::file_system::{self as fs, FsListParams, FsReadFileData};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use workspace::file_system::FsReadEncoding;

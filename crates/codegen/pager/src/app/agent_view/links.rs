@@ -720,7 +720,7 @@ mod link_click_tests {
     #[test]
     fn open_prompt_dropdown_suppresses_bg_button_click_target() {
         use crate::acp::meta::NotificationMeta;
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         let mut effects = Vec::new();
@@ -853,7 +853,7 @@ mod link_click_tests {
     #[test]
     fn frame_occluder_over_stop_and_bg_buttons_swallows_clicks() {
         use crate::acp::meta::NotificationMeta;
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         let mut effects = Vec::new();
@@ -978,10 +978,12 @@ mod link_click_tests {
         let mut permission = paste_key_tests::make_followup_permission_state();
         permission.focus = crate::views::permission_view::PermissionFocus::Options;
         permission.title = "Permission required".to_string();
-        permission.options = vec![agent_client_protocol::PermissionOption::new(
-            agent_client_protocol::PermissionOptionId::new(std::sync::Arc::from("allow-once")),
+        permission.options = vec![agent_client_protocol::schema::v1::PermissionOption::new(
+            agent_client_protocol::schema::v1::PermissionOptionId::new(std::sync::Arc::from(
+                "allow-once",
+            )),
             "Allow once".to_string(),
-            agent_client_protocol::PermissionOptionKind::AllowOnce,
+            agent_client_protocol::schema::v1::PermissionOptionKind::AllowOnce,
         )];
         agent.push_permission(permission);
         let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);

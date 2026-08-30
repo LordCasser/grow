@@ -1914,7 +1914,7 @@ async fn copy_session_data_preserves_parent_surface() {
         id: acp::SessionId::new("parent-fork-test"),
         cwd: "/workspace".to_string(),
     };
-    adapter.init_session(&parent_info, acp::ModelId::new("test-model")).await.unwrap();
+    adapter.init_session(&parent_info, crate::agent::models::ModelId::new("test-model")).await.unwrap();
     let timeline = chat_state::Timeline::from_seed(vec![
         ConversationItem::user("What files?"),
         ConversationItem::assistant("listed"),

@@ -46,8 +46,8 @@ impl<T> Clone for LocalRef<T> {
         Self { ptr: self.ptr }
     }
 }
-use agent_client_protocol::Client as _;
-use agent_client_protocol::{self as acp, AuthenticateResponse};
+use acp_transport::AcpClientHandler as _;
+use acp_transport::protocol::{self as acp, AuthenticateResponse};
 use indexmap::IndexMap;
 use tokio::sync::oneshot;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
@@ -100,8 +100,8 @@ fn parse_ask_user_question_from_meta(meta: Option<&acp::Meta>) -> Option<bool> {
 fn lookup_session_model(
     sessions: &HashMap<acp::SessionId, SessionHandle>,
     session_id: Option<&acp::SessionId>,
-    default_model_id: &acp::ModelId,
-) -> acp::ModelId {
+    default_model_id: &crate::agent::models::ModelId,
+) -> crate::agent::models::ModelId {
     session_id
         .and_then(|id| {
             sessions
@@ -141,7 +141,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     /// Persisted Agent identity when reopening a session. New sessions leave
     /// this unset and resolve the global default independently of the model.
     pub persisted_agent_name: Option<&'a str>,
-    pub session_model_id: acp::ModelId,
+    pub session_model_id: crate::agent::models::ModelId,
     pub session_permission_mode: crate::util::config::PermissionMode,
     pub prompt_display_cwd: Option<String>,
 }
@@ -499,7 +499,7 @@ pub struct MvpAgent {
     /// fetch still in flight after a leader restart), so the prompt path
     /// re-checks and self-heals — or (b) the user explicitly switches
     /// models via `set_session_model`. Released by `remove_session`.
-    model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
+    model_unavailable_sessions: RefCell<std::collections::HashMap<String, crate::agent::models::ModelId>>,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
     subagent_event_tx: tokio::sync::mpsc::UnboundedSender<

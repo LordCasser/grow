@@ -84,8 +84,8 @@ pub const IMAGE_DISPLAY_NUMBER_META_KEY: &str = "grow.dev/imageDisplayNumber";
 
 /// Build an ACP image-block `_meta` value carrying `display_number` under
 /// [`IMAGE_DISPLAY_NUMBER_META_KEY`].
-pub fn display_number_meta(display_number: usize) -> agent_client_protocol::Meta {
-    let mut meta = agent_client_protocol::Meta::new();
+pub fn display_number_meta(display_number: usize) -> agent_client_protocol::schema::v1::Meta {
+    let mut meta = agent_client_protocol::schema::v1::Meta::new();
     meta.insert(
         IMAGE_DISPLAY_NUMBER_META_KEY.to_owned(),
         serde_json::json!(display_number),
@@ -95,7 +95,9 @@ pub fn display_number_meta(display_number: usize) -> agent_client_protocol::Meta
 
 /// Read the `[Image #N]` display number recorded in an image block's
 /// `_meta`, if present.
-pub fn display_number_from_meta(meta: Option<&agent_client_protocol::Meta>) -> Option<usize> {
+pub fn display_number_from_meta(
+    meta: Option<&agent_client_protocol::schema::v1::Meta>,
+) -> Option<usize> {
     meta?
         .get(IMAGE_DISPLAY_NUMBER_META_KEY)?
         .as_u64()
@@ -509,7 +511,7 @@ fn decode_image_mime(data: &[u8]) -> Option<&'static str> {
 /// pattern.
 pub fn recover_orphan_placeholders(
     query: &str,
-    raw_images: &mut Vec<agent_client_protocol::ImageContent>,
+    raw_images: &mut Vec<agent_client_protocol::schema::v1::ImageContent>,
     workspace_cwd: &Path,
 ) -> usize {
     let allowed = default_allowed_prefixes(workspace_cwd);
@@ -537,7 +539,7 @@ pub fn recover_orphan_placeholders(
 /// summary.
 pub fn recover_orphan_placeholders_with_prefixes(
     query: &str,
-    raw_images: &mut Vec<agent_client_protocol::ImageContent>,
+    raw_images: &mut Vec<agent_client_protocol::schema::v1::ImageContent>,
     allowed_prefixes: &[PathBuf],
 ) -> usize {
     recover_orphan_placeholders_with_prefixes_and_caps(
@@ -566,7 +568,7 @@ pub fn recover_orphan_placeholders_with_prefixes(
 /// `recover_orphan_placeholders_aggregate_cap_inclusive_boundary`.
 pub fn recover_orphan_placeholders_with_prefixes_and_caps(
     query: &str,
-    raw_images: &mut Vec<agent_client_protocol::ImageContent>,
+    raw_images: &mut Vec<agent_client_protocol::schema::v1::ImageContent>,
     allowed_prefixes: &[PathBuf],
     per_image_max: usize,
     aggregate_max: usize,
@@ -618,7 +620,7 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
                 aggregate_bytes = next_total;
                 let data = base64::engine::general_purpose::STANDARD.encode(&loaded.data);
                 raw_images.push(
-                    agent_client_protocol::ImageContent::new(data, loaded.mime_type)
+                    agent_client_protocol::schema::v1::ImageContent::new(data, loaded.mime_type)
                         .uri(format!("file://{}", canonical.display()))
                         // Record the real `[Image #N]` number so it resolves by
                         // number, matching the TUI-attached images (which set it
@@ -1147,8 +1149,9 @@ mod tests {
     /// Build a non-empty ACP `ImageContent` so a future dedup change
     /// that short-circuits on `data.is_empty()` cannot silently pass
     /// these tests.
-    fn make_acp_image(uri: &str) -> agent_client_protocol::ImageContent {
-        agent_client_protocol::ImageContent::new("AAAA", "image/png").uri(Some(uri.to_string()))
+    fn make_acp_image(uri: &str) -> agent_client_protocol::schema::v1::ImageContent {
+        agent_client_protocol::schema::v1::ImageContent::new("AAAA", "image/png")
+            .uri(Some(uri.to_string()))
     }
 
     #[test]
@@ -1157,7 +1160,7 @@ mod tests {
         let path = write_png(dir.path(), "rec.png");
         let canon = dunce::canonicalize(&path).unwrap();
         let query = format!("look at [Image #1: {}]", canon.display());
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         let n = recover_orphan_placeholders_with_prefixes(&query, &mut raw, &allowed);
         assert_eq!(n, 1);
@@ -1264,7 +1267,7 @@ mod tests {
     #[test]
     fn recover_orphan_placeholders_zero_placeholders_short_circuits() {
         let dir = tempfile::tempdir().unwrap();
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         let n = recover_orphan_placeholders_with_prefixes("just a message", &mut raw, &allowed);
         assert_eq!(n, 0);
@@ -1275,7 +1278,7 @@ mod tests {
     fn recover_orphan_placeholders_failed_load_leaves_raw_images_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.png");
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let query = format!("[Image #1: {}]", missing.display());
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         let n = recover_orphan_placeholders_with_prefixes(&query, &mut raw, &allowed);
@@ -1289,7 +1292,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let png = write_png(outside.path(), "secret.png");
         let canon = dunce::canonicalize(&png).unwrap();
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let query = format!("[Image #1: {}]", canon.display());
         // Allowlist is workspace only — the placeholder canon is
         // outside it.
@@ -1313,7 +1316,7 @@ mod tests {
         let c1 = dunce::canonicalize(&p1).unwrap();
         let c2 = dunce::canonicalize(&p2).unwrap();
         let query = format!("[Image #1: {}] [Image #2: {}]", c1.display(), c2.display());
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         // Per-image cap permissive; aggregate cap admits exactly one
         // image (PNG_BYTES is 67 bytes; cap at 100 lets one through,
@@ -1341,7 +1344,7 @@ mod tests {
         let p = write_png(dir.path(), "one.png");
         let c = dunce::canonicalize(&p).unwrap();
         let query = format!("[Image #1: {}]", c.display());
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         // Cap == image size: the `>` comparison admits this image.
         let n = recover_orphan_placeholders_with_prefixes_and_caps(
@@ -1365,7 +1368,7 @@ mod tests {
         let p = write_png(dir.path(), "one.png");
         let c = dunce::canonicalize(&p).unwrap();
         let query = format!("[Image #1: {}]", c.display());
-        let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
+        let mut raw: Vec<agent_client_protocol::schema::v1::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
         let n = recover_orphan_placeholders_with_prefixes_and_caps(
             &query,

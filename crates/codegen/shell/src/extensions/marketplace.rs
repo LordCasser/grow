@@ -3,7 +3,7 @@
 //! Provides marketplace browsing and install endpoints for the pager modal.
 //! Delegates to `plugin-marketplace` crate for scanning and install logic.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use extension_types::{
     MarketplaceAction, MarketplaceActionRequest, MarketplaceListResponse, MarketplacePluginEntry,
     MarketplaceScanResult,

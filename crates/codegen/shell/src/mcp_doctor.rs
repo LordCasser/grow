@@ -86,7 +86,7 @@ pub struct DoctorReport {
 // ── Server discovery ────────────────────────────────────────────
 
 struct DiscoveredServer {
-    server: agent_client_protocol::McpServer,
+    server: agent_client_protocol::schema::v1::McpServer,
     source: ConfigSource,
 }
 
@@ -211,7 +211,7 @@ fn check_command_exists(command: &str) -> Check {
 }
 
 async fn check_server_start(
-    acp_server: agent_client_protocol::McpServer,
+    acp_server: agent_client_protocol::schema::v1::McpServer,
     cwd: &Path,
 ) -> Result<(mcp_servers::McpClient, Check), Check> {
     let start = std::time::Instant::now();
@@ -287,7 +287,7 @@ fn format_mcp_error(label: &str, err: &mcp_servers::McpError) -> Check {
 
 // ── Per-server orchestration ────────────────────────────────────
 
-fn describe_server(server: &agent_client_protocol::McpServer) -> (String, String) {
+fn describe_server(server: &agent_client_protocol::schema::v1::McpServer) -> (String, String) {
     (
         mcp_servers::mcp_transport_str(server).to_string(),
         mcp_servers::mcp_target_str(server),
@@ -295,7 +295,7 @@ fn describe_server(server: &agent_client_protocol::McpServer) -> (String, String
 }
 
 async fn check_server(
-    server: agent_client_protocol::McpServer,
+    server: agent_client_protocol::schema::v1::McpServer,
     source_label: &str,
     cwd: &Path,
 ) -> McpServerStatus {
@@ -304,10 +304,9 @@ async fn check_server(
 
     let mut checks = Vec::new();
 
-    if let agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
-        ref command,
-        ..
-    }) = server
+    if let agent_client_protocol::schema::v1::McpServer::Stdio(
+        agent_client_protocol::schema::v1::McpServerStdio { ref command, .. },
+    ) = server
     {
         let check = check_command_exists(&command.to_string_lossy());
         let ok = check.passed;

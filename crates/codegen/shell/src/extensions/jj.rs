@@ -1,6 +1,6 @@
 //! Jujutsu extension handlers — delegates to [`workspace::session::jj`].
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::{Empty, ExtResult, to_ext_response, to_ext_response_partial};
 use workspace::session::git::{CommitData, StageData};

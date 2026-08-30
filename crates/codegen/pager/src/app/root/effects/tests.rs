@@ -578,7 +578,7 @@ fn unregister_best_effort_swallows_io_error() {
 /// of disk outcome.
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     let _guard = setup_grow_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let counter = spawn_fake_acp_agent(rx);
@@ -612,7 +612,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
 /// (1 on Ok, 0 on Err).
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback() {
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     let _guard = setup_grow_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let counter = spawn_fake_acp_agent(rx);

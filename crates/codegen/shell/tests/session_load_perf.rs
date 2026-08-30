@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 use tempfile::TempDir;
 
 use shell::session::info::Info;
@@ -75,7 +75,7 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
         cwd: cwd.to_string_lossy().to_string(),
     };
     adapter
-        .init_session(&info, acp::ModelId::new("test-model"))
+        .init_session(&info, crate::agent::models::ModelId::new("test-model"))
         .await
         .expect("init_session");
     let dir = synth::locate_session_dir(root, &id);
@@ -329,7 +329,7 @@ struct CountingClient {
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for CountingClient {
+impl acp_transport::AcpClientHandler for CountingClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,

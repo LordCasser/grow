@@ -5,11 +5,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use acp_transport::protocol as acp;
 use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
-use agent_client_protocol::{self as acp};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::config::Config as AgentConfig;
@@ -23,7 +23,7 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(180);
 /// is returned so the caller keeps the connection alive for any post-load
 /// notifications (e.g. the re-advertise) it still wants to observe.
 pub struct LoadedAgent {
-    pub client_conn: acp::ClientSideConnection,
+    pub client_conn: acp_transport::ClientSideConnection,
     pub load_started: Instant,
     pub load_elapsed: Duration,
 }
@@ -31,7 +31,7 @@ pub struct LoadedAgent {
 /// Stand up a real `MvpAgent` over in-process ACP pipes wired to `client`, run
 /// the initialize and authenticate handshake, then time one `session/load`
 /// round-trip. Must run inside a `LocalSet`, since it spawns local tasks.
-pub async fn load_session_via_agent<C: acp::Client + 'static>(
+pub async fn load_session_via_agent<C: acp_transport::AcpClientHandler + 'static>(
     client: C,
     client_type: &str,
     session_id: acp::SessionId,
@@ -48,7 +48,7 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
     // Agent side.
     let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
     let (agent_conn, agent_io) =
-        acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
+        acp_transport::connect_agent_v1(agent, a2c_a.compat_write(), agent_incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
     tokio::task::spawn_local(GatewayReceiver::new(gw_rx, agent_conn).run());
@@ -57,12 +57,12 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
     // Client side.
     let client_incoming = LineBufferedRead::spawn_local(a2c_b.compat());
     let (client_conn, client_io) =
-        acp::ClientSideConnection::new(client, c2a_a.compat_write(), client_incoming, |fut| {
+        acp_transport::connect_client_v1(client, c2a_a.compat_write(), client_incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
     tokio::task::spawn_local(client_io);
 
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
 
     let init = tokio::time::timeout(
         INIT_TIMEOUT,

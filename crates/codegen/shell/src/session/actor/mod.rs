@@ -44,10 +44,10 @@ use crate::session::user_message::extract_user_query;
 use crate::terminal::TerminalRunRequest;
 use crate::tools::ToolContext;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
+use acp_transport::protocol as acp;
 use agent::AgentDefinition;
 use agent::prompt::skills::SkillsConfig;
-use agent_client_protocol as acp;
-use agent_client_protocol::ContentBlock;
+use agent_client_protocol::schema::v1::ContentBlock;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use sampler::SamplerConfig as SamplingConfig;
@@ -428,7 +428,7 @@ struct PendingModelSelection {
     route: crate::agent::models::PublishedSessionRoute,
     catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
     respond_to: tokio::sync::oneshot::Sender<
-        Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
     >,
     intent: Option<crate::session::ControlIntent>,
 }
@@ -710,7 +710,7 @@ impl PendingStepControls {
             + self.ordered.len()
     }
 
-    fn desired_sampling_model_id(&self) -> Option<acp::ModelId> {
+    fn desired_sampling_model_id(&self) -> Option<crate::agent::models::ModelId> {
         self.sampling
             .as_ref()
             .map(|pending| pending.value.route.model_id.clone())
@@ -722,7 +722,7 @@ impl PendingStepControls {
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         intent: Option<crate::session::ControlIntent>,
         responds_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) -> (u64, Option<(u64, PendingModelSelection)>) {
         self.sampling_revision = self.sampling_revision.saturating_add(1);

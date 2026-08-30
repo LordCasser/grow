@@ -51,7 +51,9 @@ mod tests {
         skills: Vec::new(),
     };
 
-    fn run_with_session(sid: Option<&agent_client_protocol::SessionId>) -> CommandResult {
+    fn run_with_session(
+        sid: Option<&agent_client_protocol::schema::v1::SessionId>,
+    ) -> CommandResult {
         let models = ModelState::default();
         let mut ctx = CommandExecCtx {
             models: &models,
@@ -73,7 +75,7 @@ mod tests {
 
     #[test]
     fn with_session_dispatches_show_tasks() {
-        let sid = agent_client_protocol::SessionId::from("s1".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("s1".to_string());
         assert!(matches!(
             run_with_session(Some(&sid)),
             CommandResult::Action(Action::ShowTasks)

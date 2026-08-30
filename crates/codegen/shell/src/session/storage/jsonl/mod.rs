@@ -4,7 +4,7 @@ use crate::sampling::{
 };
 use crate::session::info::Info;
 use crate::session::persistence::{SESSION_FORMAT_VERSION, Summary};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use async_trait::async_trait;
 use chat_state::Timeline;
 use fs2::FileExt;
@@ -2814,7 +2814,7 @@ impl JsonlStorageAdapter {
             let num_messages = updates_to_copy.len();
             let target_model_id = options
                 .new_model_id
-                .map(acp::ModelId::new)
+                .map(crate::agent::models::ModelId::new)
                 .unwrap_or(source_summary.current_model_id);
             let target_summary = crate::session::persistence::Summary {
                 info: target_info.clone(),
@@ -2945,7 +2945,11 @@ impl JsonlStorageAdapter {
 }
 #[async_trait]
 impl StorageAdapter for JsonlStorageAdapter {
-    async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
+    async fn init_session(
+        &self,
+        info: &Info,
+        model_id: crate::agent::models::ModelId,
+    ) -> io::Result<Summary> {
         match self.open_session(info) {
             Ok(opened) => {
                 tracing::info!("Loading existing session from JSONL");
@@ -3042,7 +3046,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn update_current_model_and_agent(
         &self,
         info: &Info,
-        model_id: &acp::ModelId,
+        model_id: &crate::agent::models::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<sampling_types::ReasoningEffort>>,
     ) -> io::Result<()> {

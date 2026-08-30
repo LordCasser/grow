@@ -15,7 +15,7 @@
 //!
 //! No rendering or input handling here — this is pure data and helpers.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

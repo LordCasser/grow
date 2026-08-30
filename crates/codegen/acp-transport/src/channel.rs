@@ -63,7 +63,7 @@ mod acp_send_failure_tests {
     use super::acp_send;
     use crate::common::{AcpChannelFailure, acp_channel_failure};
     use crate::message::AcpAgentMessage;
-    use agent_client_protocol as acp;
+    use crate::protocol as acp;
     use tokio::sync::mpsc;
 
     fn ext_request() -> acp::ExtRequest {

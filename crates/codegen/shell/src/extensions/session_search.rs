@@ -11,7 +11,7 @@
 //!          -> search_fts::SessionSearchIndex (SQLite FTS5)
 //! ```
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 
 use crate::session::storage::search::{SessionSearchRequest, SessionSearchResponse};

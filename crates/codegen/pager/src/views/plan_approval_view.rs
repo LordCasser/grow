@@ -1,5 +1,5 @@
 use acp_transport::AcpResult;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 pub use tools::implementations::grow_build::plan_control::{
     PlanApprovalExtRequest, PlanApprovalExtResponse,

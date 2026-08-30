@@ -568,7 +568,7 @@ pub(crate) async fn spawn_session_actor(
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
-    session_model_id: acp::ModelId,
+    session_model_id: crate::agent::models::ModelId,
     session_permission_mode: crate::util::config::PermissionMode,
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
@@ -2729,7 +2729,7 @@ pub(crate) async fn spawn_session_actor(
         session.memory_reindex_worker.arm(worker);
     }
     {
-        use agent_client_protocol::Client as _;
+        use acp_transport::AcpClientHandler as _;
         use tools::implementations::grow_build::ask_user_question::{
             AskUserQuestionExtRequest, AskUserQuestionExtResponse, UserQuestionError,
             UserQuestionResponse,
@@ -2766,7 +2766,7 @@ pub(crate) async fn spawn_session_actor(
                     !ext_req.session_id.is_empty(),
                     "ask_user_question reverse-request must carry a non-empty sessionId (design §5.4)"
                 );
-                let ext_request = agent_client_protocol::ExtRequest::new(
+                let ext_request = agent_client_protocol::schema::v1::ExtRequest::new(
                     "grow/ask_user_question",
                     serde_json::value::to_raw_value(&ext_req)
                         .expect("AskUserQuestionExtRequest serialization should not fail")
@@ -3137,7 +3137,7 @@ pub(crate) async fn spawn_session_on_thread(
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
-    session_model_id: acp::ModelId,
+    session_model_id: crate::agent::models::ModelId,
     session_permission_mode: crate::util::config::PermissionMode,
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,

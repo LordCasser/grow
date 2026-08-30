@@ -1,6 +1,8 @@
 //! Contains utility functions to attach file content and render it according to the
 //! training format we have been using
-use agent_client_protocol::{BlobResourceContents, EmbeddedResource, EmbeddedResourceResource};
+use agent_client_protocol::schema::v1::{
+    BlobResourceContents, EmbeddedResource, EmbeddedResourceResource,
+};
 use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -126,7 +128,7 @@ pub async fn render_embedded_resource(
     }
 }
 async fn render_text_resource(
-    text_resource: &agent_client_protocol::TextResourceContents,
+    text_resource: &agent_client_protocol::schema::v1::TextResourceContents,
     is_cursor: bool,
 ) -> Option<String> {
     let re = Regex::new(FILE_REGEX).ok()?;
@@ -170,7 +172,7 @@ async fn render_text_resource(
 /// The text is passed through verbatim (no line-number rewriting) since it
 /// represents a change, not a file snapshot.
 async fn render_diff_resource(
-    text_resource: &agent_client_protocol::TextResourceContents,
+    text_resource: &agent_client_protocol::schema::v1::TextResourceContents,
 ) -> Option<String> {
     let re = Regex::new(FILE_REGEX).ok()?;
     let caps = re.captures(&text_resource.uri)?;
@@ -376,7 +378,7 @@ mod tests {
         let large_content = "x".repeat(80).repeat(300);
         let _info = test_info("large-file");
         let resource = EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
-            agent_client_protocol::TextResourceContents::new(
+            agent_client_protocol::schema::v1::TextResourceContents::new(
                 large_content.clone(),
                 "file:///project/huge.rs",
             ),
@@ -399,7 +401,7 @@ mod tests {
     async fn test_render_embedded_resource_small_file_included() {
         let _info = test_info("small-file");
         let resource = EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
-            agent_client_protocol::TextResourceContents::new(
+            agent_client_protocol::schema::v1::TextResourceContents::new(
                 "fn main() {}\n",
                 "file:///project/small.rs",
             ),
@@ -415,8 +417,11 @@ mod tests {
         let content = b"fake pdf bytes";
         let encoded = general_purpose::STANDARD.encode(content);
         let resource = EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
-            agent_client_protocol::BlobResourceContents::new(encoded.clone(), "file://report.pdf")
-                .mime_type(Some("application/pdf".to_string())),
+            agent_client_protocol::schema::v1::BlobResourceContents::new(
+                encoded.clone(),
+                "file://report.pdf",
+            )
+            .mime_type(Some("application/pdf".to_string())),
         ));
         let rendered = render_embedded_resource(&resource, false).await.unwrap();
         assert!(rendered.contains("file_contents"), "got: {rendered}");
@@ -446,7 +451,7 @@ mod tests {
     async fn test_render_blob_attachment_bad_base64_returns_none() {
         let _info = test_info("blob-bad-b64");
         let resource = EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
-            agent_client_protocol::BlobResourceContents::new(
+            agent_client_protocol::schema::v1::BlobResourceContents::new(
                 "!!! not valid base64 !!!",
                 "file://bad.pdf",
             ),
@@ -459,7 +464,7 @@ mod tests {
     }
     fn diff_resource(uri: &str, text: &str) -> EmbeddedResource {
         EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
-            agent_client_protocol::TextResourceContents::new(text, uri)
+            agent_client_protocol::schema::v1::TextResourceContents::new(text, uri)
                 .mime_type(Some("text/x-diff".to_string())),
         ))
     }
@@ -517,7 +522,7 @@ mod tests {
     async fn test_grow_render_embedded_resource_uses_file_contents_tag() {
         let _info = test_info("grow-text");
         let resource = EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
-            agent_client_protocol::TextResourceContents::new(
+            agent_client_protocol::schema::v1::TextResourceContents::new(
                 "const x = 1;\nconst y = 2;\n",
                 "file:///project/app.ts#L5-L6",
             ),
@@ -533,7 +538,7 @@ mod tests {
     async fn test_grow_render_embedded_resource_full_file_uses_is_full_file() {
         let _info = test_info("grow-full-file");
         let resource = EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
-            agent_client_protocol::TextResourceContents::new(
+            agent_client_protocol::schema::v1::TextResourceContents::new(
                 "fn main() {}\n",
                 "file:///project/main.rs",
             ),

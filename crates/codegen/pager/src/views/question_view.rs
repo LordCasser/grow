@@ -164,8 +164,9 @@ pub struct QuestionViewState {
     /// Stashed ACP response sender. When the user submits/cancels, the
     /// pager serializes the response and sends it here. `take()` ensures
     /// we never send twice.
-    pub response_tx:
-        Option<tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::ExtResponse>>>,
+    pub response_tx: Option<
+        tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::schema::v1::ExtResponse>>,
+    >,
     /// Mode context from the ext-method request. Controls whether the
     /// bottom panel (Chat about this / Skip interview) is shown.
     pub mode: AskUserQuestionMode,
@@ -227,7 +228,7 @@ impl QuestionViewState {
         questions: Vec<Question>,
         stashed_prompt: StashedPrompt,
         response_tx: Option<
-            tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::ExtResponse>>,
+            tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::schema::v1::ExtResponse>>,
         >,
         mode: AskUserQuestionMode,
     ) -> Self {
@@ -917,8 +918,10 @@ impl QuestionViewState {
         };
         let raw = serde_json::value::to_raw_value(&response)
             .expect("AskUserQuestionExtResponse serialization should not fail");
-        tx.send(Ok(agent_client_protocol::ExtResponse::new(raw.into())))
-            .ok();
+        tx.send(Ok(agent_client_protocol::schema::v1::ExtResponse::new(
+            raw.into(),
+        )))
+        .ok();
         true
     }
 }

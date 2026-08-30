@@ -232,7 +232,9 @@ async fn resume_local_session_in_worktree(
             .is_some_and(|root| workspace::session::git::detect_vcs_kind(&root).is_jj());
         if !is_jj {
             let info = crate::session::info::Info {
-                id: agent_client_protocol::SessionId::new(resolved_session_id.to_owned()),
+                id: agent_client_protocol::schema::v1::SessionId::new(
+                    resolved_session_id.to_owned(),
+                ),
                 cwd: resolved_source_cwd.to_owned(),
             };
             let session_dir = crate::session::persistence::session_dir(&info);

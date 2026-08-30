@@ -19,7 +19,7 @@ use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView, DashboardReturn, TrustState};
 use crate::app::session::AgentId;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 // ---------------------------------------------------------------------------
 // Agent Dashboard dispatchers
@@ -1526,7 +1526,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
 /// dispatch input + any error toast.
 fn stage_dashboard_model(
     app: &mut AppView,
-    model_id: acp::ModelId,
+    model_id: shell::agent::models::ModelId,
     effort: Option<shell::sampling::types::ReasoningEffort>,
 ) {
     let display = model_id.0.to_string();

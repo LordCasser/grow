@@ -3,16 +3,39 @@
 //! Workflow children use their immutable Run route instead.
 use crate::agent::mvp_agent::MvpAgent;
 use crate::session::{ControlIntent, SessionCommand, SessionEffortAuthority};
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 use sampling_types::parse_reasoning_effort_meta;
 use tokio::sync::oneshot;
 
+#[derive(Debug)]
+pub(crate) struct ModelSwitchRequest {
+    pub session_id: acp::SessionId,
+    pub model_id: crate::agent::models::ModelId,
+    pub meta: Option<acp::Meta>,
+}
+
+impl ModelSwitchRequest {
+    pub(crate) fn new(session_id: acp::SessionId, model_id: crate::agent::models::ModelId) -> Self {
+        Self {
+            session_id,
+            model_id,
+            meta: None,
+        }
+    }
+
+    pub(crate) fn meta(mut self, meta: Option<acp::Meta>) -> Self {
+        self.meta = meta;
+        self
+    }
+}
+
 pub(crate) struct EnqueuedModelSwitch {
     session_id: acp::SessionId,
-    model_id: acp::ModelId,
-    previous_model_id: acp::ModelId,
-    response:
-        oneshot::Receiver<Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>>,
+    model_id: crate::agent::models::ModelId,
+    previous_model_id: crate::agent::models::ModelId,
+    response: oneshot::Receiver<
+        Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
+    >,
 }
 
 /// Resolve and enqueue a model route while the caller owns the catalog
@@ -25,7 +48,7 @@ pub(crate) fn enqueue(
     agent: &MvpAgent,
     _catalog_transaction: &tokio::sync::MutexGuard<'_, ()>,
     handle: crate::session::SessionHandle,
-    args: acp::SetSessionModelRequest,
+    args: ModelSwitchRequest,
 ) -> Result<EnqueuedModelSwitch, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
     ::diagnostics::unified_log::info(
@@ -36,7 +59,7 @@ pub(crate) fn enqueue(
     let intent = ControlIntent::from_meta(args.meta.as_ref())?;
     let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
     let effort_patch = crate::session::effort_patch_from_meta(args.meta.as_ref())?;
-    let acp::SetSessionModelRequest {
+    let ModelSwitchRequest {
         session_id,
         model_id,
         ..
@@ -157,7 +180,7 @@ pub(crate) fn enqueue(
 pub(crate) async fn finish(
     agent: &MvpAgent,
     enqueued: EnqueuedModelSwitch,
-) -> Result<acp::SetSessionModelResponse, acp::Error> {
+) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
     let EnqueuedModelSwitch {
         session_id,
         model_id,
@@ -167,7 +190,7 @@ pub(crate) async fn finish(
     let outcome = response
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
-    match outcome {
+    let status = match outcome {
         crate::session::DesiredStateOutcome::Applied(updated_model) => {
             ::diagnostics::session_ctx::log_event(::diagnostics::events::ModelSwitched {
                 session_id: session_id.0.to_string(),
@@ -178,23 +201,18 @@ pub(crate) async fn finish(
                 required_agent_type: None,
                 current_agent_type: None,
             });
-            Ok(acp::SetSessionModelResponse::new().meta(
-                serde_json::json!({ "status": "applied", "model": updated_model })
-                    .as_object()
-                    .cloned(),
-            ))
+            serde_json::json!({ "status": "applied", "model": updated_model })
         }
-        crate::session::DesiredStateOutcome::InFlight => Ok(acp::SetSessionModelResponse::new()
-            .meta(
-                serde_json::json!({ "status": "in_flight" })
-                    .as_object()
-                    .cloned(),
-            )),
-        crate::session::DesiredStateOutcome::Superseded => Ok(acp::SetSessionModelResponse::new()
-            .meta(
-                serde_json::json!({ "status": "superseded" })
-                    .as_object()
-                    .cloned(),
-            )),
-    }
+        crate::session::DesiredStateOutcome::InFlight => {
+            serde_json::json!({ "status": "in_flight" })
+        }
+        crate::session::DesiredStateOutcome::Superseded => {
+            serde_json::json!({ "status": "superseded" })
+        }
+    };
+    let state = agent.model_state(Some(&session_id));
+    Ok(acp::SetSessionConfigOptionResponse::new(
+        agent.session_config_options(Some(&session_id), &state),
+    )
+    .meta(status.as_object().cloned()))
 }

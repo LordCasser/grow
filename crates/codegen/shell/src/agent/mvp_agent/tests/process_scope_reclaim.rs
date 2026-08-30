@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use super::{build_minimal_agent_for_tests, make_test_handle, run_local_for_bridge_test};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 fn sleeper() -> tokio::process::Command {
     let mut c = tokio::process::Command::new("sleep");

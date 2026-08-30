@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use crate::scaled;
 
-use acp_transport::LineBufferedRead;
-use agent_client_protocol::{self as acp, Agent as _};
+use acp_transport::{AcpAgentHandler as _, LineBufferedRead, protocol as acp};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::env::grow_binary;
@@ -71,7 +70,7 @@ struct TestAcpClient {
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for TestAcpClient {
+impl acp_transport::AcpClientHandler for TestAcpClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -113,7 +112,7 @@ impl acp::Client for TestAcpClient {
 /// Handles the full lifecycle: spawn → initialize → authenticate → session → prompt.
 /// Child process is killed on drop.
 pub struct GrowStdioClient {
-    conn: acp::ClientSideConnection,
+    conn: acp_transport::ClientSideConnection,
     process: TestProcess,
     sandbox: Option<TestSandbox>,
     capture: Arc<TextCapture>,
@@ -156,9 +155,10 @@ impl GrowStdioClient {
         };
 
         let incoming = LineBufferedRead::spawn_local(incoming);
-        let (conn, handle_io) = acp::ClientSideConnection::new(client, outgoing, incoming, |fut| {
-            tokio::task::spawn_local(fut);
-        });
+        let (conn, handle_io) =
+            acp_transport::connect_client_v1(client, outgoing, incoming, |fut| {
+                tokio::task::spawn_local(fut);
+            });
         tokio::task::spawn_local(handle_io);
 
         Self {
@@ -247,17 +247,17 @@ impl GrowStdioClient {
         resp.session_id
     }
 
-    /// Switch model on an existing session via the typed ACP `session/set_model`.
+    /// Switch model on an existing session via stable ACP session configuration.
     pub async fn set_model(
         &self,
         session_id: &acp::SessionId,
         model_id: &str,
-    ) -> acp::Result<acp::SetSessionModelResponse> {
-        use acp::Agent as _;
+    ) -> acp::Result<acp::SetSessionConfigOptionResponse> {
         self.conn
-            .set_session_model(acp::SetSessionModelRequest::new(
+            .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
                 session_id.clone(),
-                acp::ModelId::new(model_id),
+                "model",
+                acp::SessionConfigOptionValue::value_id(model_id.to_string()),
             ))
             .await
     }
@@ -362,7 +362,7 @@ impl GrowStdioClient {
         &self,
         session_id: &acp::SessionId,
         model_id: &str,
-    ) -> acp::Result<acp::SetSessionModelResponse> {
+    ) -> acp::Result<acp::SetSessionConfigOptionResponse> {
         tokio::time::timeout(
             scaled(Duration::from_secs(20)),
             self.set_model(session_id, model_id),

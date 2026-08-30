@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tools::types::TaskSnapshot;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -747,7 +747,7 @@ pub enum SessionUpdate {
         /// Workflow child receives the immutable Run projection, not the
         /// process catalog that happened to be live when the UI saw the spawn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model_state: Option<agent_client_protocol::SessionModelState>,
+        model_state: Option<crate::agent::models::SessionModelState>,
         /// Run-frozen Agent names for a Workflow child. `None` means the child
         /// follows ordinary live Agent discovery.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -903,7 +903,7 @@ pub enum SessionUpdate {
         /// Human-readable reason for the switch.
         reason: String,
     },
-    /// The session's model was switched via `session/setModel`.
+    /// The session's model was switched via the stable model config option.
     ///
     /// Broadcast to every client subscribed to the session in leader mode so
     /// follower clients (TUI / IDE / web) mirror the change in their local

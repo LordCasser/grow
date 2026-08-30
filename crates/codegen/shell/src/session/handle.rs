@@ -5,7 +5,7 @@
 //! implementation focused on behaviour.
 use super::commands::SessionCommand;
 use super::persistence::PersistenceMsg;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use hunk_tracker::HunkTrackerHandle;
 use tokio::sync::{mpsc, oneshot};
 
@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) struct SessionModelRouteSnapshot {
     pub(crate) revision: u64,
     /// Canonical catalog identity (`provider/model`).
-    pub(crate) model_id: acp::ModelId,
+    pub(crate) model_id: crate::agent::models::ModelId,
     /// Provider transport configuration; `model` is the wire model only.
     pub(crate) sampling_config: sampler::SamplerConfig,
 }
@@ -26,7 +26,10 @@ pub(crate) struct SessionModelRouteSnapshot {
 pub(crate) struct SessionModelRoute(std::sync::Arc<parking_lot::RwLock<SessionModelRouteSnapshot>>);
 
 impl SessionModelRoute {
-    pub(crate) fn new(model_id: acp::ModelId, sampling_config: sampler::SamplerConfig) -> Self {
+    pub(crate) fn new(
+        model_id: crate::agent::models::ModelId,
+        sampling_config: sampler::SamplerConfig,
+    ) -> Self {
         Self(std::sync::Arc::new(parking_lot::RwLock::new(
             SessionModelRouteSnapshot {
                 revision: 0,
@@ -42,7 +45,7 @@ impl SessionModelRoute {
 
     pub(crate) fn replace(
         &self,
-        model_id: acp::ModelId,
+        model_id: crate::agent::models::ModelId,
         sampling_config: sampler::SamplerConfig,
     ) -> SessionModelRouteSnapshot {
         let mut route = self.0.write();
@@ -501,8 +504,8 @@ impl SessionHandle {
         &self,
         server_name: String,
         enabled: bool,
-        server_config: Option<agent_client_protocol::McpServer>,
-    ) -> Result<(), agent_client_protocol::Error> {
+        server_config: Option<agent_client_protocol::schema::v1::McpServer>,
+    ) -> Result<(), agent_client_protocol::schema::v1::Error> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -514,17 +517,20 @@ impl SessionHandle {
             })
             .is_err()
         {
-            return Err(agent_client_protocol::Error::internal_error().data("session closed"));
+            return Err(
+                agent_client_protocol::schema::v1::Error::internal_error().data("session closed")
+            );
         }
-        rx.await
-            .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
+        rx.await.map_err(|_| {
+            agent_client_protocol::schema::v1::Error::internal_error().data("session closed")
+        })?
     }
     pub async fn toggle_mcp_tool(
         &self,
         server_name: String,
         tool_name: String,
         enabled: bool,
-    ) -> Result<(), agent_client_protocol::Error> {
+    ) -> Result<(), agent_client_protocol::schema::v1::Error> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -536,10 +542,13 @@ impl SessionHandle {
             })
             .is_err()
         {
-            return Err(agent_client_protocol::Error::internal_error().data("session closed"));
+            return Err(
+                agent_client_protocol::schema::v1::Error::internal_error().data("session closed")
+            );
         }
-        rx.await
-            .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
+        rx.await.map_err(|_| {
+            agent_client_protocol::schema::v1::Error::internal_error().data("session closed")
+        })?
     }
     pub async fn call_mcp_tool(
         &self,

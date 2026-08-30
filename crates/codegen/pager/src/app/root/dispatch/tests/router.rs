@@ -69,7 +69,7 @@ fn screen_mode_relaunch_transports_a_pending_control_in_a_child_session() {
     child
         .session
         .enqueue_control(crate::app::session::PendingSessionControl::Model {
-            model_id: acp::ModelId::new("provider/model"),
+            model_id: shell::agent::models::ModelId::new("provider/model"),
             effort: None,
             effort_patch: false,
         });
@@ -709,7 +709,7 @@ fn announcements_show_clears_hidden_promo_ids() {
 fn switch_model_dispatch_produces_effect_and_sets_pending() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     assert!(!app.agents[&id].session.model_switch_pending());
     let effects = dispatch(
         Action::SwitchModel {
@@ -728,7 +728,7 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
 fn model_selected_during_reconnect_is_sent_once_after_restore() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new("reconnect-model");
+    let model_id = shell::agent::models::ModelId::new("reconnect-model");
     app.reconnect_pending = true;
 
     let during_reconnect = dispatch(
@@ -761,7 +761,7 @@ fn model_selected_during_reconnect_is_sent_once_after_restore() {
 fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new("configured-model");
+    let model_id = shell::agent::models::ModelId::new("configured-model");
     app.agents.get_mut(&id).unwrap().session.models.current = Some(model_id.clone());
 
     let effects = dispatch(
@@ -896,7 +896,7 @@ fn model_and_agent_switches_target_the_visible_subagent_session() {
     root.insert_subagent_view(child_sid.into(), Box::new(child));
     root.active_subagent = Some(child_sid.into());
 
-    let model_id = acp::ModelId::new("catalog/child-model");
+    let model_id = shell::agent::models::ModelId::new("catalog/child-model");
     let model_effects = dispatch(
         Action::SwitchModel {
             model_id: model_id.clone(),
@@ -981,7 +981,7 @@ fn behavior_selection_from_child_view_never_mutates_parent_session() {
 #[test]
 fn deferred_model_switch_still_works_for_cli_override() {
     let mut app = test_app();
-    let cli_model = acp::ModelId::new(std::sync::Arc::from("cli-override"));
+    let cli_model = shell::agent::models::ModelId::new(std::sync::Arc::from("cli-override"));
     app.cli_model_override = Some(cli_model.clone());
     dispatch(Action::NewSession, &mut app);
     let id = AgentId(0);
@@ -1085,10 +1085,10 @@ fn slash_model_invalid_arg_produces_scrollback_error() {
 fn slash_model_no_args_opens_picker_without_scrollback_error() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new("grow-test");
+    let model_id = shell::agent::models::ModelId::new("grow-test");
     app.agents[&id].session.models.available.insert(
         model_id.clone(),
-        acp::ModelInfo::new(model_id, "Grow Test".to_string()),
+        shell::agent::models::ModelInfo::new(model_id, "Grow Test".to_string()),
     );
     let initial_scrollback = app.agents[&id].scrollback.len();
     let effects = dispatch(Action::SendPrompt("/model".into()), &mut app);
@@ -1539,8 +1539,8 @@ fn all_constructor_paths_initialize_slash_fields() {
 fn deferred_switch_overwritten_by_second_switch() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
-    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    let model_a = shell::agent::models::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = shell::agent::models::ModelId::new(std::sync::Arc::from("model-b"));
     app.agents.get_mut(&id).unwrap().session.session_id = None;
     dispatch(
         Action::SwitchModel {

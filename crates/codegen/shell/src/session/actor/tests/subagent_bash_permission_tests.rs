@@ -27,8 +27,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use acp_transport::protocol as acp;
 use acp_transport::{AcpAgentGatewaySender, AcpClientMessage};
-use agent_client_protocol as acp;
 use paths::AbsPathBuf;
 use tools::implementations::grow_build::bash::BashTool;
 use tools::implementations::grow_build::task::TaskTool;

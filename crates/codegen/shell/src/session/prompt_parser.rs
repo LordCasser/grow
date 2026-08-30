@@ -1,5 +1,5 @@
 use crate::session::user_message::user_query;
-use agent_client_protocol::{self as acp, ImageContent};
+use agent_client_protocol::schema::v1::{self as acp, ImageContent};
 use serde::Deserialize;
 use std::path::PathBuf;
 use workspace::file_system::{FileReference, render_embedded_resource, render_file_reference};

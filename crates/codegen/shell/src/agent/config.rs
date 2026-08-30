@@ -2,8 +2,8 @@ use crate::agent::auth_method::ModelByok;
 use crate::agent::provider_catalog::{auth_config_issues, parse_provider_catalog};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{sampling::ApiBackend, tools::config::ShellToolsetConfig};
+use acp_transport::protocol as acp;
 use agent::prompt::skills::SkillsConfig;
-use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use sampler::{AuthScheme, SamplerConfig};
 use sampling_types::{
@@ -2616,12 +2616,12 @@ pub fn inject_url_derived_headers(
 }
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
-) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+) -> IndexMap<crate::agent::models::ModelId, crate::agent::models::ModelInfo> {
     models
         .iter()
         .map(|(key, model)| {
             let info = model.info();
-            let model_id = acp::ModelId::new(Arc::from(key.clone()));
+            let model_id = crate::agent::models::ModelId::new(Arc::from(key.clone()));
             let total_context_tokens = info.context_window.get();
             let meta = {
                 let mut map = serde_json::Map::new();
@@ -2649,7 +2649,7 @@ pub fn to_acp_model_info(
             };
             (
                 model_id.clone(),
-                acp::ModelInfo::new(
+                crate::agent::models::ModelInfo::new(
                     model_id,
                     info.name.clone().unwrap_or_else(|| info.model.clone()),
                 )
@@ -4007,11 +4007,11 @@ reasoning_effort = "low"
             "both entries should survive in ACP model list"
         );
         assert!(
-            acp_models.contains_key(&acp::ModelId::new("default-grow")),
+            acp_models.contains_key(&crate::agent::models::ModelId::new("default-grow")),
             "default entry should be addressable by map key"
         );
         assert!(
-            acp_models.contains_key(&acp::ModelId::new("acme-grow")),
+            acp_models.contains_key(&crate::agent::models::ModelId::new("acme-grow")),
             "user entry should be addressable by map key"
         );
     }

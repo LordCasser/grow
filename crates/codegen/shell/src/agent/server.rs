@@ -33,11 +33,11 @@ use tokio::time::Duration;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{info, warn};
 
+use acp_transport::protocol as acp;
 use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     AcpClientMessage, LineBufferedRead,
 };
-use agent_client_protocol as acp;
 
 use crate::agent::config::Config as AgentConfig;
 use crate::agent::mvp_agent::MvpAgent;
@@ -348,7 +348,7 @@ fn setup_acp_connection(
     // Create new ACP connection reusing the same MvpAgent (via Rc clone).
     // `Agent` is implemented for `Rc<T: Agent>` so this works.
     let incoming = LineBufferedRead::spawn_local(incoming);
-    let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
+    let (conn, handle_io) = acp_transport::connect_agent_v1(agent, outgoing, incoming, |fut| {
         tokio::task::spawn_local(fut);
     });
     tokio::task::spawn_local(GatewayReceiver::new(conn_gw_rx, conn).run());

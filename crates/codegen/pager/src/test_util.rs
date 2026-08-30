@@ -10,7 +10,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         let session = AgentSession::new(
             AgentId(0),
             tx,
-            session_id.map(agent_client_protocol::SessionId::new),
+            session_id.map(agent_client_protocol::schema::v1::SessionId::new),
             crate::acp::model_state::ModelState::default(),
             std::path::PathBuf::from(cwd),
             shell::util::config::PermissionMode::Ask,

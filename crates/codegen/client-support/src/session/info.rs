@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use agent_client_protocol::schema::v1 as acp;
 
 /// Session identity: `id` + `cwd`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

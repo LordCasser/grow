@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 fn session(id: &str, pid: u32) -> ActiveSession {
     ActiveSession {
-        session_id: agent_client_protocol::SessionId::new(id),
+        session_id: agent_client_protocol::schema::v1::SessionId::new(id),
         pid,
         cwd: "/tmp/test".into(),
         opened_at: Utc::now(),
@@ -18,7 +18,7 @@ fn full_lifecycle() {
     let dir = TempDir::new().unwrap();
     let r = dir.path();
     let pid = std::process::id();
-    let sid = |s: &str| agent_client_protocol::SessionId::new(s);
+    let sid = |s: &str| agent_client_protocol::schema::v1::SessionId::new(s);
 
     // Start session, verify listed.
     register_in(r, session("s1", pid)).unwrap();

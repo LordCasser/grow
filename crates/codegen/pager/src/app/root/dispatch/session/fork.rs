@@ -10,7 +10,7 @@ use crate::app::session::{AgentCommand, AgentId, AgentSession};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::time::Instant;
 /// Top-level `/fork` dispatcher. Resolves the worktree decision: an
 /// explicit `--worktree` / `--no-worktree` flag short-circuits to
@@ -269,7 +269,7 @@ pub(in crate::app::root::dispatch) fn open_project_question(
 pub(in crate::app::root::dispatch) fn open_project_question_with_context(
     app: &mut AppView,
     prompt_text: String,
-    model_id: Option<acp::ModelId>,
+    model_id: Option<shell::agent::models::ModelId>,
     submit_prompt: bool,
     return_to_dashboard: bool,
     attach_to_dashboard: bool,

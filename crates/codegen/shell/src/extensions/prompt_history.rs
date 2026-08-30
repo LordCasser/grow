@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 

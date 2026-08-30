@@ -2,15 +2,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use agent_client_protocol as acp;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 
 use crate::{
-    AcpMethod, acp_send,
+    AcpAgentHandler, AcpClientHandler, AcpMethod, acp_send,
     common::AcpResult,
     message::{AcpAgentMessage, AcpArgs, AcpClientMessage, AcpRequest, AcpSide},
+    protocol as acp,
 };
 
 type SpawnFn = Rc<dyn Fn(Pin<Box<dyn Future<Output = ()>>>)>;
@@ -103,9 +103,10 @@ pub fn acp_gateway<S: AcpSide, C>(conn: C) -> (AcpGatewaySender<S>, AcpGatewayRe
     (sender, receiver)
 }
 
-pub type AcpAgentGatewayReceiver = AcpGatewayReceiver<acp::AgentSide, acp::AgentSideConnection>;
+pub type AcpAgentGatewayReceiver = AcpGatewayReceiver<acp::AgentSide, crate::AgentSideConnection>;
 pub type AcpAgentGatewaySender = AcpGatewaySender<acp::AgentSide>;
-pub type AcpClientGatewayReceiver = AcpGatewayReceiver<acp::ClientSide, acp::ClientSideConnection>;
+pub type AcpClientGatewayReceiver =
+    AcpGatewayReceiver<acp::ClientSide, crate::ClientSideConnection>;
 pub type AcpClientGatewaySender = AcpGatewaySender<acp::ClientSide>;
 
 fn before_request<T: AcpRequest>(args: &AcpArgs<T>, tracing: bool) -> Option<String> {
@@ -168,7 +169,7 @@ macro_rules! handle {
     };
 }
 
-impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
+impl<C: AcpAgentHandler + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
     pub async fn run(mut self) {
         let conn = Rc::new(self.conn);
         let spawn = self.spawn_fn.clone();
@@ -187,6 +188,9 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                 }
                 AcpAgentMessage::LoadSession(args) => {
                     handle!(args, self.tracing, conn, load_session, spawn, on_meta);
+                }
+                AcpAgentMessage::ListSessions(args) => {
+                    handle!(args, self.tracing, conn, list_sessions, spawn, on_meta);
                 }
                 AcpAgentMessage::SetSessionMode(args) => {
                     handle!(args, self.tracing, conn, set_session_mode, spawn, on_meta);
@@ -219,8 +223,15 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                         on_meta
                     );
                 }
-                AcpAgentMessage::SetSessionModel(args) => {
-                    handle!(args, self.tracing, conn, set_session_model, spawn, on_meta);
+                AcpAgentMessage::SetSessionConfigOption(args) => {
+                    handle!(
+                        args,
+                        self.tracing,
+                        conn,
+                        set_session_config_option,
+                        spawn,
+                        on_meta
+                    );
                 }
             }
         }
@@ -230,7 +241,7 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
     }
 }
 
-impl<C: acp::Client + 'static> AcpGatewayReceiver<acp::AgentSide, C> {
+impl<C: AcpClientHandler + 'static> AcpGatewayReceiver<acp::AgentSide, C> {
     pub async fn run(mut self) {
         let conn = Rc::new(self.conn);
         let spawn = self.spawn_fn.clone();
@@ -387,7 +398,7 @@ impl<S: AcpSide> AcpGatewaySender<S> {
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for AcpGatewaySender<acp::AgentSide> {
+impl AcpClientHandler for AcpGatewaySender<acp::AgentSide> {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -471,7 +482,7 @@ impl acp::Client for AcpGatewaySender<acp::AgentSide> {
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
+impl AcpAgentHandler for AcpGatewaySender<acp::ClientSide> {
     async fn initialize(&self, args: acp::InitializeRequest) -> AcpResult<acp::InitializeResponse> {
         self.forward(args).await
     }
@@ -497,10 +508,24 @@ impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
         self.forward(args).await
     }
 
+    async fn list_sessions(
+        &self,
+        args: acp::ListSessionsRequest,
+    ) -> AcpResult<acp::ListSessionsResponse> {
+        self.forward(args).await
+    }
+
     async fn set_session_mode(
         &self,
         args: acp::SetSessionModeRequest,
     ) -> AcpResult<acp::SetSessionModeResponse> {
+        self.forward(args).await
+    }
+
+    async fn set_session_config_option(
+        &self,
+        args: acp::SetSessionConfigOptionRequest,
+    ) -> AcpResult<acp::SetSessionConfigOptionResponse> {
         self.forward(args).await
     }
 
@@ -527,14 +552,14 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use agent_client_protocol as acp;
+    use crate::protocol as acp;
 
     struct OrderTrackingClient {
         log: Rc<RefCell<Vec<String>>>,
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for OrderTrackingClient {
+    impl AcpClientHandler for OrderTrackingClient {
         async fn request_permission(
             &self,
             _: acp::RequestPermissionRequest,

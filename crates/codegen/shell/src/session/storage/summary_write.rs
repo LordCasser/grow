@@ -15,7 +15,7 @@
 use std::io;
 use std::path::Path;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use sampling_types::ReasoningEffort;
@@ -44,7 +44,7 @@ impl CounterOp {
 /// value unchanged (matches the legacy `update_current_model` semantics).
 #[derive(Debug, Clone)]
 pub(crate) struct ModelPatch {
-    pub model_id: acp::ModelId,
+    pub model_id: crate::agent::models::ModelId,
     pub agent_name: Option<String>,
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
 }
@@ -302,7 +302,7 @@ mod tests {
         let info = test_info();
 
         let init = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
-        init.init_session(&info, acp::ModelId::new("test-model"))
+        init.init_session(&info, crate::agent::models::ModelId::new("test-model"))
             .await
             .unwrap();
 
@@ -372,7 +372,7 @@ mod tests {
         let info = test_info();
         let adapter = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
         adapter
-            .init_session(&info, acp::ModelId::new("test-model"))
+            .init_session(&info, crate::agent::models::ModelId::new("test-model"))
             .await
             .unwrap();
         (adapter, info, session_dir.join("summary.json"))

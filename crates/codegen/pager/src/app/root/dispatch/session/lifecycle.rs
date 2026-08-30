@@ -25,7 +25,7 @@ use crate::app::session::{AgentCommand, AgentId, AgentSession};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone, SessionEvent};
 use crate::scrollback::state::ScrollbackState;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use shell::sampling::types::ReasoningEffort;
 use std::time::Instant;
 /// A deferred model switch to apply once the session exists, plus any effort
@@ -34,14 +34,14 @@ use std::time::Instant;
 /// model override.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeferredSwitchOutcome {
-    pub switch: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    pub switch: Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)>,
     pub effort_error: Option<EffortTokenError>,
 }
 /// Resolve the stashed `-m` switch and/or `cli_effort_token` against the session
 /// catalog via [`ModelState::resolve_effort_for_model`] (same gate-first policy
 /// as `/effort` and headless).
 pub(crate) fn take_deferred_model_switch(
-    stashed: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    stashed: Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)>,
     models: &ModelState,
     cli_effort_token: Option<&str>,
 ) -> DeferredSwitchOutcome {
@@ -95,7 +95,7 @@ pub(crate) fn take_deferred_model_switch(
 pub(crate) fn apply_deferred_model_switch(
     agent: &mut AgentView,
     cli_effort_token: Option<&str>,
-) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+) -> Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)> {
     let stashed = agent.session.deferred_model_switch.take();
     let outcome = take_deferred_model_switch(stashed, &agent.session.models, cli_effort_token);
     apply_deferred_switch_outcome(agent, outcome)
@@ -104,7 +104,7 @@ pub(crate) fn apply_deferred_model_switch(
 pub(crate) fn apply_deferred_switch_outcome(
     agent: &mut AgentView,
     outcome: DeferredSwitchOutcome,
-) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+) -> Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)> {
     if let Some(err) = outcome.effort_error {
         let msg = format!("--reasoning-effort: {}", err.message());
         tracing::warn!("{msg}");
@@ -214,7 +214,7 @@ pub(in crate::app::root::dispatch) fn open_new_session_question(app: &mut AppVie
 /// "No" path can call it directly without re-opening the modal.
 pub(in crate::app::root::dispatch) fn dispatch_new_session_inner(
     app: &mut AppView,
-    model_id: Option<acp::ModelId>,
+    model_id: Option<shell::agent::models::ModelId>,
 ) -> Vec<Effect> {
     // A picker already owns the placeholder and the next create completion.
     // Re-entering `/new` (including a duplicated welcome key) must not create
@@ -249,7 +249,7 @@ pub(in crate::app::root::dispatch) fn dispatch_new_session_inner(
 /// rely on the (correct-but-brittle) `app.agents.last()` lookup.
 pub(in crate::app::root::dispatch) fn dispatch_new_session_inner_with_id(
     app: &mut AppView,
-    model_id: Option<acp::ModelId>,
+    model_id: Option<shell::agent::models::ModelId>,
 ) -> (AgentId, Vec<Effect>) {
     let mut effects =
         unregister_session_effect(get_active_agent(app).and_then(|a| a.session.session_id.clone()));
@@ -561,7 +561,7 @@ pub(in crate::app::root::dispatch) fn dispatch_new_worktree_session(
     load_session_id: Option<String>,
     label: Option<String>,
     prompt: Option<String>,
-    model_id: Option<acp::ModelId>,
+    model_id: Option<shell::agent::models::ModelId>,
     git_ref: Option<String>,
     preferred_session_id: Option<String>,
 ) -> Vec<Effect> {
@@ -738,7 +738,7 @@ pub(in crate::app::root::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,
     session_id: acp::SessionId,
-    new_models: Option<acp::SessionModelState>,
+    new_models: Option<shell::agent::models::SessionModelState>,
 ) -> Vec<Effect> {
     let agent_count = app.agents.len();
     let dispatch_controls = !app.reconnect_pending;
@@ -857,7 +857,7 @@ pub(in crate::app::root::dispatch) fn handle_worktree_session_created(
     session_id: acp::SessionId,
     worktree_path: std::path::PathBuf,
     session_cwd: std::path::PathBuf,
-    new_models: Option<acp::SessionModelState>,
+    new_models: Option<shell::agent::models::SessionModelState>,
 ) -> Vec<Effect> {
     let dispatch_controls = !app.reconnect_pending;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -1077,7 +1077,7 @@ pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
     agent_id: AgentId,
     session_id: acp::SessionId,
     control_token: crate::app::session::SessionControlToken,
-    model_id: acp::ModelId,
+    model_id: shell::agent::models::ModelId,
     _effort: Option<ReasoningEffort>,
     result: Result<
         crate::app::actions::ControlRpcOutcome,

@@ -89,7 +89,7 @@ mod tests {
         models: &'a ModelState,
         bundle: &'a BundleState,
         mode: ScreenMode,
-        session: Option<&'a agent_client_protocol::SessionId>,
+        session: Option<&'a agent_client_protocol::schema::v1::SessionId>,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
             models,
@@ -104,7 +104,7 @@ mod tests {
     fn run_returns_relaunch_action_with_session() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let sid = agent_client_protocol::SessionId::from("sess-abc".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("sess-abc".to_string());
 
         for mode in [ScreenMode::Fullscreen, ScreenMode::Inline] {
             let mut ctx = exec_ctx(&models, &bundle, mode, Some(&sid));

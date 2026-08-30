@@ -13,7 +13,9 @@ use super::*;
 /// reach this boundary. A mutable HTTP locator is never a valid image identity:
 /// it could change between the primary request and an irreversible Sideband
 /// transcription. `normalize_images` drops inputs without decodable bytes.
-pub(super) fn pick_user_image_url(image: &agent_client_protocol::ImageContent) -> String {
+pub(super) fn pick_user_image_url(
+    image: &agent_client_protocol::schema::v1::ImageContent,
+) -> String {
     format!("data:{};base64,{}", image.mime_type, image.data)
 }
 /// True iff `conversation` already contains a tagged project-instructions reminder.

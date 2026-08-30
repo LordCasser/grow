@@ -10,7 +10,7 @@
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let id = acp::ModelId::new(std::sync::Arc::from("reason-model"));
+        let id = shell::agent::models::ModelId::new(std::sync::Arc::from("reason-model"));
         let mut info = make_model_info("reason-model");
         info.meta = serde_json::json!({
             "reasoningEffort": "high",
@@ -44,7 +44,7 @@
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let id_3 = acp::ModelId::new(std::sync::Arc::from("grow-3"));
+        let id_3 = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3"));
         agent
             .session
             .models
@@ -81,7 +81,7 @@
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let id_3 = acp::ModelId::new(std::sync::Arc::from("grow-3"));
+        let id_3 = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3"));
         agent
             .session
             .models
@@ -132,7 +132,7 @@
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let id_4 = acp::ModelId::new(std::sync::Arc::from("grow-4"));
+        let id_4 = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4"));
         agent
             .session
             .models
@@ -168,7 +168,7 @@
 
         {
             let agent_a = app.agents.get_mut(&AgentId(0)).unwrap();
-            let id_3 = acp::ModelId::new(std::sync::Arc::from("grow-3"));
+            let id_3 = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3"));
             agent_a
                 .session
                 .models
@@ -179,7 +179,7 @@
 
         {
             let agent_b = app.agents.get_mut(&AgentId(1)).unwrap();
-            let id_5 = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+            let id_5 = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
             agent_b
                 .session
                 .models
@@ -278,7 +278,7 @@
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_models(agent, "heavy", &["auto", "heavy"]);
         agent.session.user_model_preference =
-            Some(acp::ModelId::new(std::sync::Arc::from("heavy")));
+            Some(shell::agent::models::ModelId::new(std::sync::Arc::from("heavy")));
         assert!(!agent.session.model_switch_pending());
 
         let notif = model_changed_ext("sess-1", "auto", None);
@@ -312,7 +312,7 @@
 
     /// The invoking client is also a subscriber to its own session and so
     /// receives the broadcast it triggered. Its in-flight
-    /// `SetSessionModelResponse` is the authority for its local state +
+    /// `SetSessionConfigOptionResponse` is the authority for its local state +
     /// the single "Switched to X" scrollback entry, so the broadcast handler
     /// must be a no-op here — gated on `model_switch_pending == true`.
     ///
@@ -329,7 +329,7 @@
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_models(agent, "grow-3", &["grow-3", "grow-4"]);
         // Invoker: a local switch is in flight (set by Action::SwitchModel /
-        // set_default_model before the SetSessionModelRequest is sent).
+        // set_default_model before the config-option request is sent).
         agent.session.begin_model_switch_for_test();
         let scrollback_before = agent.scrollback.len();
 
@@ -579,7 +579,7 @@
             .session
             .models
             .available
-            .contains_key(&acp::ModelId::new("grow-5")));
+            .contains_key(&shell::agent::models::ModelId::new("grow-5")));
         assert!(handle_ext_notification(
             &model_changed_ext("child-session", "grow-5", None),
             &mut app
@@ -652,8 +652,8 @@
             unreachable!()
         };
         *workflow_run_id = Some("run-1".to_string());
-        *model_state = Some(acp::SessionModelState::new(
-            acp::ModelId::new("grow-3"),
+        *model_state = Some(shell::agent::models::SessionModelState::new(
+            shell::agent::models::ModelId::new("grow-3"),
             vec![make_model_info("grow-3"), make_model_info("grow-4")],
         ));
         *workflow_agent_names = Some(vec!["reviewer".into(), "researcher".into()]);
@@ -671,12 +671,12 @@
             .session
             .models
             .available
-            .contains_key(&acp::ModelId::new("grow-3")));
+            .contains_key(&shell::agent::models::ModelId::new("grow-3")));
         assert!(!child
             .session
             .models
             .available
-            .contains_key(&acp::ModelId::new("grow-5")));
+            .contains_key(&shell::agent::models::ModelId::new("grow-5")));
         assert_eq!(
             child.session.workflow_agent_names.as_deref(),
             Some(["reviewer".to_string(), "researcher".to_string()].as_slice())

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 

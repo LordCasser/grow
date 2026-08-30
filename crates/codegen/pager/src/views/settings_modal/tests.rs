@@ -293,12 +293,11 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
     // Seed a synthetic catalog so the resolver path can produce
     // a non-empty SetX action — empty-only would mask a missing
     // SetX arm.
-    use agent_client_protocol as acp;
     use std::sync::Arc;
     let snapshot = PagerLocalSnapshot {
         available_models: vec![(
             "Test Model".to_string(),
-            acp::ModelId::new(Arc::from("test-model")),
+            shell::agent::models::ModelId::new(Arc::from("test-model")),
         )],
         ..PagerLocalSnapshot::default()
     };
@@ -1394,7 +1393,6 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
 /// buffer for `default_model`. Catalog populated so the
 /// `KnownModel` validator has data to validate against.
 fn editor_render_fixture(buffer: &str, cursor_byte: usize) -> SettingsModalState {
-    use agent_client_protocol as acp;
     use std::sync::Arc;
     // An earlier fixture used `default_model` (a SHELL `String`
     // setting) to exercise the inline editor. `default_model` is
@@ -1428,7 +1426,7 @@ fn editor_render_fixture(buffer: &str, cursor_byte: usize) -> SettingsModalState
     let snapshot = PagerLocalSnapshot {
         available_models: vec![(
             "Grow Test".to_string(),
-            acp::ModelId::new(Arc::from("grow-test")),
+            shell::agent::models::ModelId::new(Arc::from("grow-test")),
         )],
         ..PagerLocalSnapshot::default()
     };

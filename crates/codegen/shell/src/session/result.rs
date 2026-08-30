@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use serde_json::value::to_raw_value;
 use std::sync::Arc;

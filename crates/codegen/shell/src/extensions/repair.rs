@@ -12,7 +12,7 @@
 //! session activity, rejected mid-turn); non-resident sessions append the same
 //! recovery intent and Surface replacement directly to Timeline.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chat_state::compaction_utils::HistoryRepairReport;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

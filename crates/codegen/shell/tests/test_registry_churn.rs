@@ -8,7 +8,7 @@ use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
-use agent_client_protocol::{self as acp, Agent as _};
+use acp_transport::{AcpAgentHandler as _, protocol as acp};
 use serde_json::json;
 use shell::agent::config::Config as AgentConfig;
 use shell::agent::mvp_agent::MvpAgent;
@@ -55,7 +55,7 @@ struct Counts {
 }
 struct AutoApproveClient;
 #[async_trait::async_trait(?Send)]
-impl acp::Client for AutoApproveClient {
+impl acp_transport::AcpClientHandler for AutoApproveClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -78,7 +78,7 @@ impl acp::Client for AutoApproveClient {
     }
 }
 async fn ext_method(
-    conn: &acp::ClientSideConnection,
+    conn: &acp_transport::ClientSideConnection,
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
@@ -93,12 +93,15 @@ async fn ext_method(
     .unwrap_or_else(|e| panic!("{method} failed: {e}"));
     serde_json::from_str(resp.0.get()).unwrap_or_else(|e| panic!("{method}: bad response: {e}"))
 }
-async fn read_counts(conn: &acp::ClientSideConnection) -> Counts {
+async fn read_counts(conn: &acp_transport::ClientSideConnection) -> Counts {
     let resp = ext_method(conn, "grow/debug/agent", json!({})).await;
     serde_json::from_value(resp["result"]["registries"].clone())
         .unwrap_or_else(|e| panic!("grow/debug/agent: bad registries payload: {e}\n{resp}"))
 }
-async fn new_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path) -> acp::SessionId {
+async fn new_session(
+    conn: &acp_transport::ClientSideConnection,
+    cwd: &std::path::Path,
+) -> acp::SessionId {
     tokio::time::timeout(
         RPC_TIMEOUT,
         conn.new_session(
@@ -111,7 +114,11 @@ async fn new_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path) ->
     .expect("session/new failed")
     .session_id
 }
-async fn prompt_turn(conn: &acp::ClientSideConnection, session_id: &acp::SessionId, text: &str) {
+async fn prompt_turn(
+    conn: &acp_transport::ClientSideConnection,
+    session_id: &acp::SessionId,
+    text: &str,
+) {
     let resp = tokio::time::timeout(
         RPC_TIMEOUT,
         conn.prompt(acp::PromptRequest::new(
@@ -131,7 +138,7 @@ async fn prompt_turn(conn: &acp::ClientSideConnection, session_id: &acp::Session
         resp.stop_reason
     );
 }
-async fn close_session(conn: &acp::ClientSideConnection, session_id: &acp::SessionId) {
+async fn close_session(conn: &acp_transport::ClientSideConnection, session_id: &acp::SessionId) {
     let resp = ext_method(
         conn,
         "grow/session/close",
@@ -145,7 +152,11 @@ async fn close_session(conn: &acp::ClientSideConnection, session_id: &acp::Sessi
         session_id.0
     );
 }
-async fn churn_one(conn: &acp::ClientSideConnection, cwd: &std::path::Path, label: usize) {
+async fn churn_one(
+    conn: &acp_transport::ClientSideConnection,
+    cwd: &std::path::Path,
+    label: usize,
+) {
     let sid = new_session(conn, cwd).await;
     prompt_turn(conn, &sid, &format!("churn ping {label}")).await;
     close_session(conn, &sid).await;
@@ -153,7 +164,7 @@ async fn churn_one(conn: &acp::ClientSideConnection, cwd: &std::path::Path, labe
 /// Builds the in-process agent from the environment and returns an
 /// initialized client connection over duplex pipes. IO
 /// tasks spawn on the current `LocalSet`.
-async fn connect_and_auth(base_url: &str) -> acp::ClientSideConnection {
+async fn connect_and_auth(base_url: &str) -> acp_transport::ClientSideConnection {
     let raw: toml::Value =
         toml::from_str(&test_model_config(base_url)).expect("valid explicit test model TOML");
     let mut agent_config =
@@ -168,13 +179,13 @@ async fn connect_and_auth(base_url: &str) -> acp::ClientSideConnection {
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
     let (agent_conn, agent_io) =
-        acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
+        acp_transport::connect_agent_v1(agent, a2c_a.compat_write(), agent_incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
     tokio::task::spawn_local(GatewayReceiver::new(gw_rx, agent_conn).run());
     tokio::task::spawn_local(agent_io);
     let client_incoming = LineBufferedRead::spawn_local(a2c_b.compat());
-    let (client_conn, client_io) = acp::ClientSideConnection::new(
+    let (client_conn, client_io) = acp_transport::connect_client_v1(
         AutoApproveClient,
         c2a_a.compat_write(),
         client_incoming,

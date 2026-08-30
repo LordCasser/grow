@@ -6,7 +6,7 @@ use super::session::lifecycle::skip_picker_and_create_session;
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::root::{ActiveView, AppView};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.

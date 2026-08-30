@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -3533,7 +3533,7 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for RecordingClient {
+    impl acp_transport::AcpClientHandler for RecordingClient {
         async fn request_permission(
             &self,
             args: acp::RequestPermissionRequest,
@@ -3575,7 +3575,7 @@ mod tests {
     fn manager_with_recording_client_remember(
         cwd: &AbsPathBuf,
         config: Option<crate::permission::types::PermissionConfig>,
-        client: impl acp::Client + 'static,
+        client: impl acp_transport::AcpClientHandler + 'static,
         client_type: ClientType,
         remember_tool_approvals: bool,
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
@@ -3618,7 +3618,7 @@ mod tests {
     struct ApprovingClient;
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for ApprovingClient {
+    impl acp_transport::AcpClientHandler for ApprovingClient {
         async fn request_permission(
             &self,
             args: acp::RequestPermissionRequest,
@@ -3644,7 +3644,7 @@ mod tests {
     struct CancellingClient;
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for CancellingClient {
+    impl acp_transport::AcpClientHandler for CancellingClient {
         async fn request_permission(
             &self,
             _: acp::RequestPermissionRequest,
@@ -5864,7 +5864,7 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for HangingFirstPromptClient {
+    impl acp_transport::AcpClientHandler for HangingFirstPromptClient {
         async fn request_permission(
             &self,
             args: acp::RequestPermissionRequest,
@@ -6249,7 +6249,7 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for GatingClient {
+    impl acp_transport::AcpClientHandler for GatingClient {
         async fn request_permission(
             &self,
             args: acp::RequestPermissionRequest,

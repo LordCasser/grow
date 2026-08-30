@@ -1,6 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
-//! [`acp::Agent`] trait implementation for [`MvpAgent`].
+//! [`acp_transport::AcpAgentHandler`] implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
 
@@ -28,7 +28,7 @@ impl Drop for ReconnectGatewayMute {
     }
 }
 #[async_trait::async_trait(?Send)]
-impl acp::Agent for MvpAgent {
+impl acp_transport::AcpAgentHandler for MvpAgent {
     /// In the meta, we provide
     ///   - model_state: the model state, useful for the client to display available models and the default model.
     ///
@@ -359,7 +359,7 @@ impl acp::Agent for MvpAgent {
         let resolved_custom_model = build_custom_model_id
             .as_deref()
             .and_then(|custom_model| match self
-                .resolve_model_id(&acp::ModelId::new(custom_model))
+                .resolve_model_id(&crate::agent::models::ModelId::new(custom_model))
             {
                 Ok(model) if model.info.user_selectable => {
                     let origin_client = self
@@ -532,9 +532,9 @@ impl acp::Agent for MvpAgent {
                             self,
                             &catalog_transaction,
                             handle,
-                            acp::SetSessionModelRequest::new(
+                            crate::agent::handlers::model_switch::ModelSwitchRequest::new(
                                 session_id.clone(),
-                                acp::ModelId::new(model_id),
+                                crate::agent::models::ModelId::new(model_id),
                             ),
                         )
                     })
@@ -558,7 +558,7 @@ impl acp::Agent for MvpAgent {
             );
             self.send_model_auto_switched(
                     &session_id,
-                    &acp::ModelId::new(requested),
+                    &crate::agent::models::ModelId::new(requested),
                     &current,
                     &reason,
                 )
@@ -616,11 +616,10 @@ impl acp::Agent for MvpAgent {
                 &models,
             );
         }
-        Ok(
-            acp::NewSessionResponse::new(session_id)
-                .models(Some(models))
-                .meta(meta.as_object().cloned()),
-        )
+        let config_options = self.session_config_options(Some(&session_id), &models);
+        Ok(acp::NewSessionResponse::new(session_id)
+            .config_options(config_options)
+            .meta(meta.as_object().cloned()))
     }
     async fn load_session(
         &self,
@@ -1265,7 +1264,7 @@ impl acp::Agent for MvpAgent {
                         self,
                         &catalog_transaction,
                         handle,
-                        acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
+                        crate::agent::handlers::model_switch::ModelSwitchRequest::new(session_id.to_owned(), model_id)
                             .meta(restore_meta),
                     )
                 })
@@ -1374,8 +1373,9 @@ impl acp::Agent for MvpAgent {
             Some(session_id.0.as_ref()),
             None,
         );
+        let config_options = self.session_config_options(Some(&session_id), &model_state);
         let response = acp::LoadSessionResponse::new()
-            .models(Some(model_state))
+            .config_options(config_options)
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
@@ -1448,8 +1448,8 @@ impl acp::Agent for MvpAgent {
         if self.models_manager.allowlist_excludes_all() {
             self.send_model_auto_switched(
                     &arguments.session_id,
-                    &acp::ModelId::new(String::new()),
-                    &acp::ModelId::new(String::new()),
+                    &crate::agent::models::ModelId::new(String::new()),
+                    &crate::agent::models::ModelId::new(String::new()),
                     "None of your models are allowed by allowed_models. \
                  Broaden it or remove it from your config, then restart.",
                 )
@@ -1492,7 +1492,7 @@ impl acp::Agent for MvpAgent {
                         self,
                         &catalog_transaction,
                         handle.clone(),
-                        acp::SetSessionModelRequest::new(
+                        crate::agent::handlers::model_switch::ModelSwitchRequest::new(
                             arguments.session_id.clone(),
                             restore_model_id.clone(),
                         ),
@@ -1518,8 +1518,8 @@ impl acp::Agent for MvpAgent {
                 );
                 self.send_model_auto_switched(
                         &arguments.session_id,
-                        &acp::ModelId::new(String::new()),
-                        &acp::ModelId::new(String::new()),
+                        &crate::agent::models::ModelId::new(String::new()),
+                        &crate::agent::models::ModelId::new(String::new()),
                         "Your previous model is no longer available and could not \
                      be switched to a compatible model. Please start a new session.",
                     )
@@ -1842,10 +1842,10 @@ impl acp::Agent for MvpAgent {
             })??;
         Ok(acp::SetSessionModeResponse::new().meta(outcome.response_meta()))
     }
-    async fn set_session_model(
+    async fn set_session_config_option(
         &self,
-        args: acp::SetSessionModelRequest,
-    ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        args: acp::SetSessionConfigOptionRequest,
+    ) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
         // A reconnect load registers itself before taking the catalog lock.
         // Resolve that race first so this request never holds the lock while
         // waiting for the load that must acquire it.
@@ -1853,10 +1853,48 @@ impl acp::Agent for MvpAgent {
             .control_session_handle_waiting_for_load(&args.session_id)
             .await
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        let value = args
+            .value
+            .as_value_id()
+            .ok_or_else(|| acp::Error::invalid_params().data("configuration value must be an id"))?
+            .0
+            .clone();
+        let mut meta = args.meta.clone().unwrap_or_default();
+        let is_model_selection = args.config_id.0.as_ref() == session_config::MODEL_CONFIG_ID;
+        let model_id = if is_model_selection {
+            crate::agent::models::ModelId::new(value)
+        } else if args.config_id.0.as_ref() == session_config::REASONING_EFFORT_CONFIG_ID {
+            let effort: sampling_types::ReasoningEffort = serde_json::from_value(
+                serde_json::Value::String(value.to_string()),
+            )
+            .map_err(|_| {
+                acp::Error::invalid_params()
+                    .data(format!("unknown reasoning effort `{value}`"))
+            })?;
+            meta.insert(
+                REASONING_EFFORT_META_KEY.to_string(),
+                reasoning_effort_meta_value(effort),
+            );
+            meta.insert(
+                crate::session::EFFORT_PATCH_META_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+            handle.model_route.snapshot().model_id
+        } else {
+            return Err(acp::Error::invalid_params().data(format!(
+                "unknown session configuration option `{}`",
+                args.config_id.0
+            )));
+        };
+        let switch_args = crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+            args.session_id.clone(),
+            model_id,
+        )
+        .meta(Some(meta));
         let catalog_transaction = self.model_reload_lock.lock().await;
         let workflow_pinned = handle.workflow_run_id.is_some();
-        if !workflow_pinned {
-            let model = self.resolve_model_id(&args.model_id)?;
+        if !workflow_pinned && is_model_selection {
+            let model = self.resolve_model_id(&switch_args.model_id)?;
             if !model.info.user_selectable {
                 return Err(
                     acp::Error::invalid_params()
@@ -1864,32 +1902,32 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if args
+        if switch_args
             .meta
             .as_ref()
             .is_some_and(|meta| meta.contains_key(REASONING_EFFORT_META_KEY))
         {
-            let Some(effort) = sampling_types::parse_reasoning_effort_meta(args.meta.as_ref()) else {
+            let Some(effort) = sampling_types::parse_reasoning_effort_meta(switch_args.meta.as_ref()) else {
                 return Err(acp::Error::invalid_params()
                     .data("reasoningEffort must be a canonical string offered by the selected model"));
             };
             if !workflow_pinned
                 && !self
                 .models_manager
-                .model_offers_reasoning_effort(args.model_id.0.as_ref(), effort)
+                .model_offers_reasoning_effort(switch_args.model_id.0.as_ref(), effort)
             {
                 return Err(acp::Error::invalid_params().data(format!(
                     "reasoning effort `{effort}` is not offered by model `{}`",
-                    args.model_id.0
+                    switch_args.model_id.0
                 )));
             }
         }
-        let session_id = args.session_id.clone();
+        let session_id = switch_args.session_id.clone();
         let enqueued = crate::agent::handlers::model_switch::enqueue(
             self,
             &catalog_transaction,
             handle,
-            args,
+            switch_args,
         )?;
         drop(catalog_transaction);
         let res = crate::agent::handlers::model_switch::finish(self, enqueued).await;
@@ -1902,7 +1940,7 @@ impl acp::Agent for MvpAgent {
             tracing::info!(
                 session_id = %session_id.0,
                 previously_unavailable_model = %unavailable.0,
-                "set_session_model: user model switch cleared the model-unavailable block"
+                "session config change cleared the model-unavailable block"
             );
         }
         res

@@ -850,7 +850,7 @@ impl WorkflowManager {
         let session_directory = test_session_directory(session_dir);
         let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
         let notify = super::notify::WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),
@@ -1309,7 +1309,7 @@ mod tests {
         let session_directory = test_session_directory(session_dir);
         let store = WorkflowRunStore::new(session_directory.clone(), persist_tx.clone());
         let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),
@@ -1517,7 +1517,7 @@ mod tests {
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("scratch-failure-test"),
+            agent_client_protocol::schema::v1::SessionId::new("scratch-failure-test"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),

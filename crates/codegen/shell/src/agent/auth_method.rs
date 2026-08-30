@@ -4,7 +4,7 @@
 //! already supplied by the user through provider config, environment variables,
 //! or a local key helper; it never starts a login flow.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use crate::agent::config::ModelEntry;
 

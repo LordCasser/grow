@@ -49,7 +49,7 @@ use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })

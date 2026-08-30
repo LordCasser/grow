@@ -17,7 +17,7 @@ use crate::theme::system_appearance::{self, SystemAppearanceWatcher};
 use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
 use acp_transport::acp_send;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::super::actions::{Action, Effect, TaskResult};
 use super::{ActiveView, AppView, InputOutcome, PasteProvenance, TrustState};
@@ -100,7 +100,7 @@ struct ReconnectInitializeState {
 struct AgentLoadOutcome {
     agent_id: crate::app::session::AgentId,
     success: bool,
-    models: Option<acp::SessionModelState>,
+    models: Option<shell::agent::models::SessionModelState>,
     agent_name: Option<String>,
     /// Structured regular foreground owner from the reload response.
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
@@ -854,7 +854,7 @@ pub(crate) async fn run(
     app.cli_model_override = args
         .model
         .as_deref()
-        .map(agent_client_protocol::ModelId::new);
+        .map(shell::agent::models::ModelId::new);
     app.cli_effort_token = args.reasoning_effort.clone();
     app.show_resolved_model = remote_settings
         .as_ref()
@@ -2169,7 +2169,9 @@ pub(crate) async fn run(
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
                                                 success: true,
-                                                models: resp.models,
+                                                models: shell::agent::models::SessionModelState::from_config_options(
+                                                    resp.config_options,
+                                                ),
                                                 agent_name,
                                                 foreground:
                                                     effects::parse_session_load_foreground(
@@ -2254,7 +2256,7 @@ pub(crate) async fn run(
                 let init_ok = outcome.init.is_some();
                 if let Some(initialized) = outcome.init {
                     if let Some(current) = initialized.models.current.clone() {
-                        let state = acp::SessionModelState::new(
+                        let state = shell::agent::models::SessionModelState::new(
                             current,
                             initialized.models.available.values().cloned().collect(),
                         );

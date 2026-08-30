@@ -7,14 +7,14 @@ use crate::session::goal_tracker::{GoalState, GoalStatus, GoalTracker};
 use crate::session::persistence::PersistenceMsg;
 
 pub(crate) struct GoalNotifySender {
-    session_id: agent_client_protocol::SessionId,
+    session_id: agent_client_protocol::schema::v1::SessionId,
     gateway: acp_transport::AcpAgentGatewaySender,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
 }
 
 impl GoalNotifySender {
     pub(crate) fn new(
-        session_id: agent_client_protocol::SessionId,
+        session_id: agent_client_protocol::schema::v1::SessionId,
         gateway: acp_transport::AcpAgentGatewaySender,
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     ) -> Self {
@@ -47,11 +47,12 @@ impl GoalNotifySender {
             crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
         ));
         if let Some(raw) = raw {
-            self.gateway
-                .forward_fire_and_forget(agent_client_protocol::ExtNotification::new(
+            self.gateway.forward_fire_and_forget(
+                agent_client_protocol::schema::v1::ExtNotification::new(
                     "grow/session_notification",
                     raw.into(),
-                ));
+                ),
+            );
         }
     }
 }

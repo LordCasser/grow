@@ -2,7 +2,7 @@
 //! The coordinator: owns [`MessagesReducer`] and its [`Reducer`] impl; cohesive
 //! pieces live in the `wire`/`state`/`partial`/`usage` submodules.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde_json::{Value, json};
 
 use super::{

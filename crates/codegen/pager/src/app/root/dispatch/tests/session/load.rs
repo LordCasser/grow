@@ -96,10 +96,10 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
 #[test]
 fn session_loaded_models_do_not_overwrite_new_session_default() {
     let mut app = test_app();
-    app.models = Some(acp::SessionModelState::new(
-        acp::ModelId::new("future-default"),
-        vec![acp::ModelInfo::new(
-            acp::ModelId::new("future-default"),
+    app.models = Some(shell::agent::models::SessionModelState::new(
+        shell::agent::models::ModelId::new("future-default"),
+        vec![shell::agent::models::ModelInfo::new(
+            shell::agent::models::ModelId::new("future-default"),
             "Future Default",
         )],
     ))
@@ -111,10 +111,10 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: id,
             session_id: acp::SessionId::new("session-exact"),
-            models: Some(acp::SessionModelState::new(
-                acp::ModelId::new("exact-current"),
-                vec![acp::ModelInfo::new(
-                    acp::ModelId::new("exact-current"),
+            models: Some(shell::agent::models::SessionModelState::new(
+                shell::agent::models::ModelId::new("exact-current"),
+                vec![shell::agent::models::ModelInfo::new(
+                    shell::agent::models::ModelId::new("exact-current"),
                     "Exact Current",
                 )],
             )),

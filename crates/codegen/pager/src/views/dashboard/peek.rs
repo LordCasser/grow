@@ -302,7 +302,7 @@ fn pending_interaction_peek(
             })
             .collect::<Vec<_>>();
         let reject = p.options.iter().position(|option| {
-            option.kind == agent_client_protocol::PermissionOptionKind::RejectOnce
+            option.kind == agent_client_protocol::schema::v1::PermissionOptionKind::RejectOnce
         });
         return (Some(q), options, Some(p.id), None, reject);
     }
@@ -1275,8 +1275,9 @@ pub fn peek_number_key(state: &super::state::DashboardState, n: usize) -> Option
     }
     let request_id = panel.request_id?;
     let (option_id, _) = panel.options.get(idx)?;
-    let id =
-        agent_client_protocol::PermissionOptionId::new(std::sync::Arc::from(option_id.as_str()));
+    let id = agent_client_protocol::schema::v1::PermissionOptionId::new(std::sync::Arc::from(
+        option_id.as_str(),
+    ));
     Some(Action::DashboardPermissionSelect {
         row: panel.row.clone(),
         request_id,

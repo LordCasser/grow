@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 use paths::RelPathBuf;
 use workspace::session::file_state::{FileSnapshot, RewindPoint};
 
@@ -221,7 +221,7 @@ pub async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (In
         cwd: cwd.to_string_lossy().to_string(),
     };
     adapter
-        .init_session(&info, acp::ModelId::new("test-model"))
+        .init_session(&info, crate::agent::models::ModelId::new("test-model"))
         .await
         .expect("init_session");
     let dir = locate_session_dir(root, &id);

@@ -1,6 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use std::path::Path;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tokio::task::JoinSet;
 use acp_transport::{AcpAgentTx, acp_send};
 use super::actions::{PermissionModePersist, SubagentKillOutcome, TaskResult};

@@ -2988,7 +2988,6 @@ mod arg_picker_profile_tests {
     use crate::app::agent_view::test_fixtures::make_agent;
     use crate::app::root::InputOutcome;
     use crate::views::modal::ActiveModal;
-    use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -3083,15 +3082,15 @@ mod arg_picker_profile_tests {
         let mut effects = Vec::new();
         crate::appearance::cache::set_vim_mode(true);
         let mut agent = make_agent();
-        let id = acp::ModelId::new("grow-a");
+        let id = shell::agent::models::ModelId::new("grow-a");
         agent.session.models.available.insert(
             id.clone(),
-            acp::ModelInfo::new(id.clone(), "Grow A".to_string()),
+            shell::agent::models::ModelInfo::new(id.clone(), "Grow A".to_string()),
         );
-        let id_b = acp::ModelId::new("grow-b");
+        let id_b = shell::agent::models::ModelId::new("grow-b");
         agent.session.models.available.insert(
             id_b.clone(),
-            acp::ModelInfo::new(id_b, "Grow B".to_string()),
+            shell::agent::models::ModelInfo::new(id_b, "Grow B".to_string()),
         );
         agent.session.models.current = Some(id);
         agent.open_command_picker("model", "");
@@ -3119,10 +3118,10 @@ mod arg_picker_profile_tests {
     fn arg_picker_select_emits_slash_with_catalog_id() {
         let mut effects = Vec::new();
         let mut agent = make_agent();
-        let id = acp::ModelId::new("provider/model-a");
+        let id = shell::agent::models::ModelId::new("provider/model-a");
         agent.session.models.available.insert(
             id.clone(),
-            acp::ModelInfo::new(id.clone(), "Friendly Name".to_string()),
+            shell::agent::models::ModelInfo::new(id.clone(), "Friendly Name".to_string()),
         );
         agent.session.models.current = Some(id);
         agent.open_command_picker("model", "");

@@ -1,7 +1,7 @@
 //! Auxiliary vision-model support for degrading image-bearing conversation
 //! groups after the active model is proven to accept text only.
 use crate::sampling::ConversationRequest;
-use agent_client_protocol::ImageContent;
+use agent_client_protocol::schema::v1::ImageContent;
 use base64::Engine as _;
 use parking_lot::Mutex;
 use sampling_types::conversation::{ContentPart, ConversationItem, UserItem};

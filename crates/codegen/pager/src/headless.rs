@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
+use acp_transport::protocol as acp;
 use acp_transport::{AcpAgentTx, AcpClientMessageBox, AcpClientRx, acp_send};
-use agent_client_protocol as acp;
 use shell::agent::auth_method::AuthMethodKind;
 use shell::agent::config::Config as AgentConfig;
 use shell::extensions::task::{CancelSubagentRequest, KillTaskRequest};
@@ -518,7 +518,11 @@ async fn open_session(
         if let Ok(resp) = try_load {
             return Ok(OpenedSession {
                 session_id: acp::SessionId::new(sid.to_string()),
-                models: ModelState::from(resp.models),
+                models: ModelState::from(
+                    shell::agent::models::SessionModelState::from_config_options(
+                        resp.config_options,
+                    ),
+                ),
                 cwd: cwd.to_path_buf(),
             });
         }
@@ -532,7 +536,9 @@ async fn open_session(
     .await?;
     Ok(OpenedSession {
         session_id: new_resp.session_id,
-        models: ModelState::from(new_resp.models),
+        models: ModelState::from(
+            shell::agent::models::SessionModelState::from_config_options(new_resp.config_options),
+        ),
         cwd: cwd.to_path_buf(),
     })
 }
@@ -558,7 +564,9 @@ async fn open_session_with_id(
     .await?;
     Ok(OpenedSession {
         session_id: new_resp.session_id,
-        models: ModelState::from(new_resp.models),
+        models: ModelState::from(
+            shell::agent::models::SessionModelState::from_config_options(new_resp.config_options),
+        ),
         cwd: cwd.to_path_buf(),
     })
 }
@@ -617,7 +625,7 @@ async fn apply_headless_model_and_effort(
     let model_id = if let Some(name) = model_name {
         models
             .resolve_by_id(name)
-            .unwrap_or_else(|| acp::ModelId::new(name))
+            .unwrap_or_else(|| shell::agent::models::ModelId::new(name))
     } else {
         models.current.clone().ok_or_else(|| {
             anyhow::anyhow!("--reasoning-effort: no active model to apply effort to")
@@ -663,8 +671,27 @@ async fn apply_headless_model_and_effort(
         m
     });
 
+    let (config_id, value) = if model_name.is_none() {
+        (
+            shell::agent::session_config::REASONING_EFFORT_CONFIG_ID,
+            effort
+                .expect("effort-only update requires an effort")
+                .as_str()
+                .to_string(),
+        )
+    } else {
+        (
+            shell::agent::session_config::MODEL_CONFIG_ID,
+            model_id.0.to_string(),
+        )
+    };
     acp_send(
-        acp::SetSessionModelRequest::new(session_id.clone(), model_id.clone()).meta(meta),
+        acp::SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            config_id,
+            acp::SessionConfigOptionValue::value_id(value),
+        )
+        .meta(meta),
         acp_tx,
     )
     .await

@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tool_types::{KillTaskOutput, TaskOutputOutput};
 use tools::types::output::{
     ListDirOutput, MCPOutputDetails, ReadFileOutput, SearchReplaceOutput, ToolOutput,

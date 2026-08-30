@@ -9,7 +9,7 @@ use super::tracker::WorkflowRunState;
 
 #[derive(Clone)]
 pub(crate) struct WorkflowNotifySender {
-    session_id: agent_client_protocol::SessionId,
+    session_id: agent_client_protocol::schema::v1::SessionId,
     gateway: acp_transport::AcpAgentGatewaySender,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     store: WorkflowRunStore,
@@ -17,7 +17,7 @@ pub(crate) struct WorkflowNotifySender {
 
 impl WorkflowNotifySender {
     pub(crate) fn new(
-        session_id: agent_client_protocol::SessionId,
+        session_id: agent_client_protocol::schema::v1::SessionId,
         gateway: acp_transport::AcpAgentGatewaySender,
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
         store: WorkflowRunStore,
@@ -85,7 +85,7 @@ impl WorkflowNotifySender {
             ));
         }
         if let Some(raw) = raw {
-            let ext = agent_client_protocol::ExtNotification::new(
+            let ext = agent_client_protocol::schema::v1::ExtNotification::new(
                 "grow/session_notification",
                 raw.into(),
             );

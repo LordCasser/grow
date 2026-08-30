@@ -39,16 +39,9 @@
 //! `std::io::stdin()` directly — it has no second stdin reader on these paths
 //! and the extra FFI/`dup` would add risk for no benefit.
 //!
-//! # Escaped-slash normalization (acp 0.6 wire workaround)
-//!
-//! Every line is forwarded through `normalize_json_line` — see the
-//! crate-private `normalize` module for the contract and its scope.
-
 use std::io::BufRead;
 
 use tokio::sync::mpsc;
-
-use crate::normalize::normalize_json_line;
 
 /// Channel depth for buffered stdin lines. Small: the reader thread blocks on a
 /// full channel, applying natural backpressure to a flooding peer rather than
@@ -61,13 +54,7 @@ const STDIN_LINE_CHANNEL_DEPTH: usize = 64;
 /// returned channel. A final line without a trailing newline is still delivered
 /// before the channel closes.
 ///
-/// Yielded lines are **not guaranteed byte-verbatim**: a line the pinned acp
-/// 0.6 envelope would otherwise drop (a `\/`-escaped `method`, as Foundation
-/// encoders emit) is re-serialized compactly (key order, whitespace, and
-/// number formatting normalized) before forwarding — see the crate-private
-/// `normalize` module. Every line the envelope already accepts, and anything
-/// that fails to parse, passes through byte-identical (trailing terminator
-/// always preserved).
+/// Yielded lines are byte-verbatim, including their trailing terminator.
 ///
 /// The channel closes (so [`recv`](mpsc::Receiver::recv) returns `None`) when
 /// stdin reaches EOF, the read fails, or the [`Receiver`](mpsc::Receiver) is
@@ -102,10 +89,8 @@ pub fn spawn_stdin_line_reader() -> mpsc::Receiver<Vec<u8>> {
     rx
 }
 
-/// Read `\n`-delimited lines from `reader` and forward each on `tx` — via
-/// [`normalize_json_line`], so bytes are verbatim except for the lines that
-/// workaround rewrites (terminator always preserved) — until EOF, a read
-/// error, or the receiver is dropped.
+/// Read `\n`-delimited lines from `reader` and forward each on `tx` until EOF,
+/// a read error, or the receiver is dropped.
 fn forward_lines<R: BufRead>(mut reader: R, tx: &mpsc::Sender<Vec<u8>>) {
     let mut line = Vec::new();
     loop {
@@ -115,11 +100,11 @@ fn forward_lines<R: BufRead>(mut reader: R, tx: &mpsc::Sender<Vec<u8>>) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let normalized = normalize_json_line(std::mem::take(&mut line));
+        let next = std::mem::take(&mut line);
         // `blocking_send` parks this thread (not a runtime worker) when the
         // channel is full, and errors only once the receiver is dropped — at
         // which point there is nothing left to feed.
-        if tx.blocking_send(normalized).is_err() {
+        if tx.blocking_send(next).is_err() {
             break;
         }
     }

@@ -20,7 +20,7 @@ use crate::app::session::{AgentCommand, AgentId, AgentSession};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// Reconcile and reissue each exact-session control domain after a replacement
 /// ACP transport has restored authoritative state. Descendants retain their
@@ -556,7 +556,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
     app: &mut AppView,
     agent_id: AgentId,
     session_id: acp::SessionId,
-    new_models: Option<acp::SessionModelState>,
+    new_models: Option<shell::agent::models::SessionModelState>,
     code_restored: bool,
     restore_summary: Option<String>,
     restore_degree: Option<workspace::session::git::RestoreDegree>,

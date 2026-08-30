@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use crate::protocol as acp;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::message::{AcpAgentMessage, AcpClientMessage};

@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use futures::future::{self, Either};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

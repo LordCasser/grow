@@ -9,7 +9,7 @@
 //! Note: Could be renamed to `SessionConfig` or flattened onto `SessionActor` in a future PR.
 use crate::terminal::AsyncTerminalRunner;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use hunk_tracker::HunkTrackerHandle;
 use paths::AbsPathBuf;
 use std::collections::HashMap;

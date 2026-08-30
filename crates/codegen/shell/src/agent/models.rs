@@ -1,16 +1,137 @@
 //! Configured model catalog resolution and session model management.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use parking_lot::RwLock;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
 use crate::sampling::SamplerConfig as SamplingConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use sampling_types::{ReasoningEffort, ReasoningEffortOption};
+
+/// Grow's catalog model identity. Model selection is application state, not an
+/// ACP transport primitive; the stable ACP v1 boundary projects it through
+/// `session/config_option`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ModelId(pub Arc<str>);
+
+impl ModelId {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl From<&'static str> for ModelId {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ModelId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<Arc<str>> for ModelId {
+    fn from(value: Arc<str>) -> Self {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for ModelId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub model_id: ModelId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<acp::Meta>,
+}
+
+impl ModelInfo {
+    pub fn new(model_id: impl Into<ModelId>, name: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            name: name.into(),
+            description: None,
+            meta: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<Option<String>>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn meta(mut self, meta: impl Into<Option<acp::Meta>>) -> Self {
+        self.meta = meta.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelState {
+    pub current_model_id: ModelId,
+    pub available_models: Vec<ModelInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<acp::Meta>,
+}
+
+impl SessionModelState {
+    pub fn new(current_model_id: impl Into<ModelId>, available_models: Vec<ModelInfo>) -> Self {
+        Self {
+            current_model_id: current_model_id.into(),
+            available_models,
+            meta: None,
+        }
+    }
+
+    pub fn meta(mut self, meta: impl Into<Option<acp::Meta>>) -> Self {
+        self.meta = meta.into();
+        self
+    }
+
+    /// Reconstruct Grow's model snapshot from the stable ACP v1 session
+    /// configuration projection.
+    pub fn from_config_options(
+        config_options: Option<Vec<acp::SessionConfigOption>>,
+    ) -> Option<Self> {
+        let model_config = config_options?
+            .into_iter()
+            .find(|option| option.id.0.as_ref() == crate::agent::session_config::MODEL_CONFIG_ID)?;
+        let acp::SessionConfigKind::Select(select) = model_config.kind else {
+            return None;
+        };
+        let current_model_id = ModelId::new(select.current_value.0);
+        let acp::SessionConfigSelectOptions::Ungrouped(options) = select.options else {
+            return None;
+        };
+        let available_models = options
+            .into_iter()
+            .map(|option| ModelInfo {
+                model_id: ModelId::new(option.value.0),
+                name: option.name,
+                description: option.description,
+                meta: option.meta,
+            })
+            .collect();
+        Some(Self::new(current_model_id, available_models))
+    }
+}
 
 pub(crate) fn task_model_error_for_catalog(
     requested: &str,
@@ -70,7 +191,7 @@ struct CatalogState {
     models: IndexMap<String, ModelEntry>,
     /// `allowed_models` matched nothing; the prompt path blocks instead.
     allowlist_excludes_all: bool,
-    current_model_id: acp::ModelId,
+    current_model_id: crate::agent::models::ModelId,
     cfg: config::Config,
 }
 
@@ -83,13 +204,13 @@ struct CatalogState {
 pub struct PublishedModelCatalog {
     pub(crate) revision: u64,
     models: IndexMap<String, ModelEntry>,
-    current_model_id: acp::ModelId,
+    current_model_id: crate::agent::models::ModelId,
     cfg: config::Config,
 }
 
 #[derive(Clone)]
 pub struct PublishedSessionRoute {
-    pub(crate) model_id: acp::ModelId,
+    pub(crate) model_id: crate::agent::models::ModelId,
     pub(crate) sampling_config: SamplingConfig,
     pub(crate) image_description_model: Option<String>,
     pub(crate) inference_idle_timeout: std::time::Duration,
@@ -118,7 +239,7 @@ impl PublishedModelCatalog {
     /// control in that actor's mailbox has committed.
     pub(crate) fn resolve_session_route(
         &self,
-        preferred_model_id: &acp::ModelId,
+        preferred_model_id: &crate::agent::models::ModelId,
         preferred_effort: Option<ReasoningEffort>,
     ) -> Option<PublishedSessionRoute> {
         let model_id = if self.models.contains_key(preferred_model_id.0.as_ref()) {
@@ -181,7 +302,7 @@ impl Default for ModelsManager {
     fn default() -> Self {
         Self::new(
             IndexMap::new(),
-            acp::ModelId::new("default"),
+            crate::agent::models::ModelId::new("default"),
             config::Config::default(),
         )
     }
@@ -190,7 +311,7 @@ impl Default for ModelsManager {
 impl ModelsManager {
     pub(crate) fn new(
         models: IndexMap<String, ModelEntry>,
-        current_model_id: acp::ModelId,
+        current_model_id: crate::agent::models::ModelId,
         cfg: config::Config,
     ) -> Self {
         Self {
@@ -233,7 +354,7 @@ impl ModelsManager {
             "default model resolved"
         );
 
-        let current_model_id = acp::ModelId::new(Arc::from(current_model_key));
+        let current_model_id = crate::agent::models::ModelId::new(Arc::from(current_model_key));
 
         Ok(Self::new(catalog, current_model_id, cfg.clone()))
     }
@@ -275,12 +396,12 @@ impl ModelsManager {
             .is_some_and(|entry| entry.info.user_selectable);
         let new_current = if preferred_changed && !(campaign_only_flip && current_still_ok) {
             let (key, _, _) = resolve_default_model(&new_config, &new_catalog);
-            acp::ModelId::new(Arc::from(key))
+            crate::agent::models::ModelId::new(Arc::from(key))
         } else if current_still_ok {
             old_current.clone()
         } else {
             let (key, _, source) = resolve_default_model(&new_config, &new_catalog);
-            let selected = acp::ModelId::new(Arc::from(key));
+            let selected = crate::agent::models::ModelId::new(Arc::from(key));
             tracing::info!(
                 old = %old_current.0,
                 new = %selected.0,
@@ -349,7 +470,9 @@ impl ModelsManager {
     }
 
     /// ACP-visible (non-hidden) projection of the catalog.
-    pub fn available(&self) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    pub fn available(
+        &self,
+    ) -> IndexMap<crate::agent::models::ModelId, crate::agent::models::ModelInfo> {
         let snapshot = {
             let cat = self.inner.catalog.read();
             let models = &cat.models;
@@ -370,15 +493,15 @@ impl ModelsManager {
         task_model_error_for_catalog(requested, models)
     }
 
-    pub fn current_model_id(&self) -> acp::ModelId {
+    pub fn current_model_id(&self) -> crate::agent::models::ModelId {
         self.inner.catalog.read().current_model_id.clone()
     }
 
-    pub fn set_current_model_id(&self, id: acp::ModelId) {
+    pub fn set_current_model_id(&self, id: crate::agent::models::ModelId) {
         self.set_current_model_id_internal(id);
     }
 
-    fn set_current_model_id_internal(&self, id: acp::ModelId) {
+    fn set_current_model_id_internal(&self, id: crate::agent::models::ModelId) {
         let changed = {
             let mut state = self.inner.catalog.write();
             let changed = state.current_model_id != id;
@@ -507,8 +630,10 @@ impl ModelsManager {
             })),
         );
         if let Some(ref gw) = *self.inner.gateway.read() {
-            let model_state =
-                acp::SessionModelState::new(current, available.values().cloned().collect());
+            let model_state = crate::agent::models::SessionModelState::new(
+                current,
+                available.values().cloned().collect(),
+            );
             if let Ok(params) = serde_json::value::to_raw_value(&model_state) {
                 gw.forward_fire_and_forget(acp::ExtNotification::new(
                     "grow/models/update",

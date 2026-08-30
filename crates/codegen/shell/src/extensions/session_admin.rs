@@ -19,8 +19,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use agent_client_protocol as acp;
-use agent_client_protocol::Client as _;
+use acp_transport::AcpClientHandler as _;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_raw_response};

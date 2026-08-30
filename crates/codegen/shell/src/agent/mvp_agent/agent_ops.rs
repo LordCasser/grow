@@ -8,7 +8,7 @@ use tools::implementations::grow_build::task::backend::SubagentBackend;
 use tty_utils::ProcessScope;
 impl MvpAgent {
     pub fn reload_skills_all_sessions(&self) -> usize {
-        let session_ids: Vec<agent_client_protocol::SessionId> = self
+        let session_ids: Vec<agent_client_protocol::schema::v1::SessionId> = self
             .sessions
             .borrow()
             .keys()
@@ -22,7 +22,7 @@ impl MvpAgent {
         session_ids.len()
     }
     pub fn advertise_commands_all_sessions(&self) -> usize {
-        let session_ids: Vec<agent_client_protocol::SessionId> = self
+        let session_ids: Vec<agent_client_protocol::schema::v1::SessionId> = self
             .sessions
             .borrow()
             .keys()
@@ -368,8 +368,8 @@ impl MvpAgent {
     pub(super) async fn send_model_auto_switched(
         &self,
         session_id: &acp::SessionId,
-        previous: &acp::ModelId,
-        new: &acp::ModelId,
+        previous: &crate::agent::models::ModelId,
+        new: &crate::agent::models::ModelId,
         reason: &str,
     ) {
         let notification = crate::extensions::notification::SessionNotification {
@@ -393,7 +393,7 @@ impl MvpAgent {
     /// Pure id → entry resolver (the `allowed_models` gate lives in `set_session_model`).
     pub(crate) fn resolve_model_id(
         &self,
-        requested: &acp::ModelId,
+        requested: &crate::agent::models::ModelId,
     ) -> Result<ModelEntry, acp::Error> {
         let requested_str = requested.0.as_ref();
         let models = self.models_manager.models();
@@ -432,7 +432,7 @@ impl MvpAgent {
     /// cli-chat-proxy base_url.
     pub(super) fn resolve_sampling_config_for_model(
         &self,
-        model_id: &acp::ModelId,
+        model_id: &crate::agent::models::ModelId,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
         if let Ok(model) = self.resolve_model_id(model_id) {
@@ -1135,13 +1135,13 @@ impl MvpAgent {
     pub fn model_state(
         &self,
         session_id: Option<&acp::SessionId>,
-    ) -> acp::SessionModelState {
+    ) -> crate::agent::models::SessionModelState {
         let model_id = lookup_session_model(
             &self.sessions.borrow(),
             session_id,
             &self.models_manager.current_model_id(),
         );
-        let mut available_models: Vec<acp::ModelInfo> = self
+        let mut available_models: Vec<crate::agent::models::ModelInfo> = self
             .models_manager
             .available()
             .values()
@@ -1175,13 +1175,13 @@ impl MvpAgent {
             );
             info.meta = Some(map);
         }
-        acp::SessionModelState::new(model_id, available_models)
+        crate::agent::models::SessionModelState::new(model_id, available_models)
     }
-    pub(super) fn session_config_options(
+    pub(crate) fn session_config_options(
         &self,
         session_id: Option<&acp::SessionId>,
-        state: &acp::SessionModelState,
-    ) -> Vec<session_config::SessionConfigOption> {
+        state: &crate::agent::models::SessionModelState,
+    ) -> Vec<acp::SessionConfigOption> {
         let model_id = state.current_model_id.clone();
         let effort_options: Vec<ReasoningEffortOption> = self
             .models_manager
@@ -1224,7 +1224,7 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         cwd: String,
         title: Option<String>,
-        model_state: &acp::SessionModelState,
+        model_state: &crate::agent::models::SessionModelState,
     ) {
         let config_options = self.session_config_options(Some(session_id), model_state);
         let detail = session_config::GrowSessionDetail::build(

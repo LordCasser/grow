@@ -136,7 +136,7 @@ mod tests {
 
     fn make_request(command: &str) -> TerminalRunRequest {
         TerminalRunRequest {
-            tool_call_id: agent_client_protocol::ToolCallId::new("test"),
+            tool_call_id: agent_client_protocol::schema::v1::ToolCallId::new("test"),
             command: command.to_string(),
             cwd: AbsPathBuf::new(std::env::current_dir().unwrap()).unwrap(),
             env: HashMap::new(),

@@ -724,7 +724,7 @@ pub struct DashboardState {
 /// the renderer can show the indicator without a live `ModelState`.
 #[derive(Debug, Clone)]
 pub struct PendingDispatchModel {
-    pub id: agent_client_protocol::ModelId,
+    pub id: shell::agent::models::ModelId,
     pub effort: Option<shell::sampling::types::ReasoningEffort>,
     pub display: String,
 }
@@ -9581,7 +9581,6 @@ mod tests {
     /// sits under the same screen coordinates (click-through bug).
     #[test]
     fn slash_model_dropdown_click_selects_model_not_session_row() {
-        use agent_client_protocol as acp;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use indexmap::IndexMap;
         use ratatui::layout::Rect;
@@ -9616,15 +9615,18 @@ mod tests {
         };
 
         // Seed a model catalog and open `/model ` so arg suggestions exist.
-        let model_id = acp::ModelId::new("beta-model");
+        let model_id = shell::agent::models::ModelId::new("beta-model");
         let mut available = IndexMap::new();
         available.insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Beta Model"),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Beta Model"),
         );
         available.insert(
-            acp::ModelId::new("alpha-model"),
-            acp::ModelInfo::new(acp::ModelId::new("alpha-model"), "Alpha Model"),
+            shell::agent::models::ModelId::new("alpha-model"),
+            shell::agent::models::ModelInfo::new(
+                shell::agent::models::ModelId::new("alpha-model"),
+                "Alpha Model",
+            ),
         );
         state.models.update_catalog(available, Some(model_id));
         // Mirror how the real dashboard types into the dispatch box:
@@ -9672,7 +9674,6 @@ mod tests {
     /// list tracks the pointer (agent-view parity).
     #[test]
     fn slash_dropdown_mouse_move_sets_hover() {
-        use agent_client_protocol as acp;
         use crossterm::event::{MouseEvent, MouseEventKind};
         use indexmap::IndexMap;
         use ratatui::layout::Rect;
@@ -9688,11 +9689,11 @@ mod tests {
             row_items: vec![0, 1, 2, 3],
             has_scrollbar: false,
         };
-        let model_id = acp::ModelId::new("hover-model");
+        let model_id = shell::agent::models::ModelId::new("hover-model");
         let mut available = IndexMap::new();
         available.insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Hover Model"),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Hover Model"),
         );
         state.models.update_catalog(available, Some(model_id));
         state.dispatch.set_text("/model ");

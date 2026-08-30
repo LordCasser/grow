@@ -9,7 +9,7 @@ pub use tools::implementations::grow_build::todo::TodoPriority;
 pub use tools::implementations::grow_build::todo::TodoState;
 pub use tools::implementations::grow_build::todo::TodoStatus;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// Convert an ACP `PlanEntry` to a `TodoItem`.
 ///

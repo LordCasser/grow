@@ -23,7 +23,7 @@ use crate::cpu_profile::{
     ControlError, ControlErrorCode, CpuProfileManager, CpuProfileStartOptions, CpuProfileStatus,
     ShutdownStopDisposition,
 };
-use agent_client_protocol::AGENT_METHOD_NAMES;
+use agent_client_protocol::schema::v1::AGENT_METHOD_NAMES;
 use kanal::{AsyncReceiver, AsyncSender};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -686,20 +686,6 @@ fn patch_initialize_response_model(
         return true;
     }
     false
-}
-/// Extract model ID from a `session/setModel` request in protocol tests.
-#[cfg(test)]
-fn extract_model_id_from_set_model(json: &serde_json::Value) -> Option<String> {
-    let method = json.get("method")?.as_str()?;
-    if method != AGENT_METHOD_NAMES.session_set_model {
-        return None;
-    }
-    let params = json.get("params")?;
-    params
-        .get("modelId")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 fn cpu_profile_status_payload(status: CpuProfileStatus) -> ControlPayload {
     match status {
@@ -3312,39 +3298,6 @@ mod tests {
         assert_eq!(extract_permission_mode_change(&pv(malformed)), None);
     }
     #[test]
-    fn extract_model_id_from_set_model_returns_value() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-123","modelId":"grow-3-fast"}}}}"#,
-            AGENT_METHOD_NAMES.session_set_model
-        );
-        assert_eq!(
-            extract_model_id_from_set_model(&pv(&payload)),
-            Some("grow-3-fast".to_string())
-        );
-    }
-    #[test]
-    fn extract_model_id_from_set_model_returns_none_for_other_methods() {
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"other/method","id":1,"params":{"modelId":"grow-3"}}"#;
-        assert_eq!(extract_model_id_from_set_model(&pv(payload)), None);
-    }
-    #[test]
-    fn extract_model_id_from_set_model_returns_none_for_empty_model() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-123","modelId":""}}}}"#,
-            AGENT_METHOD_NAMES.session_set_model
-        );
-        assert_eq!(extract_model_id_from_set_model(&pv(&payload)), None);
-    }
-    #[test]
-    fn extract_model_id_from_set_model_returns_none_for_missing_model() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-123"}}}}"#,
-            AGENT_METHOD_NAMES.session_set_model
-        );
-        assert_eq!(extract_model_id_from_set_model(&pv(&payload)), None);
-    }
-    #[test]
     fn patch_initialize_response_patches_current_model_id() {
         let mut json = pv(
             r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grow-3","availableModels":[]}}}}"#,
@@ -3781,8 +3734,8 @@ mod tests {
         .unwrap();
         let _: ServerMessage = read_message(&mut reader).await.unwrap();
         let set_model_payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","modelId":"provider/alternate"}}}}"#,
-            AGENT_METHOD_NAMES.session_set_model
+            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","configId":"model","value":"provider/alternate"}}}}"#,
+            AGENT_METHOD_NAMES.session_set_config_option
         );
         write_message(
             &mut writer,

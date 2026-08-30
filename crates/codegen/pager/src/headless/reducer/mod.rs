@@ -2,7 +2,7 @@
 //! One `Reducer` impl per wire format, selected by [`reducer_for`]. This module
 //! owns the shared [`StreamEvent`]/[`Reducer`] types; each format is a submodule.
 
-use agent_client_protocol as proto;
+use agent_client_protocol::schema::v1 as proto;
 use serde::Serialize;
 use serde_json::{Value, json};
 

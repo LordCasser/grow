@@ -1,11 +1,14 @@
 use std::{borrow::Borrow, fmt, ops::Deref};
 
-use agent_client_protocol as acp;
 use derive_more::From;
 use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use tokio::sync::oneshot;
 
-use crate::common::AcpResult;
+use crate::{
+    common::AcpResult,
+    handler::{AcpAgentHandler, AcpClientHandler},
+    protocol as acp,
+};
 
 pub use self::{
     agent::{AcpAgentMessage, AcpAgentMessageBox, AcpAgentMessageGeneric},
@@ -241,7 +244,7 @@ mod client {
 
         pub fn route_to_client(
             self,
-            client: impl acp::Client + 'static, // note: acp::Client is auto-implemented for Rc/Arc
+            client: impl AcpClientHandler + 'static,
             spawn: impl Fn(LocalBoxFuture<'static, ()>) + 'static,
         ) {
             match self {
@@ -375,6 +378,11 @@ mod agent {
         acp::AGENT_METHOD_NAMES.session_load,
     );
     acp_define_request_response!(
+        acp::ListSessionsRequest,
+        acp::ListSessionsResponse,
+        acp::AGENT_METHOD_NAMES.session_list,
+    );
+    acp_define_request_response!(
         acp::SetSessionModeRequest,
         acp::SetSessionModeResponse,
         acp::AGENT_METHOD_NAMES.session_set_mode,
@@ -390,9 +398,9 @@ mod agent {
         acp::AGENT_METHOD_NAMES.session_cancel,
     );
     acp_define_request_response!(
-        acp::SetSessionModelRequest,
-        acp::SetSessionModelResponse,
-        acp::AGENT_METHOD_NAMES.session_set_model,
+        acp::SetSessionConfigOptionRequest,
+        acp::SetSessionConfigOptionResponse,
+        acp::AGENT_METHOD_NAMES.session_set_config_option,
     );
 
     /// ACP messages meant *for* the agent.
@@ -402,12 +410,13 @@ mod agent {
         Authenticate(AcpArgsGeneric<acp::AuthenticateRequest, S>),
         NewSession(AcpArgsGeneric<acp::NewSessionRequest, S>),
         LoadSession(AcpArgsGeneric<acp::LoadSessionRequest, S>),
+        ListSessions(AcpArgsGeneric<acp::ListSessionsRequest, S>),
         SetSessionMode(AcpArgsGeneric<acp::SetSessionModeRequest, S>),
         Prompt(AcpArgsGeneric<acp::PromptRequest, S>),
         Cancel(AcpArgsGeneric<acp::CancelNotification, S>),
         ExtMethod(AcpArgsGeneric<acp::ExtRequest, S>),
         ExtNotification(AcpArgsGeneric<acp::ExtNotification, S>),
-        SetSessionModel(AcpArgsGeneric<acp::SetSessionModelRequest, S>),
+        SetSessionConfigOption(AcpArgsGeneric<acp::SetSessionConfigOptionRequest, S>),
     }
 
     #[allow(type_alias_bounds)]
@@ -422,12 +431,13 @@ mod agent {
                 Self::Authenticate(a) => a.method_name(),
                 Self::NewSession(a) => a.method_name(),
                 Self::LoadSession(a) => a.method_name(),
+                Self::ListSessions(a) => a.method_name(),
                 Self::SetSessionMode(a) => a.method_name(),
                 Self::Prompt(a) => a.method_name(),
                 Self::Cancel(a) => a.method_name(),
                 Self::ExtMethod(a) => a.method_name(),
                 Self::ExtNotification(a) => a.method_name(),
-                Self::SetSessionModel(a) => a.method_name(),
+                Self::SetSessionConfigOption(a) => a.method_name(),
             }
         }
     }
@@ -452,6 +462,9 @@ mod agent {
                 Self::LoadSession(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
+                Self::ListSessions(args) => {
+                    state.serialize_field("request", args.request.borrow())?
+                }
                 Self::SetSessionMode(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
@@ -461,7 +474,7 @@ mod agent {
                 Self::ExtNotification(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
-                Self::SetSessionModel(args) => {
+                Self::SetSessionConfigOption(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
             }
@@ -502,14 +515,16 @@ mod agent {
                 parse!(NewSession)
             } else if method == acp::AGENT_METHOD_NAMES.session_load {
                 parse!(LoadSession)
+            } else if method == acp::AGENT_METHOD_NAMES.session_list {
+                parse!(ListSessions)
             } else if method == acp::AGENT_METHOD_NAMES.session_set_mode {
                 parse!(SetSessionMode)
             } else if method == acp::AGENT_METHOD_NAMES.session_prompt {
                 parse!(Prompt)
             } else if method == acp::AGENT_METHOD_NAMES.session_cancel {
                 parse!(Cancel)
-            } else if method == acp::AGENT_METHOD_NAMES.session_set_model {
-                parse!(SetSessionModel)
+            } else if method == acp::AGENT_METHOD_NAMES.session_set_config_option {
+                parse!(SetSessionConfigOption)
             } else if method == "ext_method" {
                 parse!(ExtMethod)
             } else if method == "ext_notification" {
@@ -529,18 +544,21 @@ mod agent {
                 Self::Authenticate(args) => AcpAgentMessageBox::Authenticate(args.boxed()),
                 Self::NewSession(args) => AcpAgentMessageBox::NewSession(args.boxed()),
                 Self::LoadSession(args) => AcpAgentMessageBox::LoadSession(args.boxed()),
+                Self::ListSessions(args) => AcpAgentMessageBox::ListSessions(args.boxed()),
                 Self::SetSessionMode(args) => AcpAgentMessageBox::SetSessionMode(args.boxed()),
                 Self::Prompt(args) => AcpAgentMessageBox::Prompt(args.boxed()),
                 Self::Cancel(args) => AcpAgentMessageBox::Cancel(args.boxed()),
                 Self::ExtMethod(args) => AcpAgentMessageBox::ExtMethod(args.boxed()),
                 Self::ExtNotification(args) => AcpAgentMessageBox::ExtNotification(args.boxed()),
-                Self::SetSessionModel(args) => AcpAgentMessageBox::SetSessionModel(args.boxed()),
+                Self::SetSessionConfigOption(args) => {
+                    AcpAgentMessageBox::SetSessionConfigOption(args.boxed())
+                }
             }
         }
 
         pub fn route_to_agent(
             self,
-            agent: impl acp::Agent + 'static, // note: acp::Agent is auto-implemented for Rc/Arc
+            agent: impl AcpAgentHandler + 'static,
             spawn: impl Fn(LocalBoxFuture<'static, ()>) + 'static,
         ) {
             match self {
@@ -576,6 +594,15 @@ mod agent {
                         _ = args
                             .response_tx
                             .send(agent.load_session(args.request).await)
+                            .ok();
+                    }
+                    .boxed_local(),
+                ),
+                AcpAgentMessage::ListSessions(args) => spawn(
+                    async move {
+                        _ = args
+                            .response_tx
+                            .send(agent.list_sessions(args.request).await)
                             .ok();
                     }
                     .boxed_local(),
@@ -619,11 +646,11 @@ mod agent {
                     }
                     .boxed_local(),
                 ),
-                AcpAgentMessage::SetSessionModel(args) => spawn(
+                AcpAgentMessage::SetSessionConfigOption(args) => spawn(
                     async move {
                         _ = args
                             .response_tx
-                            .send(agent.set_session_model(args.request).await)
+                            .send(agent.set_session_config_option(args.request).await)
                             .ok();
                     }
                     .boxed_local(),

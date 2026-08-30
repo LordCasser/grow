@@ -1,5 +1,5 @@
 //! ACP slash command advertising and resolution.
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::collections::{HashMap, HashSet};
 use tools::implementations::skills::skill::format_skill_name;
 use tools::implementations::skills::types::SkillInfo;

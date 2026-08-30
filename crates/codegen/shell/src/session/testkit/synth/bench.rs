@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 
 use crate::session::info::Info;
 use crate::session::storage::{JsonlStorageAdapter, SessionUpdate, StorageAdapter};
@@ -51,7 +51,7 @@ pub fn synthesize_to_target_bytes(root: &Path, target_bytes: u64) -> Info {
         .expect("bench runtime");
     rt.block_on(async {
         adapter
-            .init_session(&info, acp::ModelId::new("bench-model"))
+            .init_session(&info, crate::agent::models::ModelId::new("bench-model"))
             .await
             .expect("init session");
         let mut turn = 0usize;

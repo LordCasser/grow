@@ -2,7 +2,7 @@
 //!
 //! Provides the plugins list endpoint for the pager's hooks/plugins modal.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use extension_types::{
     HookStatus, McpStatus, PluginInfo, PluginOrigin, PluginScope, PluginsListResponse,
 };

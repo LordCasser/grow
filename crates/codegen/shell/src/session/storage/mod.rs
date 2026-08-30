@@ -17,7 +17,7 @@ use crate::session::persistence::Summary;
 use crate::session::wire_tags::{
     AVAILABLE_COMMANDS_UPDATE_PREFIX, REWIND_MARKER, USER_MESSAGE_CHUNK,
 };
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use sampling_types::ReasoningEffort;
 use workspace::session::file_state::RewindPoint;
 
@@ -3068,7 +3068,11 @@ impl std::fmt::Display for AppendUpdateError {
 pub trait StorageAdapter: Send + Sync {
     /// Initialize a new session or load existing one
     /// Returns the Summary (creates if needed, loads if exists)
-    async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary>;
+    async fn init_session(
+        &self,
+        info: &Info,
+        model_id: crate::agent::models::ModelId,
+    ) -> io::Result<Summary>;
 
     /// Repair the denormalized title cache from an already-validated canonical
     /// Timeline fold. Ordinary writers never call this path. Returns false for
@@ -3146,7 +3150,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn update_current_model_and_agent(
         &self,
         info: &Info,
-        model_id: &acp::ModelId,
+        model_id: &crate::agent::models::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> io::Result<()>;

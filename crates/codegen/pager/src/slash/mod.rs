@@ -1482,8 +1482,6 @@ pub fn scan_inline_slash_tokens(text: &str, cursor: usize) -> Vec<InlineSlashTok
 mod tests {
     use std::sync::Arc;
 
-    use agent_client_protocol as acp;
-
     use crate::acp::model_state::ModelState;
 
     use super::registry::CommandRegistry;
@@ -1783,10 +1781,10 @@ mod tests {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         let state = SlashState::default();
         let mut models = ModelState::default();
-        let model_id = acp::ModelId::new(Arc::from("example"));
+        let model_id = shell::agent::models::ModelId::new(Arc::from("example"));
         models.available.insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id, "Example".to_string()),
+            shell::agent::models::ModelInfo::new(model_id, "Example".to_string()),
         );
 
         let text = "/model e";
@@ -2445,11 +2443,12 @@ mod tests {
             CommandRegistry::new(vec![Arc::new(TieCmd("prompts"))]),
             std::path::PathBuf::from("."),
         );
-        ctrl.registry_mut()
-            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+        ctrl.registry_mut().set_acp_commands(&[
+            agent_client_protocol::schema::v1::AvailableCommand::new(
                 "pager-headless".to_string(),
                 String::new(),
-            )]);
+            ),
+        ]);
         let mut store = mru::SlashMru::new_in_memory();
         store.seed_for_test("", "pager-headless", 1_700_000_900);
         ctrl.set_mru(std::rc::Rc::new(std::cell::RefCell::new(store)));
@@ -2571,11 +2570,16 @@ mod tests {
         .as_object()
         .cloned()
         .expect("skill meta is an object");
-        let skill_cmd =
-            agent_client_protocol::AvailableCommand::new("skill-cmd".to_string(), String::new())
-                .meta(skill_meta);
+        let skill_cmd = agent_client_protocol::schema::v1::AvailableCommand::new(
+            "skill-cmd".to_string(),
+            String::new(),
+        )
+        .meta(skill_meta);
         ctrl.registry_mut().set_acp_commands(&[
-            agent_client_protocol::AvailableCommand::new("acp-command".to_string(), String::new()),
+            agent_client_protocol::schema::v1::AvailableCommand::new(
+                "acp-command".to_string(),
+                String::new(),
+            ),
             skill_cmd,
         ]);
         assert!(

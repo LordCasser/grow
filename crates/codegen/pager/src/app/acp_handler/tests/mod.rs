@@ -1187,7 +1187,7 @@ fn write_session_summary(
     };
     let mut summary = shell::session::persistence::Summary::new(
         &info,
-        acp::ModelId::new("test-model"),
+        shell::agent::models::ModelId::new("test-model"),
     )
     .unwrap();
     summary.session_kind = session_kind.map(str::to_owned);
@@ -1352,22 +1352,22 @@ pub(super) fn make_replayed_task_backgrounded_notif(
 pub(super) fn setup_pending_execute_tool(app: &mut AppView, tc_id: &str) {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let meta = crate::acp::meta::NotificationMeta::default();
-    let tc = agent_client_protocol::SessionUpdate::ToolCall(
-        agent_client_protocol::ToolCall::new(
-                agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
+    let tc = agent_client_protocol::schema::v1::SessionUpdate::ToolCall(
+        agent_client_protocol::schema::v1::ToolCall::new(
+                agent_client_protocol::schema::v1::ToolCallId::new(std::sync::Arc::from(tc_id)),
                 "Execute `sleep 9999`".to_string(),
             )
-            .kind(agent_client_protocol::ToolKind::Execute)
-            .status(agent_client_protocol::ToolCallStatus::Pending)
+            .kind(agent_client_protocol::schema::v1::ToolKind::Execute)
+            .status(agent_client_protocol::schema::v1::ToolCallStatus::Pending)
             .content(vec![])
             .locations(vec![]),
     );
     agent.session.tracker.handle_update(tc, &meta, &mut agent.scrollback);
-    let update = agent_client_protocol::SessionUpdate::ToolCallUpdate(
-        agent_client_protocol::ToolCallUpdate::new(
-            agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
-            agent_client_protocol::ToolCallUpdateFields::new()
-                .status(Some(agent_client_protocol::ToolCallStatus::InProgress)),
+    let update = agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(
+        agent_client_protocol::schema::v1::ToolCallUpdate::new(
+            agent_client_protocol::schema::v1::ToolCallId::new(std::sync::Arc::from(tc_id)),
+            agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
+                .status(Some(agent_client_protocol::schema::v1::ToolCallStatus::InProgress)),
         ),
     );
     agent.session.tracker.handle_update(update, &meta, &mut agent.scrollback);
@@ -1393,11 +1393,11 @@ pub(super) fn send_late_bg_detection(app: &mut AppView, tc_id: &str) {
         output_delta: None,
         was_bare_echo: false,
     };
-    let update = agent_client_protocol::SessionUpdate::ToolCallUpdate(
-        agent_client_protocol::ToolCallUpdate::new(
-            agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
-            agent_client_protocol::ToolCallUpdateFields::new()
-                .status(Some(agent_client_protocol::ToolCallStatus::InProgress))
+    let update = agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(
+        agent_client_protocol::schema::v1::ToolCallUpdate::new(
+            agent_client_protocol::schema::v1::ToolCallId::new(std::sync::Arc::from(tc_id)),
+            agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
+                .status(Some(agent_client_protocol::schema::v1::ToolCallStatus::InProgress))
                 .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok())
                 .raw_input(
                     Some(
@@ -1487,19 +1487,19 @@ pub(super) fn make_monitor_event_notif(
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("grow/monitor_event", std::sync::Arc::from(raw))
 }
-pub(super) fn make_model_info(id: &str) -> acp::ModelInfo {
-    acp::ModelInfo::new(acp::ModelId::new(std::sync::Arc::from(id)), id.to_string())
+pub(super) fn make_model_info(id: &str) -> shell::agent::models::ModelInfo {
+    shell::agent::models::ModelInfo::new(shell::agent::models::ModelId::new(std::sync::Arc::from(id)), id.to_string())
 }
 pub(super) fn make_models_update_notif(
     current_model_id: &str,
     model_ids: &[&str],
 ) -> acp::ExtNotification {
-    let models: Vec<acp::ModelInfo> = model_ids
+    let models: Vec<shell::agent::models::ModelInfo> = model_ids
         .iter()
         .map(|id| make_model_info(id))
         .collect();
-    let state = acp::SessionModelState::new(
-        acp::ModelId::new(std::sync::Arc::from(current_model_id)),
+    let state = shell::agent::models::SessionModelState::new(
+        shell::agent::models::ModelId::new(std::sync::Arc::from(current_model_id)),
         models,
     );
     let raw = serde_json::value::to_raw_value(&state).unwrap();
@@ -1519,8 +1519,8 @@ pub(super) fn make_reasoning_models_update_notif(
         })
         .as_object()
         .cloned();
-    let state = acp::SessionModelState::new(
-        acp::ModelId::new(std::sync::Arc::from(current_model_id)),
+    let state = shell::agent::models::SessionModelState::new(
+        shell::agent::models::ModelId::new(std::sync::Arc::from(current_model_id)),
         vec![info],
     );
     let raw = serde_json::value::to_raw_value(&state).unwrap();
@@ -1532,11 +1532,11 @@ pub(super) fn make_reasoning_models_update_notif(
 /// the simulated remote/local switch then transitions away from.
 pub(super) fn seed_models(agent: &mut AgentView, current: &str, available: &[&str]) {
     for id in available {
-        let model_id = acp::ModelId::new(std::sync::Arc::from(*id));
+        let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from(*id));
         agent.session.models.available.insert(model_id.clone(), make_model_info(id));
     }
     agent.session.models.current = Some(
-        acp::ModelId::new(std::sync::Arc::from(current)),
+        shell::agent::models::ModelId::new(std::sync::Arc::from(current)),
     );
 }
 pub(super) fn model_changed_ext(

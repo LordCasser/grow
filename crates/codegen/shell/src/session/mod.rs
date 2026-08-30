@@ -26,12 +26,12 @@ pub use fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError,
 /// of "only Image blocks ride structurally" (interject parse + queue-interject
 /// harvest).
 pub(crate) fn image_blocks(
-    blocks: impl IntoIterator<Item = agent_client_protocol::ContentBlock>,
-) -> Vec<agent_client_protocol::ImageContent> {
+    blocks: impl IntoIterator<Item = agent_client_protocol::schema::v1::ContentBlock>,
+) -> Vec<agent_client_protocol::schema::v1::ImageContent> {
     blocks
         .into_iter()
         .filter_map(|block| match block {
-            agent_client_protocol::ContentBlock::Image(img) => Some(img),
+            agent_client_protocol::schema::v1::ContentBlock::Image(img) => Some(img),
             _ => None,
         })
         .collect()

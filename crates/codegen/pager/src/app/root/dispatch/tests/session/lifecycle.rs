@@ -82,10 +82,10 @@ fn session_created_models_do_not_overwrite_new_session_default() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.session_id = None;
-    app.models = Some(acp::SessionModelState::new(
-        acp::ModelId::new("future-default"),
-        vec![acp::ModelInfo::new(
-            acp::ModelId::new("future-default"),
+    app.models = Some(shell::agent::models::SessionModelState::new(
+        shell::agent::models::ModelId::new("future-default"),
+        vec![shell::agent::models::ModelInfo::new(
+            shell::agent::models::ModelId::new("future-default"),
             "Future Default",
         )],
     ))
@@ -95,10 +95,10 @@ fn session_created_models_do_not_overwrite_new_session_default() {
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: id,
             session_id: "exact-session".into(),
-            models: Some(acp::SessionModelState::new(
-                acp::ModelId::new("exact-current"),
-                vec![acp::ModelInfo::new(
-                    acp::ModelId::new("exact-current"),
+            models: Some(shell::agent::models::SessionModelState::new(
+                shell::agent::models::ModelId::new("exact-current"),
+                vec![shell::agent::models::ModelInfo::new(
+                    shell::agent::models::ModelId::new("exact-current"),
                     "Exact Current",
                 )],
             )),
@@ -296,10 +296,10 @@ fn worktree_session_models_do_not_overwrite_new_session_default() {
         &mut app,
     );
     let id = AgentId(0);
-    app.models = Some(acp::SessionModelState::new(
-        acp::ModelId::new("future-default"),
-        vec![acp::ModelInfo::new(
-            acp::ModelId::new("future-default"),
+    app.models = Some(shell::agent::models::SessionModelState::new(
+        shell::agent::models::ModelId::new("future-default"),
+        vec![shell::agent::models::ModelInfo::new(
+            shell::agent::models::ModelId::new("future-default"),
             "Future Default",
         )],
     ))
@@ -312,10 +312,10 @@ fn worktree_session_models_do_not_overwrite_new_session_default() {
             session_id: acp::SessionId::new("worktree-exact"),
             worktree_path: path.clone(),
             session_cwd: path,
-            models: Some(acp::SessionModelState::new(
-                acp::ModelId::new("exact-current"),
-                vec![acp::ModelInfo::new(
-                    acp::ModelId::new("exact-current"),
+            models: Some(shell::agent::models::SessionModelState::new(
+                shell::agent::models::ModelId::new("exact-current"),
+                vec![shell::agent::models::ModelInfo::new(
+                    shell::agent::models::ModelId::new("exact-current"),
                     "Exact Current",
                 )],
             )),
@@ -718,7 +718,7 @@ fn switch_model_without_session_does_nothing() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.session_id = None;
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     let effects = dispatch(
         Action::SwitchModel {
             model_id,
@@ -856,7 +856,7 @@ fn new_session_starts_with_prompt_focused() {
 fn switch_model_deferred_when_no_session_id() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     app.agents.get_mut(&id).unwrap().session.session_id = None;
     let effects = dispatch(
         Action::SwitchModel {
@@ -876,7 +876,7 @@ fn switch_model_deferred_when_no_session_id() {
 fn deferred_model_switch_applied_on_session_created() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     let session_id: acp::SessionId = "new-session".into();
     app.agents.get_mut(&id).unwrap().session.session_id = None;
     app.agents
@@ -906,7 +906,7 @@ fn deferred_model_switch_applied_on_session_created() {
 #[test]
 fn deferred_model_switch_applied_on_worktree_session_created() {
     let mut app = test_app_git();
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     dispatch(
         Action::NewWorktreeSession {
             load_session_id: None,
@@ -1662,7 +1662,7 @@ fn welcome_draft_survives_picker_with_model_and_preferred_session_id() {
     use crate::views::question_view::QuestionSelection;
 
     let mut app = project_picker_app();
-    let model_id = acp::ModelId::new("picker-model");
+    let model_id = shell::agent::models::ModelId::new("picker-model");
     app.deferred_startup.preferred_session_id = Some("preferred-picker-session".into());
     let effects = dispatch_new_session_inner(&mut app, Some(model_id.clone()));
     assert!(

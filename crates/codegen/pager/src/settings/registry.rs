@@ -2,7 +2,6 @@
 //!
 //! See the module-level docs in `mod.rs` for the architectural rationale.
 
-use agent_client_protocol as acp;
 use shell::agent::config::UiConfig;
 use tools::implementations::grow_build::ask_user_question;
 
@@ -240,7 +239,7 @@ pub struct PagerLocalSnapshot {
     /// `(display_name, ModelId)` pairs from the active session's catalog.
     /// Cloned into the snapshot so the modal's validator/resolver is
     /// self-contained (the modal outlives the borrow on `app.agents`).
-    pub available_models: Vec<(String, acp::ModelId)>,
+    pub available_models: Vec<(String, shell::agent::models::ModelId)>,
     /// Effective primary-agent Behavior, including optimistic selection.
     pub behavior_mode: tools::types::BehaviorId,
     /// Whether the active session exposes the Workflow tool. Used to hide the
@@ -321,7 +320,7 @@ impl PagerLocalSnapshot {
     }
 
     /// Resolve a user-supplied catalog id (`provider/model`) to a `ModelId`.
-    pub fn resolve_model_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
+    pub fn resolve_model_name_or_id(&self, query: &str) -> Option<shell::agent::models::ModelId> {
         self.available_models.iter().find_map(|(label, id)| {
             if label.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
@@ -632,8 +631,10 @@ mod tests {
 
     #[test]
     fn model_settings_display_canonical_provider_qualified_ids() {
-        let other_id = acp::ModelId::new(std::sync::Arc::from("other/deepseek-v4-pro"));
-        let id = acp::ModelId::new(std::sync::Arc::from("deepseek/deepseek-v4-pro"));
+        let other_id =
+            shell::agent::models::ModelId::new(std::sync::Arc::from("other/deepseek-v4-pro"));
+        let id =
+            shell::agent::models::ModelId::new(std::sync::Arc::from("deepseek/deepseek-v4-pro"));
         let pager = PagerLocalSnapshot {
             current_model_id: Some(id.0.to_string()),
             available_models: vec![

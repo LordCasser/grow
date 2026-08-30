@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

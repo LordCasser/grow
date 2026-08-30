@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 use acp_transport::{
     AcpClientChannel, AcpGatewayReceiver, AcpGatewaySender, LineBufferedRead, acp_channels,
 };
-use agent_client_protocol as acp;
 pub use shell::leader::ConnectionStatus;
 use shell::leader::{LeaderConnection, LeaderReconnector, ReconnectPolicy};
 
@@ -241,7 +240,7 @@ pub(crate) fn bridge_channels(
                 // Wire ClientSideConnection for JSON-RPC ser/deser.
                 let gw_tx = AcpGatewaySender::new(agent_channel.tx).with_tracing(true);
                 let incoming = LineBufferedRead::spawn_local(incoming_read.compat());
-                let (conn, handle_io) = acp::ClientSideConnection::new(
+                let (conn, handle_io) = acp_transport::connect_client_v1(
                     gw_tx,
                     outgoing_write.compat_write(),
                     incoming,

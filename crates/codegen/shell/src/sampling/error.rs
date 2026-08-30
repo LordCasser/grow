@@ -2,12 +2,12 @@
 //!
 //! The canonical error types now live in `sampling_types::error`.
 //! This module re-exports them and adds `map_sampling_err_to_acp` which
-//! depends on `agent_client_protocol::Error` (a shell dependency).
+//! depends on `agent_client_protocol::schema::v1::Error` (a shell dependency).
 
 // Re-export everything from the standalone crate.
 pub use sampling_types::error::*;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// ACP error code for rate-limited requests (HTTP 429).
 /// Uses the JSON-RPC implementation-defined server error range (-32000 to -32099).
@@ -60,7 +60,7 @@ fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
 pub const OVERLOADED_USER_MESSAGE: &str = "Model is temporarily overloaded. Try again in a moment.";
 
 /// Map a `SamplingError` to an ACP `Error` for client-facing responses.
-/// This stays in shell because it depends on `agent_client_protocol::Error`.
+/// This stays in shell because it depends on `agent_client_protocol::schema::v1::Error`.
 pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     use reqwest::StatusCode;
     // Capacity/overload gets the same short copy on every surface. Message

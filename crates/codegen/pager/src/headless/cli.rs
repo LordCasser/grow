@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use clap::ValueEnum;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]

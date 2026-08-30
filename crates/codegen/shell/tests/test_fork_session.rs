@@ -5,7 +5,7 @@
 //! 2. Verify forked session has correct metadata
 //! 3. Test worktree creation from worktree types
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use shell::sampling::ConversationItem;
 use shell::session::info::Info;
 use shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
@@ -18,7 +18,7 @@ async fn create_test_session(storage: &JsonlStorageAdapter, session_id: &str, cw
         cwd: cwd.to_string(),
     };
 
-    let model_id = acp::ModelId::new("grow-code-fast-1");
+    let model_id = crate::agent::models::ModelId::new("grow-code-fast-1");
     storage.init_session(&info, model_id).await.unwrap();
 
     // Seed the canonical Timeline.
@@ -80,7 +80,10 @@ async fn test_fork_session_creates_new_session_with_parent_tracking() {
 
     assert_eq!(loaded.summary.info.id.to_string(), "fork-session-456");
     assert_eq!(loaded.summary.info.cwd, "/new/path");
-    assert_eq!(loaded.summary.current_model_id, acp::ModelId::new("grow-3"));
+    assert_eq!(
+        loaded.summary.current_model_id,
+        crate::agent::models::ModelId::new("grow-3")
+    );
     assert_eq!(
         loaded.summary.parent_session_id,
         Some("source-session-123".to_string())

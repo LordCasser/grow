@@ -513,7 +513,7 @@ pub(crate) async fn create_test_actor_ex(
         permission_audit_bridge: parking_lot::Mutex::new(None),
         display_cwd: std::sync::OnceLock::new(),
         model_route: crate::session::handle::SessionModelRoute::new(
-            acp::ModelId::new("test"),
+            crate::agent::models::ModelId::new("test"),
             sampler::SamplerConfig {
                 base_url: "http://localhost".into(),
                 model: "test".into(),

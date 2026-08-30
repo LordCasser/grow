@@ -12,7 +12,7 @@ use crate::app::root::{ActiveView, AppView};
 use crate::app::session::{AgentCommand, AgentId, AgentSession, PendingSessionControl};
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::time::Instant;
 
 fn control_effect(
@@ -53,7 +53,7 @@ pub(super) fn enqueue_model_control(
     agent_id: AgentId,
     session_id: acp::SessionId,
     session: &mut AgentSession,
-    model_id: acp::ModelId,
+    model_id: shell::agent::models::ModelId,
     effort: Option<shell::sampling::types::ReasoningEffort>,
     dispatch_now: bool,
 ) -> Vec<Effect> {
@@ -77,7 +77,7 @@ pub(super) fn enqueue_effort_control(
     agent_id: AgentId,
     session_id: acp::SessionId,
     session: &mut AgentSession,
-    model_id: acp::ModelId,
+    model_id: shell::agent::models::ModelId,
     effort: shell::sampling::types::ReasoningEffort,
     dispatch_now: bool,
 ) -> Vec<Effect> {

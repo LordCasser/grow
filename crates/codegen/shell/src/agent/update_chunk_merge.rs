@@ -1,4 +1,4 @@
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
@@ -562,7 +562,7 @@ fn estimate_payload_bytes(n: &SessionNotification) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use serde_json::json;
 
     fn settings(max_items: u64, max_bytes: u64) -> BufferingSettings {
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn flush_merges_streaming_chunks() {
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
 
         let session_id = acp::SessionId::new("test-session");
         let mut replay_buffer = ReplayBuffer::new(Some(BufferingSettings {

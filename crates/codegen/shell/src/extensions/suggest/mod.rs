@@ -4,7 +4,7 @@ mod history_provider;
 mod path_provider;
 mod shell_token;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_raw_response};

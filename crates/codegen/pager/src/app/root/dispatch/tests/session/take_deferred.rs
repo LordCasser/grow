@@ -3,12 +3,17 @@ use crate::app::root::dispatch::session::lifecycle::{
     DeferredSwitchOutcome, apply_deferred_switch_outcome, take_deferred_model_switch,
 };
 use crate::scrollback::block::RenderBlock;
-use agent_client_protocol as acp;
 use shell::sampling::types::ReasoningEffort;
 use std::sync::Arc;
 
-fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo) {
-    let id = acp::ModelId::new(Arc::from(id));
+fn model_with_support(
+    id: &str,
+    supports: bool,
+) -> (
+    shell::agent::models::ModelId,
+    shell::agent::models::ModelInfo,
+) {
+    let id = shell::agent::models::ModelId::new(Arc::from(id));
     let meta = if supports {
         Some(serde_json::json!({
             "reasoningEffort": "medium",
@@ -20,7 +25,7 @@ fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo
     } else {
         Some(serde_json::json!({ "reasoningEffort": "medium" }))
     };
-    let info = acp::ModelInfo::new(id.clone(), id.0.to_string())
+    let info = shell::agent::models::ModelInfo::new(id.clone(), id.0.to_string())
         .meta(meta.and_then(|v| v.as_object().cloned()));
     (id, info)
 }
@@ -121,7 +126,7 @@ fn effort_only_errors_on_unknown_token() {
 #[test]
 fn stashed_model_switch_prefers_explicit_stash() {
     let models = models_with_current(true);
-    let other = acp::ModelId::new(Arc::from("other-model"));
+    let other = shell::agent::models::ModelId::new(Arc::from("other-model"));
     let out = take_deferred_model_switch(
         Some((other.clone(), Some(ReasoningEffort::Low))),
         &models,

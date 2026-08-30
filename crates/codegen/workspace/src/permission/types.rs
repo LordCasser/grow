@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

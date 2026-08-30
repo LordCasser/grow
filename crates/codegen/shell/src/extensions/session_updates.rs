@@ -37,7 +37,7 @@
 
 use std::io;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::ExtResult;
 use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK_PREFIX};
@@ -861,7 +861,10 @@ mod tests {
         let storage =
             crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
         storage
-            .init_session(&session_info, acp::ModelId::new("test-model"))
+            .init_session(
+                &session_info,
+                crate::agent::models::ModelId::new("test-model"),
+            )
             .await
             .unwrap();
         let opened = storage.open_session(&session_info).unwrap();

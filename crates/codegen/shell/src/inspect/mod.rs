@@ -630,20 +630,19 @@ fn list_mcp_servers(
     sourced
         .into_iter()
         .map(|(server, source)| {
-            let (name, transport, target) =
-                match &server {
-                    agent_client_protocol::McpServer::Stdio(
-                        agent_client_protocol::McpServerStdio { name, command, .. },
-                    ) => (name.clone(), "stdio", command.display().to_string()),
-                    agent_client_protocol::McpServer::Http(
-                        agent_client_protocol::McpServerHttp { name, url, .. },
-                    ) => (name.clone(), "http", url.clone()),
-                    agent_client_protocol::McpServer::Sse(
-                        agent_client_protocol::McpServerSse { name, url, .. },
-                    ) => (name.clone(), "sse", url.clone()),
-                    // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
-                    _ => ("unknown".to_string(), "unknown", String::new()),
-                };
+            let (name, transport, target) = match &server {
+                agent_client_protocol::schema::v1::McpServer::Stdio(
+                    agent_client_protocol::schema::v1::McpServerStdio { name, command, .. },
+                ) => (name.clone(), "stdio", command.display().to_string()),
+                agent_client_protocol::schema::v1::McpServer::Http(
+                    agent_client_protocol::schema::v1::McpServerHttp { name, url, .. },
+                ) => (name.clone(), "http", url.clone()),
+                agent_client_protocol::schema::v1::McpServer::Sse(
+                    agent_client_protocol::schema::v1::McpServerSse { name, url, .. },
+                ) => (name.clone(), "sse", url.clone()),
+                // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
+                _ => ("unknown".to_string(), "unknown", String::new()),
+            };
             McpServerEntry {
                 name,
                 transport: transport.to_string(),

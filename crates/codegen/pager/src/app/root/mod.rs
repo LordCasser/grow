@@ -20,7 +20,6 @@ use crate::notifications::NotificationService;
 use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
 use acp_transport::AcpAgentTx;
-use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use indexmap::IndexMap;
 use std::path::PathBuf;
@@ -632,7 +631,7 @@ pub struct AppView {
     /// CLI model override (`-m` / `--model`). Seeded into every new
     /// `AgentSession.deferred_model_switch` so the model is applied once
     /// the session is created.
-    pub cli_model_override: Option<acp::ModelId>,
+    pub cli_model_override: Option<shell::agent::models::ModelId>,
     /// CLI effort token (`--reasoning-effort`). Applied on session create.
     pub cli_effort_token: Option<String>,
     /// Canonical permission mode inherited by new sessions.
@@ -718,7 +717,7 @@ pub struct AppView {
     /// (AlwaysOn builtins only). Updated whenever the active agent receives
     /// an `AvailableCommandsUpdate` that includes skills, so subsequent
     /// sessions start with the full command catalog immediately.
-    pub bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+    pub bootstrap_acp_commands: Vec<agent_client_protocol::schema::v1::AvailableCommand>,
     /// Folder-trust state for the welcome screen. When `Pending`, the welcome
     /// screen shows the trust question and session creation is deferred.
     pub trust_state: TrustState,
@@ -828,7 +827,7 @@ impl AppView {
     pub fn new(
         acp_tx: AcpAgentTx,
         models: ModelState,
-        bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+        bootstrap_acp_commands: Vec<agent_client_protocol::schema::v1::AvailableCommand>,
     ) -> Self {
         let slash_mru =
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
@@ -961,7 +960,7 @@ impl AppView {
     pub fn deferred_model_switch_from_cli(
         &self,
     ) -> Option<(
-        acp::ModelId,
+        shell::agent::models::ModelId,
         Option<shell::sampling::types::ReasoningEffort>,
     )> {
         Some((self.cli_model_override.clone()?, None))
@@ -3404,8 +3403,9 @@ impl AppView {
             self.pending_action = None;
             needs_redraw = true;
         }
-        let mut bootstrap_commands_update: Option<Vec<agent_client_protocol::AvailableCommand>> =
-            None;
+        let mut bootstrap_commands_update: Option<
+            Vec<agent_client_protocol::schema::v1::AvailableCommand>,
+        > = None;
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
