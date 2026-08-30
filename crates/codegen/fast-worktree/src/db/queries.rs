@@ -187,17 +187,25 @@ pub fn list(conn: &Connection, filter: &ListFilter) -> Result<Vec<WorktreeRecord
 }
 
 pub fn stats(conn: &Connection) -> Result<DbStats> {
-    let total: u64 = conn.query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))?;
-    let alive: u64 = conn.query_row(
+    let total = u64::try_from(conn.query_row("SELECT COUNT(*) FROM worktrees", [], |row| {
+        row.get::<_, i64>(0)
+    })?)
+    .context("worktree count must be non-negative")?;
+    let alive = u64::try_from(conn.query_row(
         "SELECT COUNT(*) FROM worktrees WHERE status = 'alive'",
         [],
-        |row| row.get(0),
-    )?;
-    let page_count: u64 = conn
-        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        |row| row.get::<_, i64>(0),
+    )?)
+    .context("alive worktree count must be non-negative")?;
+    let page_count = conn
+        .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(0);
-    let page_size: u64 = conn
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
+    let page_size = conn
+        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(0);
 
     Ok(DbStats {
