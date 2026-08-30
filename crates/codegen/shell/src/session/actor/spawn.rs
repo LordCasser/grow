@@ -2219,6 +2219,8 @@ pub(crate) async fn spawn_session_actor(
         sideband_fail_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sideband_admission_gate: tokio::sync::Mutex::new(()),
         session_activities: SessionActivityTracker::new(),
+        coordination_inquiries: std::cell::RefCell::new(std::collections::VecDeque::new()),
+        coordination_inquiry_active: std::cell::Cell::new(false),
         mcp_dispatcher_worker: TaskSlot::new(),
         mcp_initialization_worker: TaskSlot::new(),
         project_discovery_worker: TaskSlot::new(),

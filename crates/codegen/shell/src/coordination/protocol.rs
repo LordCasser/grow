@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::inquiry::{InquiryOutcome, InquiryPhase};
 use super::manifest::PeerDescription;
 
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
@@ -45,6 +46,22 @@ pub(crate) enum Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Response {
     Pong,
-    Description { peer: PeerDescription },
-    Error { code: String, message: String },
+    Description {
+        peer: PeerDescription,
+    },
+    Progress {
+        inquiry_id: String,
+        phase: InquiryPhase,
+    },
+    Inquiry {
+        outcome: InquiryOutcome,
+    },
+    Cancellation {
+        inquiry_id: String,
+        accepted: bool,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }

@@ -130,6 +130,7 @@ mod hook_dispatch;
 use hook_dispatch::*;
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
+mod coordination;
 mod idle_arbitration;
 mod recap;
 mod rewind;
@@ -1503,6 +1504,10 @@ pub(crate) struct SessionActor {
     /// admission authority and drains every already-issued permit before the
     /// Goal window or final persistence barrier is closed.
     pub(crate) session_activities: SessionActivityTracker,
+    /// Accepted coordination work is actor-owned: one active inquiry and a
+    /// bounded FIFO of waiting inquiries for this target Session.
+    coordination_inquiries: std::cell::RefCell<VecDeque<coordination::QueuedCoordinationInquiry>>,
+    coordination_inquiry_active: std::cell::Cell<bool>,
     /// Long-lived session services are explicit owners rather than detached
     /// LocalSet tasks. Teardown closes their ingress, then joins them before
     /// dismantling persistence and permission authorities.

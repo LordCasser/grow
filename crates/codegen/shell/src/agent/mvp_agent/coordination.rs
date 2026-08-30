@@ -19,6 +19,35 @@ impl MvpAgent {
         if self.coordination_publisher_started.replace(true) {
             return;
         }
+        let mut inquiry_rx = self
+            .coordination
+            .take_inquiry_receiver()
+            .expect("coordination inquiry receiver is taken once with the publisher");
+        let inquiry_agent = LocalRef::new(self);
+        tokio::task::spawn_local(async move {
+            while let Some(inquiry) = inquiry_rx.recv().await {
+                let target_id = acp::SessionId::new(inquiry.target_session_id.clone());
+                let target = inquiry_agent
+                    .get()
+                    .sessions
+                    .borrow()
+                    .get(&target_id)
+                    .cloned();
+                if let Some(target) = target {
+                    if let Err(error) = target
+                        .cmd_tx
+                        .send(SessionCommand::RunCoordinationInquiry { inquiry })
+                    {
+                        let SessionCommand::RunCoordinationInquiry { inquiry } = error.0 else {
+                            unreachable!("coordination dispatcher sent one command variant");
+                        };
+                        reject_unavailable(inquiry);
+                    }
+                } else {
+                    reject_unavailable(inquiry);
+                }
+            }
+        });
         let agent_ref = LocalRef::new(self);
         tokio::task::spawn_local(async move {
             loop {
@@ -82,4 +111,14 @@ impl MvpAgent {
             .and_then(Result::ok)
             .map_or(0, |subagents| subagents.len())
     }
+}
+
+fn reject_unavailable(inquiry: crate::coordination::InboundInquiry) {
+    let _ = inquiry.respond_to.send(
+        crate::coordination::InquiryOutcome::terminal(
+            inquiry.inquiry_id,
+            crate::coordination::InquiryStatus::Unavailable,
+            "target session is unavailable",
+        ),
+    );
 }

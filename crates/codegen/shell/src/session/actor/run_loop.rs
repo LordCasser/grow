@@ -2403,6 +2403,9 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(result);
                         });
                     }
+                    SessionCommand::RunCoordinationInquiry { inquiry } => {
+                        session.enqueue_coordination_inquiry(inquiry);
+                    }
                     SessionCommand::Recap { auto } => {
                         let s = session.clone();
                         let activity = session

@@ -761,6 +761,12 @@ pub enum SessionCommand {
         question: String,
         respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
     },
+    /// Admit a process-local coordination inquiry into this Session's own
+    /// bounded FIFO. The target actor is the sole owner of context snapshot,
+    /// cross-workspace approval, and Sideband execution.
+    RunCoordinationInquiry {
+        inquiry: crate::coordination::InboundInquiry,
+    },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.
     ///
