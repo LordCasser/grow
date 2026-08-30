@@ -82,6 +82,11 @@ pub(crate) struct AgentRebuildSpec {
     pub memory_runtime: Arc<parking_lot::RwLock<Option<Arc<dyn MemoryBackend>>>>,
     pub context_recall_backend:
         Arc<dyn tools::implementations::context_recall::ContextRecallBackend>,
+    /// Live primary-session coordination dependency. It is installed after
+    /// actor spawn, then carried into every later Agent rebuild.
+    pub coordination_backend: parking_lot::RwLock<
+        Option<tools::implementations::grow_build::coordination::CoordinationBackendResource>,
+    >,
     pub web_fetch_config: WebFetchConfig,
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub write_file_enabled: bool,
@@ -188,6 +193,7 @@ impl AgentRebuildSpec {
             models_manager,
             memory_runtime,
             context_recall_backend,
+            coordination_backend,
             web_fetch_config,
             app_builder_deployer_config,
             write_file_enabled,
@@ -311,6 +317,12 @@ impl AgentRebuildSpec {
             .tool_bridge()
             .update_resource(context_recall_backend.clone())
             .await;
+        if let Some(coordination_backend) = coordination_backend.read().clone() {
+            agent
+                .tool_bridge()
+                .update_resource(coordination_backend)
+                .await;
+        }
         let model_validator = models_manager.clone();
         agent
             .tool_bridge()
@@ -395,6 +407,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         models_manager: crate::agent::models::ModelsManager::default(),
         memory_runtime: Arc::new(parking_lot::RwLock::new(None)),
         context_recall_backend: crate::session::actor::context_recall::context_recall_channel().0,
+        coordination_backend: parking_lot::RwLock::new(None),
         web_fetch_config: WebFetchConfig::Disabled,
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,

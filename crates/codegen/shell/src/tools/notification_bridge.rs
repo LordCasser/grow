@@ -244,6 +244,20 @@ async fn handle_notification_with_ack(
     require_durable_ack: bool,
 ) -> Result<(), String> {
     match notification {
+        ToolNotification::CoordinationPhase(phase) => {
+            let update = coordination_phase_update(phase);
+            let mut notification = acp::SessionNotification::new(config.session_id.clone(), update);
+            stamp_event_id(config, &mut notification.meta);
+            let _ = config.persistence.tx.send(PersistenceMsg::Update(
+                crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+            ));
+            if config
+                .gateway_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = config.gateway.session_notification(notification).await;
+            }
+        }
         ToolNotification::BashOutputChunk(chunk) => {
             let (output, output_delta) = if config.incremental_bash_output {
                 let prev_offset = offsets.get(&chunk.base.tool_call_id).copied().unwrap_or(0);
@@ -655,6 +669,26 @@ async fn handle_notification_with_ack(
     Ok(())
 }
 
+fn coordination_phase_update(
+    phase: tools::notification::types::CoordinationPhase,
+) -> acp::SessionUpdate {
+    acp::SessionUpdate::ToolCallUpdate(
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(phase.tool_call_id),
+            acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::InProgress)),
+        )
+        .meta(
+            serde_json::json!({
+                "grow/coordination": {
+                    "phase": phase.phase,
+                },
+            })
+            .as_object()
+            .cloned(),
+        ),
+    )
+}
+
 #[cfg(test)]
 async fn handle_notification(
     config: &NotificationBridgeConfig,
@@ -670,6 +704,27 @@ mod tests {
     use super::*;
     use tools::computer::types::TaskKind;
     use tools::types::TaskSnapshot;
+
+    #[test]
+    fn coordination_phase_uses_standard_in_progress_with_private_meta() {
+        let update = coordination_phase_update(tools::notification::CoordinationPhase {
+            tool_call_id: "call-1".to_owned(),
+            phase: "awaiting_approval".to_owned(),
+        });
+        let acp::SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected tool call update");
+        };
+        assert_eq!(update.fields.status, Some(acp::ToolCallStatus::InProgress));
+        assert_eq!(
+            update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/coordination"))
+                .and_then(|coordination| coordination.get("phase"))
+                .and_then(serde_json::Value::as_str),
+            Some("awaiting_approval")
+        );
+    }
     fn make_test_config() -> (
         NotificationBridgeConfig,
         mpsc::UnboundedReceiver<SessionCommand>,

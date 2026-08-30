@@ -449,6 +449,7 @@ pub enum UiNoticeTone {
 #[serde(rename_all = "camelCase")]
 pub enum UiNoticeCategory {
     Command,
+    Coordination,
     Lifecycle,
 }
 

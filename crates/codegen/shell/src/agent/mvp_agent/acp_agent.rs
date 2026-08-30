@@ -154,7 +154,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let auth_methods = built.methods;
         let default_auth_method_id_wire = Some(built.default_auth_method_id.0.to_string());
         self.set_auth_method(built.default_auth_method_id);
-        self.ensure_coordination_started().await;
+        let coordination_enabled = self.ensure_coordination_started().await;
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
@@ -172,8 +172,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 .agent_capabilities(
                     acp::AgentCapabilities::new()
                         .load_session(true)
-                        .meta(
-                            serde_json::json!({
+                        .meta({
+                            let mut capabilities = serde_json::json!({
                     "grow/fs_notify": true,
                     // Advertised so SDKs can warn when a registration depends on
                     // hook behavior this agent doesn't honor.
@@ -182,10 +182,17 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
                         "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
                     },
-                })
-                                .as_object()
-                                .cloned(),
-                        )
+                });
+                            if coordination_enabled {
+                                capabilities["grow/coordination"] = serde_json::json!({
+                                    "version": 1,
+                                    "operations": ["list", "ask", "cancel"],
+                                    "localOnly": true,
+                                    "audit": true,
+                                });
+                            }
+                            capabilities.as_object().cloned()
+                        })
                         .prompt_capabilities(
                             acp::PromptCapabilities::new().embedded_context(true),
                         )
@@ -1994,6 +2001,9 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,
             "grow/session/usage" => crate::extensions::usage::handle(self, &args).await,
+            "grow/coordination/list" | "grow/coordination/ask" | "grow/coordination/cancel" => {
+                crate::extensions::coordination::handle(self, &args).await
+            }
             "grow/memory/flush" | "grow/memory/rewrite" => {
                 crate::extensions::memory::handle(self, &args).await
             }

@@ -496,6 +496,10 @@ pub enum ToolOutput {
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateOutput),
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListOutput),
+    ListActiveSessions(crate::implementations::grow_build::coordination::ListActiveSessionsOutput),
+    CoordinationInquiry(
+        crate::implementations::grow_build::coordination::CoordinationInquiryResult,
+    ),
     CreateGoal(crate::implementations::grow_build::update_goal::CreateGoalOutput),
     UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalOutput),
     GetGoal(crate::implementations::grow_build::update_goal::GoalView),
@@ -725,6 +729,12 @@ impl ToolOutput {
                 } else {
                     serde_json::to_string_pretty(&o.tasks).unwrap_or_default()
                 }
+            }
+            ToolOutput::ListActiveSessions(o) => {
+                serde_json::to_string_pretty(o).unwrap_or_default()
+            }
+            ToolOutput::CoordinationInquiry(o) => {
+                serde_json::to_string_pretty(o).unwrap_or_default()
             }
             ToolOutput::CreateGoal(o) => o.summary.clone(),
             ToolOutput::UpdateGoal(o) => o.summary.clone(),

@@ -2039,6 +2039,76 @@ fn ext_method_rewind_uses_local_dispatch_without_bridge() {
         assert_eq!(err.code, acp::Error::resource_not_found(None).code);
     });
 }
+
+#[test]
+fn coordination_extensions_reject_forged_source_sessions() {
+    use acp_transport::AcpAgentHandler as _;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let cases = [
+            (
+                "grow/coordination/list",
+                serde_json::json!({"sourceSessionId": "forged"}),
+            ),
+            (
+                "grow/coordination/ask",
+                serde_json::json!({
+                    "inquiryId": uuid::Uuid::now_v7().to_string(),
+                    "sourceSessionId": "forged",
+                    "targetSessionId": "target",
+                    "question": "What are you changing?",
+                }),
+            ),
+            (
+                "grow/coordination/cancel",
+                serde_json::json!({
+                    "inquiryId": uuid::Uuid::now_v7().to_string(),
+                    "sourceSessionId": "forged",
+                    "targetSessionId": "target",
+                }),
+            ),
+        ];
+        for (method, params) in cases {
+            let error = agent
+                .ext_method(acp::ExtRequest::new(
+                    method,
+                    std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+                ))
+                .await
+                .expect_err("forged source session must fail closed");
+            assert_eq!(error.code, acp::Error::invalid_params().code, "{method}");
+        }
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn initialize_advertises_stable_v1_coordination_capability() {
+    use test_support::EnvGuard;
+
+    let grow_home = tempfile::tempdir().unwrap();
+    let _environment = EnvGuard::set("GROW_HOME", grow_home.path());
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let response = acp_transport::AcpAgentHandler::initialize(
+            &agent,
+            acp::InitializeRequest::new(acp::ProtocolVersion::V1),
+        )
+        .await
+        .expect("initialize succeeds");
+        assert_eq!(response.protocol_version, acp::ProtocolVersion::V1);
+        let coordination = response
+            .agent_capabilities
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/coordination"))
+            .expect("coordination capability");
+        assert_eq!(coordination["version"], 1);
+        assert_eq!(coordination["operations"], serde_json::json!(["list", "ask", "cancel"]));
+        assert_eq!(coordination["localOnly"], true);
+        assert_eq!(coordination["audit"], true);
+    });
+}
 #[test]
 fn cancel_does_not_forward_to_bridge_in_local_mode() {
     use crate::session::SessionCommand;

@@ -767,6 +767,19 @@ pub enum SessionCommand {
     RunCoordinationInquiry {
         inquiry: crate::coordination::InboundInquiry,
     },
+    /// Persist and publish one coordination audit fact through the Session's
+    /// canonical UiNotice timeline. The acknowledgement is a durability
+    /// barrier: callers must not continue remote execution if it fails.
+    RecordCoordinationNotice {
+        notice: crate::extensions::notification::UiNotice,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Bind the primary Session's process-level coordination backend into
+    /// both the live tool bridge and the canonical rebuild recipe.
+    InstallCoordinationBackend {
+        backend: tools::implementations::grow_build::coordination::CoordinationBackendResource,
+        respond_to: oneshot::Sender<()>,
+    },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.
     ///

@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod code_nav;
+pub mod coordination;
 pub mod debug;
 pub mod feedback;
 pub mod fs;

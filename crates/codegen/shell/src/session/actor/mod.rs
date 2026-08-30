@@ -1977,17 +1977,23 @@ impl SessionActor {
     }
 
     async fn send_ui_notice(&self, notice: crate::extensions::notification::UiNotice) {
-        let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
-        if let Err(error) = self
-            .send_grow_passive_notification(update.clone(), update)
-            .await
-        {
+        if let Err(error) = self.persist_ui_notice(notice).await {
             tracing::warn!(
                 session_id = %self.session_info.id.0,
                 error = %error,
                 "failed to persist Shell command output",
             );
         }
+    }
+
+    async fn persist_ui_notice(
+        &self,
+        notice: crate::extensions::notification::UiNotice,
+    ) -> Result<(), String> {
+        let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
+        self.send_grow_passive_notification(update.clone(), update)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn send_host_turn_slash_command_success(&self, message: &str) {

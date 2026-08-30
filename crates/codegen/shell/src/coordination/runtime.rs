@@ -121,6 +121,11 @@ pub struct CoordinationRuntime {
     started: AtomicBool,
 }
 
+#[derive(Clone)]
+pub struct CoordinationHandle {
+    shared: Arc<Shared>,
+}
+
 impl CoordinationRuntime {
     pub fn new(grow_home: PathBuf) -> Self {
         let peer_id = uuid::Uuid::new_v4().to_string();
@@ -205,6 +210,53 @@ impl CoordinationRuntime {
         self.shared.cancel.cancelled().await;
     }
 
+    pub fn handle(&self) -> CoordinationHandle {
+        CoordinationHandle {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    pub async fn list_active_sessions(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Vec<DiscoveredSession>, String> {
+        self.handle().list_active_sessions(source_session_id).await
+    }
+
+    pub async fn ask_session(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+        question: &str,
+        progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
+        cancellation: CancellationToken,
+    ) -> Result<InquiryOutcome, String> {
+        self.handle()
+            .ask_session(
+                inquiry_id,
+                source_session_id,
+                target_session_id,
+                question,
+                progress,
+                cancellation,
+            )
+            .await
+    }
+
+    pub async fn cancel_session(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<bool, String> {
+        self.handle()
+            .cancel_session(inquiry_id, source_session_id, target_session_id)
+            .await
+    }
+}
+
+impl CoordinationHandle {
     pub async fn list_active_sessions(
         &self,
         source_session_id: &str,
@@ -1018,6 +1070,91 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "second");
         assert_eq!(sessions[0].canonical_cwd, "/repo");
+    }
+
+    #[tokio::test]
+    async fn independent_processes_discover_and_answer_over_local_ipc() {
+        const CHILD_HOME: &str = "GROW_COORDINATION_PROCESS_TEST_HOME";
+        const CHILD_READY: &str = "GROW_COORDINATION_PROCESS_TEST_READY";
+        const TEST_NAME: &str = "coordination::runtime::tests::independent_processes_discover_and_answer_over_local_ipc";
+
+        if let (Ok(home), Ok(ready)) = (std::env::var(CHILD_HOME), std::env::var(CHILD_READY)) {
+            let runtime = CoordinationRuntime::new(PathBuf::from(home));
+            runtime.ensure_started().await.unwrap();
+            runtime.publish_sessions(vec![snapshot("process-target", "/repo")]);
+            let mut inquiries = runtime.take_inquiry_receiver().unwrap();
+            std::fs::write(ready, b"ready").unwrap();
+            let inquiry = timeout(Duration::from_secs(10), inquiries.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            inquiry.progress.send_replace(InquiryPhase::Running);
+            let inquiry_id = inquiry.inquiry_id.clone();
+            let _ = inquiry.respond_to.send(InquiryOutcome::answered(
+                inquiry_id,
+                "answer from an independent Grow process".to_owned(),
+            ));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("child.ready");
+        let executable = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(executable)
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(CHILD_HOME, home.path())
+            .env(CHILD_READY, &ready)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("independent target process did not publish its manifest");
+
+        let source = CoordinationRuntime::new(home.path().to_path_buf());
+        source.ensure_started().await.unwrap();
+        source.publish_sessions(vec![snapshot("process-source", "/repo")]);
+        let sessions = source.list_active_sessions("process-source").await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "process-target");
+
+        let outcome = source
+            .ask_session(
+                &uuid::Uuid::now_v7().to_string(),
+                "process-source",
+                "process-target",
+                "what are you doing?",
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, InquiryStatus::Answered);
+        assert_eq!(
+            outcome.answer.as_deref(),
+            Some("answer from an independent Grow process")
+        );
+
+        let output = tokio::task::spawn_blocking(move || child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child process failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[tokio::test]

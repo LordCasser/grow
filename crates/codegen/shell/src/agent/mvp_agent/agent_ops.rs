@@ -2034,6 +2034,22 @@ impl MvpAgent {
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
         self.push_roster_delta_upserted(&session_info.id);
+        let coordination_backend = self.coordination_backend_resource(handle.clone());
+        let (coordination_ready, coordination_installed) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SessionCommand::InstallCoordinationBackend {
+                backend: coordination_backend,
+                respond_to: coordination_ready,
+            })
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("session closed before coordination backend installation")
+            })?;
+        coordination_installed.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("session closed while installing coordination backend")
+        })?;
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;
@@ -2054,6 +2070,7 @@ impl MvpAgent {
         {
             scope.kill_all();
         }
+        self.publish_coordination_snapshot().await;
         Ok(())
     }
 }

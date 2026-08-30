@@ -15,6 +15,7 @@ pub use types::BashExecutionFailed;
 pub use types::BashExecutionTimeout;
 pub use types::BashNotificationBase;
 pub use types::BashOutputChunk;
+pub use types::CoordinationPhase;
 pub use types::FileRead;
 pub use types::FileWritten;
 pub use types::LspServerCrashed;

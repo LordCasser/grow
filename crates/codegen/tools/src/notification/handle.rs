@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
-    BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
-    LspServerRetrying, LspServerStarting, MonitorEvent, ScheduledTaskCreated, ScheduledTaskFired,
-    ScheduledTaskRemoved, ToolNotification, UserQuestionAsked,
+    BashOutputChunk, CoordinationPhase, FileWritten, LspServerCrashed, LspServerFailed,
+    LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent, ScheduledTaskCreated,
+    ScheduledTaskFired, ScheduledTaskRemoved, ToolNotification, UserQuestionAsked,
 };
 use crate::types::TaskSnapshot;
 
@@ -368,6 +368,7 @@ impl ToolNotificationHandle {
         send_backgrounded, BashExecutionBackgrounded, BashExecutionBackgrounded;
         send_failed, BashExecutionFailed, BashExecutionFailed;
         send_file_written, FileWritten, FileWritten;
+        send_coordination_phase, CoordinationPhase, CoordinationPhase;
         send_task_complete, TaskSnapshot, TaskCompleted;
         send_user_question_asked, UserQuestionAsked, UserQuestionAsked;
         send_lsp_starting, LspServerStarting, LspServerStarting;

@@ -221,6 +221,15 @@ pub struct FileWritten {
     pub is_new_file: bool,
 }
 
+/// A private Grow coordination phase projected into ACP ToolCallUpdate `_meta`.
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct CoordinationPhase {
+    pub tool_call_id: String,
+    pub phase: String,
+}
+
 /// Notification that the agent is asking the user a question.
 ///
 /// Sent by the `AskUserQuestion` tool so the gateway / client can present
@@ -378,6 +387,9 @@ pub enum ToolNotification {
     /// Consumers can forward to hunk tracking, audit logging, etc.
     FileWritten(FileWritten),
 
+    /// Progress for a local session-coordination tool call.
+    CoordinationPhase(CoordinationPhase),
+
     /// Task completed notification which sends the exit code as well and notifies any client
     /// about the task being finished status
     TaskCompleted(TaskSnapshot),
@@ -452,6 +464,7 @@ notification_variants! {
     BashExecutionBackgrounded => BashExecutionBackgrounded,
     BashExecutionFailed => BashExecutionFailed,
     FileWritten => FileWritten,
+    CoordinationPhase => CoordinationPhase,
     TaskCompleted => TaskSnapshot,
     UserQuestionAsked => UserQuestionAsked,
     LspServerStarting => LspServerStarting,

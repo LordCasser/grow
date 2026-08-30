@@ -74,6 +74,8 @@ pub enum ToolInput {
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
+    ListActiveSessions(crate::implementations::grow_build::coordination::ListActiveSessionsInput),
+    AskSession(crate::implementations::grow_build::coordination::AskSessionInput),
     CreateGoal(crate::implementations::grow_build::update_goal::CreateGoalInput),
     GetGoal(crate::implementations::grow_build::update_goal::GetGoalInput),
     UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalInput),

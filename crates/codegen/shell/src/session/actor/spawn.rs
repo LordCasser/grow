@@ -1284,6 +1284,7 @@ pub(crate) async fn spawn_session_actor(
         models_manager: models_manager.clone(),
         memory_runtime: std::sync::Arc::new(parking_lot::RwLock::new(memory_backend_for_spec)),
         context_recall_backend,
+        coordination_backend: parking_lot::RwLock::new(None),
         web_fetch_config: web_fetch_config.clone(),
         app_builder_deployer_config: app_builder_deployer_config.clone(),
         write_file_enabled,
