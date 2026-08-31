@@ -90,7 +90,7 @@ Additional requirements / notices:
   Upstream license expression: Apache-2.0 OR MIT. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-agent-client-protocol 0.10.4
+agent-client-protocol 2.0.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/agentclientprotocol/rust-sdk
 License: Apache-2.0
@@ -105,7 +105,7 @@ Additional requirements / notices:
   Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
 
 --------------------------------------------------------------------------------
-agent-client-protocol-schema 0.11.4
+agent-client-protocol-schema 1.5.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/agentclientprotocol/agent-client-protocol
 License: Apache-2.0
@@ -4455,7 +4455,7 @@ Copyright notice:
 License text: see Part II — MIT
 
 --------------------------------------------------------------------------------
-fontdb 0.23.0
+fontdb 0.24.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/RazrFalcon/fontdb
 License: MIT
@@ -4926,7 +4926,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-git2 0.20.2
+git2 0.21.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/rust-lang/git2-rs
 License: MIT  (upstream declares: MIT OR Apache-2.0)
@@ -6806,7 +6806,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-jsonschema 0.30.0
+jsonschema 0.52.1
 --------------------------------------------------------------------------------
 Source:  https://github.com/Stranger6667/jsonschema
 License: MIT
@@ -10233,7 +10233,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-ratatui 0.29.0
+ratatui 0.30.2
 --------------------------------------------------------------------------------
 Source:  https://github.com/ratatui/ratatui
 License: MIT
@@ -10526,7 +10526,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-resvg 0.47.0
+resvg 0.48.1
 --------------------------------------------------------------------------------
 Source:  https://github.com/linebender/resvg
 License: MIT  (upstream declares: Apache-2.0 OR MIT)
@@ -10584,7 +10584,7 @@ Additional requirements / notices:
   Upstream license expression: Apache-2.0 AND ISC. All of the following license terms apply: Apache-2.0, ISC.
 
 --------------------------------------------------------------------------------
-rmcp 2.1.0
+rmcp 2.2.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/modelcontextprotocol/rust-sdk
 License: Apache-2.0
@@ -10656,7 +10656,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-rusqlite 0.37.0
+rusqlite 0.40.2
 --------------------------------------------------------------------------------
 Source:  https://github.com/rusqlite/rusqlite
 License: MIT
@@ -13872,7 +13872,7 @@ Copyright notice:
 License text: see Part II — MIT
 
 --------------------------------------------------------------------------------
-tree-sitter 0.25.10
+tree-sitter 0.26.9
 --------------------------------------------------------------------------------
 Source:  https://github.com/tree-sitter/tree-sitter
 License: MIT
@@ -14048,7 +14048,7 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-two-face 0.4.5
+two-face 0.5.2+bat-0.26.1
 --------------------------------------------------------------------------------
 Source:  https://github.com/CosmicHorrorDev/two-face
 License: MIT  (upstream declares: MIT OR Apache-2.0)

@@ -45,6 +45,18 @@ After restart, Grow reconstructs child rows and terminal state from the parent a
 
 ---
 
+## Local session coordination
+
+Separate primary Grow sessions can ask each other a bounded question without creating a child session or interrupting either foreground turn. `list_active_sessions` lists other live primary sessions owned by the same OS user and using the same `GROW_HOME`; `ask_session` takes one returned `session_id` and a concise question. ACP clients can use the equivalent `grow/coordination/list`, `grow/coordination/ask`, and `grow/coordination/cancel` extension methods.
+
+Discovery is local-only. Each Grow process publishes an owner-private manifest containing a fresh process incarnation, endpoint, session snapshot, and expiring heartbeat lease. Stale manifests are reclaimed, duplicate session identities are hidden, and reconnect accepts only the current incarnation. No TCP listener or MCP server is involved.
+
+The target answers from a frozen copy of its committed conversation through one tool-free Sideband request. It cannot run tools, edit files, resume a Workflow, or promise follow-up work. Same-workspace questions proceed directly; a different canonical workspace requires an online target UI to approve that inquiry once. Rejection, cancellation, timeout, target loss, and transport failure return typed terminal outcomes and do not become ordinary user prompts or foreground turns. Both sessions retain durable audit facts, while the frozen question context remains outside their model Surface.
+
+This facility is for coordination between already-running primary sessions. Use `spawn_subagent` when one session should own delegated execution and return a task result.
+
+---
+
 ## Built-in Agent types
 
 The `subagent_type` argument selects the child definition:

@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.1.0 — 2026-09-01
+
+2.1.0 把本地多 Session coordination、15 类 Hook 生命周期与 HumanIntent admission 纳入 Timeline，并重构 Plan、Goal、Workflow 的控制流交接。Plan 获批后会在同一 Turn 自动继续执行；Hook client callback 严格按注册顺序短路；ACP stable v1 stack 迁移到 Rust SDK 2.0.0，MCP 继续保持 client-only。Timeline 从 v21 升到 v24，旧 Timeline 不做迁移。
+
+完整发布说明见 [changelogs/2.1.0.md](changelogs/2.1.0.md)。
+
 # 2.0.4 — 2026-08-30
 
 2.0.4 收敛为全局与项目两级本地配置，明确各子系统的项目覆盖单位与 folder-trust 边界；新 session 在创建前显示项目选择器，保留

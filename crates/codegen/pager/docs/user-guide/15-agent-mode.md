@@ -138,11 +138,14 @@ Beyond the base ACP protocol, Grow defines extension methods under the `grow/` p
 | **Search**                 | `grow/search/*`      | `fuzzy/open`, `fuzzy/change`, `content`          |
 | **Terminal**               | `grow/terminal/*`    | `create`, `kill`, `output`, `wait_for_exit`      |
 | **Session Management**     | `grow/session/*`     | `fork`, `resolve_local_for_worktree_resume`      |
+| **Local Coordination**     | `grow/coordination/*`| `list`, `ask`, `cancel`                          |
 | **Conversation & History** | `grow/*`             | `prompt_history`, `rewind/*`, `compact_conversation` |
 | **Authentication**         | `grow/auth/*`        | `get_url`, `submit_code`                         |
 | **Feedback & Diagnostic**   | `grow/*`             | `feedback`, `diagnostics/*`                        |
 
 The tables here show representative methods in each category. The `grow/*` set may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
+
+`grow/coordination/list`, `grow/coordination/ask`, and `grow/coordination/cancel` expose the same local-session inquiry runtime used by the built-in `list_active_sessions` and `ask_session` tools. Requests are limited to primary sessions owned by the same OS user and the same `GROW_HOME`; they do not turn Grow into a network service. See [Local session coordination](16-subagents.md#local-session-coordination) for identity, approval, and execution semantics.
 
 ### Notifications (agent to client)
 
