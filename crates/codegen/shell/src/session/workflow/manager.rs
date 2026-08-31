@@ -236,6 +236,11 @@ impl WorkflowManager {
         }
     }
 
+    fn rollback_unspawned_run(&self, run_id: &str) {
+        self.tracker.lock().clear_run(run_id);
+        self.store.remove(run_id);
+    }
+
     /// Update the launch default after a durably committed session model
     /// transition. Runs already tracked are intentionally unaffected.
     pub(crate) fn set_next_run_route(&mut self, route: WorkflowRuntimeRoute) {
@@ -406,7 +411,6 @@ impl WorkflowManager {
                     .capture_agent_definitions(&self.agent_catalog_source)
                     .await
                     .map_err(|error| LaunchError::Store(error.to_owned()))?;
-                self.check_admission(admission_generation)?;
                 self.store
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
@@ -446,37 +450,60 @@ impl WorkflowManager {
                 (run_id, journal, state, false, 0)
             }
         };
-        self.check_admission(admission_generation)?;
+        if let Err(error) = self.check_admission(admission_generation) {
+            if !resumed {
+                self.rollback_unspawned_run(&run_id);
+            }
+            return Err(error);
+        }
+        let initial_spawn = if resumed {
+            None
+        } else {
+            let projection = (|| {
+                let manifest = self.store.initial_manifest(&state)?;
+                let manifest = serde_json::to_value(manifest).map_err(std::io::Error::other)?;
+                let script_hash = super::store::workflow_script_hash(&execution_script);
+                let args_hash = super::store::workflow_args_hash(&spec.args)?;
+                Ok::<_, std::io::Error>((manifest, script_hash, args_hash))
+            })();
+            match projection {
+                Ok(projection) => Some(projection),
+                Err(error) => {
+                    self.rollback_unspawned_run(&run_id);
+                    return Err(LaunchError::Store(error.to_string()));
+                }
+            }
+        };
         let lifecycle = if resumed {
+            if let Err(error) = self.store.validate_persistable(&state) {
+                return Err(LaunchError::Store(format!(
+                    "workflow state cannot be persisted: {error}"
+                )));
+            }
             chat_state::WorkflowEvent::Resumed {
                 run_id: run_id.clone(),
                 execution_epoch,
             }
         } else {
+            let (initial_manifest, script_hash, args_hash) =
+                initial_spawn.expect("new Workflow Run has an initial projection");
             chat_state::WorkflowEvent::Spawned {
                 run_id: run_id.clone(),
                 execution_epoch,
                 name: state.name.clone(),
                 objective: state.objective.clone(),
+                script_hash,
+                args_hash,
+                initial_manifest,
             }
         };
-        if let Err(error) = self.store.validate_persistable(&state) {
-            if !resumed {
-                self.tracker.lock().clear_run(&run_id);
-                self.store.remove(&run_id);
-            }
-            return Err(LaunchError::Store(format!(
-                "workflow state cannot be persisted: {error}"
-            )));
-        }
         if let Err(error) = self
             .timeline
             .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(lifecycle))
             .await
         {
             if !resumed {
-                self.tracker.lock().clear_run(&run_id);
-                self.store.remove(&run_id);
+                self.rollback_unspawned_run(&run_id);
             }
             return Err(LaunchError::Timeline(error.to_string()));
         }
@@ -776,10 +803,11 @@ impl WorkflowManager {
                         state.definition_id.as_ref(),
                         state.definition_hash.as_deref(),
                     )
-                    && let Ok(mut workspace) = super::workspace::WorkflowWorkspace::open_in_session(
-                        session,
-                        &completion_cwd,
-                    )
+                    && let Ok(mut workspace) =
+                        super::workspace::WorkflowWorkspace::open_reconciled_in_session(
+                            session,
+                            &completion_cwd,
+                        )
                     && workspace
                         .take_save_prompt(definition_id, definition_hash)
                         .unwrap_or(false)
@@ -1514,6 +1542,46 @@ mod tests {
         assert_eq!(workflow_rows.len(), 2);
         assert_eq!(workflow_rows[0].state, "running");
         assert_eq!(workflow_rows[1].state, "complete");
+    }
+
+    #[tokio::test]
+    async fn oversized_initial_projection_rolls_back_before_timeline_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+        )
+        .unwrap();
+        let error = manager
+            .launch(
+                resolved,
+                LaunchSpec {
+                    objective: "x".repeat(chat_state::MAX_WORKFLOW_INITIAL_MANIFEST_BYTES),
+                    ..spec()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LaunchError::Store(_)));
+        assert!(manager.tracker.lock().list().is_empty());
+        assert!(manager.active.is_empty());
+        let workflow_dirs = std::fs::read_dir(dir.path().join("workflows"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(workflow_dirs.len(), 1);
+        assert!(manager.script_copy_for(&workflow_dirs[0]).is_none());
+        assert!(
+            manager
+                .timeline
+                .trajectory()
+                .await
+                .unwrap()
+                .rows
+                .iter()
+                .all(|row| row.class != "workflow")
+        );
     }
 
     #[tokio::test]

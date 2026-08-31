@@ -1098,7 +1098,8 @@ mod rwx_projection_tests {
     use tool_types::{KillTaskToolInput, TaskToolInput};
     use tools::implementations::BashToolInput;
     use tools::implementations::grow_build::workflow::{
-        WorkflowDefinitionId, WorkflowDraftSource, WorkflowToolInput,
+        WorkflowDefinitionId, WorkflowDraftSource, WorkflowRunControl, WorkflowScope,
+        WorkflowToolInput,
     };
     use tools::types::ToolInput;
 
@@ -1134,6 +1135,7 @@ mod rwx_projection_tests {
     #[test]
     fn workflow_projection_narrows_the_all_descriptor_by_action() {
         let id = WorkflowDefinitionId::new("project:review");
+        let draft_id = WorkflowDefinitionId::new("session:draft");
         for (input, expected) in [
             (
                 WorkflowToolInput::Search {
@@ -1152,19 +1154,83 @@ mod rwx_projection_tests {
                 ToolAccess::Write,
             ),
             (
+                WorkflowToolInput::Draft {
+                    name: None,
+                    source: WorkflowDraftSource::File {
+                        path: ".grow/workflows/review.rhai".into(),
+                    },
+                },
+                ToolAccess::ReadWrite,
+            ),
+            (
+                WorkflowToolInput::Draft {
+                    name: None,
+                    source: WorkflowDraftSource::Definition {
+                        definition_id: id.clone(),
+                    },
+                },
+                ToolAccess::ReadWrite,
+            ),
+            (
                 WorkflowToolInput::Inspect {
                     definition_id: id.clone(),
                     include_source: true,
                 },
-                ToolAccess::Read,
+                ToolAccess::ReadWrite,
             ),
             (
                 WorkflowToolInput::Validate {
-                    definition_id: id,
+                    definition_id: id.clone(),
                     args: None,
                     agent_budget: None,
                 },
                 ToolAccess::All,
+            ),
+            (
+                WorkflowToolInput::Run {
+                    definition_id: id.clone(),
+                    args: None,
+                    max_concurrency: None,
+                    agent_budget: None,
+                },
+                ToolAccess::All,
+            ),
+            (
+                WorkflowToolInput::Publish {
+                    definition_id: draft_id.clone(),
+                    scope: WorkflowScope::Project,
+                },
+                ToolAccess::ReadWrite,
+            ),
+            (
+                WorkflowToolInput::Discard {
+                    definition_id: draft_id,
+                },
+                ToolAccess::Write,
+            ),
+            (
+                WorkflowToolInput::ControlRun {
+                    run_id: "review".into(),
+                    operation: WorkflowRunControl::Pause,
+                    agent_budget: None,
+                },
+                ToolAccess::WriteExecute,
+            ),
+            (
+                WorkflowToolInput::ControlRun {
+                    run_id: "review".into(),
+                    operation: WorkflowRunControl::Resume,
+                    agent_budget: Some(16),
+                },
+                ToolAccess::WriteExecute,
+            ),
+            (
+                WorkflowToolInput::ControlRun {
+                    run_id: "review".into(),
+                    operation: WorkflowRunControl::Stop,
+                    agent_budget: None,
+                },
+                ToolAccess::WriteExecute,
             ),
         ] {
             let required = project_call_access(&ToolInput::Workflow(input), ToolAccess::All, None);

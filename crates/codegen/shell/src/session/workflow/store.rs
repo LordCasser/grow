@@ -13,7 +13,8 @@ use super::tracker::WorkflowRunState;
 
 pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 6;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
-pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
+pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 =
+    chat_state::MAX_WORKFLOW_INITIAL_MANIFEST_BYTES as u64;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,70 +71,42 @@ impl WorkflowRunStore {
             let mut sources = store.sources.lock();
             // Storage enumerates these in canonical Timeline spawn order.
             for run in restored {
-                if run.manifest.version != WORKFLOW_RUN_MANIFEST_VERSION {
-                    tracing::warn!(
-                        version = run.manifest.version,
-                        expected = WORKFLOW_RUN_MANIFEST_VERSION,
-                        "ignoring unsupported Workflow manifest"
-                    );
-                    continue;
-                }
-                let run_id = run.manifest.state.run_id.clone();
+                let RestoredWorkflowRun {
+                    manifest,
+                    script,
+                    args,
+                } = run;
+                let run_id = manifest.state.run_id.clone();
                 let Some(lifecycle) =
                     timeline.and_then(|timeline| timeline.workflow_lifecycle(&run_id))
                 else {
                     tracing::warn!(%run_id, "ignoring Workflow manifest without a Timeline spawn fact");
                     continue;
                 };
-                let expected_journal = format!("workflows/{run_id}/journal.jsonl");
-                if run.manifest.state.name != lifecycle.name
-                    || run.manifest.state.objective != lifecycle.objective
-                    || run.manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
-                {
-                    tracing::warn!(%run_id, "ignoring Workflow manifest that does not match its Timeline spawn fact");
-                    continue;
-                }
-                let mut state = run.manifest.state;
-                let (status, turn_handoff, message, execution_was_open) = if lifecycle.open {
-                    (
-                        super::tracker::WorkflowRunStatus::Interrupted,
-                        chat_state::WorkflowTurnHandoff::Completion,
-                        Some("process_interrupted".into()),
-                        true,
-                    )
-                } else {
-                    let status = lifecycle
-                        .status
-                        .expect("a closed Workflow execution has a terminal status");
-                    (
-                        super::tracker::WorkflowRunStatus::from_timeline(status),
-                        lifecycle
-                            .handoff
-                            .expect("a closed Workflow execution has a turn handoff"),
-                        lifecycle.message.clone(),
-                        false,
-                    )
+                let resolution = match resolve_workflow_restore_manifest(
+                    &run_id,
+                    &lifecycle,
+                    Some(manifest),
+                ) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        tracing::warn!(%run_id, %error, "ignoring Workflow with no valid Timeline-owned restore projection");
+                        continue;
+                    }
                 };
-                let was_repaired = state.reconcile_lifecycle_after_restore(
-                    lifecycle.execution_epoch,
-                    status,
-                    turn_handoff,
-                    message,
-                    execution_was_open,
-                );
-                if let Err(error) = state.validate_restored_projection() {
-                    tracing::warn!(%run_id, %error, "ignoring semantically invalid Workflow manifest");
-                    continue;
-                }
+                let source_revision = resolution.manifest.script_revision;
+                let mut state = resolution.manifest.state;
+                let was_repaired = reconcile_workflow_lifecycle(&mut state, &lifecycle);
+                debug_assert!(state.validate_restored_projection().is_ok());
                 sources.insert(
                     run_id.clone(),
                     RunSource {
-                        script: run.script,
-                        args: run.args,
-                        revision: run.manifest.script_revision,
+                        script,
+                        args,
+                        revision: source_revision,
                     },
                 );
-                if was_repaired {
+                if was_repaired || resolution.used_timeline_seed {
                     repaired.push(state.clone());
                 }
                 states.push(state);
@@ -149,25 +122,6 @@ impl WorkflowRunStore {
             }
         }
         (store, states)
-    }
-
-    pub(crate) fn manifest_matches_timeline_spawn(
-        manifest: &WorkflowRunManifest,
-        timeline: Option<&chat_state::Timeline>,
-    ) -> bool {
-        if manifest.version != WORKFLOW_RUN_MANIFEST_VERSION {
-            return false;
-        }
-        let state = &manifest.state;
-        let Some(lifecycle) =
-            timeline.and_then(|timeline| timeline.workflow_lifecycle(&state.run_id))
-        else {
-            return false;
-        };
-        let expected_journal = format!("workflows/{}/journal.jsonl", state.run_id);
-        state.name == lifecycle.name
-            && state.objective == lifecycle.objective
-            && state.journal_path.as_deref() == Some(expected_journal.as_str())
     }
 
     pub(crate) fn register(
@@ -254,13 +208,24 @@ impl WorkflowRunStore {
     /// publish `Workflow::Spawned` and only then discover that its manifest is
     /// structurally too large to exist.
     pub(crate) fn validate_persistable(&self, state: &WorkflowRunState) -> io::Result<()> {
+        self.initial_manifest(state).map(|_| ())
+    }
+
+    /// Build the exact credential-free projection embedded in the Timeline
+    /// spawn fact. Mutable sidecar manifests are caches of this initial state
+    /// plus later lifecycle and journal progress.
+    pub(crate) fn initial_manifest(
+        &self,
+        state: &WorkflowRunState,
+    ) -> io::Result<WorkflowRunManifest> {
         let manifest = self.manifest_for(state).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "workflow state has no registered resume source",
             )
         })?;
-        encode_workflow_manifest(&manifest).map(|_| ())
+        encode_workflow_manifest(&manifest)?;
+        Ok(manifest)
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -333,6 +298,169 @@ impl WorkflowRunStore {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct WorkflowManifestResolution {
+    pub manifest: WorkflowRunManifest,
+    pub used_timeline_seed: bool,
+}
+
+/// Select a restore projection without consulting the filesystem. Timeline is
+/// authoritative for the immutable seed and execution lifecycle; the sidecar
+/// may contribute only mutable progress from the same frozen Run contract.
+pub(crate) fn resolve_workflow_restore_manifest(
+    run_id: &str,
+    lifecycle: &chat_state::WorkflowLifecycle,
+    sidecar: Option<WorkflowRunManifest>,
+) -> io::Result<WorkflowManifestResolution> {
+    validate_run_id(run_id)?;
+    let initial =
+        decode_workflow_manifest_value(lifecycle.initial_manifest.clone()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Workflow {run_id} has an invalid Timeline initial projection: {error}"),
+            )
+        })?;
+    if !initial_manifest_matches_spawn(run_id, lifecycle, &initial) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Workflow {run_id} Timeline initial projection does not match its spawn fact"),
+        ));
+    }
+    validate_reconciled_projection(&initial, lifecycle).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Workflow {run_id} Timeline initial projection is invalid: {error}"),
+        )
+    })?;
+
+    if let Some(sidecar) = sidecar
+        && frozen_manifest_matches(&sidecar, &initial, lifecycle.execution_epoch)
+        && validate_reconciled_projection(&sidecar, lifecycle).is_ok()
+    {
+        return Ok(WorkflowManifestResolution {
+            manifest: sidecar,
+            used_timeline_seed: false,
+        });
+    }
+
+    Ok(WorkflowManifestResolution {
+        manifest: initial,
+        used_timeline_seed: true,
+    })
+}
+
+fn initial_manifest_matches_spawn(
+    run_id: &str,
+    lifecycle: &chat_state::WorkflowLifecycle,
+    initial: &WorkflowRunManifest,
+) -> bool {
+    let state = &initial.state;
+    let expected_journal = format!("workflows/{run_id}/journal.jsonl");
+    initial.version == WORKFLOW_RUN_MANIFEST_VERSION
+        && initial.script_revision == 0
+        && state.run_id == run_id
+        && state.name == lifecycle.name
+        && state.objective == lifecycle.objective
+        && state.execution_epoch == 0
+        && state.status == super::tracker::WorkflowRunStatus::Active
+        && state.turn_handoff == chat_state::WorkflowTurnHandoff::None
+        && state.journal_path.as_deref() == Some(expected_journal.as_str())
+}
+
+fn frozen_manifest_matches(
+    candidate: &WorkflowRunManifest,
+    initial: &WorkflowRunManifest,
+    lifecycle_epoch: u64,
+) -> bool {
+    let candidate_state = &candidate.state;
+    let initial_state = &initial.state;
+    candidate.version == initial.version
+        && candidate.script_revision == initial.script_revision
+        && candidate_state.revision >= initial_state.revision
+        && candidate_state.execution_epoch <= lifecycle_epoch
+        && candidate_state.run_id == initial_state.run_id
+        && candidate_state.name == initial_state.name
+        && candidate_state.objective == initial_state.objective
+        && candidate_state.definition_id == initial_state.definition_id
+        && candidate_state.definition_scope == initial_state.definition_scope
+        && candidate_state.definition_hash == initial_state.definition_hash
+        && candidate_state.runtime_route == initial_state.runtime_route
+        && candidate_state.phases == initial_state.phases
+        && candidate_state.journal_path == initial_state.journal_path
+}
+
+fn validate_reconciled_projection(
+    manifest: &WorkflowRunManifest,
+    lifecycle: &chat_state::WorkflowLifecycle,
+) -> Result<(), &'static str> {
+    let mut state = manifest.state.clone();
+    reconcile_workflow_lifecycle(&mut state, lifecycle);
+    state.validate_restored_projection()
+}
+
+fn reconcile_workflow_lifecycle(
+    state: &mut WorkflowRunState,
+    lifecycle: &chat_state::WorkflowLifecycle,
+) -> bool {
+    let (status, turn_handoff, message, execution_was_open) = if lifecycle.open {
+        (
+            super::tracker::WorkflowRunStatus::Interrupted,
+            chat_state::WorkflowTurnHandoff::Completion,
+            Some("process_interrupted".into()),
+            true,
+        )
+    } else {
+        (
+            super::tracker::WorkflowRunStatus::from_timeline(
+                lifecycle
+                    .status
+                    .expect("closed Workflow lifecycle has a terminal status"),
+            ),
+            lifecycle
+                .handoff
+                .expect("closed Workflow lifecycle has a turn handoff"),
+            lifecycle.message.clone(),
+            false,
+        )
+    };
+    state.reconcile_lifecycle_after_restore(
+        lifecycle.execution_epoch,
+        status,
+        turn_handoff,
+        message,
+        execution_was_open,
+    )
+}
+
+pub(crate) fn workflow_script_hash(script: &str) -> String {
+    blake3::hash(script.as_bytes()).to_hex().to_string()
+}
+
+pub(crate) fn workflow_args_hash(args: &serde_json::Value) -> io::Result<String> {
+    let canonical = canonicalize_json(args);
+    let bytes = serde_json::to_vec(&canonical).map_err(io::Error::other)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonicalize_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar.clone(),
+    }
+}
+
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
     if run_id.is_empty()
         || run_id.len() > chat_state::MAX_WORKFLOW_RUN_ID_BYTES
@@ -369,6 +497,29 @@ fn encode_workflow_manifest(manifest: &WorkflowRunManifest) -> io::Result<Vec<u8
 pub(crate) fn decode_workflow_manifest(bytes: &[u8]) -> io::Result<WorkflowRunManifest> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Workflow manifest has no valid version",
+            )
+        })?;
+    if version != u64::from(WORKFLOW_RUN_MANIFEST_VERSION) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "unsupported Workflow manifest version {version}; expected {WORKFLOW_RUN_MANIFEST_VERSION}"
+            ),
+        ));
+    }
+    serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn decode_workflow_manifest_value(
+    value: serde_json::Value,
+) -> io::Result<WorkflowRunManifest> {
     let version = value
         .get("version")
         .and_then(serde_json::Value::as_u64)
@@ -570,6 +721,20 @@ mod tests {
     }
 
     fn timeline_with_workflow(run_id: &str, name: &str, objective: &str) -> chat_state::Timeline {
+        let state = WorkflowTracker::default().start_run(
+            run_id.into(),
+            name.into(),
+            objective.into(),
+            Vec::new(),
+            None,
+            Some(format!("workflows/{run_id}/journal.jsonl")),
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let initial_manifest = WorkflowRunManifest {
+            version: WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        };
         let mut timeline = chat_state::Timeline::default();
         timeline
             .record(chat_state::TimelineEventKind::Workflow(
@@ -578,6 +743,9 @@ mod tests {
                     execution_epoch: 0,
                     name: name.into(),
                     objective: objective.into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: serde_json::to_value(initial_manifest).unwrap(),
                 },
             ))
             .unwrap();
@@ -924,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn semantically_invalid_manifest_is_isolated_from_other_restored_runs() {
+    fn semantically_invalid_manifest_falls_back_without_hiding_other_runs() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut invalid_manifest_json = serde_json::to_value(manifest("wf_invalid", 1)).unwrap();
         *invalid_manifest_json
@@ -950,6 +1118,9 @@ mod tests {
                     execution_epoch: 0,
                     name: "demo".into(),
                     objective: "objective".into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: serde_json::to_value(manifest("wf_valid", 1)).unwrap(),
                 },
             ))
             .unwrap();
@@ -962,14 +1133,117 @@ mod tests {
                 .iter()
                 .map(|state| state.run_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["wf_valid"]
+            vec!["wf_invalid", "wf_valid"]
         );
-        assert!(store.script_for("wf_invalid").is_none());
+        assert_eq!(
+            store.script_for("wf_invalid").as_deref(),
+            Some("complete(0);")
+        );
         assert_eq!(
             store.script_for("wf_valid").as_deref(),
             Some("complete(1);")
         );
         assert!(WorkflowTracker::from_snapshot(states).is_ok());
+    }
+
+    #[test]
+    fn semantically_invalid_sidecar_rebuilds_from_timeline_initial_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial = manifest("wf_rebuilt", 1);
+        let mut damaged_json = serde_json::to_value(initial.clone()).unwrap();
+        *damaged_json
+            .pointer_mut("/state/runtime_route/samplers/test-model/contract_fingerprint")
+            .expect("test manifest contains its sampler fingerprint") = serde_json::json!("");
+        let damaged = serde_json::from_value(damaged_json).unwrap();
+        let restored = RestoredWorkflowRun {
+            manifest: damaged,
+            script: "complete(1);".into(),
+            args: serde_json::json!({"restored": true}),
+        };
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: "wf_rebuilt".into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "objective".into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: serde_json::to_value(initial).unwrap(),
+                },
+            ))
+            .unwrap();
+
+        let (store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].run_id, "wf_rebuilt");
+        assert_eq!(
+            states[0].status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+        );
+        assert_eq!(
+            store.script_for("wf_rebuilt").as_deref(),
+            Some("complete(1);")
+        );
+    }
+
+    #[test]
+    fn frozen_sidecar_drift_falls_back_to_timeline_initial_projection() {
+        let initial = manifest("wf_frozen", 1);
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: "wf_frozen".into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "objective".into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: serde_json::to_value(&initial).unwrap(),
+                },
+            ))
+            .unwrap();
+        let lifecycle = timeline.workflow_lifecycle("wf_frozen").unwrap();
+        let mut drifted = initial.clone();
+        drifted.script_revision = 1;
+
+        let resolution =
+            resolve_workflow_restore_manifest("wf_frozen", &lifecycle, Some(drifted)).unwrap();
+
+        assert!(resolution.used_timeline_seed);
+        assert_eq!(resolution.manifest, initial);
+    }
+
+    #[test]
+    fn valid_sidecar_cannot_bypass_an_invalid_timeline_seed() {
+        let sidecar = manifest("wf_seed", 1);
+        let mut invalid_seed = serde_json::to_value(&sidecar).unwrap();
+        invalid_seed["version"] = serde_json::json!(WORKFLOW_RUN_MANIFEST_VERSION - 1);
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: "wf_seed".into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "objective".into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: invalid_seed,
+                },
+            ))
+            .unwrap();
+        let lifecycle = timeline.workflow_lifecycle("wf_seed").unwrap();
+
+        let error =
+            resolve_workflow_restore_manifest("wf_seed", &lifecycle, Some(sidecar)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("Timeline initial projection"));
     }
 
     #[test]

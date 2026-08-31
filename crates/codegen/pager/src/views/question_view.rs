@@ -65,6 +65,15 @@ pub enum QuestionFocus {
     /// User is typing in the TextArea (input mode).
     /// @-dropdown may be open. Esc exits back to Navigation.
     InputMode,
+    /// One of the Plan-only actions below the question list has focus.
+    PlanAction(PlanQuestionAction),
+}
+
+/// Actions shown below an interview while `ask_user_question` is in Plan mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanQuestionAction {
+    ChatAboutThis,
+    SkipInterview,
 }
 
 /// Pager-internal origin for a locally-opened question (one that was NOT
@@ -170,10 +179,6 @@ pub struct QuestionViewState {
     /// Mode context from the ext-method request. Controls whether the
     /// bottom panel (Chat about this / Skip interview) is shown.
     pub mode: AskUserQuestionMode,
-    /// Bottom panel selection index (plan mode only).
-    /// `None` = options list has focus, `Some(0)` = Chat about this,
-    /// `Some(1)` = Skip interview.
-    pub bottom_panel_index: Option<usize>,
     /// `Some` when this question was opened locally (e.g. by `/fork`)
     /// instead of by an ACP `grow/ask_user_question` request. `None` for
     /// ACP questions (preserves today's behaviour).
@@ -261,7 +266,6 @@ impl QuestionViewState {
             cached_preview_cap: DEFAULT_MAX_CHROME_PREVIEW_LINES,
             response_tx,
             mode,
-            bottom_panel_index: None,
             local_kind: None,
             opened_at: Instant::now(),
             opened_at_wall_ms: chrono::Utc::now().timestamp_millis(),
@@ -384,6 +388,15 @@ impl QuestionViewState {
     /// they feed layout or scroll limits.
     pub fn phantom_freeform_h(&self) -> u16 {
         if self.no_freeform { 1 } else { 0 }
+    }
+
+    /// Number of sticky rows reserved for Plan-only interview actions.
+    pub fn plan_action_rows_height(&self) -> u16 {
+        if self.mode == AskUserQuestionMode::Plan {
+            2
+        } else {
+            0
+        }
     }
 }
 
@@ -904,6 +917,37 @@ impl QuestionViewState {
         }
     }
 
+    /// Build the lossy partial-answer shape used by the existing Plan action
+    /// wire contract. Freeform-only answers are represented as `Other`; notes
+    /// are intentionally omitted by that contract.
+    pub fn build_partial_answers(&self) -> std::collections::HashMap<String, String> {
+        let mut partial_answers = std::collections::HashMap::new();
+
+        for (i, question) in self.questions.iter().enumerate() {
+            let labels = self.selected_labels(i);
+            let has_freeform = self
+                .per_question_freeform_selected
+                .get(i)
+                .copied()
+                .unwrap_or(false)
+                && self
+                    .per_question_freeform
+                    .get(i)
+                    .is_some_and(|text| !text.trim().is_empty());
+
+            let answer = if labels.is_empty() {
+                has_freeform.then(|| "Other".to_string())
+            } else {
+                Some(labels.join(", "))
+            };
+            if let Some(answer) = answer {
+                partial_answers.insert(question.question.clone(), answer);
+            }
+        }
+
+        partial_answers
+    }
+
     /// Send the ACP ext-method response and return `true` if the response
     /// was actually sent (i.e. `response_tx` was present).
     ///
@@ -969,7 +1013,8 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
     // row under the last option.
     let phantom_freeform = state.phantom_freeform_h();
     let freeform_h: u16 = 1 - phantom_freeform;
-    let min_options_space = MIN_VISIBLE_OPTION_ROWS + freeform_h;
+    let plan_action_h = state.plan_action_rows_height();
+    let min_options_space = MIN_VISIBLE_OPTION_ROWS + freeform_h + plan_action_h;
 
     if state.fullscreen {
         // desc_cap/preview_cap are ignored when fullscreen=true (chrome_height
@@ -984,7 +1029,8 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
         );
         let total = chrome_h
             + total_options_height(question, content_w, state.cursor())
-                .saturating_sub(phantom_freeform);
+                .saturating_sub(phantom_freeform)
+            + plan_action_h;
         state.cached_desc_cap = u16::MAX;
         state.cached_preview_cap = u16::MAX;
         return total.min(screen_h);
@@ -1064,7 +1110,8 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
 
     let total = chrome_h
         + total_options_height(question, content_w, state.cursor())
-            .saturating_sub(phantom_freeform);
+            .saturating_sub(phantom_freeform)
+        + plan_action_h;
     total.min(cap)
 }
 
@@ -1640,12 +1687,15 @@ pub fn render_question_view(
     // rendered height (wrap-width drift, stale caps), the chrome must degrade
     // to truncation instead of writing past the area — set_line past the
     // buffer bottom aborts the TUI.
+    let plan_action_h = state.plan_action_rows_height().min(area.height);
+    let plan_action_start_y = area.y + area.height - plan_action_h;
+
     y = render_question_chrome(
         buf,
         content_x,
         y,
         content_width,
-        area.y + area.height,
+        plan_action_start_y,
         state,
         question,
         theme,
@@ -1660,7 +1710,7 @@ pub fn render_question_view(
     let options_start_y = y;
 
     // ── Option rows (scrollable) + sticky freeform row ──
-    let visible_bottom = area.y + area.height;
+    let visible_bottom = plan_action_start_y;
     let scroll = state.per_question_scroll.get(q_idx).copied().unwrap_or(0) as usize;
     let cursor = state.cursor();
     let is_input_mode = state.focus == QuestionFocus::InputMode;
@@ -1693,7 +1743,7 @@ pub fn render_question_view(
         false, // never in scroll list
         freeform_text,
         freeform_selected,
-        focused,
+        focused && !matches!(state.focus, QuestionFocus::PlanAction(_)),
     );
 
     let visible_h = visible_bottom.saturating_sub(y).saturating_sub(freeform_h) as usize;
@@ -1726,7 +1776,7 @@ pub fn render_question_view(
                 freeform_selected,
                 is_multi,
                 theme,
-                focused,
+                focused && !matches!(state.focus, QuestionFocus::PlanAction(_)),
             );
             let row_rect = Rect {
                 x: content_x,
@@ -1737,6 +1787,55 @@ pub fn render_question_view(
             buf.set_style(row_rect, freeform_line.style);
             buf.set_line(content_x, freeform_y, &freeform_line, content_width);
         }
+    }
+
+    // ── Sticky Plan actions ──
+    let plan_actions = [
+        (PlanQuestionAction::ChatAboutThis, "Chat about this"),
+        (PlanQuestionAction::SkipInterview, "Skip interview"),
+    ];
+    for (offset, (action, label)) in plan_actions
+        .into_iter()
+        .take(plan_action_h as usize)
+        .enumerate()
+    {
+        let row_y = plan_action_start_y + offset as u16;
+        let selected = state.focus == QuestionFocus::PlanAction(action);
+        let row_bg = if selected && focused {
+            hovered_bg(theme)
+        } else {
+            theme.bg_light
+        };
+        let row_rect = Rect {
+            x: content_x,
+            y: row_y,
+            width: content_width,
+            height: 1,
+        };
+        buf.set_style(row_rect, Style::default().bg(row_bg));
+        let marker = if selected {
+            format!("{} ", crate::glyphs::prompt_arrow())
+        } else {
+            "  ".to_string()
+        };
+        let marker_style = Style::default().fg(theme.accent_plan).bg(row_bg);
+        let label_style = Style::default()
+            .fg(if selected {
+                theme.text_primary
+            } else {
+                theme.gray
+            })
+            .bg(row_bg)
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let line = Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(label, label_style),
+        ]);
+        buf.set_line(content_x, row_y, &line, content_width);
     }
 
     // Unfocus dim: when this overlay is rendered while the user has
@@ -2615,6 +2714,75 @@ mod tests {
         let h_with = question_view_height(&mut with_freeform, 50, 80);
         let h_without = question_view_height(&mut without_freeform, 50, 80);
         assert_eq!(h_with, h_without + 1);
+    }
+
+    #[test]
+    fn plan_mode_reserves_and_renders_fixed_action_rows() {
+        let q = make_question("Pick?", &["A", "B"], false);
+        let mut default_state =
+            QuestionViewState::new("tc".into(), vec![q.clone()], StashedPrompt::default());
+        let mut plan_state = QuestionViewState::with_response_tx(
+            None,
+            "tc".into(),
+            vec![q],
+            StashedPrompt::default(),
+            None,
+            AskUserQuestionMode::Plan,
+        );
+
+        let default_h = question_view_height(&mut default_state, 80, 80);
+        let plan_h = question_view_height(&mut plan_state, 80, 80);
+        assert_eq!(plan_h, default_h + 2);
+        assert_eq!(plan_state.plan_action_rows_height(), 2);
+
+        plan_state.focus = QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis);
+        let area = Rect::new(0, 0, 85, plan_h);
+        let mut buf = Buffer::empty(area);
+        let result =
+            render_question_view(&mut buf, area, &plan_state, None, &Theme::default(), true);
+        let row_text = |row: u16| -> String {
+            (0..area.width).filter_map(|col| buf.cell((col, row))).fold(
+                String::new(),
+                |mut text, cell| {
+                    text.push_str(cell.symbol());
+                    text
+                },
+            )
+        };
+        assert!(row_text(area.bottom() - 2).contains("Chat about this"));
+        assert!(row_text(area.bottom() - 1).contains("Skip interview"));
+        assert!(
+            result.options_end_y <= area.bottom() - 2,
+            "sticky actions must not be part of the scrollable options region"
+        );
+    }
+
+    #[test]
+    fn partial_answers_include_selected_labels_and_freeform_other() {
+        let q1 = make_question("Languages?", &["Rust", "Go", "Zig"], true);
+        let q2 = make_question("Anything else?", &["No"], false);
+        let mut state = QuestionViewState::with_response_tx(
+            None,
+            "tc".into(),
+            vec![q1, q2],
+            StashedPrompt::default(),
+            None,
+            AskUserQuestionMode::Plan,
+        );
+        state.select_option(0, 0);
+        state.select_option(0, 2);
+        state.per_question_freeform[1] = "Keep the API small".into();
+        state.per_question_freeform_selected[1] = true;
+
+        let partial = state.build_partial_answers();
+        assert_eq!(
+            partial.get("Languages?").map(String::as_str),
+            Some("Rust, Zig")
+        );
+        assert_eq!(
+            partial.get("Anything else?").map(String::as_str),
+            Some("Other")
+        );
     }
 
     // ── option_visual_height ───────────────────────────────────────────

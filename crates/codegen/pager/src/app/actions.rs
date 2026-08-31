@@ -1940,6 +1940,27 @@ pub enum Effect {
         plan: Box<crate::diagnostics::FixPlan>,
     },
 }
+
+impl Effect {
+    /// Every effect which starts the ACP prompt RPC lifecycle. Keeping this
+    /// classification beside the enum prevents local-draft ownership transfer
+    /// from drifting when text and structured-block sends evolve separately.
+    pub(crate) fn prompt_rpc_identity(&self) -> Option<(AgentId, &acp::SessionId)> {
+        match self {
+            Self::SendPrompt {
+                agent_id,
+                session_id,
+                ..
+            }
+            | Self::SendPromptBlocks {
+                agent_id,
+                session_id,
+                ..
+            } => Some((*agent_id, session_id)),
+            _ => None,
+        }
+    }
+}
 /// Outcome of an `grow/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
 #[derive(Debug)]

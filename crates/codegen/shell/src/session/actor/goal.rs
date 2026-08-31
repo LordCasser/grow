@@ -937,10 +937,19 @@ impl SessionActor {
 
         let support = self.behavior_capability_support().await;
         let workflow_admission = self.workflow_manager.lock().await;
+        let admission_facts = {
+            let admission = self.state.lock().await;
+            Self::capture_behavior_admission_facts(&admission, None)
+        };
         let availability = {
             let tracker = workflow_admission.tracker();
             let tracker = tracker.lock();
-            self.behavior_availability_from_tracker(&tracker, support)
+            self.behavior_availability_from_tracker(
+                &tracker,
+                support,
+                crate::session::behavior::BehaviorRequestAuthority::GoalLifecycle,
+                admission_facts,
+            )
         };
         let Some(choice) = availability.choice(BehaviorId::Goal) else {
             self.restore_goal_snapshot(previous);
@@ -1055,12 +1064,16 @@ impl SessionActor {
             let support = self.behavior_capability_support().await;
             let admission = self.workflow_manager.lock().await;
             let public_workflow_active = admission.tracker().lock().has_active_run();
+            let admission_facts = {
+                let state = self.state.lock().await;
+                Self::capture_behavior_admission_facts(&state, None)
+            };
             // Availability normally derives Goal status from the live tracker.
             // This control deliberately keeps that tracker unchanged until its
             // durable step-boundary commit, so evaluate the candidate Goal
             // against the same Behavior facts without observing the stale
             // terminal status.
-            let choice = self.behavior.lock().switch_availability(
+            let choice = self.behavior.lock().assess_switch(
                 BehaviorId::Goal,
                 &crate::session::behavior::BehaviorSwitchFacts {
                     unavailable_reason: (!support.2)
@@ -1069,7 +1082,9 @@ impl SessionActor {
                     public_workflow_active,
                     source_owned_work_active: previous_behavior == BehaviorId::Plan
                         || (previous_behavior == BehaviorId::Workflow && public_workflow_active),
+                    ..admission_facts
                 },
+                crate::session::behavior::BehaviorRequestAuthority::GoalLifecycle,
             );
             if choice.disposition != BehaviorAvailabilityDisposition::Available {
                 return Err(acp::Error::invalid_request().data(

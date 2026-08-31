@@ -692,6 +692,7 @@ fn render_question(
                 qv.cached_desc_cap,
                 qv.cached_preview_cap,
             )
+            .saturating_sub(qv.plan_action_rows_height())
         });
         if let Some(vis) = vis {
             qv.clamp_scroll(vis, content_w);

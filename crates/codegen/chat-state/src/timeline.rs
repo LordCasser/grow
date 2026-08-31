@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 22;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 23;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
+pub const MAX_WORKFLOW_INITIAL_MANIFEST_BYTES: usize = 512 * 1024;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
 /// A busy turn can accumulate monitor ticks faster than the model can consume
@@ -327,6 +328,12 @@ pub enum WorkflowEvent {
         execution_epoch: u64,
         name: String,
         objective: String,
+        script_hash: String,
+        args_hash: String,
+        /// Canonical, credential-free initial Run projection. Timeline owns
+        /// Run existence; the mutable manifest sidecar may be rebuilt from
+        /// this snapshot plus later lifecycle facts after a crash.
+        initial_manifest: serde_json::Value,
     },
     Resumed {
         run_id: String,
@@ -1053,6 +1060,9 @@ struct WorkflowFold {
 pub struct WorkflowLifecycle {
     pub name: String,
     pub objective: String,
+    pub script_hash: String,
+    pub args_hash: String,
+    pub initial_manifest: serde_json::Value,
     pub execution_epoch: u64,
     pub status: Option<WorkflowExecutionStatus>,
     pub handoff: Option<WorkflowTurnHandoff>,
@@ -1742,15 +1752,25 @@ impl Timeline {
     /// Consumers must not reconstruct Workflow state by scanning raw events.
     pub fn workflow_lifecycle(&self, run_id: &str) -> Option<WorkflowLifecycle> {
         let fold = self.lifecycle.workflows.get(run_id)?;
-        let (name, objective) = self.events.iter().find_map(|event| match &event.kind {
-            TimelineEventKind::Workflow(WorkflowEvent::Spawned {
-                run_id: candidate,
-                name,
-                objective,
-                ..
-            }) if candidate == run_id => Some((name.clone(), objective.clone())),
-            _ => None,
-        })?;
+        let (name, objective, script_hash, args_hash, initial_manifest) =
+            self.events.iter().find_map(|event| match &event.kind {
+                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                    run_id: candidate,
+                    name,
+                    objective,
+                    script_hash,
+                    args_hash,
+                    initial_manifest,
+                    ..
+                }) if candidate == run_id => Some((
+                    name.clone(),
+                    objective.clone(),
+                    script_hash.clone(),
+                    args_hash.clone(),
+                    initial_manifest.clone(),
+                )),
+                _ => None,
+            })?;
         let terminal = (!fold.open).then(|| {
             self.events
                 .iter()
@@ -1781,6 +1801,9 @@ impl Timeline {
         Some(WorkflowLifecycle {
             name,
             objective,
+            script_hash,
+            args_hash,
+            initial_manifest,
             execution_epoch: fold.execution_epoch,
             status,
             handoff,
@@ -3580,12 +3603,17 @@ impl LifecycleFold {
                 execution_epoch,
                 name,
                 objective,
-                ..
+                script_hash,
+                args_hash,
+                initial_manifest,
             }) => {
                 if !valid_workflow_run_id(run_id)
                     || *execution_epoch != 0
                     || name.trim().is_empty()
                     || objective.trim().is_empty()
+                    || !valid_workflow_content_hash(script_hash)
+                    || !valid_workflow_content_hash(args_hash)
+                    || !valid_workflow_initial_manifest(initial_manifest)
                 {
                     return Err(TimelineError::InvalidWorkflow);
                 }
@@ -4584,6 +4612,19 @@ fn duration_since(started_at_ms: Option<i64>, now_ms: i64) -> u64 {
         .unwrap_or(0)
 }
 
+fn valid_workflow_initial_manifest(manifest: &serde_json::Value) -> bool {
+    manifest.is_object()
+        && serde_json::to_vec(manifest)
+            .is_ok_and(|encoded| encoded.len() <= MAX_WORKFLOW_INITIAL_MANIFEST_BYTES)
+}
+
+fn valid_workflow_content_hash(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn valid_workflow_run_id(run_id: &str) -> bool {
     !run_id.is_empty()
         && run_id.len() <= MAX_WORKFLOW_RUN_ID_BYTES
@@ -5530,6 +5571,9 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "find the cause".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
             }))
             .unwrap();
         assert_eq!(
@@ -5541,6 +5585,9 @@ mod tests {
             Some(WorkflowLifecycle {
                 name: "research".into(),
                 objective: "find the cause".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
                 execution_epoch: 0,
                 status: None,
                 handoff: None,
@@ -5609,6 +5656,9 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "recover causality".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
             }))
             .unwrap();
 
@@ -5665,6 +5715,9 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "wait for input".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
             }))
             .unwrap();
         timeline
@@ -5717,6 +5770,9 @@ mod tests {
                 execution_epoch: 0,
                 name: "owner".into(),
                 objective: "spawn one child".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
             }))
             .unwrap();
         timeline
@@ -5733,6 +5789,9 @@ mod tests {
                 execution_epoch: 0,
                 name: "research".into(),
                 objective: "join children".into(),
+                script_hash: "0".repeat(64),
+                args_hash: "0".repeat(64),
+                initial_manifest: serde_json::json!({}),
             }))
             .unwrap();
         let mut spawn = subagent_spawn("sa-child", "child-session");

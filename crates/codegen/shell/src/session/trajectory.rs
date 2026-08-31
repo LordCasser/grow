@@ -1864,25 +1864,19 @@ impl SessionTrajectoryCache {
         depth: usize,
         budget: &mut TrajectoryReadBudget,
     ) -> anyhow::Result<()> {
-        let spawns = self
-            .timeline
-            .events()
-            .iter()
-            .filter_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
-                    run_id,
-                    name,
-                    objective,
-                    ..
-                }) => Some((
-                    run_id.clone(),
-                    (event.seq.get(), name.clone(), objective.clone()),
-                )),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
+        let spawns =
+            self.timeline
+                .events()
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Workflow(
+                        chat_state::WorkflowEvent::Spawned { run_id, .. },
+                    ) => Some((run_id.clone(), event.seq.get())),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>();
         let mut seen = BTreeSet::new();
-        for (run_id, (spawn_seq, name, objective)) in &spawns {
+        for (run_id, spawn_seq) in &spawns {
             if !visited.insert(run_id.clone()) {
                 anyhow::bail!(
                     "Workflow identity '{run_id}' is linked more than once in the Trajectory tree"
@@ -1906,44 +1900,29 @@ impl SessionTrajectoryCache {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let manifest = match run_dir.read_bounded(
+            budget.enter_entity(&format!("Workflow {run_id}"), depth.saturating_add(1))?;
+            let lifecycle = self.timeline.workflow_lifecycle(run_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Workflow spawn t:{timeline_id}/{spawn_seq} has no lifecycle projection"
+                )
+            })?;
+            let sidecar = match run_dir.read_bounded(
                 std::ffi::OsStr::new("state.json"),
                 "Trajectory Workflow manifest",
                 super::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES,
             ) {
                 Ok(bytes) => {
-                    budget.enter_entity(&format!("Workflow {run_id}"), depth.saturating_add(1))?;
                     let manifest_file = run_dir.open_regular(
                         std::ffi::OsStr::new("state.json"),
                         "Trajectory Workflow manifest",
                     )?;
                     budget.admit_file(&manifest_file, "Workflow manifest")?;
-                    super::workflow::store::decode_workflow_manifest(&bytes)?
+                    super::workflow::store::decode_workflow_manifest(&bytes).ok()
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    match run_dir.open_regular(
-                        std::ffi::OsStr::new("journal.jsonl"),
-                        "Trajectory Workflow journal",
-                    ) {
-                        Ok(_) => anyhow::bail!(
-                            "Workflow {run_id} has a journal but no manifest under t:{timeline_id}/{spawn_seq}"
-                        ),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                    continue;
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
-            let expected_journal = format!("workflows/{run_id}/journal.jsonl");
-            if manifest.version != super::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
-                || manifest.state.run_id != *run_id
-                || manifest.state.name != *name
-                || manifest.state.objective != *objective
-                || manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
-            {
-                anyhow::bail!("Workflow manifest does not match spawn t:{timeline_id}/{spawn_seq}");
-            }
+            super::workflow::store::resolve_workflow_restore_manifest(run_id, &lifecycle, sidecar)?;
             let journal = self.workflows.entry(run_id.clone()).or_default();
             match run_dir.open_regular(
                 std::ffi::OsStr::new("journal.jsonl"),
@@ -4088,6 +4067,26 @@ mod tests {
     fn workflow_journal_is_nested_under_spawn_and_uses_run_identity() {
         let dir = tempfile::tempdir().unwrap();
         let mut timeline = chat_state::Timeline::default();
+        let mut tracker = super::super::workflow::tracker::WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "wf_debug".into(),
+            "debug".into(),
+            "trace host calls".into(),
+            Vec::new(),
+            Some(4),
+            Some("workflows/wf_debug/journal.jsonl".into()),
+            super::super::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
+            )
+            .unwrap(),
+        );
+        let initial_manifest = super::super::workflow::store::WorkflowRunManifest {
+            version: super::super::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION,
+            state: state.clone(),
+            script_revision: 0,
+        };
         timeline
             .record(chat_state::TimelineEventKind::Workflow(
                 chat_state::WorkflowEvent::Spawned {
@@ -4095,6 +4094,9 @@ mod tests {
                     execution_epoch: 0,
                     name: "debug".into(),
                     objective: "trace host calls".into(),
+                    script_hash: "0".repeat(64),
+                    args_hash: "0".repeat(64),
+                    initial_manifest: serde_json::to_value(initial_manifest).unwrap(),
                 },
             ))
             .unwrap();
@@ -4137,21 +4139,6 @@ mod tests {
 
         let run_dir = dir.path().join("workflows/wf_debug");
         std::fs::create_dir_all(&run_dir).unwrap();
-        let mut tracker = super::super::workflow::tracker::WorkflowTracker::default();
-        let mut state = tracker.start_run(
-            "wf_debug".into(),
-            "debug".into(),
-            "trace host calls".into(),
-            Vec::new(),
-            Some(4),
-            Some("workflows/wf_debug/journal.jsonl".into()),
-            super::super::workflow::tracker::WorkflowRuntimeRoute::for_test(
-                "test-model",
-                None,
-                sampling_types::ModelImageInputKey::new("test-model", "responses", "test-endpoint"),
-            )
-            .unwrap(),
-        );
         state = tracker
             .apply_outcome(
                 "wf_debug",

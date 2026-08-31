@@ -2381,6 +2381,12 @@ impl JsonlStorageAdapter {
         let session = self.open_session(info)?.directory;
         let mut restored = Vec::new();
         for run_id in run_ids {
+            let lifecycle = timeline.workflow_lifecycle(&run_id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Workflow Timeline spawn has no lifecycle projection: {run_id}"),
+                )
+            })?;
             let run_relative = Path::new("workflows").join(&run_id);
             let run_dir =
                 match session.open_relative(&run_relative, "Workflow run directory", false) {
@@ -2398,29 +2404,40 @@ impl JsonlStorageAdapter {
                 Err(error) => return Err(error),
             }
             let manifest_path = run_dir.display_path().join("state.json");
-            let manifest = match run_dir
-                .read_bounded(
-                    std::ffi::OsStr::new("state.json"),
-                    "Workflow manifest",
-                    MAX_WORKFLOW_MANIFEST_BYTES,
-                )
-                .and_then(|bytes| crate::session::workflow::store::decode_workflow_manifest(&bytes))
-            {
-                Ok(manifest) => manifest,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) if error.kind() == io::ErrorKind::Unsupported => return Err(error),
+            let sidecar = match run_dir.read_bounded(
+                std::ffi::OsStr::new("state.json"),
+                "Workflow manifest",
+                MAX_WORKFLOW_MANIFEST_BYTES,
+            ) {
+                Ok(bytes) => {
+                    match crate::session::workflow::store::decode_workflow_manifest(&bytes) {
+                        Ok(manifest) => Some(manifest),
+                        Err(error) => {
+                            tracing::warn!(path = %manifest_path.display(), %error, "using the Timeline seed for an invalid Workflow manifest");
+                            None
+                        }
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    tracing::warn!(path = %manifest_path.display(), "using the Timeline seed for a missing Workflow manifest");
+                    None
+                }
                 Err(error) => {
-                    tracing::warn!(path = %manifest_path.display(), %error, "skipping invalid workflow manifest");
+                    tracing::warn!(
+                        path = %manifest_path.display(),
+                        %error,
+                        "skipping inaccessible Workflow manifest"
+                    );
                     continue;
                 }
             };
-            if manifest.version != crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
-                || crate::session::workflow::store::validate_run_id(&manifest.state.run_id).is_err()
-                || manifest.state.run_id != run_id
-            {
-                tracing::warn!(path = %manifest_path.display(), "skipping unsupported or mismatched workflow manifest");
-                continue;
+            let resolution = crate::session::workflow::store::resolve_workflow_restore_manifest(
+                &run_id, &lifecycle, sidecar,
+            )?;
+            if resolution.used_timeline_seed {
+                tracing::warn!(path = %manifest_path.display(), "using the Timeline seed instead of Workflow sidecar progress");
             }
+            let manifest = resolution.manifest;
             let scripts = match run_dir.open_relative(
                 Path::new("scripts"),
                 "Workflow scripts directory",
@@ -2450,6 +2467,12 @@ impl JsonlStorageAdapter {
                     continue;
                 }
             };
+            if crate::session::workflow::store::workflow_script_hash(&script)
+                != lifecycle.script_hash
+            {
+                tracing::warn!(path = %script_path.display(), "skipping Workflow with an immutable script hash mismatch");
+                continue;
+            }
             let args_path = run_dir.display_path().join("args.json");
             let args = match run_dir
                 .read_bounded(
@@ -2467,6 +2490,10 @@ impl JsonlStorageAdapter {
                     continue;
                 }
             };
+            if crate::session::workflow::store::workflow_args_hash(&args)? != lifecycle.args_hash {
+                tracing::warn!(path = %args_path.display(), "skipping Workflow with an immutable args hash mismatch");
+                continue;
+            }
             restored.push(crate::session::workflow::store::RestoredWorkflowRun {
                 manifest,
                 script,

@@ -1458,6 +1458,7 @@ pub(crate) async fn run(
     crate::app::signal_handler::set_quit_notify(quit_notify.clone());
 
     loop {
+        app.sync_local_drafts(std::time::Instant::now());
         schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
         schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
         schedule_simulation(&mut simulation_deadline, &app, tick_interval);
@@ -1609,6 +1610,14 @@ pub(crate) async fn run(
             }
         };
 
+        let local_draft_at = app.local_draft_deadline();
+        let local_draft_tick = async move {
+            match local_draft_at {
+                Some(at) => sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             biased;
 
@@ -1640,6 +1649,10 @@ pub(crate) async fn run(
                 if app.apply_async_view_updates() {
                     presenter.request(false);
                 }
+            }
+
+            _ = local_draft_tick => {
+                app.sync_local_drafts(std::time::Instant::now());
             }
 
             // Biased order: cancellation/quit, writer acks/failures, ACP,
@@ -2395,6 +2408,7 @@ pub(crate) async fn run(
         presenter.present_if_dirty(&mut app, terminal);
     }
 
+    app.flush_local_drafts();
     app.notification_service.shutdown();
 
     Ok(make_run_result(&app))
@@ -3209,8 +3223,12 @@ fn process_effects(
         resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
+        // From this point every ACP prompt variant belongs to the request
+        // lifecycle, not to the Pager's unsent-draft recovery domain.
+        app.transfer_local_draft_ownership(&eff);
         let (quit, _meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
         if quit {
+            app.flush_local_drafts();
             return true;
         }
     }

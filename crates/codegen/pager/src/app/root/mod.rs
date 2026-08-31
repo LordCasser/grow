@@ -16,6 +16,7 @@ use crate::input::key::KeyShortcut;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::input::mouse::{MouseScrollState, ScrollConfig, ScrollDirection};
 use crate::key;
+use crate::local_drafts::LocalDraftRuntime;
 use crate::notifications::NotificationService;
 use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
@@ -397,6 +398,8 @@ pub struct AppView {
     pub active_view: ActiveView,
     /// Per-agent views (keyed by AgentId).
     pub agents: IndexMap<AgentId, AgentView>,
+    /// Pager-local, versioned recovery for input that has not crossed ACP.
+    pub(crate) local_drafts: LocalDraftRuntime,
     /// Monotonically increasing counter for agent ID allocation.
     /// Never reuse IDs after `shift_remove` to avoid collisions.
     pub next_agent_id: usize,
@@ -809,6 +812,26 @@ fn paint_welcome_toast(
     }
 }
 impl AppView {
+    pub(crate) fn sync_local_drafts(&mut self, now: Instant) {
+        let active = match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        };
+        self.local_drafts.sync(&mut self.agents, active, now);
+    }
+
+    pub(crate) fn local_draft_deadline(&self) -> Option<Instant> {
+        self.local_drafts.next_deadline()
+    }
+
+    pub(crate) fn flush_local_drafts(&mut self) {
+        self.local_drafts.flush_all();
+    }
+
+    pub(crate) fn transfer_local_draft_ownership(&mut self, effect: &crate::app::actions::Effect) {
+        self.local_drafts.transfer_prompt_rpc_ownership(effect);
+    }
+
     /// Reconcile reducer-derived display phases for every agent, including
     /// hidden tabs and fullscreen subagent children.
     pub(crate) fn reconcile_activity_phases(&mut self, now: Instant) {
@@ -837,6 +860,7 @@ impl AppView {
             motion_origin: Instant::now(),
             active_view: ActiveView::Welcome,
             agents: IndexMap::new(),
+            local_drafts: LocalDraftRuntime::default(),
             next_agent_id: 0,
             models,
             registry: ActionRegistry::defaults(),
@@ -4006,6 +4030,7 @@ pub(crate) mod tests {
             motion_origin: Instant::now(),
             active_view: ActiveView::Welcome,
             agents: indexmap::IndexMap::new(),
+            local_drafts: LocalDraftRuntime::default(),
             next_agent_id: 0,
             models: ModelState::default(),
             registry: ActionRegistry::defaults(),

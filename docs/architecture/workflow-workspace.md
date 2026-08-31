@@ -48,17 +48,26 @@ Run；已启动 Run 即使模型被删除也继续使用原 lease。进程重启
 sensitive transport contract 时才重新附着实时 credential，否则 fail closed，绝不换成相似模型或
 采入新的 sampler 字段。
 
-admission 在写入 `Workflow::Spawned` 之前，用 writer 自己的 canonical encoder 对初始完整 manifest
-执行一次精确预检；当前上限为 512 KiB。route、脚本、参数和 projection metadata 都计入同一真实字节
-边界，不存在较宽的 tracker 估算上限。预检失败时 Run 不注册、Timeline 不产生 spawn。恢复时每个
-manifest 在 Timeline lifecycle 调和后单独做语义校验；一个 fingerprint/route/status 无效的 Run 只被
-隔离并告警，不阻断同 session 其他有效 Run 的恢复，也不会把无效 source 注册进 tracker。
+admission 在写入 `Workflow::Spawned` 之前，用 writer 自己的 canonical encoder 对 credential-free
+初始 manifest 执行一次精确预检；当前上限为 512 KiB。Spawn 还冻结 canonical script/args 的 BLAKE3
+摘要。任一预检或 Timeline commit 失败都在 Spawn 前统一回滚 tracker 与 store，不留下 ghost Run。
+
+Timeline 的 Spawn seed 与 lifecycle 是恢复权威；`state.json` 只是同一冻结 Run 契约下的可变进度
+sidecar。恢复 resolver 总是先校验 seed 的版本、Run identity、Definition provenance、runtime route、
+phase metadata 和 journal path，再接受冻结字段一致且语义有效的 sidecar；sidecar 缺失、损坏或漂移时
+回退 seed，script/args 文件则必须匹配 Spawn 摘要。JSONL loader 与 Trajectory 共用这一个 resolver，
+不能各自发明恢复规则。一个无效 Run 只被隔离并告警，不阻断同 session 其他有效 Run。
 
 `<session>/workflows/<run-id>/script.rhai` 是该 Run 的不可变执行快照，不是另一个可发现
 Definition，也不是自动释放到 `.grow/workflows` 或 `~/.grow/workflows` 的来源。Registry
 discovery、Workspace state 和 Run snapshot 只有单向所有权关系，不做双向同步。
 
 ## 发现与编辑
+
+Workspace 访问分类必须覆盖真实副作用：`Search` 使用 observational open，不创建目录、不恢复 publish、
+不刷新 hash，也不清理 draft；`Inspect` 因持久化唯一 focus 明确投影为 `ReadWrite`。Edit、Validate、
+Publish 等变更动作使用 reconciled open；ControlRun 不借由 workspace open 产生隐式写入。Tool descriptor、
+call projector 和 action 矩阵测试共享这组分类。
 
 未指定 Definition 时，主 Agent 先判断焦点是否与请求相关，再按 `name`、`description` 和
 `when_to_use` 搜索 session、project、user 元数据。唯一明确匹配可说明来源和参数

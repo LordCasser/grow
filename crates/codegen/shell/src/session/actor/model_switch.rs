@@ -2075,7 +2075,10 @@ impl SessionActor {
             // through and rebuild exactly once.
             if let Some(intent) = control_intent {
                 let _transaction = self.goal_transaction_gate.lock().await;
+                let (behavior, goal) = self.capture_control_authorities();
                 self.persist_applied_control_receipt_durably(
+                    behavior,
+                    goal,
                     crate::extensions::notification::ControlDomain::Agent,
                     crate::extensions::notification::ControlTarget::Agent {
                         agent_name: new_agent_name.clone(),
@@ -2190,7 +2193,10 @@ impl SessionActor {
         let persistence = {
             let _transaction = self.goal_transaction_gate.lock().await;
             if let Some(intent) = control_intent {
+                let (behavior, goal) = self.capture_control_authorities();
                 self.persist_agent_transition_for_control_durably(
+                    behavior,
+                    goal,
                     &new_agent_name,
                     new_agent.role_prompt(),
                     candidate_capability_catalog.as_deref(),

@@ -843,6 +843,25 @@ impl PromptWidget {
         self.textarea.cursor()
     }
 
+    /// Pager-local crash recovery intentionally refuses image ownership: the
+    /// backing paths are temporary and cannot be made durable by copying their
+    /// names into a draft record.
+    pub(crate) fn has_local_draft_images(&self) -> bool {
+        !self.images.is_empty() || !self.image_undo_stash.is_empty()
+    }
+
+    pub(crate) fn local_draft_chip_elements(&self) -> Vec<crate::app::session::ChipElement> {
+        self.textarea
+            .elements()
+            .iter()
+            .map(|element| crate::app::session::ChipElement {
+                range: element.range.clone(),
+                kind: element.kind,
+                display: element.display.clone(),
+            })
+            .collect()
+    }
+
     /// Clear the undo/redo history (see [`TextArea::clear_history`]).
     /// Pair with `set_text("")` when reusing the widget for a new
     /// logical context so an undo can't resurrect the previous draft.

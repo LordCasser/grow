@@ -522,13 +522,17 @@ impl AgentView {
     }
     /// Handle key input when the question view is active.
     ///
-    /// Two modes:
+    /// Three focus modes:
     /// - **Navigation**: j/k move cursor, Space toggles, Enter advances or
     ///   edits freeform, h/l/[/] cycle questions, 1-9/a-f jump+toggle,
     ///   n next, s skip, Shift-X kill (only explicit way to dismiss).
     /// - **InputMode**: all keys go to the prompt widget; Esc exits input mode.
+    /// - **PlanAction**: arrows choose a Plan-only action, Enter submits it,
+    ///   and Esc returns to option navigation.
     pub(super) fn handle_question_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        use crate::views::question_view::{QuestionFocus, QuestionSelection};
+        use crate::views::question_view::{
+            AskUserQuestionMode, PlanQuestionAction, QuestionFocus, QuestionSelection,
+        };
         let Some(ref mut qv) = self.question_view else {
             return InputOutcome::Unchanged;
         };
@@ -664,6 +668,8 @@ impl AgentView {
                         if cur < max {
                             qv.set_cursor(cur + 1);
                             needs_scroll_update = true;
+                        } else if qv.mode == AskUserQuestionMode::Plan {
+                            qv.focus = QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis);
                         }
                     }
                     KeyCode::Char('k') | KeyCode::Up
@@ -834,8 +840,12 @@ impl AgentView {
                         }
                     }
                     KeyCode::Tab => {
-                        self.swap_question_freeform();
-                        self.active_pane = AgentPane::Scrollback;
+                        if qv.mode == AskUserQuestionMode::Plan {
+                            qv.focus = QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis);
+                        } else {
+                            self.swap_question_freeform();
+                            self.active_pane = AgentPane::Scrollback;
+                        }
                         return InputOutcome::Changed;
                     }
                     KeyCode::Char('X') if key.modifiers == KeyModifiers::SHIFT => {
@@ -858,6 +868,45 @@ impl AgentView {
                 }
                 if needs_scroll_update {
                     self.ensure_question_cursor_visible();
+                }
+                InputOutcome::Changed
+            }
+            QuestionFocus::PlanAction(action) => {
+                if key!('y', CONTROL).matches(key) {
+                    return self.dismiss_question_view();
+                }
+                if key!('c', CONTROL).matches(key) {
+                    return self.submit_question_answers(true);
+                }
+                if key!('f', CONTROL).matches(key) {
+                    qv.fullscreen = !qv.fullscreen;
+                    return InputOutcome::Changed;
+                }
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
+                    {
+                        qv.focus = QuestionFocus::PlanAction(PlanQuestionAction::SkipInterview);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
+                    {
+                        if action == PlanQuestionAction::ChatAboutThis {
+                            qv.focus = QuestionFocus::Navigation;
+                        } else {
+                            qv.focus = QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis);
+                        }
+                    }
+                    KeyCode::Enter => return self.submit_plan_question_action(action),
+                    KeyCode::Esc => qv.focus = QuestionFocus::Navigation,
+                    KeyCode::Tab => {
+                        self.swap_question_freeform();
+                        self.active_pane = AgentPane::Scrollback;
+                    }
+                    KeyCode::Char('X') if key.modifiers == KeyModifiers::SHIFT => {
+                        return self.submit_question_answers(true);
+                    }
+                    _ => {}
                 }
                 InputOutcome::Changed
             }
@@ -1167,7 +1216,7 @@ impl AgentView {
             qv.fullscreen,
             qv.cached_desc_cap,
             qv.cached_preview_cap,
-            1 - qv.phantom_freeform_h(),
+            1 - qv.phantom_freeform_h() + qv.plan_action_rows_height(),
         );
         let current_scroll = qv
             .per_question_scroll
@@ -1222,7 +1271,7 @@ impl AgentView {
             qv.fullscreen,
             qv.cached_desc_cap,
             qv.cached_preview_cap,
-            1 - qv.phantom_freeform_h(),
+            1 - qv.phantom_freeform_h() + qv.plan_action_rows_height(),
         );
         let cell_index = screen_y.saturating_sub(sb.y);
         let result = scrollbar_click_to_offset(cell_index, sb.height, total_h, visible_h);
@@ -1258,7 +1307,7 @@ impl AgentView {
             qv.fullscreen,
             qv.cached_desc_cap,
             qv.cached_preview_cap,
-            1 - qv.phantom_freeform_h(),
+            1 - qv.phantom_freeform_h() + qv.plan_action_rows_height(),
         );
         qv.ensure_cursor_visible(visible_h, content_w);
     }
@@ -1422,6 +1471,45 @@ impl AgentView {
     pub(crate) fn submit_question_answers_for_test(&mut self, skipped: bool) -> InputOutcome {
         self.submit_question_answers(skipped)
     }
+
+    fn submit_plan_question_action(
+        &mut self,
+        action: crate::views::question_view::PlanQuestionAction,
+    ) -> InputOutcome {
+        use crate::views::question_view::PlanQuestionAction;
+        use tools::implementations::grow_build::ask_user_question::AskUserQuestionExtResponse;
+
+        self.swap_question_freeform();
+        let Some(mut qv) = self.take_question_view() else {
+            return InputOutcome::Changed;
+        };
+        debug_assert_eq!(
+            qv.mode,
+            tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Plan
+        );
+        debug_assert!(qv.local_kind.is_none());
+
+        self.session.turn_paused_duration += qv.opened_at.elapsed();
+        let partial_answers = qv.build_partial_answers();
+        let (response, diagnostic_action) = match action {
+            PlanQuestionAction::ChatAboutThis => (
+                AskUserQuestionExtResponse::ChatAboutThis { partial_answers },
+                "interview_chat",
+            ),
+            PlanQuestionAction::SkipInterview => (
+                AskUserQuestionExtResponse::SkipInterview { partial_answers },
+                "interview_skip",
+            ),
+        };
+        qv.send_ext_response(response);
+        self.prompt.restore(qv.stashed_prompt);
+        self.cleanup_question_state();
+        diagnostics::session_ctx::log_event(diagnostics::events::PlanSubmit {
+            action: diagnostic_action.to_string(),
+        });
+        InputOutcome::Changed
+    }
+
     fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use tools::implementations::grow_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();
@@ -1471,7 +1559,7 @@ impl AgentView {
         self.prompt.restore(qv.stashed_prompt);
         self.cleanup_question_state();
         let action = if skipped {
-            "interview_skip"
+            "interview_cancel"
         } else {
             "interview_submit"
         };
@@ -1580,6 +1668,163 @@ impl AgentView {
         PeekAnswerOutcome::Submitted
     }
 }
+
+#[cfg(test)]
+mod question_plan_action_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::app::agent_view::AgentView;
+    use crate::app::root::InputOutcome;
+    use crate::views::prompt_widget::StashedPrompt;
+    use crate::views::question_view::{PlanQuestionAction, QuestionFocus, QuestionViewState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tools::implementations::grow_build::ask_user_question::{
+        AskUserQuestionExtResponse, AskUserQuestionMode, Question, QuestionOption,
+    };
+
+    fn open_plan_question(
+        agent: &mut AgentView,
+    ) -> tokio::sync::oneshot::Receiver<
+        acp_transport::AcpResult<agent_client_protocol::schema::v1::ExtResponse>,
+    > {
+        let question = Question {
+            question: "Which implementation?".into(),
+            options: vec![
+                QuestionOption {
+                    label: "Simple".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: None,
+                },
+                QuestionOption {
+                    label: "Extensible".into(),
+                    description: String::new(),
+                    preview: None,
+                    id: None,
+                },
+            ],
+            multi_select: Some(false),
+            id: None,
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent.replace_question_view(Some(QuestionViewState::with_response_tx(
+            Some("test-session".into()),
+            "call-plan-question".into(),
+            vec![question],
+            StashedPrompt::default(),
+            Some(tx),
+            AskUserQuestionMode::Plan,
+        )));
+        rx
+    }
+
+    fn receive_response(
+        rx: &mut tokio::sync::oneshot::Receiver<
+            acp_transport::AcpResult<agent_client_protocol::schema::v1::ExtResponse>,
+        >,
+    ) -> AskUserQuestionExtResponse {
+        let response = rx
+            .try_recv()
+            .expect("Plan interview response sent")
+            .expect("Plan interview response is valid");
+        serde_json::from_str(response.0.get()).expect("typed Plan interview response")
+    }
+
+    #[test]
+    fn tab_arrows_and_escape_traverse_plan_actions() {
+        let mut agent = make_agent();
+        let _rx = open_plan_question(&mut agent);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        let _ = agent.handle_question_key(&tab);
+        assert_eq!(
+            agent.question_view.as_ref().unwrap().focus,
+            QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis)
+        );
+        let _ = agent.handle_question_key(&down);
+        assert_eq!(
+            agent.question_view.as_ref().unwrap().focus,
+            QuestionFocus::PlanAction(PlanQuestionAction::SkipInterview)
+        );
+        let _ = agent.handle_question_key(&up);
+        assert_eq!(
+            agent.question_view.as_ref().unwrap().focus,
+            QuestionFocus::PlanAction(PlanQuestionAction::ChatAboutThis)
+        );
+        let _ = agent.handle_question_key(&esc);
+        assert_eq!(
+            agent.question_view.as_ref().unwrap().focus,
+            QuestionFocus::Navigation
+        );
+    }
+
+    #[test]
+    fn enter_on_chat_about_this_sends_partial_answers() {
+        let mut agent = make_agent();
+        let mut rx = open_plan_question(&mut agent);
+        agent.question_view.as_mut().unwrap().select_option(0, 1);
+
+        let _ = agent.handle_question_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let outcome = agent.handle_question_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        match receive_response(&mut rx) {
+            AskUserQuestionExtResponse::ChatAboutThis { partial_answers } => {
+                assert_eq!(
+                    partial_answers
+                        .get("Which implementation?")
+                        .map(String::as_str),
+                    Some("Extensible")
+                );
+            }
+            other => panic!("expected ChatAboutThis, got {other:?}"),
+        }
+        assert!(agent.question_view.is_none());
+        assert_eq!(
+            agent.session.queue_len(),
+            0,
+            "must not synthesize user input"
+        );
+    }
+
+    #[test]
+    fn enter_on_skip_interview_sends_current_freeform_as_other() {
+        let mut agent = make_agent();
+        let mut rx = open_plan_question(&mut agent);
+        {
+            let qv = agent.question_view.as_mut().unwrap();
+            qv.per_question_freeform[0] = "Keep the public API small".into();
+            qv.per_question_freeform_selected[0] = true;
+        }
+        agent
+            .prompt
+            .set_text_preserving("Keep the public API small");
+
+        let _ = agent.handle_question_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let _ = agent.handle_question_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let outcome = agent.handle_question_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        match receive_response(&mut rx) {
+            AskUserQuestionExtResponse::SkipInterview { partial_answers } => {
+                assert_eq!(
+                    partial_answers
+                        .get("Which implementation?")
+                        .map(String::as_str),
+                    Some("Other")
+                );
+            }
+            other => panic!("expected SkipInterview, got {other:?}"),
+        }
+        assert!(agent.question_view.is_none());
+        assert_eq!(
+            agent.session.queue_len(),
+            0,
+            "must not synthesize user input"
+        );
+    }
+}
+
 #[cfg(test)]
 mod cancel_turn_mouse_tests {
     use super::*;

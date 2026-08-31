@@ -1726,9 +1726,9 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
     Some(InputOutcome::Action(action))
 }
 /// Visible height of the scrollable options area, from the render-computed
-/// scroll region or a fallback estimate (footer=3, sticky freeform=1).
-/// `sticky_freeform_h` is 0 for `no_freeform` questions (no sticky row is
-/// rendered) and 1 otherwise.
+/// scroll region or a fallback estimate (footer=3 plus sticky rows).
+/// `sticky_rows_h` includes the freeform row, when present, and any Plan
+/// action rows fixed below the options.
 #[allow(clippy::too_many_arguments)]
 fn question_visible_h(
     scroll_region: Option<(u16, u16)>,
@@ -1739,7 +1739,7 @@ fn question_visible_h(
     fullscreen: bool,
     desc_cap: u16,
     preview_cap: u16,
-    sticky_freeform_h: u16,
+    sticky_rows_h: u16,
 ) -> u16 {
     if let Some((top, bottom)) = scroll_region {
         bottom.saturating_sub(top)
@@ -1754,7 +1754,7 @@ fn question_visible_h(
             desc_cap,
             preview_cap,
         )
-        .saturating_sub(sticky_freeform_h)
+        .saturating_sub(sticky_rows_h)
     }
 }
 /// Collect URLs from visible WebFetch tool blocks.

@@ -74,6 +74,7 @@ fn test_app() -> AppView {
         motion_origin: Instant::now(),
         active_view: ActiveView::Welcome,
         agents: IndexMap::new(),
+        local_drafts: Default::default(),
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),

@@ -91,7 +91,7 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
             actor.session_directory = session_directory.clone();
 
             let mut workspace =
-                crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+                crate::session::workflow::workspace::WorkflowWorkspace::open_reconciled_in_session(
                     &session_directory,
                     project.path(),
                 )

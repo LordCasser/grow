@@ -211,7 +211,7 @@ impl AgentView {
                 h
             }
         } else if let Some(ref qv) = self.question_view {
-            use crate::views::question_view::QuestionFocus;
+            use crate::views::question_view::{AskUserQuestionMode, QuestionFocus};
             match qv.focus {
                 QuestionFocus::InputMode => {
                     if self.prompt.file_search_visible() {
@@ -231,10 +231,23 @@ impl AgentView {
                 QuestionFocus::Navigation => {
                     vec![
                         HintItem::new(key!(Esc), "unselect"),
-                        HintItem::new(key!(Tab), "scrollback"),
+                        HintItem::new(
+                            key!(Tab),
+                            if qv.mode == AskUserQuestionMode::Plan {
+                                "plan actions"
+                            } else {
+                                "scrollback"
+                            },
+                        ),
                         HintItem::new(key!('X'), "dismiss"),
                     ]
                 }
+                QuestionFocus::PlanAction(_) => vec![
+                    HintItem::paired(key!(Up), key!(Down), "select"),
+                    HintItem::new(key!(Enter), "choose"),
+                    HintItem::new(key!(Esc), "back"),
+                    HintItem::new(key!(Tab), "scrollback"),
+                ],
             }
         } else if self.cancel_turn_view.is_some() {
             vec![
@@ -2424,7 +2437,8 @@ impl AgentView {
                         qv.fullscreen,
                         qv.cached_desc_cap,
                         qv.cached_preview_cap,
-                    );
+                    )
+                    .saturating_sub(qv.plan_action_rows_height());
                     qv.clamp_scroll(visible_options_h, content_w);
                 }
             }
@@ -2630,7 +2644,12 @@ impl AgentView {
                     let avail_w = footer_w.saturating_sub(3);
                     buf.set_line_safe(content_x, footer_y, &left_line, avail_w);
                     let is_last = qv.active_tab >= qv.questions.len().saturating_sub(1);
-                    let enter_label = if qv.is_on_freeform_row() {
+                    let enter_label = if matches!(
+                        qv.focus,
+                        crate::views::question_view::QuestionFocus::PlanAction(_)
+                    ) {
+                        "choose"
+                    } else if qv.is_on_freeform_row() {
                         "edit"
                     } else if is_last {
                         "submit"
@@ -3248,7 +3267,7 @@ impl AgentView {
                     .render(layout.shortcuts, buf);
             }
         } else if let Some(ref qv) = self.question_view {
-            use crate::views::question_view::QuestionFocus;
+            use crate::views::question_view::{AskUserQuestionMode, QuestionFocus};
             use crate::views::shortcuts_bar::HintItem;
             let hints = match qv.focus {
                 QuestionFocus::InputMode => {
@@ -3269,10 +3288,23 @@ impl AgentView {
                 QuestionFocus::Navigation => {
                     vec![
                         HintItem::new(key!(Esc), "unselect"),
-                        HintItem::new(key!(Tab), "scrollback"),
+                        HintItem::new(
+                            key!(Tab),
+                            if qv.mode == AskUserQuestionMode::Plan {
+                                "plan actions"
+                            } else {
+                                "scrollback"
+                            },
+                        ),
                         HintItem::new(key!('X'), "dismiss"),
                     ]
                 }
+                QuestionFocus::PlanAction(_) => vec![
+                    HintItem::paired(key!(Up), key!(Down), "select"),
+                    HintItem::new(key!(Enter), "choose"),
+                    HintItem::new(key!(Esc), "back"),
+                    HintItem::new(key!(Tab), "scrollback"),
+                ],
             };
             ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
         } else if self.cancel_turn_view.is_some() {

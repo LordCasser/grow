@@ -140,9 +140,9 @@ pub(super) fn project_call_access(
                 WorkflowDraftSource, WorkflowToolInput,
             };
             match input {
-                WorkflowToolInput::Search { .. } | WorkflowToolInput::Inspect { .. } => {
-                    ToolAccess::Read
-                }
+                WorkflowToolInput::Search { .. } => ToolAccess::Read,
+                // Inspect persists the selected Definition as workspace focus.
+                WorkflowToolInput::Inspect { .. } => ToolAccess::ReadWrite,
                 WorkflowToolInput::Draft {
                     source: WorkflowDraftSource::Inline { .. },
                     ..

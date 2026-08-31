@@ -1065,7 +1065,8 @@ async fn updates_do_not_rebuild_timeline_surface() {
 #[tokio::test]
 async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     use crate::session::workflow::store::{
-        script_revision_path, WorkflowRunManifest, WORKFLOW_RUN_MANIFEST_VERSION,
+        script_revision_path, workflow_args_hash, workflow_script_hash, WorkflowRunManifest,
+        WORKFLOW_RUN_MANIFEST_VERSION,
     };
     use crate::session::workflow::tracker::WorkflowTracker;
     let temp_dir = TempDir::new().unwrap();
@@ -1092,6 +1093,13 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
             )
                 .unwrap(),
         );
+    let manifest = WorkflowRunManifest {
+        version: WORKFLOW_RUN_MANIFEST_VERSION,
+        state,
+        script_revision: 0,
+    };
+    let script = "complete(\"ok\");";
+    let args = serde_json::json!({"objective": "ship"});
     let mut timeline = chat_state::Timeline::default();
     let spawn = timeline
         .record(chat_state::TimelineEventKind::Workflow(
@@ -1100,19 +1108,17 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
                 execution_epoch: 0,
                 name: "demo".into(),
                 objective: "ship".into(),
+                script_hash: workflow_script_hash(script),
+                args_hash: workflow_args_hash(&args).unwrap(),
+                initial_manifest: serde_json::to_value(&manifest).unwrap(),
             },
         ))
         .unwrap();
     adapter.append_timeline_event(&info, &spawn).await.unwrap();
     let run_dir = adapter.session_dir(&info).join("workflows/wf_restore");
     std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
-    std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
-    std::fs::write(run_dir.join("args.json"), r#"{"objective":"ship"}"#).unwrap();
-    let manifest = WorkflowRunManifest {
-        version: WORKFLOW_RUN_MANIFEST_VERSION,
-        state,
-        script_revision: 0,
-    };
+    std::fs::write(script_revision_path(&run_dir, 0), script).unwrap();
+    std::fs::write(run_dir.join("args.json"), serde_json::to_vec(&args).unwrap()).unwrap();
     adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
     assert_eq!(loaded.workflow_runs.len(), 1);
@@ -1130,11 +1136,173 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
                 .is_empty()
         );
 }
+
+#[tokio::test]
+async fn workflow_restore_rebuilds_missing_and_invalid_manifests_from_timeline() {
+    use crate::session::workflow::store::{
+        WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest, script_revision_path,
+        workflow_args_hash, workflow_script_hash,
+    };
+    use crate::session::workflow::tracker::{WorkflowRuntimeRoute, WorkflowTracker};
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut timeline = chat_state::Timeline::default();
+
+    for (run_id, invalid_sidecar) in [("wf_missing", false), ("wf_invalid", true)] {
+        let state = WorkflowTracker::default().start_run(
+            run_id.into(),
+            "demo".into(),
+            "ship".into(),
+            Vec::new(),
+            None,
+            Some(format!("workflows/{run_id}/journal.jsonl")),
+            WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new(
+                    "test-model",
+                    "responses",
+                    "test-endpoint",
+                ),
+            )
+            .unwrap(),
+        );
+        let manifest = WorkflowRunManifest {
+            version: WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        };
+        let spawn = timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "ship".into(),
+                    script_hash: workflow_script_hash("complete(\"ok\");"),
+                    args_hash: workflow_args_hash(&serde_json::json!({})).unwrap(),
+                    initial_manifest: serde_json::to_value(&manifest).unwrap(),
+                },
+            ))
+            .unwrap();
+        adapter.append_timeline_event(&info, &spawn).await.unwrap();
+
+        let run_dir = adapter.session_dir(&info).join("workflows").join(run_id);
+        std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
+        std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
+        std::fs::write(run_dir.join("args.json"), "{}").unwrap();
+        if invalid_sidecar {
+            std::fs::write(run_dir.join("state.json"), b"not json").unwrap();
+        }
+    }
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(
+        loaded
+            .workflow_runs
+            .iter()
+            .map(|run| run.manifest.state.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wf_missing", "wf_invalid"]
+    );
+    assert!(
+        loaded
+            .workflow_runs
+            .iter()
+            .all(|run| run.script == "complete(\"ok\");")
+    );
+}
+
+#[tokio::test]
+async fn workflow_restore_rejects_immutable_script_and_args_hash_mismatches() {
+    use crate::session::workflow::store::{
+        script_revision_path, workflow_args_hash, workflow_script_hash, WorkflowRunManifest,
+        WORKFLOW_RUN_MANIFEST_VERSION,
+    };
+    use crate::session::workflow::tracker::{WorkflowRuntimeRoute, WorkflowTracker};
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let expected_script = "complete(\"ok\");";
+    let expected_args = serde_json::json!({});
+    let mut timeline = chat_state::Timeline::default();
+
+    for (run_id, stored_script, stored_args) in [
+        (
+            "wf_script_hash_mismatch",
+            "complete(\"tampered\");",
+            serde_json::json!({}),
+        ),
+        (
+            "wf_args_hash_mismatch",
+            expected_script,
+            serde_json::json!({"tampered": true}),
+        ),
+    ] {
+        let state = WorkflowTracker::default().start_run(
+            run_id.into(),
+            "demo".into(),
+            "ship".into(),
+            Vec::new(),
+            None,
+            Some(format!("workflows/{run_id}/journal.jsonl")),
+            WorkflowRuntimeRoute::for_test(
+                "test-model",
+                None,
+                sampling_types::ModelImageInputKey::new(
+                    "test-model",
+                    "responses",
+                    "test-endpoint",
+                ),
+            )
+            .unwrap(),
+        );
+        let manifest = WorkflowRunManifest {
+            version: WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        };
+        let spawn = timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "ship".into(),
+                    script_hash: workflow_script_hash(expected_script),
+                    args_hash: workflow_args_hash(&expected_args).unwrap(),
+                    initial_manifest: serde_json::to_value(&manifest).unwrap(),
+                },
+            ))
+            .unwrap();
+        adapter.append_timeline_event(&info, &spawn).await.unwrap();
+
+        let run_dir = adapter.session_dir(&info).join("workflows").join(run_id);
+        std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
+        std::fs::write(run_dir.join("state.json"), serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        std::fs::write(script_revision_path(&run_dir, 0), stored_script).unwrap();
+        std::fs::write(
+            run_dir.join("args.json"),
+            serde_json::to_vec(&stored_args).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert!(loaded.workflow_runs.is_empty());
+}
+
 #[tokio::test]
 async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
     use crate::session::workflow::store::{
-        MAX_RESTORED_WORKFLOW_RUNS, WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest,
-        script_revision_path,
+        script_revision_path, workflow_args_hash, workflow_script_hash, WorkflowRunManifest,
+        MAX_RESTORED_WORKFLOW_RUNS, WORKFLOW_RUN_MANIFEST_VERSION,
     };
     use crate::session::workflow::tracker::WorkflowTracker;
     let temp_dir = TempDir::new().unwrap();
@@ -1146,17 +1314,6 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
     let mut timeline = chat_state::Timeline::default();
     for index in 0..=MAX_RESTORED_WORKFLOW_RUNS {
         let run_id = format!("wf_{index:03}");
-        let spawn = timeline
-            .record(chat_state::TimelineEventKind::Workflow(
-                chat_state::WorkflowEvent::Spawned {
-                    run_id: run_id.clone(),
-                    execution_epoch: 0,
-                    name: "demo".into(),
-                    objective: "ship".into(),
-                },
-            ))
-            .unwrap();
-        adapter.append_timeline_event(&info, &spawn).await.unwrap();
         let run_dir = workflows.join(&run_id);
         std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
         let mut tracker = WorkflowTracker::default();
@@ -1184,6 +1341,20 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
             state,
             script_revision: 0,
         };
+        let spawn = timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.clone(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "ship".into(),
+                    script_hash: workflow_script_hash("complete(\"ok\");"),
+                    args_hash: workflow_args_hash(&serde_json::json!({})).unwrap(),
+                    initial_manifest: serde_json::to_value(&manifest).unwrap(),
+                },
+            ))
+            .unwrap();
+        adapter.append_timeline_event(&info, &spawn).await.unwrap();
         std::fs::write(
                 run_dir.join("state.json"),
                 serde_json::to_vec(&manifest).unwrap(),
@@ -1204,7 +1375,8 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
 async fn workflow_restore_rejects_symlink_manifest() {
     use std::os::unix::fs::symlink;
     use crate::session::workflow::store::{
-        WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest, script_revision_path,
+        script_revision_path, workflow_args_hash, workflow_script_hash, WorkflowRunManifest,
+        WORKFLOW_RUN_MANIFEST_VERSION,
     };
     use crate::session::workflow::tracker::WorkflowTracker;
     let temp_dir = TempDir::new().unwrap();
@@ -1212,17 +1384,6 @@ async fn workflow_restore_rejects_symlink_manifest() {
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
     let mut timeline = chat_state::Timeline::default();
-    let spawn = timeline
-        .record(chat_state::TimelineEventKind::Workflow(
-            chat_state::WorkflowEvent::Spawned {
-                run_id: "wf_symlink".into(),
-                execution_epoch: 0,
-                name: "demo".into(),
-                objective: "ship".into(),
-            },
-        ))
-        .unwrap();
-    adapter.append_timeline_event(&info, &spawn).await.unwrap();
     let run_dir = adapter.session_dir(&info).join("workflows/wf_symlink");
     std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
     let state = WorkflowTracker::default().start_run(
@@ -1244,6 +1405,20 @@ async fn workflow_restore_rejects_symlink_manifest() {
         state,
         script_revision: 0,
     };
+    let spawn = timeline
+        .record(chat_state::TimelineEventKind::Workflow(
+            chat_state::WorkflowEvent::Spawned {
+                run_id: "wf_symlink".into(),
+                execution_epoch: 0,
+                name: "demo".into(),
+                objective: "ship".into(),
+                script_hash: workflow_script_hash("complete(\"ok\");"),
+                args_hash: workflow_args_hash(&serde_json::json!({})).unwrap(),
+                initial_manifest: serde_json::to_value(&manifest).unwrap(),
+            },
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &spawn).await.unwrap();
     let outside = temp_dir.path().join("outside-state.json");
     std::fs::write(&outside, serde_json::to_vec(&manifest).unwrap()).unwrap();
     symlink(&outside, run_dir.join("state.json")).unwrap();

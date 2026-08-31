@@ -1714,14 +1714,17 @@ pub(crate) async fn spawn_session_actor(
                     continue;
                 }
                 let output: Result<WorkflowToolOutput, (&'static str, String)> = async {
-                    let mut workspace = WorkflowWorkspace::open_in_session(
-                        &launch_session_directory,
-                        &launch_cwd,
-                    )
-                        .map_err(|error| ("workflow_workspace_failed", error.to_string()))?;
                     match input {
                         WorkflowToolInput::Search { query, limit } => {
-                            let catalog = workspace.search(&launch_cwd, &query, limit.unwrap_or(10));
+                            let catalog = WorkflowWorkspace::search_in_session_observational(
+                                &launch_session_directory,
+                                &launch_cwd,
+                                &query,
+                                limit.unwrap_or(10),
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             let count = catalog.definitions.len();
                             let diagnostic_count = catalog.diagnostics.len();
                             Ok(WorkflowToolOutput::Search {
@@ -1736,12 +1739,12 @@ pub(crate) async fn spawn_session_actor(
                             definition_id,
                             include_source,
                         } => {
-                            workspace
-                                .focus(&launch_cwd, &definition_id)
-                                .map_err(|error| ("workflow_focus_failed", error.to_string()))?;
-                            let definition = workspace
-                                .resolve(&launch_cwd, &definition_id)
-                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            let definition = WorkflowWorkspace::focus_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                                &definition_id,
+                            )
+                            .map_err(|error| ("workflow_focus_failed", error.to_string()))?;
                             let source = include_source.then(|| definition.resolved.script.clone());
                             Ok(WorkflowToolOutput::Inspect {
                                 definition: definition.summary,
@@ -1751,6 +1754,13 @@ pub(crate) async fn spawn_session_actor(
                             })
                         }
                         WorkflowToolInput::Draft { name, source } => {
+                            let mut workspace = WorkflowWorkspace::open_reconciled_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             let definition = workspace
                                 .draft(
                                     &launch_cwd,
@@ -1769,6 +1779,13 @@ pub(crate) async fn spawn_session_actor(
                             args,
                             agent_budget,
                         } => {
+                            let mut workspace = WorkflowWorkspace::open_reconciled_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             let definition = workspace
                                 .resolve(&launch_cwd, &definition_id)
                                 .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
@@ -1841,6 +1858,13 @@ pub(crate) async fn spawn_session_actor(
                             max_concurrency,
                             agent_budget,
                         } => {
+                            let mut workspace = WorkflowWorkspace::open_reconciled_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             let mut workflow_admission = Some(workflow_admission);
                             let mut definition = workspace
                                 .resolve(&launch_cwd, &definition_id)
@@ -1969,6 +1993,13 @@ pub(crate) async fn spawn_session_actor(
                             definition_id,
                             scope,
                         } => {
+                            let mut workspace = WorkflowWorkspace::open_reconciled_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             let definition = workspace
                                 .publish(&launch_cwd, &definition_id, scope)
                                 .map_err(|error| ("workflow_publish_failed", error.to_string()))?;
@@ -1988,6 +2019,13 @@ pub(crate) async fn spawn_session_actor(
                             })
                         }
                         WorkflowToolInput::Discard { definition_id } => {
+                            let mut workspace = WorkflowWorkspace::open_reconciled_in_session(
+                                &launch_session_directory,
+                                &launch_cwd,
+                            )
+                            .map_err(|error| {
+                                ("workflow_workspace_failed", error.to_string())
+                            })?;
                             workspace
                                 .discard(&definition_id)
                                 .map_err(|error| ("workflow_discard_failed", error.to_string()))?;

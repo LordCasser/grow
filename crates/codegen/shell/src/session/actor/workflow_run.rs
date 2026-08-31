@@ -100,12 +100,11 @@ impl SessionActor {
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
         let registry = crate::session::workflow::registry::WorkflowRegistry::scan(Some(cwd));
         let session_dir = &self.session_dir;
-        match crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+        match crate::session::workflow::workspace::WorkflowWorkspace::catalog_in_session_observational(
             &self.session_directory,
             cwd,
         ) {
-            Ok(workspace) => {
-                let catalog = workspace.catalog(cwd);
+            Ok(catalog) => {
                 let listings = catalog
                     .definitions
                     .into_iter()
@@ -169,7 +168,7 @@ impl SessionActor {
         };
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
         let mut workspace =
-            match crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+            match crate::session::workflow::workspace::WorkflowWorkspace::open_reconciled_in_session(
                 &self.session_directory,
                 cwd,
             ) {
@@ -488,15 +487,14 @@ impl SessionActor {
             );
         }
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
-        let workspace =
-            match crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+        let catalog =
+            match crate::session::workflow::workspace::WorkflowWorkspace::catalog_in_session_observational(
                 &self.session_directory,
                 cwd,
             ) {
-                Ok(workspace) => workspace,
+                Ok(catalog) => catalog,
                 Err(error) => return format!("Workflow workspace unavailable: {error}"),
             };
-        let catalog = workspace.catalog(cwd);
         let mut lines = vec![format!(
             "Workflow Workspace — {} Definition(s), {} diagnostic(s)",
             catalog.definitions.len(),

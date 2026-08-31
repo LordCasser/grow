@@ -875,6 +875,22 @@ impl SessionActor {
         )
     }
 
+    /// Copy the synchronous Behavior and Goal authorities into owned values.
+    ///
+    /// Persistence callers may retain the returned values across an async
+    /// Timeline barrier. The `parking_lot` guards themselves are confined to
+    /// these statements and are always released before this helper returns.
+    pub(super) fn capture_control_authorities(
+        &self,
+    ) -> (
+        crate::session::behavior::BehaviorSnapshot,
+        Option<crate::session::goal_tracker::GoalState>,
+    ) {
+        let behavior = self.behavior.lock().snapshot();
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        (behavior, goal)
+    }
+
     pub(super) async fn persist_control_snapshot_durably(
         &self,
         behavior: crate::session::behavior::BehaviorSnapshot,
@@ -985,13 +1001,15 @@ impl SessionActor {
 
     pub(super) async fn persist_applied_control_receipt_durably(
         &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
         domain: crate::extensions::notification::ControlDomain,
         target: crate::extensions::notification::ControlTarget,
         intent: crate::session::ControlIntent,
     ) -> std::io::Result<()> {
         self.persist_control_snapshot_with_contexts_and_receipt_durably(
-            self.behavior.lock().snapshot(),
-            self.goal_tracker.lock().snapshot().cloned(),
+            behavior,
+            goal,
             None,
             Vec::new(),
             Some(crate::session::control::DurableControlReceipt {
@@ -1042,8 +1060,7 @@ impl SessionActor {
             role_prompt,
             capability_catalog,
         );
-        let behavior = self.behavior.lock().snapshot();
-        let goal = self.goal_tracker.lock().snapshot().cloned();
+        let (behavior, goal) = self.capture_control_authorities();
         self.persist_control_snapshot_with_context_durably(
             behavior,
             goal,
@@ -1059,6 +1076,8 @@ impl SessionActor {
 
     pub(super) async fn persist_agent_transition_for_control_durably(
         &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
         agent_name: &str,
         role_prompt: Option<&str>,
         capability_catalog: Option<&str>,
@@ -1070,8 +1089,8 @@ impl SessionActor {
             capability_catalog,
         );
         self.persist_control_snapshot_with_contexts_and_receipt_durably(
-            self.behavior.lock().snapshot(),
-            self.goal_tracker.lock().snapshot().cloned(),
+            behavior,
+            goal,
             Some(agent_name),
             vec![(
                 chat_state::ControlContextLayer::AgentRole,
@@ -1132,8 +1151,7 @@ impl SessionActor {
             return Ok(());
         }
         let agent_name = self.agent.borrow().definition().selector_identity();
-        let behavior = self.behavior.lock().snapshot();
-        let goal = self.goal_tracker.lock().snapshot().cloned();
+        let (behavior, goal) = self.capture_control_authorities();
         self.persist_control_snapshot_with_contexts_durably(
             behavior,
             goal,
@@ -1289,8 +1307,7 @@ impl SessionActor {
             return;
         }
         self.goal_tracker.lock().account_elapsed();
-        let behavior = self.behavior.lock().snapshot();
-        let goal = self.goal_tracker.lock().snapshot().cloned();
+        let (behavior, goal) = self.capture_control_authorities();
         if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
             tracing::warn!(%error, "failed to checkpoint Goal control state before shutdown");
         }
@@ -1519,6 +1536,56 @@ mod tests {
         actor.sync_goal_usage_window();
         begin_test_active_causal_turn_with_origin(&actor, prompt_id, origin, turn_kind).await;
         actor
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_control_authorities_release_sync_guards_before_async_persistence() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+
+                let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                let writer = actor.clone();
+                let persistence = tokio::task::spawn_local(async move {
+                    let _transaction = writer.goal_transaction_gate.lock().await;
+                    let (behavior, goal) = writer.capture_control_authorities();
+                    let _ = captured_tx.send(());
+                    let _ = release_rx.await;
+                    writer
+                        .persist_applied_control_receipt_durably(
+                            behavior,
+                            goal,
+                            crate::extensions::notification::ControlDomain::Behavior,
+                            crate::extensions::notification::ControlTarget::Behavior {
+                                behavior_id: tool_types::BehaviorId::Normal.as_id().to_owned(),
+                            },
+                            crate::session::ControlIntent {
+                                client_id: "lock-scope-test".into(),
+                                generation: 1,
+                                sequence: 1,
+                            },
+                        )
+                        .await
+                });
+
+                captured_rx.await.expect("owned Control snapshot captured");
+                assert!(
+                    actor.behavior.try_lock().is_some(),
+                    "Behavior guard must be released while the owned snapshot crosses an await"
+                );
+                assert!(
+                    actor.goal_tracker.try_lock().is_some(),
+                    "Goal guard must be released while the owned snapshot crosses an await"
+                );
+
+                let _ = release_tx.send(());
+                persistence
+                    .await
+                    .expect("persistence task")
+                    .expect("owned Control snapshot persists");
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

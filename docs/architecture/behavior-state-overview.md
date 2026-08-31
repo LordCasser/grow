@@ -14,7 +14,7 @@ enum ForegroundState {
 }
 ```
 
-`InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。用户 picker 的 Behavior transition 与 foreground admission 共享 session state mutex，只允许在 `Idle` 提交；Goal lifecycle 工具可以在已 admission 的 turn 内原子提交下一状态，但不会重标当前 turn，也不会把新协议插进已经运行的因果单元。唯一的控制面例外是 Normal/Clarify foreground 中的 out-of-band `/goal`：它先持久化 Goal Behavior，再由命令平面取消原 exact foreground；Plan/Workflow 冲突和 picker 的 idle gate 均不放宽。
+`InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。用户 picker 的 Behavior transition 与 foreground admission 共享 session state mutex；Shell 先捕获 termination、pending step control 和 foreground owner，再由 `BehaviorCoordinator::assess_switch` 同时生成 picker projection 与服务端 admission。`Picker`、`HostCommand`、`GoalLifecycle` 是显式 authority，不能互借 busy 例外；不可用判定也不能修改二次确认 latch。Goal lifecycle 工具可以在已 admission 的 turn 内原子提交下一状态，但不会重标当前 turn，也不会把新协议插进已经运行的因果单元。唯一的控制面例外是 Normal/Clarify foreground 中的 out-of-band `/goal`：它先持久化 Goal Behavior，再由命令平面取消原 exact foreground；Plan/Workflow 冲突和 picker 的 idle gate 均不放宽。
 
 Agent/model route control 与 Behavior admission 还共享 `step_control_gate`。pending deque 只表示尚未开始的控制，不能代表已经 pop 后异步重建中的 Agent；因此 Goal/Plan/Workflow 的能力校验、Workflow admission 校验、durable Control commit 与 live Behavior swap 必须在同一 gate 内完成，并在取得 gate 后读取当前已提交 Agent。较晚到达的 Behavior 不能越过较早的 queued route control。durable/live commit 完成后才释放 gate；随后需要取消旧 foreground 的操作在 gate 外执行，避免取消路径反向等待同一边界。
 
@@ -46,7 +46,7 @@ flowchart LR
 
 `tool_types::BehaviorId` 是 Shell、Tools 与 Pager 的唯一身份：`Normal | Clarify | Plan | Workflow | Goal`。代码内部不再保留第二套 Behavior identity；ACP 的 `SessionModeId` 只是外部传输字段名。Pager 的 `PromptMode` 仅表示输入框是否正在编辑排队消息，与 Behavior 无关。
 
-`BehaviorCoordinator` 是纯决策器：输入当前选择与 `BehaviorSwitchFacts`，输出 `Applied | ConfirmationRequired | Rejected` 及 declarative effects。它不运行模型、不等待子 Agent、不写文件、不触碰 Pager。SessionActor 串行执行 effect，并在取消 owned work 之前先持久化目标 control snapshot。
+`BehaviorCoordinator` 是纯决策器：输入当前选择、`BehaviorSwitchFacts` 与 request authority，先输出唯一 `BehaviorAvailabilityEntry`，再把同一个 assessment 解析为 `Applied | ConfirmationRequired | Rejected` 及 declarative effects。它不运行模型、不等待子 Agent、不写文件、不触碰 Pager。SessionActor 串行执行 effect，并在取消 owned work 之前先持久化目标 control snapshot。所有异步持久化入口都先复制 owned `BehaviorSnapshot`/`GoalState`，同步锁 guard 不得跨越 Timeline await。
 
 Plan 与 Goal 各自保留必要的专用状态。Workflow Definition/Run 统一走 Workflow Workspace 与 manager，不再按用途派生私有 runtime。
 
@@ -63,6 +63,8 @@ Plan 与 Goal 各自保留必要的专用状态。Workflow Definition/Run 统一
 Goal 的 provider usage 一旦缺失，持久计数只能作为下界，自动 continuation 必须暂停。用户可显式 restart 无 token budget 的 Goal，并保留 `usage_incomplete` 事实及其独立的 durable acknowledgement；带 token budget 的 Goal 不允许在无法精确执法时 restart 或重新安装预算，必须先移除预算或重建 Goal。restart 是对当前不确定性的显式确认，不得伪造或清除历史 usage；后续再次出现未知 usage 会撤销该确认并重新暂停。
 
 Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 属于统一公共 runtime。`deep-research` 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后作为普通 User workflow 由 Registry 扫描，不拥有额外 scope、Behavior 或运行机制。
+
+Plan 模式的 `ask_user_question` 在 Pager 中拥有完整的 `Navigation | InputMode | PlanAction` 焦点状态。`Chat about this` 与 `Skip interview` 是固定、可键盘到达的 typed response；当前部分答案随响应返回，不通过 prompt queue、Interject 或伪造 UserMessage 旁路提交。
 
 Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definition revision 与 active status 为边界。全局 Control revision 仍保护尚无 Goal owner 的创建操作，但 Goal 已激活后，usage、reminder、context reprojection 或 compaction checkpoint 不属于定义变更，不能撤销同一 turn 的 `update_goal` 权限。
 
@@ -112,7 +114,7 @@ Timeline 的 `control` 事件包含单调 control revision，以及 Behavior sna
 每个 Control 事件同时声明本次原子退役的 model-context layer。退役只撤销该 layer 的当前 authority 与尚未跨过边界的 pending transition，不删除历史 Surface；后续 compaction 只能重投影仍然活跃的 layer。因此 Goal pause/complete/clear 与离开 Goal Behavior 会在同一 Control 事实中退役 `GoalDefinition`，旧 Goal 指令即使被 Surface replacement 遮蔽，也不能在后续修复中重新成为模型上下文。
 
 - 控制命令收到持久化 ack 后才返回 Applied/成功。
-- 成功的 PlanControl 或 Goal lifecycle 工具结果形成强制 turn control boundary：同批未开始的工具先以未执行结果闭合，当前 Step 结束并应用已排队的 step controls，然后直接写入 TurnEnded。completion requirement、Stop hook 与任何 recovery 都不得在旧 admission 下再次采样。
+- PlanControl 或 Goal lifecycle 工具成功提交后形成显式 control disposition。同批未开始的工具先以未执行结果闭合；`ResampleStep` 关闭当前 Step、激活新的 Plan phase context，并在同一 Turn 内重新采样，`EndTurn` 才写入 `TurnEnded`。失败或没有提交状态变化的控制仍返回 Continue，不能误取消兄弟调用。completion requirement、Stop hook 与 recovery 都不得在旧 phase/admission 下再次采样。
 - 新 session 的 deferred stable prefix 是所有 prompt origin 共用的 admission barrier。User、Goal continuation、Workflow/task/subagent completion、notification 与 host command 在写入首个 `TurnStarted` 前都必须先 durable commit 该 prefix；不存在 synthetic turn 绕过 bootstrap 后再补 `ContextRebuild` 的合法路径。
 - 显式 Stop/Cancel 与进程内 owner panic 都按 Request/Tool → Step → Turn 的顺序只追加终态。若 panic 发生在 durable `TurnEnded` 之后，不再投影第二个 completion，而是关闭 writer epoch；进程重启则由 Timeline interrupted recovery 追加缺失终态。
 - 先持久化将要到达的控制状态，再取消 exact foreground/owned run并发布 UI projection。

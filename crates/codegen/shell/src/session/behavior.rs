@@ -19,12 +19,46 @@ pub enum BehaviorChangeOutcome {
 /// Runtime facts captured by `SessionActor` before asking the coordinator for
 /// a transition. The coordinator is deliberately I/O-free: it never queries a
 /// workflow, runs a model, persists a file, or touches the pager.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BehaviorRequestAuthority {
+    Picker,
+    HostCommand,
+    GoalLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BehaviorForeground {
+    #[default]
+    Idle,
+    BehaviorControl,
+    HostCommand,
+    Regular,
+    Busy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BehaviorSwitchFacts {
     pub unavailable_reason: Option<String>,
     pub active_goal: bool,
     pub public_workflow_active: bool,
     pub source_owned_work_active: bool,
+    pub termination_open: bool,
+    pub pending_step_control: bool,
+    pub foreground: BehaviorForeground,
+}
+
+impl Default for BehaviorSwitchFacts {
+    fn default() -> Self {
+        Self {
+            unavailable_reason: None,
+            active_goal: false,
+            public_workflow_active: false,
+            source_owned_work_active: false,
+            termination_open: true,
+            pending_step_control: false,
+            foreground: BehaviorForeground::Idle,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,19 +335,31 @@ impl BehaviorCoordinator {
         confirmation_window: std::time::Duration,
         confirmation_owner: Option<&str>,
     ) -> BehaviorDecision {
+        let assessment = self.assess_switch(target, &facts, BehaviorRequestAuthority::Picker);
+        self.decide_assessed_switch_owned(
+            target,
+            assessment,
+            confirmation_window,
+            confirmation_owner,
+        )
+    }
+
+    /// Resolve a previously assessed transition. The Shell uses this entry
+    /// point so the exact projection decision, including its reason, is also
+    /// the admission decision. Only confirmation ownership mutates here.
+    pub fn decide_assessed_switch_owned(
+        &mut self,
+        target: BehaviorId,
+        assessment: BehaviorAvailabilityEntry,
+        confirmation_window: std::time::Duration,
+        confirmation_owner: Option<&str>,
+    ) -> BehaviorDecision {
+        debug_assert_eq!(assessment.behavior, target);
         let source = self.behavior();
-        if source == target {
-            self.clear_pending_switch();
-            return BehaviorDecision {
-                outcome: BehaviorChangeOutcome::Applied,
-                effects: Vec::new(),
-            };
-        }
-        let availability = self.switch_availability(target, &facts);
-        if availability.disposition == BehaviorAvailabilityDisposition::Unavailable {
+        if assessment.disposition == BehaviorAvailabilityDisposition::Unavailable {
             return BehaviorDecision {
                 outcome: BehaviorChangeOutcome::Rejected {
-                    message: availability.reason.unwrap_or_else(|| {
+                    message: assessment.reason.clone().unwrap_or_else(|| {
                         format!("{} behavior is unavailable.", target.display_label())
                     }),
                 },
@@ -321,7 +367,7 @@ impl BehaviorCoordinator {
             };
         }
 
-        if facts.source_owned_work_active
+        if assessment.disposition == BehaviorAvailabilityDisposition::ConfirmationRequired
             && !self.confirm_interrupting_switch_owned(
                 target,
                 confirmation_window,
@@ -332,18 +378,12 @@ impl BehaviorCoordinator {
                 .pending_switch()
                 .map(|(_, _, remaining)| remaining)
                 .unwrap_or(confirmation_window.as_millis() as u64);
-            let message = if source == BehaviorId::Workflow {
+            let message = assessment.reason.clone().unwrap_or_else(|| {
                 format!(
-                    "An active public Workflow Run will continue in the background, but it can only be managed in Workflow behavior. Select {} again to leave and confirm.",
+                    "Switching to {} requires confirmation. Select it again to confirm.",
                     target.display_label()
                 )
-            } else {
-                format!(
-                    "Switching to {} will interrupt active {} work. Select it again to confirm.",
-                    target.display_label(),
-                    source.display_label()
-                )
-            };
+            });
             return BehaviorDecision {
                 outcome: BehaviorChangeOutcome::ConfirmationRequired {
                     message,
@@ -353,8 +393,16 @@ impl BehaviorCoordinator {
             };
         }
 
+        if source == target {
+            self.clear_pending_switch();
+            return BehaviorDecision {
+                outcome: BehaviorChangeOutcome::Applied,
+                effects: Vec::new(),
+            };
+        }
+
         let mut effects = Vec::new();
-        if facts.source_owned_work_active {
+        if assessment.disposition == BehaviorAvailabilityDisposition::ConfirmationRequired {
             effects.push(BehaviorEffect::CancelSourceForeground(source));
         }
         effects.push(BehaviorEffect::Select(target));
@@ -371,8 +419,59 @@ impl BehaviorCoordinator {
         target: BehaviorId,
         facts: &BehaviorSwitchFacts,
     ) -> BehaviorAvailabilityEntry {
+        self.assess_switch(target, facts, BehaviorRequestAuthority::Picker)
+    }
+
+    /// Pure transition assessment shared by user-visible projection and the
+    /// authoritative admission path. It never mutates the confirmation latch.
+    pub fn assess_switch(
+        &self,
+        target: BehaviorId,
+        facts: &BehaviorSwitchFacts,
+        authority: BehaviorRequestAuthority,
+    ) -> BehaviorAvailabilityEntry {
         let supported = facts.unavailable_reason.is_none();
         let source = self.behavior();
+        let admission_reason = if !facts.termination_open {
+            Some("The session is shutting down; Behavior selection is unavailable.".to_string())
+        } else if facts.pending_step_control
+            && facts.foreground != BehaviorForeground::BehaviorControl
+        {
+            Some(format!(
+                "{} Behavior cannot overtake an earlier model or Agent control. Retry after the current step reaches its boundary.",
+                target.display_label()
+            ))
+        } else {
+            let foreground_allowed = match facts.foreground {
+                BehaviorForeground::Idle | BehaviorForeground::BehaviorControl => true,
+                BehaviorForeground::HostCommand => {
+                    authority == BehaviorRequestAuthority::HostCommand
+                        || (authority == BehaviorRequestAuthority::GoalLifecycle
+                            && target == BehaviorId::Goal
+                            && matches!(source, BehaviorId::Normal | BehaviorId::Clarify))
+                }
+                BehaviorForeground::Regular => {
+                    authority == BehaviorRequestAuthority::GoalLifecycle
+                        && target == BehaviorId::Goal
+                        && matches!(source, BehaviorId::Normal | BehaviorId::Clarify)
+                }
+                BehaviorForeground::Busy => false,
+            };
+            (!foreground_allowed).then(|| {
+                format!(
+                    "Stop the active foreground work before selecting {} Behavior.",
+                    target.display_label()
+                )
+            })
+        };
+        if let Some(reason) = admission_reason {
+            return BehaviorAvailabilityEntry {
+                behavior: target,
+                supported,
+                disposition: BehaviorAvailabilityDisposition::Unavailable,
+                reason: Some(reason),
+            };
+        }
         if source == target {
             return BehaviorAvailabilityEntry {
                 behavior: target,
@@ -407,11 +506,12 @@ impl BehaviorCoordinator {
         if facts.source_owned_work_active {
             let reason = if source == BehaviorId::Workflow {
                 format!(
-                    "Leaving Workflow while an active public Run continues requires confirmation; re-enter Workflow to manage it."
+                    "An active public Workflow Run will continue in the background, but it can only be managed in Workflow behavior. Select {} again to leave and confirm.",
+                    target.display_label()
                 )
             } else {
                 format!(
-                    "Switching to {} will interrupt active {} work and requires confirmation.",
+                    "Switching to {} will interrupt active {} work. Select it again to confirm.",
                     target.display_label(),
                     source.display_label()
                 )
@@ -1188,6 +1288,151 @@ mod tests {
     }
 
     #[test]
+    fn admission_assessment_reason_is_the_exact_rejection_reason() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        assert!(matches!(
+            controller
+                .decide_switch_owned(
+                    BehaviorId::Clarify,
+                    BehaviorSwitchFacts {
+                        source_owned_work_active: true,
+                        ..BehaviorSwitchFacts::default()
+                    },
+                    std::time::Duration::from_secs(8),
+                    Some("client-a:1"),
+                )
+                .outcome,
+            BehaviorChangeOutcome::ConfirmationRequired { .. }
+        ));
+        let (pending_source, pending_target, _) =
+            controller.pending_switch().expect("parked confirmation");
+        let assessment = controller.assess_switch(
+            BehaviorId::Normal,
+            &BehaviorSwitchFacts {
+                foreground: BehaviorForeground::Regular,
+                source_owned_work_active: true,
+                ..BehaviorSwitchFacts::default()
+            },
+            BehaviorRequestAuthority::Picker,
+        );
+        let projected_reason = assessment.reason.clone().unwrap();
+        let decision = controller.decide_assessed_switch_owned(
+            BehaviorId::Normal,
+            assessment,
+            std::time::Duration::from_secs(8),
+            Some("client-a:1"),
+        );
+        assert_eq!(
+            decision.outcome,
+            BehaviorChangeOutcome::Rejected {
+                message: projected_reason
+            }
+        );
+        let (source_after, target_after, _) = controller
+            .pending_switch()
+            .expect("unavailable assessment preserves confirmation");
+        assert_eq!(
+            (source_after, target_after),
+            (pending_source, pending_target),
+            "an unavailable assessment must neither arm nor clear confirmation"
+        );
+    }
+
+    #[test]
+    fn foreground_exceptions_require_the_request_authority_that_owns_them() {
+        let controller = controller();
+        let host_foreground = BehaviorSwitchFacts {
+            foreground: BehaviorForeground::HostCommand,
+            ..BehaviorSwitchFacts::default()
+        };
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Plan,
+                    &host_foreground,
+                    BehaviorRequestAuthority::Picker,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Unavailable,
+            "a Picker request cannot borrow the current HostCommand foreground"
+        );
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Plan,
+                    &host_foreground,
+                    BehaviorRequestAuthority::HostCommand,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Available
+        );
+
+        let regular_foreground = BehaviorSwitchFacts {
+            foreground: BehaviorForeground::Regular,
+            ..BehaviorSwitchFacts::default()
+        };
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Goal,
+                    &regular_foreground,
+                    BehaviorRequestAuthority::Picker,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Unavailable
+        );
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Goal,
+                    &regular_foreground,
+                    BehaviorRequestAuthority::GoalLifecycle,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Available,
+            "only Goal lifecycle admission may enter Goal beside a regular foreground"
+        );
+    }
+
+    #[test]
+    fn terminal_and_step_control_fences_are_part_of_the_shared_assessment() {
+        let controller = controller();
+        for facts in [
+            BehaviorSwitchFacts {
+                termination_open: false,
+                ..BehaviorSwitchFacts::default()
+            },
+            BehaviorSwitchFacts {
+                pending_step_control: true,
+                ..BehaviorSwitchFacts::default()
+            },
+        ] {
+            assert_eq!(
+                controller
+                    .assess_switch(BehaviorId::Plan, &facts, BehaviorRequestAuthority::Picker,)
+                    .disposition,
+                BehaviorAvailabilityDisposition::Unavailable
+            );
+        }
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Plan,
+                    &BehaviorSwitchFacts {
+                        pending_step_control: true,
+                        foreground: BehaviorForeground::BehaviorControl,
+                        ..BehaviorSwitchFacts::default()
+                    },
+                    BehaviorRequestAuthority::Picker,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Available,
+            "the Behavior worker that owns foreground may drain its admitted control"
+        );
+    }
+
+    #[test]
     fn public_workflow_blocks_only_special_runtime_behaviors() {
         for target in [BehaviorId::Plan, BehaviorId::Goal] {
             let mut controller = controller();
@@ -1347,6 +1592,10 @@ mod tests {
             source_owned_work_active: true,
             ..BehaviorSwitchFacts::default()
         };
+        let projected_reason = controller
+            .assess_switch(BehaviorId::Normal, &facts, BehaviorRequestAuthority::Picker)
+            .reason
+            .expect("confirmation reason");
 
         let first = controller.decide_switch_owned(
             BehaviorId::Normal,
@@ -1356,7 +1605,8 @@ mod tests {
         );
         assert!(matches!(
             first.outcome,
-            BehaviorChangeOutcome::ConfirmationRequired { .. }
+            BehaviorChangeOutcome::ConfirmationRequired { ref message, .. }
+                if message == &projected_reason
         ));
 
         let other_client = controller.decide_switch_owned(

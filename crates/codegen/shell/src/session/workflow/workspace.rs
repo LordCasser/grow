@@ -124,12 +124,44 @@ impl WorkflowWorkspace {
             path: session_dir.display().to_string(),
             error: error.to_string(),
         })?;
-        Self::open_in_session(&session, cwd)
+        Self::open_reconciled_in_session(&session, cwd)
     }
 
-    pub(crate) fn open_in_session(
+    /// Open the persisted workspace without creating or repairing anything.
+    /// A missing workspace is a valid empty session projection.
+    fn open_observational_in_session(
         session: &crate::session::storage::ContainedDirectory,
-        cwd: &Path,
+    ) -> Result<Option<Self>, WorkspaceError> {
+        let root = match session
+            .open_relative_shared_read(Path::new("workflow-workspace"), "Workflow workspace")
+        {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(match error.kind() {
+                    std::io::ErrorKind::InvalidData => {
+                        WorkspaceError::InvalidState(error.to_string())
+                    }
+                    _ => WorkspaceError::Io {
+                        path: session
+                            .display_path()
+                            .join("workflow-workspace")
+                            .display()
+                            .to_string(),
+                        error: error.to_string(),
+                    },
+                });
+            }
+        };
+        let state = load_state(&root)?.unwrap_or_default();
+        Ok(Some(Self { root, state }))
+    }
+
+    /// Open the workspace for an intentional mutation without coupling that
+    /// mutation to crash recovery. Inspect uses this path only for its explicit
+    /// focus write.
+    fn open_for_update_in_session(
+        session: &crate::session::storage::ContainedDirectory,
     ) -> Result<Self, WorkspaceError> {
         let root = session
             .open_relative(Path::new("workflow-workspace"), "Workflow workspace", true)
@@ -145,10 +177,49 @@ impl WorkflowWorkspace {
                 },
             })?;
         let state = load_state(&root)?.unwrap_or_default();
-        let mut workspace = Self { root, state };
+        Ok(Self { root, state })
+    }
+
+    /// Open the workspace and reconcile durable write-ahead state. This is the
+    /// entry point for actions that already own mutation authority.
+    pub(crate) fn open_reconciled_in_session(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+    ) -> Result<Self, WorkspaceError> {
+        let mut workspace = Self::open_for_update_in_session(session)?;
         workspace.recover_pending_publish(cwd)?;
         workspace.refresh_content_hashes()?;
         Ok(workspace)
+    }
+
+    pub(crate) fn catalog_in_session_observational(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+    ) -> Result<WorkflowCatalog, WorkspaceError> {
+        match Self::open_observational_in_session(session)? {
+            Some(workspace) => Ok(workspace.catalog(cwd)),
+            None => Ok(Self::catalog_without_workspace(cwd)),
+        }
+    }
+
+    pub(crate) fn search_in_session_observational(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<WorkflowCatalog, WorkspaceError> {
+        let catalog = Self::catalog_in_session_observational(session, cwd)?;
+        Ok(Self::filter_catalog(catalog, query, limit))
+    }
+
+    pub(crate) fn focus_in_session(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+        definition_id: &WorkflowDefinitionId,
+    ) -> Result<WorkflowDefinition, WorkspaceError> {
+        let mut workspace = Self::open_for_update_in_session(session)?;
+        workspace.focus(cwd, definition_id)?;
+        workspace.resolve(cwd, definition_id)
     }
 
     pub(crate) fn catalog(&self, cwd: &Path) -> WorkflowCatalog {
@@ -215,7 +286,22 @@ impl WorkflowWorkspace {
     }
 
     pub(crate) fn compact_context(&self, cwd: &Path) -> String {
-        let catalog = self.catalog(cwd);
+        Self::format_compact_context(self.catalog(cwd))
+    }
+
+    pub(crate) fn compact_context_in_session_observational(
+        session: &crate::session::storage::ContainedDirectory,
+        cwd: &Path,
+    ) -> Result<String, WorkspaceError> {
+        match Self::open_observational_in_session(session)? {
+            Some(workspace) => Ok(workspace.compact_context(cwd)),
+            None => Ok(Self::format_compact_context(
+                Self::catalog_without_workspace(cwd),
+            )),
+        }
+    }
+
+    fn format_compact_context(catalog: WorkflowCatalog) -> String {
         let focus = catalog
             .definitions
             .iter()
@@ -262,8 +348,11 @@ impl WorkflowWorkspace {
     }
 
     pub(crate) fn search(&self, cwd: &Path, query: &str, limit: usize) -> WorkflowCatalog {
+        Self::filter_catalog(self.catalog(cwd), query, limit)
+    }
+
+    fn filter_catalog(mut catalog: WorkflowCatalog, query: &str, limit: usize) -> WorkflowCatalog {
         let query = query.trim().to_lowercase();
-        let mut catalog = self.catalog(cwd);
         catalog.definitions.retain(|definition| {
             [
                 definition.name.as_str(),
@@ -285,6 +374,33 @@ impl WorkflowWorkspace {
         });
         catalog.definitions.truncate(limit);
         catalog
+    }
+
+    fn catalog_without_workspace(cwd: &Path) -> WorkflowCatalog {
+        let registry = WorkflowRegistry::scan(Some(cwd));
+        let diagnostics = registry.diagnostics().to_vec();
+        let definitions = registry
+            .list()
+            .into_iter()
+            .map(|listing| WorkflowDefinitionSummary {
+                focused: false,
+                definition_id: listing.definition_id,
+                name: listing.name,
+                description: listing.description,
+                when_to_use: listing.when_to_use,
+                scope: listing.scope,
+                status: "saved".into(),
+                path: listing.path,
+                draft_source: None,
+                source_definition_id: None,
+                source_path: None,
+                content_hash: listing.content_hash,
+            })
+            .collect();
+        WorkflowCatalog {
+            definitions,
+            diagnostics,
+        }
     }
 
     pub(crate) fn resolve(
@@ -561,20 +677,23 @@ impl WorkflowWorkspace {
     }
 
     fn definition_from_saved(&self, resolved: ResolvedWorkflow) -> WorkflowDefinition {
+        Self::definition_from_saved_state(Some(&self.state), resolved)
+    }
+
+    fn definition_from_saved_state(
+        state: Option<&WorkspaceState>,
+        resolved: ResolvedWorkflow,
+    ) -> WorkflowDefinition {
         let path = match &resolved.source {
             WorkflowSource::File(path) => Some(path.display().to_string()),
             WorkflowSource::Inline => None,
         };
-        let validated = self
-            .state
-            .validated_hashes
-            .get(&resolved.definition_id)
+        let validated = state
+            .and_then(|state| state.validated_hashes.get(&resolved.definition_id))
             .is_some_and(|hash| hash == &resolved.content_hash);
         let summary = WorkflowDefinitionSummary {
-            focused: self
-                .state
-                .focused_definition_id
-                .as_ref()
+            focused: state
+                .and_then(|state| state.focused_definition_id.as_ref())
                 .is_some_and(|focused| focused == &resolved.definition_id),
             definition_id: resolved.definition_id.clone(),
             name: resolved.meta.name.clone(),
@@ -1201,6 +1320,89 @@ mod tests {
                 .definitions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn observational_search_does_not_create_a_missing_workspace() {
+        let session = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let session_directory = crate::session::storage::ContainedDirectory::open(
+            session.path(),
+            Path::new(""),
+            "Workflow observational search test",
+            false,
+        )
+        .unwrap();
+
+        let _catalog = WorkflowWorkspace::search_in_session_observational(
+            &session_directory,
+            project.path(),
+            "review",
+            10,
+        )
+        .unwrap();
+
+        assert!(!session.path().join("workflow-workspace").exists());
+    }
+
+    #[test]
+    fn observational_search_neither_recovers_publish_nor_persists_refreshed_hash() {
+        let session = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let mut workspace = WorkflowWorkspace::open(session.path(), project.path()).unwrap();
+        let draft = workspace
+            .draft(
+                project.path(),
+                None,
+                WorkflowDraftSource::Inline {
+                    script: script("observe-only", "before edit"),
+                },
+            )
+            .unwrap();
+        let target_id = registry::definition_id(WorkflowScope::Project, "observe-only");
+        let target_path =
+            registry::publish_target_path(project.path(), WorkflowScope::Project, "observe-only")
+                .unwrap();
+        workspace.state.pending_publish = Some(PendingPublish {
+            draft_definition_id: draft.summary.definition_id.clone(),
+            target_definition_id: target_id,
+            scope: WorkflowScope::Project,
+            target_path: target_path.display().to_string(),
+            content_hash: draft.summary.content_hash.clone(),
+            expected_base_hash: None,
+        });
+        workspace.persist().unwrap();
+        std::fs::write(
+            draft.summary.path.as_deref().unwrap(),
+            script("observe-only", "external edit"),
+        )
+        .unwrap();
+        let state_path = session.path().join("workflow-workspace/state.json");
+        let before = std::fs::read(&state_path).unwrap();
+        let session_directory = crate::session::storage::ContainedDirectory::open(
+            session.path(),
+            Path::new(""),
+            "Workflow observational search test",
+            false,
+        )
+        .unwrap();
+
+        let catalog = WorkflowWorkspace::search_in_session_observational(
+            &session_directory,
+            project.path(),
+            "observe-only",
+            10,
+        )
+        .unwrap();
+
+        assert!(
+            catalog
+                .definitions
+                .iter()
+                .any(|definition| definition.definition_id == draft.summary.definition_id)
+        );
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+        assert!(!target_path.exists());
     }
 
     #[test]

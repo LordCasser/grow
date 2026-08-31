@@ -191,18 +191,68 @@ mod desired_state_tests {
             })
             .await;
     }
+
+    #[tokio::test]
+    async fn picker_projection_and_admission_share_the_host_foreground_rejection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
+                let mut task = super::super::tests::support::running_task_stub("host-command");
+                task.origin = crate::session::PromptOrigin::HostCommand;
+                task.turn_kind = crate::session::TurnKind::Internal;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(task);
+
+                let projection = actor.behavior_availability_projection().await;
+                let choice = projection
+                    .choice(tool_types::BehaviorId::Plan)
+                    .cloned()
+                    .expect("Plan projection");
+                assert_eq!(
+                    choice.disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Unavailable
+                );
+                let projected_reason = choice.reason.expect("busy reason");
+
+                let application = actor
+                    .apply_behavior_change_with_admission(
+                        acp::SessionModeId::new("plan"),
+                        crate::session::behavior::BehaviorRequestAuthority::Picker,
+                        None,
+                        Some("client-a:1"),
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    application.disposition.unwrap(),
+                    BehaviorChangeOutcome::Rejected {
+                        message: projected_reason
+                    },
+                    "a Picker cannot borrow an unrelated HostCommand foreground exception"
+                );
+                assert!(actor.behavior.lock().pending_switch().is_none());
+
+                assert!(matches!(
+                    actor
+                        .request_behavior_change(acp::SessionModeId::new("plan"))
+                        .await,
+                    Ok(BehaviorChangeOutcome::Applied)
+                ));
+            })
+            .await;
+    }
 }
 impl SessionActor {
     pub(super) fn workflow_behavior_context(&self) -> Result<String, acp::Error> {
-        let workspace = crate::session::workflow::workspace::WorkflowWorkspace::open_in_session(
+        crate::session::workflow::workspace::WorkflowWorkspace::compact_context_in_session_observational(
             &self.session_directory,
             std::path::Path::new(self.session_info.cwd.as_str()),
         )
         .map_err(|error| {
             acp::Error::internal_error()
                 .data(format!("active Workflow workspace is unavailable: {error}"))
-        })?;
-        Ok(workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str())))
+        })
     }
 
     pub(super) async fn behavior_capability_support(&self) -> (bool, bool, bool) {
@@ -228,12 +278,46 @@ impl SessionActor {
         (plan_supported, workflow_supported, goal_supported)
     }
 
+    pub(super) fn capture_behavior_admission_facts(
+        admission: &AdmissionState,
+        expected_revision: Option<u64>,
+    ) -> crate::session::behavior::BehaviorSwitchFacts {
+        use crate::session::behavior::BehaviorForeground;
+
+        let owns_behavior_foreground = expected_revision.is_some()
+            && admission.behavior_control_foreground_claimed
+            && matches!(admission.foreground, ForegroundState::ApplyingControl);
+        let foreground = if owns_behavior_foreground {
+            BehaviorForeground::BehaviorControl
+        } else {
+            match &admission.foreground {
+                ForegroundState::Idle => BehaviorForeground::Idle,
+                ForegroundState::RegularTurn(turn)
+                    if turn.origin == crate::session::PromptOrigin::HostCommand =>
+                {
+                    BehaviorForeground::HostCommand
+                }
+                ForegroundState::RegularTurn(_) => BehaviorForeground::Regular,
+                ForegroundState::ApplyingControl
+                | ForegroundState::Settling { .. }
+                | ForegroundState::Compaction => BehaviorForeground::Busy,
+            }
+        };
+        crate::session::behavior::BehaviorSwitchFacts {
+            termination_open: admission.termination.is_open(),
+            pending_step_control: !admission.pending_step_controls.is_empty(),
+            foreground,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn behavior_availability_from_tracker(
         &self,
         workflow_tracker: &crate::session::workflow::tracker::WorkflowTracker,
         (plan_supported, workflow_supported, goal_supported): (bool, bool, bool),
+        authority: crate::session::behavior::BehaviorRequestAuthority,
+        admission_facts: crate::session::behavior::BehaviorSwitchFacts,
     ) -> tool_types::BehaviorAvailability {
-        use crate::session::behavior::BehaviorSwitchFacts;
         use tool_types::{BehaviorAvailability, BehaviorId};
 
         let current = self.behavior.lock().behavior();
@@ -279,14 +363,16 @@ impl SessionActor {
                     }),
                 _ => None,
             };
-            controller.switch_availability(
+            controller.assess_switch(
                 target,
-                &BehaviorSwitchFacts {
+                &crate::session::behavior::BehaviorSwitchFacts {
                     unavailable_reason,
                     active_goal,
                     public_workflow_active,
                     source_owned_work_active,
+                    ..admission_facts.clone()
                 },
+                authority,
             )
         })
         .collect();
@@ -300,9 +386,18 @@ impl SessionActor {
         &self,
     ) -> tool_types::BehaviorAvailability {
         let support = self.behavior_capability_support().await;
+        let admission_facts = {
+            let admission = self.state.lock().await;
+            Self::capture_behavior_admission_facts(&admission, None)
+        };
         let workflow_tracker = self.workflow_tracker().await;
         let workflow_tracker = workflow_tracker.lock();
-        self.behavior_availability_from_tracker(&workflow_tracker, support)
+        self.behavior_availability_from_tracker(
+            &workflow_tracker,
+            support,
+            crate::session::behavior::BehaviorRequestAuthority::Picker,
+            admission_facts,
+        )
     }
 
     pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
@@ -522,11 +617,10 @@ impl SessionActor {
             let application = self
                 .apply_behavior_change_with_admission(
                     pending.session_mode,
-                    false,
+                    crate::session::behavior::BehaviorRequestAuthority::Picker,
                     Some(pending.revision),
                     pending.confirmation_owner.as_deref(),
                     pending.intent.as_ref(),
-                    false,
                 )
                 .await;
             if application.cancelled_by_shutdown {
@@ -662,8 +756,11 @@ impl SessionActor {
         &self,
         session_mode_id: acp::SessionModeId,
     ) -> Result<BehaviorChangeOutcome, acp::Error> {
-        self.request_behavior_change_with_admission(session_mode_id, false)
-            .await
+        self.request_behavior_change_with_admission(
+            session_mode_id,
+            crate::session::behavior::BehaviorRequestAuthority::HostCommand,
+        )
+        .await
     }
 
     /// Goal entry is an out-of-band control operation: from Normal/Clarify it
@@ -674,14 +771,17 @@ impl SessionActor {
     pub(super) async fn request_goal_behavior_entry(
         &self,
     ) -> Result<BehaviorChangeOutcome, acp::Error> {
-        self.request_behavior_change_with_admission(acp::SessionModeId::new("goal"), true)
-            .await
+        self.request_behavior_change_with_admission(
+            acp::SessionModeId::new("goal"),
+            crate::session::behavior::BehaviorRequestAuthority::GoalLifecycle,
+        )
+        .await
     }
 
     async fn request_behavior_change_with_admission(
         &self,
         session_mode_id: acp::SessionModeId,
-        allow_out_of_band_goal_entry: bool,
+        authority: crate::session::behavior::BehaviorRequestAuthority,
     ) -> Result<BehaviorChangeOutcome, acp::Error> {
         let projection = {
             let mut admission = self.state.lock().await;
@@ -717,11 +817,10 @@ impl SessionActor {
         let application = self
             .apply_behavior_change_with_admission(
                 session_mode_id,
-                allow_out_of_band_goal_entry,
+                authority,
                 Some(projection.revision),
                 None,
                 None,
-                true,
             )
             .await;
         if application.cancelled_by_shutdown {
@@ -838,13 +937,12 @@ impl SessionActor {
     async fn apply_behavior_change_with_admission(
         &self,
         session_mode_id: acp::SessionModeId,
-        allow_out_of_band_goal_entry: bool,
+        authority: crate::session::behavior::BehaviorRequestAuthority,
         expected_revision: Option<u64>,
         confirmation_owner: Option<&str>,
         control_intent: Option<&crate::session::ControlIntent>,
-        trusted_internal_confirmation: bool,
     ) -> BehaviorApplication {
-        use crate::session::behavior::{BehaviorEffect, BehaviorSwitchFacts};
+        use crate::session::behavior::BehaviorEffect;
         use tool_types::BehaviorAvailabilityDisposition;
         use tools::types::BehaviorId;
 
@@ -866,12 +964,28 @@ impl SessionActor {
         // against the old Behavior after the new one was committed.
         let support = self.behavior_capability_support().await;
         let mut workflow_admission = self.workflow_manager.lock().await;
+        let mut foreground_admission = self.state.lock().await;
+        if expected_revision
+            .is_some_and(|revision| revision != foreground_admission.behavior_control_revision)
+        {
+            return BehaviorApplication::disposition(Ok(BehaviorChangeOutcome::Superseded));
+        }
+        let admission_facts =
+            Self::capture_behavior_admission_facts(&foreground_admission, expected_revision);
         let availability = {
             let workflow_tracker = workflow_admission.tracker();
             let workflow_tracker = workflow_tracker.lock();
-            self.behavior_availability_from_tracker(&workflow_tracker, support)
+            self.behavior_availability_from_tracker(
+                &workflow_tracker,
+                support,
+                authority,
+                admission_facts.clone(),
+            )
         };
         let previous_behavior = availability.current;
+        if !admission_facts.termination_open {
+            return BehaviorApplication::cancelled_by_shutdown();
+        }
         let Some(mode) = BehaviorId::try_from_id(session_mode_id.0.as_ref()) else {
             let message = format!(
                 "Unknown Behavior id: {}. Agent Roles must be selected through the Agent interface.",
@@ -890,7 +1004,7 @@ impl SessionActor {
                 message,
             }));
         };
-        let Some(choice) = availability.choice(mode) else {
+        let Some(choice) = availability.choice(mode).cloned() else {
             let message = format!("{} behavior is unavailable.", mode.display_label());
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(previous_behavior.as_id()),
@@ -907,71 +1021,11 @@ impl SessionActor {
         };
 
         // Confirmation is durable control-plane intent, not a side effect of
-        // an inadmissible request. Reject a busy foreground before touching
-        // the coordinator's confirmation latch.
-        let mut foreground_admission = self.state.lock().await;
-        if expected_revision
-            .is_some_and(|revision| revision != foreground_admission.behavior_control_revision)
-        {
-            return BehaviorApplication::disposition(Ok(BehaviorChangeOutcome::Superseded));
-        }
-        let host_control_turn = foreground_admission
-            .foreground
-            .regular()
-            .is_some_and(|turn| turn.origin == crate::session::PromptOrigin::HostCommand);
-        let goal_control_turn = allow_out_of_band_goal_entry
-            && mode == BehaviorId::Goal
-            && matches!(previous_behavior, BehaviorId::Normal | BehaviorId::Clarify)
-            && foreground_admission.foreground.regular().is_some();
-        let owns_behavior_foreground = expected_revision.is_some()
-            && foreground_admission.behavior_control_foreground_claimed
-            && matches!(
-                foreground_admission.foreground,
-                ForegroundState::ApplyingControl
-            );
-        if !owns_behavior_foreground && !foreground_admission.pending_step_controls.is_empty() {
-            let message = format!(
-                "{} Behavior cannot overtake an earlier model or Agent control. Retry after the current step reaches its boundary.",
-                mode.display_label()
-            );
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(previous_behavior.as_id()),
-                serde_json::json!({
-                    "status": "rejected",
-                    "source": previous_behavior.as_id(),
-                    "target": mode.as_id(),
-                    "message": message,
-                }),
-            );
-            return BehaviorApplication::disposition(Ok(BehaviorChangeOutcome::Rejected {
-                message,
-            }));
-        }
-        if !foreground_admission.foreground.is_idle()
-            && !owns_behavior_foreground
-            && !host_control_turn
-            && !goal_control_turn
-        {
-            let message = format!(
-                "Stop the active foreground work before selecting {} Behavior.",
-                mode.display_label()
-            );
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(previous_behavior.as_id()),
-                serde_json::json!({
-                    "status": "rejected",
-                    "source": previous_behavior.as_id(),
-                    "target": mode.as_id(),
-                    "message": message,
-                }),
-            );
-            return BehaviorApplication::disposition(Ok(BehaviorChangeOutcome::Rejected {
-                message,
-            }));
-        }
+        // an inadmissible request. The shared assessment above rejects every
+        // busy or otherwise unavailable transition before this latch can move.
         if choice.disposition == BehaviorAvailabilityDisposition::ConfirmationRequired
             && confirmation_owner.is_none()
-            && !trusted_internal_confirmation
+            && authority == crate::session::behavior::BehaviorRequestAuthority::Picker
         {
             let message = format!(
                 "Switching to {} requires a client-scoped control intent; retry from a client that supports Grow control intents.",
@@ -990,21 +1044,9 @@ impl SessionActor {
                 message,
             }));
         }
-        let decision = self.behavior.lock().decide_switch_owned(
+        let decision = self.behavior.lock().decide_assessed_switch_owned(
             mode,
-            BehaviorSwitchFacts {
-                unavailable_reason: (choice.disposition
-                    == BehaviorAvailabilityDisposition::Unavailable)
-                    .then(|| {
-                        choice.reason.clone().unwrap_or_else(|| {
-                            format!("{} behavior is unavailable.", mode.display_label())
-                        })
-                    }),
-                active_goal: false,
-                public_workflow_active: false,
-                source_owned_work_active: choice.disposition
-                    == BehaviorAvailabilityDisposition::ConfirmationRequired,
-            },
+            choice,
             std::time::Duration::from_secs(8),
             confirmation_owner,
         );
@@ -1076,9 +1118,12 @@ impl SessionActor {
                     ),
                 ));
             }
-        } else if let Some(intent) = control_intent
-            && let Err(error) = self
+        } else if let Some(intent) = control_intent {
+            let (behavior, goal) = self.capture_control_authorities();
+            if let Err(error) = self
                 .persist_applied_control_receipt_durably(
+                    behavior,
+                    goal,
                     crate::extensions::notification::ControlDomain::Behavior,
                     crate::extensions::notification::ControlTarget::Behavior {
                         behavior_id: mode.as_id().to_owned(),
@@ -1086,13 +1131,14 @@ impl SessionActor {
                     intent.clone(),
                 )
                 .await
-        {
-            return BehaviorApplication::disposition(Err(
-                crate::session::commands::fatal_turn_boundary_error(
-                    "Behavior control",
-                    format!("Behavior acknowledgement was not persisted: {error}"),
-                ),
-            ));
+            {
+                return BehaviorApplication::disposition(Err(
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "Behavior control",
+                        format!("Behavior acknowledgement was not persisted: {error}"),
+                    ),
+                ));
+            }
         }
 
         // Publish the new ownership identity before either admission lock is
@@ -1181,6 +1227,7 @@ impl SessionActor {
     /// stale state.
     pub(super) async fn record_control_snapshot_durably(&self) -> std::io::Result<()> {
         let _transaction = self.goal_transaction_gate.lock().await;
+        let (behavior, goal) = self.capture_control_authorities();
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1188,8 +1235,8 @@ impl SessionActor {
         let snapshot = crate::session::control::SessionControlSnapshot::new(
             revision,
             self.agent.borrow().definition().selector_identity(),
-            self.behavior.lock().snapshot(),
-            self.goal_tracker.lock().snapshot().cloned(),
+            behavior,
+            goal,
         );
         let kind = snapshot.timeline_kind()?;
         self.chat_state_handle

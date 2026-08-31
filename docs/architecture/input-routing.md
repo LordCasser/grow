@@ -14,6 +14,8 @@ Goal's future continuation right, watchers, and background tasks do not occupy t
 
 The pager mirrors shell state. It does not infer ownership from Goal status, prompt text, token count, or prompt-id prefixes.
 
+Pager crash recovery owns only input that has not crossed an ACP prompt RPC. Its versioned local draft store is keyed by bound session identity, or by canonical cwd before binding, and persists the normal composer, cursor/chip metadata, deferred Behavior latch, and at most one plain staged prompt. A restored staged prompt returns to the composer and is never enqueued or auto-sent. Modal inputs, expanded commands, Shell state, and temporary image paths never enter this store; image-bearing or ambiguous multi-prompt state fails closed. Starting either text or structured-block prompt RPC atomically disarms the in-memory draft and removes both the current cwd/session key and the request's session key. This local cache is not Timeline and never becomes a second input authority.
+
 Behavior capability follows the same ownership rule. Once the Shell publishes
 `grow/behaviorAvailability`, Pager settings, pickers, and transition guards all
 consume that projection. The advertised command catalog is an execution and
