@@ -978,7 +978,7 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
 pub(super) fn validate_string(
     validator: StringValidator,
     buffer: &str,
-    available_models: &[(String, agent_client_protocol::ModelId)],
+    available_models: &[(String, shell::agent::models::ModelId)],
 ) -> Option<String> {
     match validator {
         StringValidator::Any => None,

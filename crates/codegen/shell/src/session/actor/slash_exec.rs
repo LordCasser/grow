@@ -1432,9 +1432,11 @@ impl SessionActor {
                     self.behavior
                         .lock()
                         .select_behavior(tool_types::BehaviorId::Normal);
-                    self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                        tools::types::BehaviorId::Normal.as_id(),
-                    ));
+                    self.enqueue_current_mode_update(
+                        agent_client_protocol::schema::v1::SessionModeId::new(
+                            tools::types::BehaviorId::Normal.as_id(),
+                        ),
+                    );
                 }
                 drop(transaction);
                 drop(boundary);

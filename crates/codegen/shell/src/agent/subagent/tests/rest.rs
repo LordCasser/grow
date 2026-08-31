@@ -910,7 +910,7 @@ fn ctx_with_parent_chat_state(
     available_models: indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
 ) -> SubagentSpawnContext {
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new(session_model_id);
+    ctx.model_id = crate::agent::models::ModelId::new(session_model_id);
     ctx.sampling_config.base_url = "https://api.test/v1".into();
     ctx.sampling_config.model = inference_slug.into();
     ctx.sampling_config.context_window = 256_000;
@@ -919,7 +919,7 @@ fn ctx_with_parent_chat_state(
     ctx.delegation_chat_state = Some(chat_state);
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         available_models.clone(),
-        acp::ModelId::new(global_model_id),
+        crate::agent::models::ModelId::new(global_model_id),
         crate::agent::config::Config::default(),
     );
     ctx.available_models = available_models;
@@ -970,14 +970,14 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
         test_model_entry("composer-2-fast"),
     );
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new("anthropic/composer-2-fast");
+    ctx.model_id = crate::agent::models::ModelId::new("anthropic/composer-2-fast");
     ctx.parent_chat_state = None;
     ctx.delegation_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         indexmap::IndexMap::new(),
-        acp::ModelId::new("deepseek/grow-4.5"),
+        crate::agent::models::ModelId::new("deepseek/grow-4.5"),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
@@ -1035,14 +1035,14 @@ async fn read_parent_sampling_config_without_chat_state_keeps_route_compaction_p
     let mut models = indexmap::IndexMap::new();
     models.insert("anthropic/composer-2-fast".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new("anthropic/composer-2-fast");
+    ctx.model_id = crate::agent::models::ModelId::new("anthropic/composer-2-fast");
     ctx.parent_chat_state = None;
     ctx.delegation_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.sampling_config.compactions_remaining = Some(CompactionsRemaining::Dynamic(false));
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         models,
-        acp::ModelId::new("anthropic/composer-2-fast"),
+        crate::agent::models::ModelId::new("anthropic/composer-2-fast"),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
@@ -1107,7 +1107,7 @@ async fn fork_context_pins_parent_model_over_overrides() {
     let build_ctx = || {
         let mut ctx = ctx_with_toggle(HashMap::new());
         ctx.sampling_config.model = "parent-model".to_string();
-        ctx.model_id = acp::ModelId::new("parent-model");
+        ctx.model_id = crate::agent::models::ModelId::new("parent-model");
         ctx.available_models
             .insert("parent-model".to_string(), test_model_entry("parent-model"));
         ctx.available_models
@@ -1153,7 +1153,7 @@ async fn resolve_subagent_inherits_parent_model_without_pins() {
     for parent_model in ["grow-4.5", "composer-2-fast", "my-custom-byok-model"] {
         let mut ctx = ctx_with_toggle(HashMap::new());
         ctx.sampling_config.model = parent_model.to_string();
-        ctx.model_id = acp::ModelId::new(parent_model);
+        ctx.model_id = crate::agent::models::ModelId::new(parent_model);
         let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)
             .await
             .unwrap();
@@ -1173,7 +1173,7 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
     for parent_model in ["grow-4.5", "composer-2-fast"] {
         let mut ctx = ctx_with_toggle(HashMap::new());
         ctx.sampling_config.model = parent_model.to_string();
-        ctx.model_id = acp::ModelId::new(parent_model);
+        ctx.model_id = crate::agent::models::ModelId::new(parent_model);
         ctx.available_models
             .insert("pinned-model".to_string(), test_model_entry("pinned-model"));
         ctx.subagent_model_overrides
@@ -1219,7 +1219,7 @@ async fn subagent_override_uses_provider_qualified_identity() {
 async fn resolve_subagent_config_override_unknown_model_fails_closed() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.sampling_config.model = "grow-4.5".to_string();
-    ctx.model_id = acp::ModelId::new("grow-4.5");
+    ctx.model_id = crate::agent::models::ModelId::new("grow-4.5");
     ctx.subagent_model_overrides
         .insert("explore".to_string(), "does-not-exist".to_string());
     let error = resolve_subagent_sampling_config("explore", &ctx)
@@ -1244,7 +1244,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     models.insert("proxied".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.sampling_config.model = "grow-4.5".to_string();
-    ctx.model_id = acp::ModelId::new("grow-4.5");
+    ctx.model_id = crate::agent::models::ModelId::new("grow-4.5");
     ctx.available_models = models;
     ctx.subagent_model_overrides.insert("explore".to_string(), "proxied".to_string());
     let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx)

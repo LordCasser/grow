@@ -4,7 +4,7 @@ use crate::sampling::SamplingClient;
 use crate::session::info::Info;
 use crate::session::{SessionActor, sideband::SidebandSource};
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 pub(crate) struct SessionTitleRoute {
     client: SamplingClient,

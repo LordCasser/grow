@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, simplex};
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::time::Duration;
@@ -175,8 +175,8 @@ pub(crate) async fn run_auto_update_checker(
 fn spawn_agent_local(
     agent_config: AgentConfig,
     memory_config: Option<crate::config::MemoryConfig>,
-    outgoing: impl futures::AsyncWrite + Unpin + 'static,
-    incoming: impl futures::AsyncRead + Unpin + 'static,
+    outgoing: impl futures::AsyncWrite + Unpin + Send + 'static,
+    incoming: impl futures::AsyncRead + Unpin + Send + 'static,
 ) -> impl std::future::Future<Output = Result<(), acp::Error>> {
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
@@ -185,7 +185,7 @@ fn spawn_agent_local(
         agent.set_memory_config(mc);
     }
     let incoming = LineBufferedRead::spawn_local(incoming);
-    let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
+    let (conn, handle_io) = acp_transport::connect_agent_v1(agent, outgoing, incoming, |fut| {
         tokio::task::spawn_local(fut);
     });
     tokio::task::spawn_local(GatewayReceiver::new(gw_rx, conn).run());
@@ -638,7 +638,7 @@ pub async fn run_leader(
                 }
                 let incoming = LineBufferedRead::spawn_local(incoming);
                 let (conn, handle_io) =
-                    acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
+                    acp_transport::connect_agent_v1(agent, outgoing, incoming, |fut| {
                         tokio::task::spawn_local(fut);
                     });
                 tokio::task::spawn_local(

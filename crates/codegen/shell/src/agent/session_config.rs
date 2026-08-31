@@ -1,19 +1,12 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use sampling_types::{ReasoningEffort, ReasoningEffortOption};
 use serde::Serialize;
 
+use crate::agent::models::{ModelId, ModelInfo};
 use crate::session::unified_list::SessionKind;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionConfigOption {
-    pub id: String,
-    pub category: String,
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub selected: bool,
-}
+pub const MODEL_CONFIG_ID: &str = "model";
+pub const REASONING_EFFORT_CONFIG_ID: &str = "reasoning_effort";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,36 +37,53 @@ impl GrowSessionDetail {
 }
 
 pub(crate) fn build_session_config_options(
-    available_models: &[acp::ModelInfo],
-    current_model_id: &acp::ModelId,
+    available_models: &[ModelInfo],
+    current_model_id: &ModelId,
     effort_options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,
-) -> Vec<SessionConfigOption> {
-    let mut options = Vec::with_capacity(available_models.len() + effort_options.len());
+) -> Vec<acp::SessionConfigOption> {
+    let models = available_models
+        .iter()
+        .map(|model| {
+            let label = if model.name.is_empty() {
+                model.model_id.0.to_string()
+            } else {
+                model.name.clone()
+            };
+            acp::SessionConfigSelectOption::new(model.model_id.0.clone(), label)
+                .description(model.description.clone())
+                .meta(model.meta.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut options = vec![
+        acp::SessionConfigOption::select(
+            MODEL_CONFIG_ID,
+            "Model",
+            current_model_id.0.clone(),
+            models,
+        )
+        .category(acp::SessionConfigOptionCategory::Model),
+    ];
 
-    for model in available_models {
-        let label = if model.name.is_empty() {
-            model.model_id.0.to_string()
-        } else {
-            model.name.clone()
-        };
-        options.push(SessionConfigOption {
-            id: model.model_id.0.to_string(),
-            category: "model".to_string(),
-            label,
-            description: None,
-            selected: model.model_id == *current_model_id,
-        });
-    }
-
-    for effort in effort_options {
-        options.push(SessionConfigOption {
-            id: effort.id.clone(),
-            category: "mode".to_string(),
-            label: effort.label.clone(),
-            description: effort.description.clone(),
-            selected: Some(effort.value) == current_effort,
-        });
+    if let Some(current_effort) = current_effort {
+        let efforts = effort_options
+            .iter()
+            .map(|effort| {
+                acp::SessionConfigSelectOption::new(effort.id.clone(), effort.label.clone())
+                    .description(effort.description.clone())
+            })
+            .collect::<Vec<_>>();
+        if !efforts.is_empty() {
+            options.push(
+                acp::SessionConfigOption::select(
+                    REASONING_EFFORT_CONFIG_ID,
+                    "Reasoning effort",
+                    current_effort.as_str(),
+                    efforts,
+                )
+                .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+            );
+        }
     }
 
     options
@@ -83,8 +93,8 @@ pub(crate) fn build_session_config_options(
 mod tests {
     use super::*;
 
-    fn model(id: &'static str, name: &str) -> acp::ModelInfo {
-        acp::ModelInfo::new(acp::ModelId::new(id), name.to_string())
+    fn model(id: &'static str, name: &str) -> ModelInfo {
+        ModelInfo::new(ModelId::new(id), name.to_string())
     }
 
     fn efforts(values: &[ReasoningEffort]) -> Vec<ReasoningEffortOption> {
@@ -99,71 +109,42 @@ mod tests {
     }
 
     #[test]
-    fn options_have_one_selected_model_and_a_mode_per_effort() {
+    fn builds_stable_model_and_reasoning_selectors() {
         let models = [model("grow-build", "Grow"), model("grow-4.5", "Grow 4.5")];
-        let current = acp::ModelId::from("grow-build");
+        let current = ModelId::from("grow-build");
         let menu = efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
-        let opts =
+        let options =
             build_session_config_options(&models, &current, &menu, Some(ReasoningEffort::High));
 
-        let model_opts: Vec<_> = opts.iter().filter(|o| o.category == "model").collect();
-        assert_eq!(model_opts.len(), 2);
-        let selected_models: Vec<_> = model_opts.iter().filter(|o| o.selected).collect();
-        assert_eq!(selected_models.len(), 1);
-        assert_eq!(selected_models[0].id, "grow-build");
-
-        let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
-        assert_eq!(mode_opts.len(), menu.len());
-        let selected_modes: Vec<_> = mode_opts.iter().filter(|o| o.selected).collect();
-        assert_eq!(selected_modes.len(), 1);
-        assert_eq!(selected_modes[0].id, "high");
-        assert_eq!(selected_modes[0].label, "High");
-    }
-
-    #[test]
-    fn undeclared_current_effort_does_not_create_a_mode() {
-        let models = [model("grow-build", "Grow")];
-        let current = acp::ModelId::from("grow-build");
-        let menu = efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
-        let opts =
-            build_session_config_options(&models, &current, &menu, Some(ReasoningEffort::None));
-        let modes: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
-        assert!(modes.iter().all(|o| o.id != "none"));
-        assert!(modes.iter().all(|o| !o.selected));
-    }
-
-    #[test]
-    fn no_mode_options_when_model_lacks_effort_support() {
-        let models = [model("grow-build", "Grow")];
-        let current = acp::ModelId::from("grow-build");
-        let opts = build_session_config_options(&models, &current, &[], None);
-        assert_eq!(opts.len(), 1);
-        assert!(opts.iter().all(|o| o.category == "model"));
-    }
-
-    #[test]
-    fn model_label_falls_back_to_id_when_name_empty() {
-        let models = [model("grow-build", "")];
-        let current = acp::ModelId::from("grow-build");
-        let opts = build_session_config_options(&models, &current, &[], None);
-        assert_eq!(opts[0].label, "grow-build");
-    }
-
-    #[test]
-    fn session_config_option_serializes_camel_case() {
-        let opt = SessionConfigOption {
-            id: "grow-build".to_string(),
-            category: "model".to_string(),
-            label: "Grow".to_string(),
-            description: None,
-            selected: true,
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id.0.as_ref(), MODEL_CONFIG_ID);
+        assert_eq!(options[1].id.0.as_ref(), REASONING_EFFORT_CONFIG_ID);
+        let acp::SessionConfigKind::Select(model_select) = &options[0].kind else {
+            panic!("model config must be a select")
         };
-        let v = serde_json::to_value(&opt).expect("serialize");
-        assert_eq!(v["id"], "grow-build");
-        assert_eq!(v["category"], "model");
-        assert_eq!(v["label"], "Grow");
-        assert_eq!(v["selected"], true);
-        assert!(v.get("description").is_none());
+        assert_eq!(model_select.current_value.0.as_ref(), "grow-build");
+        let acp::SessionConfigKind::Select(effort_select) = &options[1].kind else {
+            panic!("effort config must be a select")
+        };
+        assert_eq!(effort_select.current_value.0.as_ref(), "high");
+    }
+
+    #[test]
+    fn omits_reasoning_selector_without_a_current_effort() {
+        let models = [model("grow-build", "Grow")];
+        let current = ModelId::from("grow-build");
+        let menu = efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
+        let options = build_session_config_options(&models, &current, &menu, None);
+        assert_eq!(options.len(), 1);
+    }
+
+    #[test]
+    fn model_label_falls_back_to_id() {
+        let models = [model("grow-build", "")];
+        let current = ModelId::from("grow-build");
+        let options = build_session_config_options(&models, &current, &[], None);
+        let value = serde_json::to_value(&options[0]).expect("serialize");
+        assert_eq!(value["options"][0]["name"], "grow-build");
     }
 
     #[test]
@@ -174,11 +155,11 @@ mod tests {
             "grow-build".to_string(),
             None,
         );
-        let v = serde_json::to_value(&detail).expect("serialize");
-        assert_eq!(v["sessionId"], "sess-1");
-        assert_eq!(v["kind"], "build");
-        assert_eq!(v["cwd"], "/Users/me/grow");
-        assert_eq!(v["currentModelId"], "grow-build");
-        assert!(v.get("title").is_none());
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["sessionId"], "sess-1");
+        assert_eq!(value["kind"], "build");
+        assert_eq!(value["cwd"], "/Users/me/grow");
+        assert_eq!(value["currentModelId"], "grow-build");
+        assert!(value.get("title").is_none());
     }
 }

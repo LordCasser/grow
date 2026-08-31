@@ -16,7 +16,7 @@ use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
     CompactionOutcome, build_compaction_request_surface, is_context_length_error,
 };
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chat_state::compaction_utils::{
     is_degenerate_summary, plan_compaction_range, prepare_conversation_for_verbatim_summarization,
 };

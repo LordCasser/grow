@@ -95,7 +95,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ::mcp::servers::{McpClientEventKind, McpServerName};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use async_trait::async_trait;
 
 use crate::session::mcp_dispatcher::{
@@ -171,7 +171,7 @@ impl SkipReason {
 ///
 /// `?Send` matches the session actor's LocalSet: the production impl
 /// holds `Arc<SessionActor>` (!Send) and the dispatcher's
-/// `AcpAgentGatewaySender` (!Send via `acp::AgentSideConnection`).
+/// `AcpAgentGatewaySender` (!Send via `acp_transport::AgentSideConnection`).
 /// Both [`maybe_schedule_restart`] and [`auto_restart_stdio`] call
 /// `tokio::task::spawn_local` directly, which **panics** at runtime
 /// if invoked outside a `LocalSet`. Callers MUST drive these

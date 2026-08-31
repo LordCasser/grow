@@ -160,19 +160,19 @@ mod tests {
     use crate::app::actions::Action;
     use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
     use crate::slash::registry::CommandRegistry;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     /// Build a ModelState with two models for testing.
     fn sample_models() -> ModelState {
         let mut models = ModelState::default();
-        let id_fast = acp::ModelId::new(Arc::from("grow-4.5"));
+        let id_fast = shell::agent::models::ModelId::new(Arc::from("grow-4.5"));
         models.available.insert(
             id_fast.clone(),
-            acp::ModelInfo::new(id_fast.clone(), "Grow 4.5".to_string()),
+            shell::agent::models::ModelInfo::new(id_fast.clone(), "Grow 4.5".to_string()),
         );
-        let id_pro = acp::ModelId::new(Arc::from("grow-4.3"));
+        let id_pro = shell::agent::models::ModelId::new(Arc::from("grow-4.3"));
         models.available.insert(
             id_pro.clone(),
-            acp::ModelInfo::new(id_pro.clone(), "Grow 4.3".to_string()),
+            shell::agent::models::ModelInfo::new(id_pro.clone(), "Grow 4.3".to_string()),
         );
         models.current = Some(id_fast);
         models

@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod code_nav;
+pub mod coordination;
 pub mod debug;
 pub mod feedback;
 pub mod fs;
@@ -32,7 +33,7 @@ pub mod terminal;
 pub mod usage;
 pub mod worktree;
 use crate::session::ExtMethodResult;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;

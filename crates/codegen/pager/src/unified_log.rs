@@ -8,7 +8,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use acp_transport::AcpAgentTx;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use diagnostics::unified_log::{
     ClientLogEntry, LOG_METHOD, LogLevel, LogNotificationParams, LogSource,
 };

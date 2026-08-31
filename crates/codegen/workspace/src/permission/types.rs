@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -378,7 +378,8 @@ impl AccessKind {
             | ToolInput::MemoryGet(_)
             | ToolInput::ContextRecall(_)
             | ToolInput::GetGoal(_)
-            | ToolInput::SchedulerList(_) => AccessKind::Read(None),
+            | ToolInput::SchedulerList(_)
+            | ToolInput::ListActiveSessions(_) => AccessKind::Read(None),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
@@ -409,6 +410,7 @@ impl AccessKind {
             | ToolInput::SchedulerDelete(_)
             | ToolInput::CreateGoal(_)
             | ToolInput::UpdateGoal(_)
+            | ToolInput::AskSession(_)
             | ToolInput::Workflow(_) => AccessKind::InternalControl {
                 name: tool_name.to_owned(),
             },

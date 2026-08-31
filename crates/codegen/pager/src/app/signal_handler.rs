@@ -22,7 +22,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::ScreenMode;
 

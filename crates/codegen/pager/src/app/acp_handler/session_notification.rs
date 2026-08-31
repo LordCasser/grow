@@ -654,7 +654,7 @@ fn handle_session_notification_inner(
                     child_view
                         .session
                         .models
-                        .set_current(acp::ModelId::new(model_id), None);
+                        .set_current(shell::agent::models::ModelId::new(model_id), None);
                 }
                 child_view.session.cwd = effective_child_cwd;
                 child_view.session.permission_mode = effective_permission_mode
@@ -693,7 +693,7 @@ fn handle_session_notification_inner(
                     if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
                         session
                             .models
-                            .set_current(acp::ModelId::new(model_id), None);
+                            .set_current(shell::agent::models::ModelId::new(model_id), None);
                     }
                     session.workflow_agent_names = workflow_agent_names;
                     session.apply_agent_name(Some(subagent_type.clone()));
@@ -1522,7 +1522,7 @@ fn apply_model_changed(
     reasoning_effort: Option<String>,
 ) -> Option<bool> {
     use shell::sampling::types::ReasoningEffort;
-    let new_model_id = acp::ModelId::new(model_id.clone());
+    let new_model_id = shell::agent::models::ModelId::new(model_id.clone());
     let effort = reasoning_effort
         .as_deref()
         .and_then(|value| value.parse::<ReasoningEffort>().ok());

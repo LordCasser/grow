@@ -404,7 +404,7 @@ mod rss {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use agent_client_protocol::{self as acp};
+    use agent_client_protocol::schema::v1 as acp;
 
     use test_support::resources::ResourceSnapshot;
 
@@ -619,7 +619,7 @@ mod rss {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl acp::Client for CountingClient {
+    impl acp_transport::AcpClientHandler for CountingClient {
         async fn request_permission(
             &self,
             args: acp::RequestPermissionRequest,

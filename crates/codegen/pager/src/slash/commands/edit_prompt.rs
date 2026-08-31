@@ -48,7 +48,7 @@ mod tests {
     fn exec_ctx<'a>(
         models: &'a ModelState,
         bundle: &'a BundleState,
-        session_id: Option<&'a agent_client_protocol::SessionId>,
+        session_id: Option<&'a agent_client_protocol::schema::v1::SessionId>,
         mode: crate::app::ScreenMode,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
@@ -65,7 +65,7 @@ mod tests {
         let command = EditPromptCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let session_id = agent_client_protocol::SessionId::from("session".to_owned());
+        let session_id = agent_client_protocol::schema::v1::SessionId::from("session".to_owned());
 
         assert!(matches!(
             command.run(

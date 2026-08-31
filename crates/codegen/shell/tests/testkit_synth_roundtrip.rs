@@ -6,7 +6,7 @@
 //! (only Grow extension updates are dropped); the redundant-ACU skip is a later
 //! line-based step in the client replay path, not asserted here.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tempfile::TempDir;
 
 use shell::session::storage::{JsonlStorageAdapter, load_updates_for_replay_at};

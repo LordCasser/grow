@@ -1031,7 +1031,7 @@ impl PromptWidget {
     /// is not yet known; tool-gated commands stay visible.
     pub fn sync_acp_commands(
         &mut self,
-        commands: &[agent_client_protocol::AvailableCommand],
+        commands: &[agent_client_protocol::schema::v1::AvailableCommand],
         tools: Option<&std::collections::HashSet<String>>,
         models: &crate::acp::model_state::ModelState,
     ) {

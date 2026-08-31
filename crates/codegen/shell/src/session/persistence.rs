@@ -11,7 +11,7 @@ use crate::session::signals::SessionSignals;
 use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
 use crate::util::grow_home::grow_home;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use sampling_types::ReasoningEffort;
 
 use crate::session::info::Info;
@@ -37,8 +37,8 @@ pub(crate) const MODEL_CHANGE_NAME: &str = "changed";
 /// retained as diagnostics because one catalog entry can change its wire
 /// route. `summary.json` is only a projection of the `to_*` fields.
 pub(crate) fn model_change_event(
-    previous_model_id: &acp::ModelId,
-    model_id: &acp::ModelId,
+    previous_model_id: &crate::agent::models::ModelId,
+    model_id: &crate::agent::models::ModelId,
     previous_reasoning_effort: Option<ReasoningEffort>,
     reasoning_effort: Option<ReasoningEffort>,
     previous_provider_model: &str,
@@ -74,7 +74,7 @@ pub(crate) fn model_change_event(
 /// facts fail session load instead of silently trusting a stale summary.
 pub(crate) fn latest_model_selection(
     events: &[chat_state::TimelineEvent],
-) -> io::Result<Option<(acp::ModelId, Option<ReasoningEffort>)>> {
+) -> io::Result<Option<(crate::agent::models::ModelId, Option<ReasoningEffort>)>> {
     let mut latest: Option<(
         String,
         Option<ReasoningEffort>,
@@ -175,7 +175,7 @@ pub(crate) fn latest_model_selection(
         }
         latest = Some((to_model, to_effort, to_provider, to_transport));
     }
-    Ok(latest.map(|(model, effort, _, _)| (acp::ModelId::new(model), effort)))
+    Ok(latest.map(|(model, effort, _, _)| (crate::agent::models::ModelId::new(model), effort)))
 }
 
 pub(crate) fn durable_model_control_receipts(
@@ -295,7 +295,7 @@ pub enum PersistenceMsg {
         respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
     },
     CurrentModel {
-        model_id: acp::ModelId,
+        model_id: crate::agent::models::ModelId,
         /// The active agent definition name (e.g. `"grow-build"`).
         /// Persisted in `summary.agent_name` so session resume doesn't depend
         /// on the mutable model catalog.
@@ -997,7 +997,7 @@ pub struct Summary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub num_messages: usize,
-    pub current_model_id: acp::ModelId,
+    pub current_model_id: crate::agent::models::ModelId,
     /// Parent session ID if this session was forked from another session
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
@@ -1105,8 +1105,8 @@ pub fn grow_home_string() -> Option<String> {
         .map(String::from)
 }
 
-pub fn default_model_id() -> acp::ModelId {
-    acp::ModelId::new(String::new())
+pub fn default_model_id() -> crate::agent::models::ModelId {
+    crate::agent::models::ModelId::new(String::new())
 }
 
 impl Summary {
@@ -1169,7 +1169,7 @@ impl Summary {
         Ok(())
     }
 
-    pub fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
+    pub fn new(info: &Info, model_id: crate::agent::models::ModelId) -> std::io::Result<Self> {
         let git_metadata = workspace::session::git::resolve_persisted_session_git_metadata_sync(
             std::path::Path::new(&info.cwd),
         );
@@ -2169,7 +2169,7 @@ const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 
 pub(crate) async fn new(
     info: &Info,
-    model_id: acp::ModelId,
+    model_id: crate::agent::models::ModelId,
     gateway: Option<GatewaySender>,
 ) -> io::Result<PersistenceHandle> {
     let root_dir = grow_home();
@@ -2212,7 +2212,7 @@ pub(crate) async fn new(
 /// every other session; only gateway lifecycle projection is omitted.
 pub(crate) async fn new_child(
     info: &Info,
-    model_id: acp::ModelId,
+    model_id: crate::agent::models::ModelId,
     lineage: SessionLineage,
     initial_surface: Vec<ConversationItem>,
     initial_prompt_blobs: ImmutablePromptBlobs,

@@ -654,7 +654,7 @@ fn make_test_handle_with_receiver(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_route: crate::session::handle::SessionModelRoute::new(
-            acp::ModelId::new(model),
+            crate::agent::models::ModelId::new(model),
             sampler::SamplerConfig {
                 model: model.to_owned(),
                 ..Default::default()
@@ -695,7 +695,7 @@ fn make_test_handle_with_receiver(
 async fn lookup_session_model_returns_per_session_model() {
     let sid_a = acp::SessionId::new("sess-a");
     let sid_b = acp::SessionId::new("sess-b");
-    let default_model = acp::ModelId::new("default-model");
+    let default_model = crate::agent::models::ModelId::new("default-model");
     let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
         (sid_a.clone(), make_test_handle("grow-3-fast", None)),
         (sid_b.clone(), make_test_handle("grow-mini", None)),
@@ -717,7 +717,7 @@ async fn lookup_session_model_returns_per_session_model() {
 /// lookup_session_model falls back to the default when session_id is None.
 #[tokio::test]
 async fn lookup_session_model_fallback_no_session() {
-    let default_model = acp::ModelId::new("grow-3");
+    let default_model = crate::agent::models::ModelId::new("grow-3");
     let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = HashMap::new();
     assert_eq!(
         lookup_session_model(&sessions, None, &default_model)
@@ -731,7 +731,7 @@ async fn lookup_session_model_fallback_no_session() {
 async fn set_session_model_does_not_cross_contaminate() {
     let sid_a = acp::SessionId::new("sess-a");
     let sid_b = acp::SessionId::new("sess-b");
-    let default_model = acp::ModelId::new("default");
+    let default_model = crate::agent::models::ModelId::new("default");
     let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
         (sid_a.clone(), make_test_handle("grow-3", None)),
         (sid_b.clone(), make_test_handle("grow-3", None)),
@@ -747,7 +747,7 @@ async fn set_session_model_does_not_cross_contaminate() {
         .get(&sid_a)
         .unwrap()
         .model_route
-        .replace(acp::ModelId::new("grow-mini"), route);
+        .replace(crate::agent::models::ModelId::new("grow-mini"), route);
     assert_eq!(
         lookup_session_model(&sessions, Some(&sid_a), &default_model)
             .0
@@ -784,7 +784,7 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     agent
         .models_manager
         .insert_test_entry("effort-model", entry);
-    let read_effort = |state: &acp::SessionModelState| -> Option<String> {
+    let read_effort = |state: &crate::agent::models::SessionModelState| -> Option<String> {
         state
             .available_models
             .iter()
@@ -800,7 +800,7 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     route.reasoning_effort = Some(ReasoningEffort::Xhigh);
     handle
         .model_route
-        .replace(acp::ModelId::new("effort-model"), route);
+        .replace(crate::agent::models::ModelId::new("effort-model"), route);
     agent.sessions.borrow_mut().insert(pinned.clone(), handle);
     assert_eq!(
         read_effort(&agent.model_state(Some(&pinned))).as_deref(),
@@ -1188,7 +1188,7 @@ async fn set_session_mode_routes_to_a_live_child_actor() {
                     responds_to.send(Ok(crate::session::behavior::BehaviorChangeOutcome::Applied));
             });
 
-            let response = acp::Agent::set_session_mode(
+            let response = acp_transport::AcpAgentHandler::set_session_mode(
                 &agent,
                 acp::SetSessionModeRequest::new(child_id, acp::SessionModeId::new("plan")),
             )
@@ -1215,7 +1215,7 @@ async fn workflow_child_switch_uses_frozen_model_after_live_catalog_removal() {
             entry.info.base_url = "https://workflow-frozen.test.invalid/v1".to_owned();
             let frozen_manager = crate::agent::models::ModelsManager::new(
                 indexmap::IndexMap::from([("catalog/frozen".to_owned(), entry.clone())]),
-                acp::ModelId::new("catalog/frozen"),
+                crate::agent::models::ModelId::new("catalog/frozen"),
                 crate::agent::config::Config::default(),
             );
             let sampler = crate::agent::config::sampling_config_for_model(
@@ -1266,9 +1266,13 @@ async fn workflow_child_switch_uses_frozen_model_after_live_catalog_removal() {
                 )));
             });
 
-            let response = acp::Agent::set_session_model(
+            let response = acp_transport::AcpAgentHandler::set_session_config_option(
                 &agent,
-                acp::SetSessionModelRequest::new(session_id, acp::ModelId::new("catalog/frozen")),
+                acp::SetSessionConfigOptionRequest::new(
+                    session_id,
+                    crate::agent::session_config::MODEL_CONFIG_ID,
+                    acp::SessionConfigOptionValue::value_id("catalog/frozen"),
+                ),
             )
             .await;
             assert!(response.is_ok(), "frozen child switch failed: {response:?}");
@@ -1990,7 +1994,7 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     *agent.workspace_ops.borrow_mut() = Some(ops);
     agent.model_unavailable_sessions.borrow_mut().insert(
         sid.0.to_string(),
-        acp::ModelId::new(std::sync::Arc::from("gone-model")),
+        crate::agent::models::ModelId::new(std::sync::Arc::from("gone-model")),
     );
     agent.set_turn_number(&sid, 3);
     agent
@@ -2021,7 +2025,7 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
 /// the routing hook is skipped in local mode.
 #[test]
 fn ext_method_rewind_uses_local_dispatch_without_bridge() {
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let params = serde_json::json!({ "sessionId": "sess-local" });
@@ -2035,10 +2039,80 @@ fn ext_method_rewind_uses_local_dispatch_without_bridge() {
         assert_eq!(err.code, acp::Error::resource_not_found(None).code);
     });
 }
+
+#[test]
+fn coordination_extensions_reject_forged_source_sessions() {
+    use acp_transport::AcpAgentHandler as _;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let cases = [
+            (
+                "grow/coordination/list",
+                serde_json::json!({"sourceSessionId": "forged"}),
+            ),
+            (
+                "grow/coordination/ask",
+                serde_json::json!({
+                    "inquiryId": uuid::Uuid::now_v7().to_string(),
+                    "sourceSessionId": "forged",
+                    "targetSessionId": "target",
+                    "question": "What are you changing?",
+                }),
+            ),
+            (
+                "grow/coordination/cancel",
+                serde_json::json!({
+                    "inquiryId": uuid::Uuid::now_v7().to_string(),
+                    "sourceSessionId": "forged",
+                    "targetSessionId": "target",
+                }),
+            ),
+        ];
+        for (method, params) in cases {
+            let error = agent
+                .ext_method(acp::ExtRequest::new(
+                    method,
+                    std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+                ))
+                .await
+                .expect_err("forged source session must fail closed");
+            assert_eq!(error.code, acp::Error::invalid_params().code, "{method}");
+        }
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn initialize_advertises_stable_v1_coordination_capability() {
+    use test_support::EnvGuard;
+
+    let grow_home = tempfile::tempdir().unwrap();
+    let _environment = EnvGuard::set("GROW_HOME", grow_home.path());
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let response = acp_transport::AcpAgentHandler::initialize(
+            &agent,
+            acp::InitializeRequest::new(acp::ProtocolVersion::V1),
+        )
+        .await
+        .expect("initialize succeeds");
+        assert_eq!(response.protocol_version, acp::ProtocolVersion::V1);
+        let coordination = response
+            .agent_capabilities
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("grow/coordination"))
+            .expect("coordination capability");
+        assert_eq!(coordination["version"], 1);
+        assert_eq!(coordination["operations"], serde_json::json!(["list", "ask", "cancel"]));
+        assert_eq!(coordination["localOnly"], true);
+        assert_eq!(coordination["audit"], true);
+    });
+}
 #[test]
 fn cancel_does_not_forward_to_bridge_in_local_mode() {
     use crate::session::SessionCommand;
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-local");
@@ -2066,7 +2140,7 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
 #[test]
 fn cancel_forwards_pause_goal_meta() {
     use crate::session::SessionCommand;
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-pause");
@@ -2117,7 +2191,7 @@ fn cancel_forwards_pause_goal_meta() {
 #[test]
 fn cancel_never_overtakes_in_flight_prompt_intake() {
     use crate::session::SessionCommand;
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-intake-race");
@@ -2260,7 +2334,7 @@ async fn drive_disconnect(agent: &MvpAgent, sid: &acp::SessionId) {
 /// real client disconnect, and the path that exercises `handle_evict_sessions`'
 /// concurrent actor-owned unload transactions.
 async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     let ids: Vec<&str> = sids.iter().map(|s| s.0.as_ref()).collect();
     let params = serde_json::json!({ "sessionIds": ids });
     let raw = serde_json::value::to_raw_value(&params).unwrap();
@@ -2276,7 +2350,7 @@ async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
 /// (`ext_method` → `handlers::session::handle` → `handle_session_close`),
 /// exercising the exact production path that finalizes the replica.
 async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtResponse, acp::Error> {
-    use acp::Agent as _;
+    use acp_transport::AcpAgentHandler as _;
     let params = serde_json::json!({ "sessionId": session_id });
     let raw = serde_json::value::to_raw_value(&params).unwrap();
     agent

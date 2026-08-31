@@ -20,7 +20,7 @@ fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTa
 fn begin_model_control(
     app: &mut AppView,
     id: AgentId,
-    model_id: acp::ModelId,
+    model_id: shell::agent::models::ModelId,
     effort: Option<shell::sampling::types::ReasoningEffort>,
 ) -> crate::app::session::SessionControlToken {
     app.agents
@@ -1148,7 +1148,7 @@ fn cancel_complete_does_nothing() {
 fn switch_model_rpc_waits_for_authoritative_projection_without_local_notice() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     // Set up available models so the display name can be resolved.
     app.agents
@@ -1159,7 +1159,7 @@ fn switch_model_rpc_waits_for_authoritative_projection_without_local_notice() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
         );
     let control_token = begin_model_control(&mut app, id, model_id.clone(), None);
 
@@ -1212,7 +1212,7 @@ fn switch_model_rpc_waits_for_authoritative_projection_without_local_notice() {
 fn switch_agent_rpc_waits_for_authoritative_projection() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new("configured-model");
+    let model_id = shell::agent::models::ModelId::new("configured-model");
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.models.current = Some(model_id.clone());
     agent.session.apply_agent_name(Some("builder".into()));
@@ -1447,10 +1447,10 @@ fn authoritative_switch_projections_update_the_exact_subagent_view() {
     let root_id = AgentId(0);
     let child_sid = "child-session";
     let mut child_session = make_test_agent_session(&app, AgentId(99), child_sid);
-    let model_id = acp::ModelId::new("catalog/child-model");
+    let model_id = shell::agent::models::ModelId::new("catalog/child-model");
     child_session.models.available.insert(
         model_id.clone(),
-        acp::ModelInfo::new(model_id.clone(), "Child Model"),
+        shell::agent::models::ModelInfo::new(model_id.clone(), "Child Model"),
     );
     let model_control_token = child_session
         .enqueue_control(crate::app::session::PendingSessionControl::Model {
@@ -1528,14 +1528,15 @@ fn switch_model_complete_noop_waits_for_shell_notice_and_skips_persist() {
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     let agent = app.agents.get_mut(&id).unwrap();
     let mut meta = serde_json::Map::new();
     meta.insert("reasoningEfforts".into(), serde_json::json!(["high"]));
     agent.session.models.available.insert(
         model_id.clone(),
-        acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()).meta(Some(meta)),
+        shell::agent::models::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string())
+            .meta(Some(meta)),
     );
     agent.session.models.current = Some(model_id.clone());
     agent.session.models.reasoning_effort = Some(ReasoningEffort::High);
@@ -1590,7 +1591,7 @@ fn switch_model_complete_resolves_effort_from_catalog_meta_session_only() {
     use shell::sampling::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("byok-model-47"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("byok-model-47"));
 
     let mut meta = serde_json::Map::new();
     meta.insert("reasoningEfforts".into(), serde_json::json!(["xhigh"]));
@@ -1606,7 +1607,7 @@ fn switch_model_complete_resolves_effort_from_catalog_meta_session_only() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "BYOK Model 4.7".to_string())
+            shell::agent::models::ModelInfo::new(model_id.clone(), "BYOK Model 4.7".to_string())
                 .meta(serde_json::Value::Object(meta).as_object().cloned()),
         );
     let control_token = begin_model_control(&mut app, id, model_id.clone(), None);
@@ -1648,7 +1649,7 @@ fn switch_to_non_reasoning_model_clears_session_effort() {
     use shell::sampling::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     // Simulate prior reasoning effort from a previous model.
     app.agents
@@ -1667,7 +1668,7 @@ fn switch_to_non_reasoning_model_clears_session_effort() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow".to_string()),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Grow".to_string()),
         );
     let control_token = begin_model_control(&mut app, id, model_id.clone(), None);
 
@@ -1710,7 +1711,7 @@ fn switch_to_non_reasoning_model_clears_session_effort() {
 fn switch_model_complete_failure_pushes_error_and_clears_pending() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("bad-model"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("bad-model"));
 
     let control_token = app
         .agents
@@ -1747,18 +1748,18 @@ fn failed_model_switch_preserves_local_selection() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    let prev_model = acp::ModelId::new(std::sync::Arc::from("original-model"));
-    let new_model = acp::ModelId::new(std::sync::Arc::from("cursor-model"));
+    let prev_model = shell::agent::models::ModelId::new(std::sync::Arc::from("original-model"));
+    let new_model = shell::agent::models::ModelId::new(std::sync::Arc::from("cursor-model"));
 
     // Set up catalog with both models.
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.models.available.insert(
         prev_model.clone(),
-        acp::ModelInfo::new(prev_model.clone(), "Original".to_string()),
+        shell::agent::models::ModelInfo::new(prev_model.clone(), "Original".to_string()),
     );
     agent.session.models.available.insert(
         new_model.clone(),
-        acp::ModelInfo::new(new_model.clone(), "Cursor".to_string()),
+        shell::agent::models::ModelInfo::new(new_model.clone(), "Cursor".to_string()),
     );
     // Local control correlation does not own a speculative selection. A failure
     // must therefore not overwrite the current local projection.
@@ -1791,19 +1792,19 @@ fn failed_model_switch_preserves_local_selection() {
 fn model_switch_succeeds_without_changing_agent() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_a = acp::ModelId::new(std::sync::Arc::from("grow-build-a"));
-    let model_b = acp::ModelId::new(std::sync::Arc::from("grow-build-b"));
+    let model_a = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-build-a"));
+    let model_b = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-build-b"));
 
     // Agent identity is not part of the model switch path.
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.models.available.insert(
         model_a.clone(),
-        acp::ModelInfo::new(model_a.clone(), "Grow A".to_string()),
+        shell::agent::models::ModelInfo::new(model_a.clone(), "Grow A".to_string()),
     );
     agent.session.models.set_current(model_a, None);
     agent.session.models.available.insert(
         model_b.clone(),
-        acp::ModelInfo::new(model_b.clone(), "Grow B".to_string()),
+        shell::agent::models::ModelInfo::new(model_b.clone(), "Grow B".to_string()),
     );
     let control_token = agent
         .session
@@ -1858,7 +1859,7 @@ fn switch_model_stays_pending_until_authoritative_projection() {
     // ModelChanged projection -> false.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     // Initially false.
     assert!(!app.agents[&id].session.model_switch_pending());
@@ -1870,7 +1871,7 @@ fn switch_model_stays_pending_until_authoritative_projection() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow 4.5"),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Grow 4.5"),
         );
 
     // Action sets pending.
@@ -1912,18 +1913,17 @@ fn switch_model_stays_pending_until_authoritative_projection() {
 fn sampling_completion_order_keeps_the_latest_model_as_effort_base() {
     use shell::sampling::types::ReasoningEffort;
 
-    fn seed(app: &mut AppView) -> (acp::ModelId, acp::ModelId) {
-        let old = acp::ModelId::new("provider/old");
-        let new = acp::ModelId::new("provider/new");
+    fn seed(app: &mut AppView) -> (shell::agent::models::ModelId, shell::agent::models::ModelId) {
+        let old = shell::agent::models::ModelId::new("provider/old");
+        let new = shell::agent::models::ModelId::new("provider/new");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent
-            .session
-            .models
-            .available
-            .insert(old.clone(), acp::ModelInfo::new(old.clone(), "Old"));
+        agent.session.models.available.insert(
+            old.clone(),
+            shell::agent::models::ModelInfo::new(old.clone(), "Old"),
+        );
         agent.session.models.available.insert(
             new.clone(),
-            acp::ModelInfo::new(new.clone(), "New").meta(
+            shell::agent::models::ModelInfo::new(new.clone(), "New").meta(
                 serde_json::json!({
                     "reasoningEfforts": ["low", "high"],
                     "reasoningEffort": "high"
@@ -2053,7 +2053,7 @@ fn sampling_completion_order_keeps_the_latest_model_as_effort_base() {
 fn reconnect_terminal_superseded_drains_local_sampling_desired() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let target = acp::ModelId::new("provider/reconnect-target");
+    let target = shell::agent::models::ModelId::new("provider/reconnect-target");
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -2062,7 +2062,7 @@ fn reconnect_terminal_superseded_drains_local_sampling_desired() {
         .available
         .insert(
             target.clone(),
-            acp::ModelInfo::new(target.clone(), "Reconnect Target"),
+            shell::agent::models::ModelInfo::new(target.clone(), "Reconnect Target"),
         );
     let effects = dispatch(
         Action::SwitchModel {
@@ -2112,7 +2112,7 @@ fn model_and_agent_domains_dispatch_independently_but_jointly_fence_prompts() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let session_id = acp::SessionId::new("test-session");
-    let model_id = acp::ModelId::new("serialized-model");
+    let model_id = shell::agent::models::ModelId::new("serialized-model");
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -2121,7 +2121,7 @@ fn model_and_agent_domains_dispatch_independently_but_jointly_fence_prompts() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Serialized Model"),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Serialized Model"),
         );
 
     let first = dispatch(
@@ -2215,8 +2215,8 @@ fn model_and_agent_domains_dispatch_independently_but_jointly_fence_prompts() {
 fn reconnect_generation_discards_old_control_completion() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let old_model = acp::ModelId::new("old-completion-model");
-    let new_model = acp::ModelId::new("post-reconnect-model");
+    let old_model = shell::agent::models::ModelId::new("old-completion-model");
+    let new_model = shell::agent::models::ModelId::new("post-reconnect-model");
     for model in [&old_model, &new_model] {
         app.agents
             .get_mut(&id)
@@ -2226,7 +2226,7 @@ fn reconnect_generation_discards_old_control_completion() {
             .available
             .insert(
                 model.clone(),
-                acp::ModelInfo::new(model.clone(), model.0.to_string()),
+                shell::agent::models::ModelInfo::new(model.clone(), model.0.to_string()),
             );
     }
     let old_effects = dispatch(

@@ -44,10 +44,10 @@ use crate::session::user_message::extract_user_query;
 use crate::terminal::TerminalRunRequest;
 use crate::tools::ToolContext;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
+use acp_transport::protocol as acp;
 use agent::AgentDefinition;
 use agent::prompt::skills::SkillsConfig;
-use agent_client_protocol as acp;
-use agent_client_protocol::ContentBlock;
+use agent_client_protocol::schema::v1::ContentBlock;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use sampler::SamplerConfig as SamplingConfig;
@@ -130,6 +130,7 @@ mod hook_dispatch;
 use hook_dispatch::*;
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
+mod coordination;
 mod idle_arbitration;
 mod recap;
 mod rewind;
@@ -428,7 +429,7 @@ struct PendingModelSelection {
     route: crate::agent::models::PublishedSessionRoute,
     catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
     respond_to: tokio::sync::oneshot::Sender<
-        Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+        Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
     >,
     intent: Option<crate::session::ControlIntent>,
 }
@@ -710,7 +711,7 @@ impl PendingStepControls {
             + self.ordered.len()
     }
 
-    fn desired_sampling_model_id(&self) -> Option<acp::ModelId> {
+    fn desired_sampling_model_id(&self) -> Option<crate::agent::models::ModelId> {
         self.sampling
             .as_ref()
             .map(|pending| pending.value.route.model_id.clone())
@@ -722,7 +723,7 @@ impl PendingStepControls {
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         intent: Option<crate::session::ControlIntent>,
         responds_to: tokio::sync::oneshot::Sender<
-            Result<crate::session::DesiredStateOutcome<acp::ModelId>, acp::Error>,
+            Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
     ) -> (u64, Option<(u64, PendingModelSelection)>) {
         self.sampling_revision = self.sampling_revision.saturating_add(1);
@@ -1503,6 +1504,10 @@ pub(crate) struct SessionActor {
     /// admission authority and drains every already-issued permit before the
     /// Goal window or final persistence barrier is closed.
     pub(crate) session_activities: SessionActivityTracker,
+    /// Accepted coordination work is actor-owned: one active inquiry and a
+    /// bounded FIFO of waiting inquiries for this target Session.
+    coordination_inquiries: std::cell::RefCell<VecDeque<coordination::QueuedCoordinationInquiry>>,
+    coordination_inquiry_active: std::cell::Cell<bool>,
     /// Long-lived session services are explicit owners rather than detached
     /// LocalSet tasks. Teardown closes their ingress, then joins them before
     /// dismantling persistence and permission authorities.
@@ -1972,17 +1977,23 @@ impl SessionActor {
     }
 
     async fn send_ui_notice(&self, notice: crate::extensions::notification::UiNotice) {
-        let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
-        if let Err(error) = self
-            .send_grow_passive_notification(update.clone(), update)
-            .await
-        {
+        if let Err(error) = self.persist_ui_notice(notice).await {
             tracing::warn!(
                 session_id = %self.session_info.id.0,
                 error = %error,
                 "failed to persist Shell command output",
             );
         }
+    }
+
+    async fn persist_ui_notice(
+        &self,
+        notice: crate::extensions::notification::UiNotice,
+    ) -> Result<(), String> {
+        let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
+        self.send_grow_passive_notification(update.clone(), update)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn send_host_turn_slash_command_success(&self, message: &str) {

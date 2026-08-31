@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use ::hooks::event::{HookEventEnvelope, HookEventName};
 use ::hooks::matcher::HookMatcher;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use extension_types::{HookEvent, HookHandlerType, HookInfo};
 use serde::Deserialize;
 

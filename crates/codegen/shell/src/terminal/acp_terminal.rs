@@ -1,5 +1,5 @@
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::runner::{AsyncTerminalRunner, TerminalError, TerminalRunRequest, TerminalRunResult};
 

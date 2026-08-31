@@ -68,9 +68,10 @@ async fn make_laziness_actor(
         .models_manager
         .insert_test_entry("test-laziness-model", entry);
     let route = actor.model_route.snapshot().sampling_config;
-    actor
-        .model_route
-        .replace(acp::ModelId::new("test-laziness-model"), route);
+    actor.model_route.replace(
+        crate::agent::models::ModelId::new("test-laziness-model"),
+        route,
+    );
     (Arc::new(actor), tmp)
 }
 
@@ -182,7 +183,7 @@ async fn model_switch_during_idle_wait_aborts_with_model_switch() {
                 // Real id change → bumps the model_switch generation.
                 switch_actor
                     .models_manager
-                    .set_current_model_id(acp::ModelId::new("some-other-model"));
+                    .set_current_model_id(crate::agent::models::ModelId::new("some-other-model"));
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             switch_task.await.unwrap();
@@ -408,7 +409,7 @@ async fn laziness_abort_check_detects_bumps_between_snapshot_and_recheck() {
             let snap2 = actor.laziness_abort_snapshot();
             actor
                 .models_manager
-                .set_current_model_id(acp::ModelId::new("yet-another-model"));
+                .set_current_model_id(crate::agent::models::ModelId::new("yet-another-model"));
             // Invoke the helper UNDER the state lock — mirrors the
             // production call site inside `maybe_fire_laziness_check`'s
             // final injection block and pins that the helper has no
@@ -557,9 +558,10 @@ async fn make_debug_actor(
         .models_manager
         .insert_test_entry("test-laziness-model", entry);
     let route = actor.model_route.snapshot().sampling_config;
-    actor
-        .model_route
-        .replace(acp::ModelId::new("test-laziness-model"), route);
+    actor.model_route.replace(
+        crate::agent::models::ModelId::new("test-laziness-model"),
+        route,
+    );
     let log_path = tmp.path().join("debug.jsonl");
     arm_debug_log(&mut actor, log_path.clone());
     (Arc::new(actor), tmp, log_path)

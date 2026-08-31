@@ -15,7 +15,7 @@
 
 use std::cell::Cell;
 
-use agent_client_protocol as acp;
+use agent_client_protocol::schema::v1 as acp;
 use workspace::permission::is_enable_always_approve_option;
 
 /// Which row the approval-menu cursor preselects (the highlighted row).

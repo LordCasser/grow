@@ -386,7 +386,7 @@ pub struct WorkflowRuntimeRoute {
     /// ACP/UI projection of the same Task-selectable catalog as `samplers`.
     /// Keeping it in the Run snapshot prevents a child picker from drifting to
     /// a later process catalog that the Run is not authorized to execute.
-    available_models: Vec<agent_client_protocol::ModelInfo>,
+    available_models: Vec<crate::agent::models::ModelInfo>,
     /// Auxiliary multimodal projection model captured with this Run. Changing
     /// global config later may affect future Runs, never existing children.
     image_description_model: Option<String>,
@@ -663,7 +663,7 @@ impl WorkflowRuntimeRoute {
             );
             let published_route = published_catalog
                 .resolve_session_route(
-                    &agent_client_protocol::ModelId::new(catalog_id.as_str()),
+                    &crate::agent::models::ModelId::new(catalog_id.as_str()),
                     None,
                 )
                 .filter(|route| route.model_id.0.as_ref() == catalog_id)
@@ -686,7 +686,7 @@ impl WorkflowRuntimeRoute {
         }
         let default_route = published_catalog
             .resolve_session_route(
-                &agent_client_protocol::ModelId::new(model_id.as_str()),
+                &crate::agent::models::ModelId::new(model_id.as_str()),
                 default_sampler.reasoning_effort,
             )
             .filter(|route| route.model_id.0.as_ref() == model_id)
@@ -715,7 +715,7 @@ impl WorkflowRuntimeRoute {
             let entry = crate::agent::config::find_model_by_catalog_id(models, auxiliary_id)
                 .ok_or("Workflow image-description model could not be resolved")?;
             let published_route = published_catalog
-                .resolve_session_route(&agent_client_protocol::ModelId::new(auxiliary_id), None)
+                .resolve_session_route(&crate::agent::models::ModelId::new(auxiliary_id), None)
                 .filter(|route| route.model_id.0.as_ref() == auxiliary_id)
                 .ok_or("Workflow image-description route could not be resolved")?;
             let credentials = crate::agent::config::resolve_credentials(entry);
@@ -774,8 +774,8 @@ impl WorkflowRuntimeRoute {
         let route = Self {
             model_id: model_id.clone(),
             samplers: std::collections::BTreeMap::from([(model_id.clone(), snapshot)]),
-            available_models: vec![agent_client_protocol::ModelInfo::new(
-                agent_client_protocol::ModelId::new(model_id.clone()),
+            available_models: vec![crate::agent::models::ModelInfo::new(
+                crate::agent::models::ModelId::new(model_id.clone()),
                 model_id.clone(),
             )],
             image_description_model: None,
@@ -854,8 +854,8 @@ impl WorkflowRuntimeRoute {
         snapshot.transport_key = transport_key;
         self.samplers.insert(model_id.clone(), snapshot);
         self.available_models
-            .push(agent_client_protocol::ModelInfo::new(
-                agent_client_protocol::ModelId::new(model_id.clone()),
+            .push(crate::agent::models::ModelInfo::new(
+                crate::agent::models::ModelId::new(model_id.clone()),
                 model_id.clone(),
             ));
         self.runtime
@@ -924,7 +924,7 @@ impl WorkflowRuntimeRoute {
         &self,
         model_id: &str,
         reasoning_effort: Option<sampling_types::ReasoningEffort>,
-    ) -> Result<agent_client_protocol::SessionModelState, String> {
+    ) -> Result<crate::agent::models::SessionModelState, String> {
         if !self.samplers.contains_key(model_id) {
             return Err(format!(
                 "model '{model_id}' was not present in the Workflow Run sampler snapshot"
@@ -950,8 +950,8 @@ impl WorkflowRuntimeRoute {
             );
             current.meta = Some(meta);
         }
-        Ok(agent_client_protocol::SessionModelState::new(
-            agent_client_protocol::ModelId::new(model_id),
+        Ok(crate::agent::models::SessionModelState::new(
+            crate::agent::models::ModelId::new(model_id),
             available_models,
         ))
     }
@@ -970,7 +970,7 @@ impl WorkflowRuntimeRoute {
         })?;
         let sampling_config = self.sampler_for(model_id, models_manager, alpha_test_key)?;
         Ok(crate::agent::models::PublishedSessionRoute {
-            model_id: agent_client_protocol::ModelId::new(model_id),
+            model_id: crate::agent::models::ModelId::new(model_id),
             image_description_model: self.image_description_model.clone(),
             inference_idle_timeout: std::time::Duration::from_secs(
                 sampling_config.idle_timeout_secs.unwrap_or(600).max(10),
@@ -1762,7 +1762,7 @@ mod tests {
     ) -> crate::agent::models::ModelsManager {
         crate::agent::models::ModelsManager::new(
             indexmap::IndexMap::from([(catalog_id.to_owned(), entry)]),
-            agent_client_protocol::ModelId::new(catalog_id),
+            crate::agent::models::ModelId::new(catalog_id),
             crate::agent::config::Config::default(),
         )
     }
@@ -2009,7 +2009,7 @@ mod tests {
                 ("volcengine/glm-5.3".to_owned(), volcengine),
                 ("bigmodel/glm-5.3".to_owned(), bigmodel.clone()),
             ]),
-            agent_client_protocol::ModelId::new("bigmodel/glm-5.3"),
+            crate::agent::models::ModelId::new("bigmodel/glm-5.3"),
             crate::agent::config::Config::default(),
         );
         let sampler = crate::agent::config::sampling_config_for_model(
@@ -2124,7 +2124,7 @@ mod tests {
                 ("catalog/text".to_owned(), primary.clone()),
                 ("catalog/vision".to_owned(), vision),
             ]),
-            agent_client_protocol::ModelId::new("catalog/text"),
+            crate::agent::models::ModelId::new("catalog/text"),
             cfg,
         );
         let sampler = crate::agent::config::sampling_config_for_model(
@@ -2186,7 +2186,7 @@ mod tests {
                 ("catalog/allowed".to_owned(), allowed.clone()),
                 ("catalog/denied".to_owned(), denied),
             ]),
-            agent_client_protocol::ModelId::new("catalog/allowed"),
+            crate::agent::models::ModelId::new("catalog/allowed"),
             crate::agent::config::Config::default(),
         );
         let sampler = crate::agent::config::sampling_config_for_model(

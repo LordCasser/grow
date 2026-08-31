@@ -544,9 +544,11 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     let mut meta = serde_json::Map::new();
     meta.insert("promptId".into(), serde_json::json!("p1"));
     meta.insert("structuredOutput".into(), serde_json::json!({"ok": true}));
-    let pr = acp::PromptResponse::new(acp::StopReason::EndTurn)
-        .usage(acp::Usage::new(42, 10, 32))
-        .meta(meta);
+    meta.insert(
+        "usage".into(),
+        serde_json::json!({"totalTokens": 42, "inputTokens": 10, "outputTokens": 32}),
+    );
+    let pr = acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta);
     agent.merge_finalized_pr_meta(&Ok(pr));
 
     let merged = agent
@@ -555,7 +557,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
         .as_ref()
         .expect("meta merged");
     assert_eq!(
-        merged.usage.as_ref().map(|u| u.total_tokens),
+        merged.usage.as_ref().map(|u| u.totals.total_tokens),
         Some(42),
         "late usage merged"
     );
@@ -570,7 +572,7 @@ fn late_prompt_response_merges_usage_and_structured_output_only() {
     let merged = agent.session.finalized_pr_meta.as_ref().unwrap();
     assert_eq!(merged.error.as_deref(), Some("late boom"));
     assert_eq!(
-        merged.usage.as_ref().map(|u| u.total_tokens),
+        merged.usage.as_ref().map(|u| u.totals.total_tokens),
         Some(42),
         "usage must survive a later error response"
     );

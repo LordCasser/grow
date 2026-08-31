@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use crate::session::info::Info;
 use crate::session::persistence::{SessionLineage, Summary, default_model_id};
 use crate::session::storage::{CopySessionOptions, SessionUpdate};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tempfile::TempDir;
 fn create_test_info() -> Info {
     Info {
@@ -577,7 +577,7 @@ async fn test_jsonl_round_trip() {
         .append_update(&info, &SessionUpdate::Acp(Box::new(notification)))
         .await
         .unwrap();
-    let new_model = acp::ModelId::new("grow-4.3");
+    let new_model = crate::agent::models::ModelId::new("grow-4.3");
     adapter
         .update_current_model_and_agent(&info, &new_model, None, None)
         .await
@@ -1038,7 +1038,7 @@ async fn sideband_writer_rejects_symlinked_directory_roots() {
 /// chunks.
 #[tokio::test]
 async fn updates_do_not_rebuild_timeline_surface() {
-    use agent_client_protocol::{
+    use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, SessionUpdate as Acp, TextContent,
     };
     let temp_dir = TempDir::new().unwrap();
@@ -1557,6 +1557,69 @@ async fn test_grow_session_update_round_trip() {
     match &loaded.updates[1] {
         SessionUpdate::Acp(_) => {}
         _ => panic!("Expected ACP update as second item"),
+    }
+}
+#[tokio::test]
+async fn coordination_notices_survive_symmetric_session_reload() {
+    use crate::extensions::notification::{
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
+        UiNotice,
+        UiNoticeCategory,
+        UiNoticeTone,
+    };
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("coordination-source"),
+        cwd: "/repo".to_owned(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("coordination-target"),
+        cwd: "/repo".to_owned(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    adapter.init_session(&target, default_model_id()).await.unwrap();
+    let inquiry_id = uuid::Uuid::now_v7().to_string();
+    for (info, subject, details) in [
+        (&source, "outgoing inquiry", "Question:\nWhich files are you changing?"),
+        (&target, "incoming inquiry", "Answer:\nI am changing src/lib.rs"),
+    ] {
+        let notification = GrowSessionNotification {
+            session_id: info.id.clone(),
+            update: GrowSessionUpdateType::UiNotice(UiNotice {
+                correlation_id: inquiry_id.clone(),
+                category: UiNoticeCategory::Coordination,
+                subject: Some(subject.to_owned()),
+                description: Some("Local coordination audit".to_owned()),
+                message: subject.to_owned(),
+                tone: UiNoticeTone::Info,
+                details: Some(details.to_owned()),
+            }),
+            meta: None,
+        };
+        adapter
+            .append_update(info, &SessionUpdate::Grow(Box::new(notification)))
+            .await
+            .unwrap();
+    }
+
+    let source_loaded = adapter.load_session(&source).await.unwrap();
+    let target_loaded = adapter.load_session(&target).await.unwrap();
+    for (loaded, expected_subject, expected_content) in [
+        (source_loaded, "outgoing inquiry", "Which files"),
+        (target_loaded, "incoming inquiry", "src/lib.rs"),
+    ] {
+        let SessionUpdate::Grow(notification) = &loaded.updates[0] else {
+            panic!("expected Grow coordination notice");
+        };
+        let GrowSessionUpdateType::UiNotice(notice) = &notification.update else {
+            panic!("expected UiNotice");
+        };
+        assert_eq!(notice.correlation_id, inquiry_id);
+        assert_eq!(notice.category, UiNoticeCategory::Coordination);
+        assert_eq!(notice.subject.as_deref(), Some(expected_subject));
+        assert!(notice.details.as_deref().unwrap().contains(expected_content));
     }
 }
 /// SubagentSpawned and SubagentFinished must survive JSONL round-trip
@@ -3569,8 +3632,8 @@ async fn model_change_repairs_selection_summary_from_timeline() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let old_model = acp::ModelId::new("provider/old");
-    let new_model = acp::ModelId::new("provider/new");
+    let old_model = crate::agent::models::ModelId::new("provider/old");
+    let new_model = crate::agent::models::ModelId::new("provider/new");
     adapter.init_session(&info, old_model.clone()).await.unwrap();
     let events = adapter.read_timeline_events_sync(&info).unwrap();
     let mut timeline = chat_state::Timeline::from_events(events).unwrap();
@@ -3639,8 +3702,8 @@ async fn malformed_model_change_bricks_session_load() {
 
 #[test]
 fn model_change_fold_rejects_transport_discontinuity() {
-    let old_model = acp::ModelId::new("catalog/old");
-    let current_model = acp::ModelId::new("catalog/current");
+    let old_model = crate::agent::models::ModelId::new("catalog/old");
+    let current_model = crate::agent::models::ModelId::new("catalog/current");
     let old_route = sampling_types::ModelImageInputKey::new(
         "old-wire",
         "responses",
@@ -3699,7 +3762,7 @@ fn model_change_fold_rejects_transport_discontinuity() {
 
 #[test]
 fn model_change_folds_its_atomic_sampling_receipt() {
-    let model = acp::ModelId::new("catalog/current");
+    let model = crate::agent::models::ModelId::new("catalog/current");
     let route = sampling_types::ModelImageInputKey::new(
         "wire-model",
         "responses",

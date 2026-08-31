@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::mvp_agent::{CodeNavEligibility, MvpAgent};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 
 /// Record a structured diagnostics event at the end of a code-nav handler call.

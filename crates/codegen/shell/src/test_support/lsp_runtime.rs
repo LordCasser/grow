@@ -1,6 +1,6 @@
 use crate::agent::subagent::SubagentSpawnContext;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         },
         alpha_test_key: None,
         auth_method_id: acp::AuthMethodId::new("test"),
-        model_id: acp::ModelId::new("test"),
+        model_id: crate::agent::models::ModelId::new("test"),
         parent_cwd: PathBuf::from("/tmp"),
         parent_session_id: "test-parent".into(),
         security_parent_session_id: "test-parent".into(),

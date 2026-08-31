@@ -141,9 +141,9 @@ fn resolve_workflow_sampler(
 
 fn model_state_for_catalog(
     catalog: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
-    model_id: &acp::ModelId,
+    model_id: &crate::agent::models::ModelId,
     reasoning_effort: Option<ReasoningEffort>,
-) -> acp::SessionModelState {
+) -> crate::agent::models::SessionModelState {
     let selectable = crate::agent::models::task_selectable_catalog(catalog);
     let mut available_models: Vec<_> = crate::agent::config::to_acp_model_info(&selectable)
         .into_values()
@@ -164,7 +164,7 @@ fn model_state_for_catalog(
         );
         info.meta = Some(meta);
     }
-    acp::SessionModelState::new(model_id.clone(), available_models)
+    crate::agent::models::SessionModelState::new(model_id.clone(), available_models)
 }
 
 fn frozen_workflow_agent_definition(
@@ -1163,7 +1163,7 @@ pub(crate) async fn run_shell_child(
             "ignoring child-owned mcpServers; subagents only inherit connected parent servers"
         );
     }
-    let agent_mcp_servers: Vec<agent_client_protocol::McpServer> = Vec::new();
+    let agent_mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer> = Vec::new();
     let mut parent_mcp_pool =
         resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
     if let (Some(pool), Some(ceiling)) = (

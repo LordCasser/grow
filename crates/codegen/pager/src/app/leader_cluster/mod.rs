@@ -35,11 +35,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 
+use acp_transport::protocol as acp;
 use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     AcpClientRx, LineBufferedRead, acp_send,
 };
-use agent_client_protocol as acp;
 use shell::agent::config::Config as AgentConfig;
 use shell::agent::mvp_agent::MvpAgent;
 use shell::leader::{
@@ -397,7 +397,7 @@ impl PagerLeaderCluster {
             let gateway = GatewaySender::new(gw_tx);
             let agent = MvpAgent::new(gateway, &agent_config).expect("valid agent config");
             let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
-            let (conn, handle_io) = acp::AgentSideConnection::new(
+            let (conn, handle_io) = acp_transport::connect_agent_v1(
                 agent,
                 agent_out_write.compat_write(),
                 incoming,

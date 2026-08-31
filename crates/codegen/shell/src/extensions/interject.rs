@@ -4,7 +4,7 @@
 //! interjection buffer.  The session actor drains it at the next safe
 //! point in `process_conversation_turn`.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;

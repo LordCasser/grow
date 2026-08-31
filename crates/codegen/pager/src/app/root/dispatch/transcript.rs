@@ -7,7 +7,7 @@ use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::blocks::ToolCallBlock;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use diagnostics::session_ctx::log_event;
 
 /// Copy the selected block's content to the system clipboard.

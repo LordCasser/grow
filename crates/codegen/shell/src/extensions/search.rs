@@ -4,7 +4,7 @@
 
 use crate::agent::mvp_agent::MvpAgent;
 use crate::session::ExtMethodResult;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use workspace::file_system::ContentSearchRequest as ContentSearchRequestParams;

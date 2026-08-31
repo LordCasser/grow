@@ -5,7 +5,7 @@
 //! 2. The notifications are persisted to storage
 //! 3. When a session is loaded, the notifications are replayed with `isReplay: true`
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde_json::json;
 use std::path::PathBuf;
 use tempfile::TempDir;

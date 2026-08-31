@@ -5,7 +5,7 @@
 //!   - config.toml    — seeds the map; `enabled = false` blocks lower layers
 //!   - Plugins        — `or_insert` (won't override config.toml)
 //!   - Client         — `insert` (always wins)
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use std::collections::HashMap;
 
 fn normalize_url(url: &str) -> String {

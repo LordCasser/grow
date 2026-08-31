@@ -3,7 +3,7 @@
 //! Router pattern: single `handle()` dispatches by method name.
 //! Business logic delegates to pure functions or MvpAgent methods.
 
-use agent_client_protocol::{self as acp};
+use acp_transport::protocol as acp;
 use serde::Deserialize;
 
 use super::super::mvp_agent::MvpAgent;

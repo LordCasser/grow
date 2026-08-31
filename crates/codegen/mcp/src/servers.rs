@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
-use agent_client_protocol as acp;
+use agent_client_protocol::schema::v1 as acp;
 use futures::StreamExt;
 use regex::Regex;
 use tokio::{

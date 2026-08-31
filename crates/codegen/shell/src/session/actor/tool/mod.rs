@@ -693,7 +693,7 @@ impl SessionActor {
         plan_content: String,
     ) -> Result<tools::implementations::grow_build::plan_control::PlanApprovalExtResponse, acp::Error>
     {
-        use agent_client_protocol::Client as _;
+        use acp_transport::AcpClientHandler as _;
         use tools::implementations::grow_build::plan_control::{
             PlanApprovalExtRequest, PlanApprovalExtResponse,
         };
@@ -1740,7 +1740,7 @@ mod plan_approval_helper_tests {
 
 #[cfg(test)]
 mod plan_finish_projection_tests {
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
 
     #[tokio::test]
     async fn finishing_plan_refreshes_available_commands_with_normal_behavior() {
@@ -1853,7 +1853,7 @@ mod wait_interrupt_tests {
     async fn pending_interjection_aborts_in_flight_wait() {
         use super::InterjectionBuffer;
         use super::PendingInterjection;
-        let buf: InterjectionBuffer<agent_client_protocol::ImageContent> =
+        let buf: InterjectionBuffer<agent_client_protocol::schema::v1::ImageContent> =
             InterjectionBuffer::default();
         let out = tokio::select! {
             biased;

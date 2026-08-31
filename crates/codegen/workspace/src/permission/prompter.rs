@@ -6,8 +6,8 @@ use crate::permission::{
     bash_command_splitting::{BashCommandHighlights, primary_command_from_script},
     types::{AccessKind, ClientType},
 };
-use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol::{self as acp, Client as _};
+use acp_transport::protocol as acp;
+use acp_transport::{AcpAgentGatewaySender as GatewaySender, AcpClientHandler as _};
 use mcp::servers::parse_mcp_qualified_name;
 use tools::implementations::grow_build::web_fetch::domain_from_url;
 

@@ -240,7 +240,7 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
 fn slash_model_valid_switches_session_without_persisting_default() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -249,7 +249,7 @@ fn slash_model_valid_switches_session_without_persisting_default() {
         .available
         .insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
         );
     let effects = dispatch(Action::SendPrompt("/model grow-4.5".into()), &mut app);
     assert_eq!(
@@ -271,8 +271,8 @@ fn slash_model_valid_switches_session_without_persisting_default() {
 fn model_switch_pending_resets_correctly_across_success_and_failure() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let model_a = acp::ModelId::new(std::sync::Arc::from("model-a"));
-    let model_b = acp::ModelId::new(std::sync::Arc::from("model-b"));
+    let model_a = shell::agent::models::ModelId::new(std::sync::Arc::from("model-a"));
+    let model_b = shell::agent::models::ModelId::new(std::sync::Arc::from("model-b"));
     dispatch(
         Action::SwitchModel {
             model_id: model_a.clone(),
@@ -1116,11 +1116,10 @@ fn every_persisting_setting_has_rollback_arm() {
 /// `agent.session.models.current`.
 #[test]
 fn clear_default_model_persists_but_keeps_live_current() {
-    use agent_client_protocol as acp;
     use std::sync::Arc;
     let mut app = test_app_with_agent();
-    let id = acp::ModelId::new(Arc::from("grow-test"));
-    let info = acp::ModelInfo::new(id.clone(), "Grow Test".to_string());
+    let id = shell::agent::models::ModelId::new(Arc::from("grow-test"));
+    let info = shell::agent::models::ModelInfo::new(id.clone(), "Grow Test".to_string());
     let agent_id = AgentId(0);
     app.agents
         .get_mut(&agent_id)
@@ -1162,11 +1161,10 @@ fn clear_default_model_persists_but_keeps_live_current() {
 /// active session.
 #[test]
 fn set_default_model_resolves_known_name() {
-    use agent_client_protocol as acp;
     use std::sync::Arc;
     let mut app = test_app_with_agent();
-    let id = acp::ModelId::new(Arc::from("grow-4.5"));
-    let info = acp::ModelInfo::new(id.clone(), "Grow 4.5".to_string());
+    let id = shell::agent::models::ModelId::new(Arc::from("grow-4.5"));
+    let info = shell::agent::models::ModelInfo::new(id.clone(), "Grow 4.5".to_string());
     let agent_id = AgentId(0);
     app.models.available.insert(id.clone(), info);
     let active_before = app.agents[&agent_id].session.models.current.clone();
@@ -1187,11 +1185,10 @@ fn set_default_model_resolves_known_name() {
 /// reasoning_effort reset.
 #[test]
 fn set_default_model_idempotent_when_already_current() {
-    use agent_client_protocol as acp;
     use std::sync::Arc;
     let mut app = test_app_with_agent();
-    let id = acp::ModelId::new(Arc::from("grow-already"));
-    let info = acp::ModelInfo::new(id.clone(), "Grow Already".to_string());
+    let id = shell::agent::models::ModelId::new(Arc::from("grow-already"));
+    let info = shell::agent::models::ModelInfo::new(id.clone(), "Grow Already".to_string());
     app.models.available.insert(id.clone(), info);
     app.models.set_current(id.clone(), None);
     let effects = dispatch(Action::SetDefaultModel(id), &mut app);
@@ -1413,13 +1410,13 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             );
         }
         "default_model" => {
-            use agent_client_protocol as acp;
             use std::sync::Arc;
             if let ActiveView::Agent(aid) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&aid)
             {
-                let id = acp::ModelId::new(Arc::from("test-model-move"));
-                let info = acp::ModelInfo::new(id.clone(), "Test Model Move".to_string());
+                let id = shell::agent::models::ModelId::new(Arc::from("test-model-move"));
+                let info =
+                    shell::agent::models::ModelInfo::new(id.clone(), "Test Model Move".to_string());
                 agent.session.models.available.insert(id.clone(), info);
                 agent.session.models.set_current(id, None);
             }
@@ -1493,13 +1490,13 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
         "fork_secondary_model" => {
-            use agent_client_protocol as acp;
             use std::sync::Arc;
             if let ActiveView::Agent(aid) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&aid)
             {
-                let id = acp::ModelId::new(Arc::from("test-fork-move"));
-                let info = acp::ModelInfo::new(id.clone(), "Test Fork Move".to_string());
+                let id = shell::agent::models::ModelId::new(Arc::from("test-fork-move"));
+                let info =
+                    shell::agent::models::ModelInfo::new(id.clone(), "Test Fork Move".to_string());
                 agent.session.models.available.insert(id.clone(), info);
                 let _ = dispatch(Action::SetForkSecondaryModel(id), app);
             }
@@ -1561,7 +1558,7 @@ fn simple_mode_rollback_preserves_queue_release_effect() {
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.input_mode = crate::views::agent::InputMode::Simple;
-    agent.session.session_id = Some(agent_client_protocol::SessionId::new("s1"));
+    agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new("s1"));
     agent.prompt_mode = PromptMode::EditingQueued {
         id: 7,
         original: String::new(),
@@ -1580,7 +1577,7 @@ fn simple_mode_rollback_preserves_queue_release_effect() {
     assert!(matches!(
         effects.as_slice(),
         [Effect::QueueReleaseEdit { session_id, id }]
-            if session_id == &agent_client_protocol::SessionId::new("s1") && id == "q1"
+            if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1"
     ));
 }
 
@@ -3251,8 +3248,11 @@ fn new_session_inherits_switched_default_model_for_welcome() {
     use std::sync::Arc;
     let mut app = test_app_with_agent();
     let mk = |slug: &str, name: &str| {
-        let id = acp::ModelId::new(Arc::from(slug));
-        (id.clone(), acp::ModelInfo::new(id, name.to_string()))
+        let id = shell::agent::models::ModelId::new(Arc::from(slug));
+        (
+            id.clone(),
+            shell::agent::models::ModelInfo::new(id, name.to_string()),
+        )
     };
     let (id_a, info_a) = mk("model-a", "Model A");
     let (id_b, info_b) = mk("model-b", "Model B");

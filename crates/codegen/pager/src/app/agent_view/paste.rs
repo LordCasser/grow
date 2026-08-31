@@ -1202,11 +1202,11 @@ pub(super) mod paste_key_tests {
     pub(in crate::app::agent_view) fn make_followup_permission_state()
     -> crate::views::permission_view::PermissionViewState {
         let (response_tx, _rx) = tokio::sync::oneshot::channel();
-        let request = agent_client_protocol::RequestPermissionRequest::new(
-            agent_client_protocol::SessionId::new(std::sync::Arc::from("test")),
-            agent_client_protocol::ToolCallUpdate::new(
-                agent_client_protocol::ToolCallId::new(std::sync::Arc::from("call-1")),
-                agent_client_protocol::ToolCallUpdateFields::default(),
+        let request = agent_client_protocol::schema::v1::RequestPermissionRequest::new(
+            agent_client_protocol::schema::v1::SessionId::new(std::sync::Arc::from("test")),
+            agent_client_protocol::schema::v1::ToolCallUpdate::new(
+                agent_client_protocol::schema::v1::ToolCallId::new(std::sync::Arc::from("call-1")),
+                agent_client_protocol::schema::v1::ToolCallUpdateFields::default(),
             ),
             vec![],
         );

@@ -208,7 +208,7 @@ mod idle_admission_tests {
                         );
                     let (control_tx, _control_rx) = tokio::sync::oneshot::channel();
                     let control_route = SessionActor::selection_route_for_test(
-                        acp::ModelId::new("provider/termination-fence"),
+                        crate::agent::models::ModelId::new("provider/termination-fence"),
                         sampler::SamplerConfig::default(),
                         85,
                     );

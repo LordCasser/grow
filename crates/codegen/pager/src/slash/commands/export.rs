@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn dispatches_clipboard_when_no_path() {
         let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("test-session".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("test-session".to_string());
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: Some(&sid),
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn dispatches_file_path_when_given() {
         let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("s2".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("s2".to_string());
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: Some(&sid),

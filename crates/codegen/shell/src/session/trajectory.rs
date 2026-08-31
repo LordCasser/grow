@@ -3555,12 +3555,12 @@ mod tests {
             .join(session_id);
         std::fs::create_dir_all(&session_dir).unwrap();
         let info = client_support::session::Info {
-            id: agent_client_protocol::SessionId::new(session_id.to_owned()),
+            id: agent_client_protocol::schema::v1::SessionId::new(session_id.to_owned()),
             cwd: cwd.to_owned(),
         };
         let mut summary = super::super::persistence::Summary::new(
             &info,
-            agent_client_protocol::ModelId::new("model"),
+            crate::agent::models::ModelId::new("model"),
         )
         .unwrap();
         summary.parent_session_id = Some(parent_session_id.to_owned());

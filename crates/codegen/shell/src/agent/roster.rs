@@ -151,7 +151,7 @@ mod merge_roster_tests {
     use super::*;
     use crate::session::info::Info;
     use crate::session::persistence::default_model_id;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
 
     fn summary(id: &str, title: Option<&str>, last_active_ms: i64) -> Summary {
         let mut s = Summary::new(

@@ -4,7 +4,7 @@
 //! subagent spend). Partial costs are scrubbed (absence ≠ free). Totals reset
 //! when a session is resumed in a new agent process.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_raw_response};

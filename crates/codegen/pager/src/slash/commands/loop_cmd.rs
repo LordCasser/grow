@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tools::implementations::grow_build::{
     SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
 };

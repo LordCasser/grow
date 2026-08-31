@@ -2,7 +2,7 @@
 //! [`ExtEvent`] the orchestrator dispatches. Owns the wire envelope shapes and
 //! the method to event mapping, kept out of `headless.rs`.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use crate::headless::reducer::{Lifecycle, StreamEvent};
 

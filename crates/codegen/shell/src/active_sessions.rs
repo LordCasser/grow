@@ -6,7 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};

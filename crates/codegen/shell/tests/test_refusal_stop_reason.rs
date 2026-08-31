@@ -20,7 +20,7 @@ use std::future::Future;
 #[cfg(unix)]
 mod common;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use test_support::*;
 
 /// Run an async test body inside a `LocalSet` (required by ACP's `!Send` futures).
@@ -118,7 +118,7 @@ async fn test_refusal_turn_completes_with_single_messages_request() {
 mod leader {
     use std::time::Duration;
 
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
 
     use test_support::leader::{LeaderFixture, wait_for_live_leader};
     use test_support::*;

@@ -4,9 +4,9 @@
 //! including message routing, multiple client connections, and proper cleanup.
 //!
 //! Currently Unix-only: the tests use `tokio::net::UnixStream` directly
-//! (rather than the leader's `LeaderStream` transport abstraction) so they
+//! (rather than the shared `LocalStream` transport abstraction) so they
 //! exercise the on-disk socket path. Equivalent Windows coverage would
-//! need to go through `LeaderStream`/`LeaderListener` and is tracked as a
+//! need to go through `LocalStream`/`LocalListener` and is tracked as a
 //! follow-up.
 
 #![cfg(unix)]
@@ -1216,12 +1216,12 @@ async fn test_two_clients_session_isolation() {
 ///     on the invoker (covered by `model_changed_*` tests in
 ///     `pager`'s `acp_handler` tests).
 ///
-/// The setModel response itself still routes back to the invoker only —
+/// The set-config response itself still routes back to the invoker only —
 /// this test asserts BOTH (broadcast to all + response to one) so a
 /// future regression that, say, accidentally suppresses the notification
 /// when a response is also produced is caught.
 #[tokio::test]
-async fn test_set_model_broadcasts_to_session_subscribers() {
+async fn test_set_config_option_broadcasts_to_session_subscribers() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, mut acp_rx, response_tx) = setup_test_server(&temp).await;
 
@@ -1273,24 +1273,25 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
         .expect("timeout draining subscribe 2")
         .expect("closed");
 
-    // Invoker sends `session/setModel` for the shared session.
+    // Invoker selects a model through the stable session config method.
     invoker
         .send(format!(
-            r#"{{"jsonrpc":"2.0","id":42,"method":"session/setModel","params":{{"sessionId":"{}","modelId":"grow-4"}}}}"#,
+            r#"{{"jsonrpc":"2.0","id":42,"method":"session/set_config_option","params":{{"sessionId":"{}","configId":"model","value":"grow-4"}}}}"#,
             shared_sid
         ))
         .unwrap();
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
     let setmodel_ns_id = json["id"].as_str().unwrap().to_string();
-    assert_eq!(json["method"], "session/setModel");
-    assert_eq!(json["params"]["modelId"], "grow-4");
+    assert_eq!(json["method"], "session/set_config_option");
+    assert_eq!(json["params"]["configId"], "model");
+    assert_eq!(json["params"]["value"], "grow-4");
 
     // Simulate the agent's two outputs for a successful switch:
     //
     //   1. A session-scoped `ModelChanged` broadcast — what `model_switch::apply`
     //      now emits via the gateway after the actor confirms the swap.
-    //   2. The `SetSessionModelResponse` — routed by the leader to the
+    //   2. The `SetSessionConfigOptionResponse` — routed by the leader to the
     //      invoker only via namespaced-id matching.
     //
     // Order matters for the assertions below: the broadcast is fired
@@ -1302,7 +1303,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     );
     response_tx.send(broadcast.clone()).unwrap();
     let response = format!(
-        r#"{{"jsonrpc":"2.0","result":{{"meta":{{"model":"grow-4"}}}},"id":"{}"}}"#,
+        r#"{{"jsonrpc":"2.0","result":{{"configOptions":[],"_meta":{{"model":"grow-4"}}}},"id":"{}"}}"#,
         setmodel_ns_id
     );
     response_tx.send(response).unwrap();
@@ -1337,7 +1338,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
         inv2["id"], 42,
         "response id must be restored to the invoker's original"
     );
-    assert_eq!(inv2["result"]["meta"]["model"], "grow-4");
+    assert_eq!(inv2["result"]["_meta"]["model"], "grow-4");
 
     // --- Follower: must receive the broadcast (this is the fix — before
     // this notification existed, the follower's status bar / `/model`
@@ -1358,7 +1359,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     assert_eq!(f["params"]["update"]["model_id"], "grow-4");
     assert_eq!(f["params"]["update"]["reasoning_effort"], "high");
 
-    // Follower must NOT see the namespaced setModel response — the
+    // Follower must NOT see the namespaced set-config response — the
     // leader routes responses by request-id prefix, and only the invoker's
     // ClientId prefixes that id.
     let unexpected = tokio::time::timeout(Duration::from_millis(200), follower.recv()).await;

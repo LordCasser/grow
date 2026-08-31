@@ -31,8 +31,8 @@ impl AgentView {
         let had_permissions = !permissions.is_empty();
         for permission in permissions {
             let _ = permission.request.response_tx.send(Ok(
-                agent_client_protocol::RequestPermissionResponse::new(
-                    agent_client_protocol::RequestPermissionOutcome::Cancelled,
+                agent_client_protocol::schema::v1::RequestPermissionResponse::new(
+                    agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled,
                 ),
             ));
         }
@@ -73,8 +73,8 @@ impl AgentView {
             if permission.request.request.session_id.0.as_ref() == session_id {
                 changed = true;
                 let _ = permission.request.response_tx.send(Ok(
-                    agent_client_protocol::RequestPermissionResponse::new(
-                        agent_client_protocol::RequestPermissionOutcome::Cancelled,
+                    agent_client_protocol::schema::v1::RequestPermissionResponse::new(
+                        agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled,
                     ),
                 ));
             } else {
@@ -335,13 +335,13 @@ impl AgentView {
                     let on_scoped_row = perm.options.get(perm.active_idx).is_some_and(|o| {
                         matches!(
                             o.kind,
-                            agent_client_protocol::PermissionOptionKind::AllowAlways
-                                | agent_client_protocol::PermissionOptionKind::RejectAlways
+                            agent_client_protocol::schema::v1::PermissionOptionKind::AllowAlways
+                                | agent_client_protocol::schema::v1::PermissionOptionKind::RejectAlways
                         )
                     });
                     if !on_scoped_row
                         && let Some(idx) = perm.options.iter().position(|o| {
-                            o.kind == agent_client_protocol::PermissionOptionKind::AllowAlways
+                            o.kind == agent_client_protocol::schema::v1::PermissionOptionKind::AllowAlways
                         })
                     {
                         perm.active_idx = idx;
@@ -349,7 +349,8 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if let Some(opt) = perm.options.get(perm.active_idx)
-                    && opt.kind == agent_client_protocol::PermissionOptionKind::RejectOnce
+                    && opt.kind
+                        == agent_client_protocol::schema::v1::PermissionOptionKind::RejectOnce
                     && crate::input::key::is_text_input_key(key)
                     && matches!(key.code, KeyCode::Char(c) if !c.is_ascii_digit())
                 {
@@ -1831,7 +1832,7 @@ mod permission_mouse_tests {
     use super::test_fixtures::make_agent;
     use super::*;
     use crate::app::root::InputOutcome;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use std::sync::Arc;
@@ -1961,7 +1962,7 @@ mod permission_mouse_tests {
 mod permission_scope_key_tests {
     use super::test_fixtures::make_agent;
     use super::*;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use std::sync::Arc;
     fn option(id: &str, kind: acp::PermissionOptionKind) -> acp::PermissionOption {
         acp::PermissionOption::new(

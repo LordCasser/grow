@@ -1144,8 +1144,8 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
 async fn e2e_http_transport_closed_recovers_in_place_not_evicted() {
     // `http-mcp-server` is present in configs as HTTP so the dispatcher's
     // `recoverable_http_servers` classifies it as recoverable.
-    let http_mcp_cfg = agent_client_protocol::McpServer::Http(
-        agent_client_protocol::McpServerHttp::new(
+    let http_mcp_cfg = agent_client_protocol::schema::v1::McpServer::Http(
+        agent_client_protocol::schema::v1::McpServerHttp::new(
             "http-mcp-server".to_string(),
             "https://relay.test/mcp".to_string(),
         )

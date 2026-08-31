@@ -8,7 +8,7 @@
 //! - [`TaskResult`] — produced by spawned tasks, fed back into dispatch.
 use super::session::AgentId;
 use crate::scrollback::entry::EntryId;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use shell::sampling::types::ReasoningEffort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -349,13 +349,13 @@ pub enum Action {
     NextModel,
     /// Switch active model.
     SwitchModel {
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
     },
     /// Patch only reasoning effort. `model_id` is a local display/validation
     /// hint; Shell composes the patch with its newest Sampling target.
     PatchEffort {
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort: ReasoningEffort,
     },
     /// Switch the active prompt profile without changing model, permissions, or Behavior.
@@ -508,7 +508,7 @@ pub enum Action {
     /// (NOT a free-form string). The dispatcher switches the active
     /// session and persists via `Effect::PersistSetting`. Does not
     /// carry effort — use `Action::SwitchModel` for that.
-    SetDefaultModel(acp::ModelId),
+    SetDefaultModel(shell::agent::models::ModelId),
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
     /// via the shell's default-resolution chain.
@@ -519,7 +519,7 @@ pub enum Action {
     /// Commit the fork-secondary model. Typed `ModelId` payload,
     /// persisted to `[ui].fork_secondary_model`. Rebroadcast via
     /// `ConfigUpdate::Ui` so running agents pick up the change.
-    SetForkSecondaryModel(acp::ModelId),
+    SetForkSecondaryModel(shell::agent::models::ModelId),
     /// Clear the persisted fork-secondary model — restores to built-in
     /// default. Active agent keeps its value; next fork uses the default.
     ClearForkSecondaryModel,
@@ -1263,7 +1263,7 @@ pub enum Effect {
         /// `NewSessionRequest` so the shell spawns the session with
         /// the correct model and agent type from the start — avoids a
         /// follow-up `SetSessionModel` roundtrip.
-        model_id: Option<acp::ModelId>,
+        model_id: Option<shell::agent::models::ModelId>,
         /// Client-chosen session ID (`--session-id` / `meta.sessionId`).
         preferred_session_id: Option<String>,
     },
@@ -1298,7 +1298,7 @@ pub enum Effect {
         /// into the worktree's `NewSessionRequest` so it spawns with the
         /// right model — mirrors [`Effect::CreateSession::model_id`]. `None`
         /// for the welcome / CLI / fork paths.
-        model_id: Option<acp::ModelId>,
+        model_id: Option<shell::agent::models::ModelId>,
         /// Client-chosen session ID (`--session-id` with `--worktree`) used as
         /// the worktree/session id and `meta.sessionId` on fresh create.
         /// Ignored when `load_session_id` is set (resume path owns the id).
@@ -1427,7 +1427,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         control_token: super::session::SessionControlToken,
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
         effort_patch: bool,
     },
@@ -1465,7 +1465,7 @@ pub enum Effect {
     },
     /// Persist preferred model (and effort if Some) to config.toml.
     PersistPreferredModel {
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         reasoning_effort: Option<ReasoningEffort>,
     },
     /// Persist the permission mode to config.toml and notify the agent
@@ -2004,7 +2004,7 @@ pub enum TaskResult {
     SessionCreated {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        models: Option<acp::SessionModelState>,
+        models: Option<shell::agent::models::SessionModelState>,
     },
     /// Session creation failed.
     SessionFailed {
@@ -2024,7 +2024,7 @@ pub enum TaskResult {
         worktree_path: std::path::PathBuf,
         /// Effective cwd inside the worktree (preserves subdirectory offset).
         session_cwd: std::path::PathBuf,
-        models: Option<acp::SessionModelState>,
+        models: Option<shell::agent::models::SessionModelState>,
     },
     /// Worktree created and session forked, but not yet loaded.
     /// The dispatch handler sets session_id eagerly, then emits LoadSession.
@@ -2046,7 +2046,7 @@ pub enum TaskResult {
     SessionLoaded {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        models: Option<acp::SessionModelState>,
+        models: Option<shell::agent::models::SessionModelState>,
         code_restored: bool,
         restore_summary: Option<String>,
         restore_degree: Option<workspace::session::git::RestoreDegree>,
@@ -2199,7 +2199,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         control_token: super::session::SessionControlToken,
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
         result: Result<ControlRpcOutcome, ControlRequestFailure>,
     },
@@ -2461,7 +2461,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         error: String,
         text: String,
-        blocks: Option<Vec<agent_client_protocol::ContentBlock>>,
+        blocks: Option<Vec<agent_client_protocol::schema::v1::ContentBlock>>,
     },
     /// Out-of-band slash-command acknowledgement or transport/command error.
     SlashCommandExecuted {

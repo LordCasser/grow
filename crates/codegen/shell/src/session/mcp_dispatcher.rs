@@ -15,7 +15,7 @@
 //! one ACP push.
 //!
 //! Each surviving entry is emitted as an ACP
-//! [`agent_client_protocol::ExtNotification`] with method
+//! [`agent_client_protocol::schema::v1::ExtNotification`] with method
 //! `grow/mcp/server_status` and the payload schema defined by
 //! [`McpServerStatusPayload`].
 //!
@@ -44,7 +44,7 @@ use std::time::Duration;
 use ::mcp::servers::{
     McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
 };
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -1266,9 +1266,9 @@ mod tests {
         assert_eq!(recover, vec!["http-mcp-server".to_string()]);
     }
 
-    fn http_cfg(name: &str) -> agent_client_protocol::McpServer {
-        agent_client_protocol::McpServer::Http(
-            agent_client_protocol::McpServerHttp::new(
+    fn http_cfg(name: &str) -> agent_client_protocol::schema::v1::McpServer {
+        agent_client_protocol::schema::v1::McpServer::Http(
+            agent_client_protocol::schema::v1::McpServerHttp::new(
                 name.to_string(),
                 format!("https://example.test/{name}"),
             )
@@ -1276,9 +1276,9 @@ mod tests {
         )
     }
 
-    fn stdio_cfg(name: &str) -> agent_client_protocol::McpServer {
-        agent_client_protocol::McpServer::Stdio(
-            agent_client_protocol::McpServerStdio::new(
+    fn stdio_cfg(name: &str) -> agent_client_protocol::schema::v1::McpServer {
+        agent_client_protocol::schema::v1::McpServer::Stdio(
+            agent_client_protocol::schema::v1::McpServerStdio::new(
                 name.to_string(),
                 std::path::PathBuf::from("x"),
             )

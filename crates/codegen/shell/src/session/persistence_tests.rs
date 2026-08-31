@@ -212,8 +212,8 @@ async fn current_model_write_preserves_omitted_metadata() {
         cwd: dir.path().to_string_lossy().into_owned(),
     };
     let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
-    let previous = acp::ModelId::new("deepseek/deepseek-v4-flash");
-    let replacement = acp::ModelId::new("anthropic/claude-sonnet");
+    let previous = crate::agent::models::ModelId::new("deepseek/deepseek-v4-flash");
+    let replacement = crate::agent::models::ModelId::new("anthropic/claude-sonnet");
     storage.init_session(&info, previous.clone()).await.unwrap();
     storage
         .update_current_model_and_agent(

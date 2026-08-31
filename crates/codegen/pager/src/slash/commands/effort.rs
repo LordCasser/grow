@@ -83,25 +83,36 @@ impl SlashCommand for EffortCommand {
 mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use agent_client_protocol as acp;
     use shell::sampling::types::ReasoningEffort;
     use std::sync::Arc;
 
-    fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
+    fn model_with_reasoning(
+        id: &str,
+        name: &str,
+    ) -> (
+        shell::agent::models::ModelId,
+        shell::agent::models::ModelInfo,
+    ) {
+        let id = shell::agent::models::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
         meta.insert(
             "reasoningEfforts".into(),
             serde_json::json!(["xhigh", "high", "medium", "low"]),
         );
-        let info = acp::ModelInfo::new(id.clone(), name.to_string())
+        let info = shell::agent::models::ModelInfo::new(id.clone(), name.to_string())
             .meta(serde_json::Value::Object(meta).as_object().cloned());
         (id, info)
     }
 
-    fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
-        let info = acp::ModelInfo::new(id.clone(), name.to_string());
+    fn plain_model(
+        id: &str,
+        name: &str,
+    ) -> (
+        shell::agent::models::ModelId,
+        shell::agent::models::ModelInfo,
+    ) {
+        let id = shell::agent::models::ModelId::new(Arc::from(id));
+        let info = shell::agent::models::ModelInfo::new(id.clone(), name.to_string());
         (id, info)
     }
 
@@ -216,17 +227,18 @@ mod tests {
     #[test]
     fn none_accepted_when_model_menu_offers_it() {
         let mut state = ModelState::default();
-        let id = acp::ModelId::new(Arc::from("effort-dual"));
-        let info = acp::ModelInfo::new(id.clone(), "Effort Dual".to_string()).meta(
-            serde_json::json!({
-                "reasoningEfforts": [
-                    { "value": "none", "label": "None", "default": true },
-                    { "value": "high", "label": "High" },
-                ],
-            })
-            .as_object()
-            .cloned(),
-        );
+        let id = shell::agent::models::ModelId::new(Arc::from("effort-dual"));
+        let info = shell::agent::models::ModelInfo::new(id.clone(), "Effort Dual".to_string())
+            .meta(
+                serde_json::json!({
+                    "reasoningEfforts": [
+                        { "value": "none", "label": "None", "default": true },
+                        { "value": "high", "label": "High" },
+                    ],
+                })
+                .as_object()
+                .cloned(),
+            );
         state.available.insert(id.clone(), info);
         state.current = Some(id.clone());
         let mut ctx = dummy_exec_ctx(&state);
@@ -243,14 +255,15 @@ mod tests {
     #[test]
     fn remap_id_dispatches_mapped_canonical_effort() {
         let mut state = ModelState::default();
-        let id = acp::ModelId::new(Arc::from("reasoning-x"));
-        let info = acp::ModelInfo::new(id.clone(), "Reasoning X".to_string()).meta(
-            serde_json::json!({
-                "reasoningEfforts": [{ "id": "deep", "value": "xhigh", "label": "Deep" }],
-            })
-            .as_object()
-            .cloned(),
-        );
+        let id = shell::agent::models::ModelId::new(Arc::from("reasoning-x"));
+        let info = shell::agent::models::ModelInfo::new(id.clone(), "Reasoning X".to_string())
+            .meta(
+                serde_json::json!({
+                    "reasoningEfforts": [{ "id": "deep", "value": "xhigh", "label": "Deep" }],
+                })
+                .as_object()
+                .cloned(),
+            );
         state.available.insert(id.clone(), info);
         state.current = Some(id.clone());
         let mut ctx = dummy_exec_ctx(&state);

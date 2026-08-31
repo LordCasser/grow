@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use ::diagnostics::events::{CompactionRetryDegraded, CompactionTrigger};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use async_trait::async_trait;
 use compaction::{
     CompactionPrompt, CompactionSampleError, CompactionSampler, LlmCompactionOutput,

@@ -532,7 +532,7 @@ mod queue_steering_tests {
     #[test]
     fn clean_server_edit_pane_switch_releases_hold_through_caller_effects() {
         let mut agent = make_agent();
-        agent.session.session_id = Some(agent_client_protocol::SessionId::new("s1"));
+        agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new("s1"));
         agent.prompt_mode = PromptMode::EditingQueued {
             id: 7,
             original: "queued".into(),
@@ -549,7 +549,7 @@ mod queue_steering_tests {
         assert!(matches!(
             effects.as_slice(),
             [crate::app::actions::Effect::QueueReleaseEdit { session_id, id }]
-                if session_id == &agent_client_protocol::SessionId::new("s1") && id == "q1"
+                if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1"
         ));
     }
 }

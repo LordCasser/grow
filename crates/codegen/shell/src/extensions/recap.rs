@@ -11,7 +11,7 @@
 //! automatically when the user returns to the terminal after being away
 //! (`auto = true`).
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;

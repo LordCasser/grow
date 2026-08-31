@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tools::notification::types::ToolNotificationHandle;
 
 use super::adapter::{SnapshotOutput, TaskMap, parse_exit};

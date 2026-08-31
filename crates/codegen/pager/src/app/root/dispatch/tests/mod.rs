@@ -52,7 +52,7 @@ use crate::app::session::{AgentId, AgentSession, AgentState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::scrollback::state::ScrollbackState;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,17 +1,66 @@
-//! Cross-platform IPC transport for leader<->client communication.
+//! Cross-platform transport shared by Grow's local IPC protocols.
 //!
-//! - **Unix:** [`LeaderStream`] / [`LeaderListener`] are type aliases for
-//!   `tokio::net::UnixStream` / `UnixListener`. Zero wrapper, no unsafe.
+//! - **Unix:** wraps Tokio Unix sockets and restricts the socket to its owner.
 //! - **Windows:** wraps `tokio::net::windows::named_pipe::*` (tokio doesn't
-//!   expose AF_UNIX on Windows). The leader's filesystem path is hashed
-//!   into `\\.\pipe\grow-leader-<hash>` so callers keep their path-based API.
+//!   expose AF_UNIX on Windows). The logical filesystem path is hashed
+//!   into `\\.\pipe\grow-local-<hash>` so callers keep their path-based API.
 //!
 #[cfg(unix)]
-pub use tokio::net::UnixListener as LeaderListener;
-#[cfg(unix)]
-pub use tokio::net::UnixStream as LeaderStream;
+mod unix_impl {
+    use std::io;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
-/// Has a leader bound a listener at `path`?
+    pub use tokio::net::UnixStream as LocalStream;
+
+    pub struct LocalListener {
+        inner: tokio::net::UnixListener,
+    }
+
+    impl LocalListener {
+        pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+            let path = path.as_ref();
+            let inner = tokio::net::UnixListener::bind(path)?;
+            if let Err(error) =
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            {
+                let _ = std::fs::remove_file(path);
+                return Err(error);
+            }
+            Ok(Self { inner })
+        }
+
+        pub async fn accept(&self) -> io::Result<(LocalStream, tokio::net::unix::SocketAddr)> {
+            self.inner.accept().await
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix_impl::{LocalListener, LocalStream};
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::LocalListener;
+
+    #[tokio::test]
+    async fn socket_is_owner_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("local.sock");
+
+        let listener = LocalListener::bind(&path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(listener);
+    }
+}
+
+/// Has a local process bound a listener at `path`?
 ///
 /// - Unix: stats the socket file.
 /// - Windows: probes the named pipe (Named Pipes don't appear in the
@@ -28,10 +77,11 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{LeaderListener, LeaderStream};
+pub use windows_impl::{LocalListener, LocalStream};
 
 #[cfg(windows)]
 mod windows_impl {
+    use std::ffi::OsStr;
     use std::io;
     use std::path::Path;
     use std::pin::Pin;
@@ -41,9 +91,76 @@ mod windows_impl {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tracing::debug;
 
+    struct OwnerOnlySecurityAttributes {
+        descriptor: windows::Win32::Security::PSECURITY_DESCRIPTOR,
+        attributes: windows::Win32::Security::SECURITY_ATTRIBUTES,
+    }
+
+    impl OwnerOnlySecurityAttributes {
+        fn new() -> io::Result<Self> {
+            use windows::Win32::Security::Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            };
+            use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+            use windows::core::PCWSTR;
+
+            // A protected DACL that grants generic-all only to the object owner.
+            // Named-pipe objects inherit the creating token's owner, i.e. the
+            // current OS user, so other local users cannot open the endpoint.
+            let sddl: Vec<u16> = "D:P(A;;GA;;;OW)\0".encode_utf16().collect();
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(sddl.as_ptr()),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    None,
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+            }
+
+            Ok(Self {
+                descriptor,
+                attributes: SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: descriptor.0,
+                    bInheritHandle: false.into(),
+                },
+            })
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
+            (&mut self.attributes as *mut windows::Win32::Security::SECURITY_ATTRIBUTES).cast()
+        }
+    }
+
+    impl Drop for OwnerOnlySecurityAttributes {
+        fn drop(&mut self) {
+            use windows::Win32::Foundation::{HLOCAL, LocalFree};
+
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
+            }
+        }
+    }
+
+    fn create_server(
+        pipe_name: &OsStr,
+        first_instance: bool,
+    ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let mut options = ServerOptions::new();
+        options
+            .first_pipe_instance(first_instance)
+            .reject_remote_clients(true);
+        let mut security = OwnerOnlySecurityAttributes::new()?;
+        unsafe { options.create_with_security_attributes_raw(pipe_name, security.as_mut_ptr()) }
+    }
+
     /// Bidirectional IPC stream wrapping a connected named pipe (server-
     /// or client-side, depending on how it was created).
-    pub struct LeaderStream {
+    pub struct LocalStream {
         inner: StreamInner,
     }
 
@@ -52,7 +169,7 @@ mod windows_impl {
         Client(tokio::net::windows::named_pipe::NamedPipeClient),
     }
 
-    impl LeaderStream {
+    impl LocalStream {
         /// Connect to a listener at `path`. The path is translated to a
         /// named-pipe name and `ClientOptions::open` is used.
         pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -74,7 +191,7 @@ mod windows_impl {
     // wrapping enum and struct are auto-Unpin as well. That means
     // Pin<&mut Self>::get_mut() is safe — no unsafe needed for the
     // structural projection into `inner`.
-    impl AsyncRead for LeaderStream {
+    impl AsyncRead for LocalStream {
         fn poll_read(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -87,7 +204,7 @@ mod windows_impl {
         }
     }
 
-    impl AsyncWrite for LeaderStream {
+    impl AsyncWrite for LocalStream {
         fn poll_write(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -114,10 +231,10 @@ mod windows_impl {
         }
     }
 
-    /// Listener for incoming leader IPC connections. Holds the pipe name
+    /// Listener for incoming local IPC connections. Holds the pipe name
     /// plus the next pre-created server instance (Windows named pipes
     /// require pre-creating an instance per pending connection).
-    pub struct LeaderListener {
+    pub struct LocalListener {
         pipe_name: std::ffi::OsString,
         /// Next pre-created server instance, ready for `connect().await`.
         /// We rotate: take this one, await its connect, immediately create
@@ -130,15 +247,11 @@ mod windows_impl {
         next_server: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
     }
 
-    impl LeaderListener {
+    impl LocalListener {
         /// Reserve a named-pipe name (no on-disk file is created).
         pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
             let pipe_name = path_to_pipe_name(path.as_ref());
-            let first = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&pipe_name)?;
+            let first = create_server(&pipe_name, true)?;
             Ok(Self {
                 pipe_name,
                 next_server: tokio::sync::Mutex::new(Some(first)),
@@ -149,9 +262,7 @@ mod windows_impl {
         /// `UnixListener::accept`, returning a connected stream and a unit
         /// placeholder where Unix would return the peer address (named
         /// pipes don't carry one).
-        pub async fn accept(&self) -> io::Result<(LeaderStream, ())> {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
+        pub async fn accept(&self) -> io::Result<(LocalStream, ())> {
             // Take the pending instance (or create one), await a client, then
             // pre-create the next. On connect() error, drop the instance and
             // retry with a fresh one — returning early would leave the slot
@@ -165,13 +276,13 @@ mod windows_impl {
             for attempt in 0..MAX_ACCEPT_ATTEMPTS {
                 let server = match slot.take() {
                     Some(server) => server,
-                    None => ServerOptions::new().create(&self.pipe_name)?,
+                    None => create_server(&self.pipe_name, false)?,
                 };
                 match server.connect().await {
                     Ok(()) => {
-                        *slot = Some(ServerOptions::new().create(&self.pipe_name)?);
+                        *slot = Some(create_server(&self.pipe_name, false)?);
                         return Ok((
-                            LeaderStream {
+                            LocalStream {
                                 inner: StreamInner::Server(server),
                             },
                             (),
@@ -187,15 +298,15 @@ mod windows_impl {
             }
 
             // Best-effort re-arm; take-or-create above still recovers if this fails.
-            if let Ok(fresh) = ServerOptions::new().create(&self.pipe_name) {
+            if let Ok(fresh) = create_server(&self.pipe_name, false) {
                 *slot = Some(fresh);
             }
             Err(last_err
-                .unwrap_or_else(|| io::Error::other("LeaderListener: accept exhausted retries")))
+                .unwrap_or_else(|| io::Error::other("LocalListener: accept exhausted retries")))
         }
     }
 
-    /// Whether a leader has a pipe bound at `path`.
+    /// Whether a local process has a pipe bound at `path`.
     ///
     /// Probes with `WaitNamedPipeW` (non-connecting), not `ClientOptions::open`,
     /// which would open a real client the leader's `accept()` consumes as a
@@ -233,7 +344,7 @@ mod windows_impl {
         name
     }
 
-    /// Deterministic leaf name (`grow-leader-<hash>`) for a filesystem path.
+    /// Deterministic leaf name (`grow-local-<hash>`) for a filesystem path.
     ///
     /// Uses SipHash-1-3 with fixed keys so the hash is stable across Rust
     /// versions (unlike `DefaultHasher`, whose algorithm is unspecified).
@@ -245,7 +356,7 @@ mod windows_impl {
         let mut hasher = SipHasher13::new_with_keys(0x67726f6b_6c656164, 0x65725f70_69706521);
         path.hash(&mut hasher);
         let hash = hasher.finish();
-        std::ffi::OsString::from(format!("grow-leader-{hash:016x}"))
+        std::ffi::OsString::from(format!("grow-local-{hash:016x}"))
     }
 
     #[cfg(test)]
@@ -271,14 +382,14 @@ mod windows_impl {
         fn pipe_name_has_correct_prefix() {
             let name = path_to_pipe_name(Path::new("/tmp/test.sock"));
             let s = name.to_string_lossy();
-            assert!(s.starts_with(r"\\.\pipe\grow-leader-"), "got: {s}");
+            assert!(s.starts_with(r"\\.\pipe\grow-local-"), "got: {s}");
         }
 
         #[test]
         fn pipe_name_is_bounded() {
             let long_path = format!("/{}", "a".repeat(500));
             let name = path_to_pipe_name(Path::new(&long_path));
-            // \\.\pipe\grow-leader- (20 chars) + 16 hex chars = 36 total
+            // \\.\pipe\grow-local- (20 chars) + 16 hex chars = 36 total
             assert!(name.len() <= 256, "pipe name too long: {}", name.len());
         }
 
@@ -292,7 +403,7 @@ mod windows_impl {
             // Nothing bound yet -> ERROR_FILE_NOT_FOUND -> not ready.
             assert!(!listener_is_ready(&path));
 
-            let listener = LeaderListener::bind(&path).unwrap();
+            let listener = LocalListener::bind(&path).unwrap();
             // Ready as soon as the pipe is bound, before any accept().
             assert!(listener_is_ready(&path));
 

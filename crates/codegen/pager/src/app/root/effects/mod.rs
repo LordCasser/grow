@@ -18,7 +18,7 @@ pub(crate) use helpers::{
 };
 use helpers::*;
 use std::path::{Path, PathBuf};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tokio::task::JoinSet;
 use tokio::io::AsyncBufReadExt as _;
 use acp_transport::{AcpAgentTx, acp_send};
@@ -315,7 +315,9 @@ pub(crate) fn execute(
                             TaskResult::SessionCreated {
                                 agent_id,
                                 session_id: resp.session_id,
-                                models: resp.models,
+                                models: shell::agent::models::SessionModelState::from_config_options(
+                                    resp.config_options,
+                                ),
                             }
                         }
                         Err(e) => {
@@ -598,7 +600,9 @@ pub(crate) fn execute(
                                 session_id: resp.session_id,
                                 worktree_path: worktree_root,
                                 session_cwd,
-                                models: resp.models,
+                                models: shell::agent::models::SessionModelState::from_config_options(
+                                    resp.config_options,
+                                ),
                             }
                         }
                         Err(e) => {
@@ -665,7 +669,9 @@ pub(crate) fn execute(
                             TaskResult::SessionLoaded {
                                 agent_id,
                                 session_id: acp_session_id,
-                                models: resp.models,
+                                models: shell::agent::models::SessionModelState::from_config_options(
+                                    resp.config_options,
+                                ),
                                 code_restored,
                                 restore_summary,
                                 restore_degree,
@@ -1507,18 +1513,25 @@ pub(crate) fn execute(
                                 reasoning_effort_meta_value(eff),
                             );
                     }
-                    if effort_patch {
-                        meta.insert(
-                            shell::session::EFFORT_PATCH_META_KEY.to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                    }
                     control_token.shell_intent().insert_meta(&mut meta);
-                    let req = acp::SetSessionModelRequest::new(
-                            session_id.clone(),
-                            model_id.clone(),
+                    let (config_id, value) = if effort_patch {
+                        let effort = effort.expect("effort patch requires a selected effort");
+                        (
+                            shell::agent::session_config::REASONING_EFFORT_CONFIG_ID,
+                            effort.as_str().to_string(),
                         )
-                        .meta(meta);
+                    } else {
+                        (
+                            shell::agent::session_config::MODEL_CONFIG_ID,
+                            model_id.0.to_string(),
+                        )
+                    };
+                    let req = acp::SetSessionConfigOptionRequest::new(
+                        session_id.clone(),
+                        config_id,
+                        acp::SessionConfigOptionValue::value_id(value),
+                    )
+                    .meta(meta);
                     let result = acp_send(req, &tx)
                         .await
                         .map(|response| {

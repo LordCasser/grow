@@ -1,5 +1,5 @@
+use acp_transport::protocol as acp;
 use agent::prompt::skills::SkillsConfig;
-use agent_client_protocol as acp;
 use anyhow::Result;
 use indexmap::IndexMap;
 use std::collections::HashMap;

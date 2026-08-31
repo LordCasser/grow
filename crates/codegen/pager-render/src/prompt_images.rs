@@ -1054,7 +1054,7 @@ pub fn persist_to_session(
 ///
 /// Returns `None` if session identity is not yet known.
 pub fn session_images_dir(
-    session_id: Option<&agent_client_protocol::SessionId>,
+    session_id: Option<&agent_client_protocol::schema::v1::SessionId>,
     cwd: &std::path::Path,
 ) -> Option<PathBuf> {
     let sid = session_id?;
@@ -1072,7 +1072,7 @@ pub fn session_images_dir(
 /// the session and torn down with it. Returns `None` until session identity is
 /// known (no diagrams are cached on disk before then).
 pub fn session_mermaid_dir(
-    session_id: Option<&agent_client_protocol::SessionId>,
+    session_id: Option<&agent_client_protocol::schema::v1::SessionId>,
     cwd: &std::path::Path,
 ) -> Option<PathBuf> {
     let sid = session_id?;
@@ -1163,7 +1163,7 @@ pub fn build_content_blocks_with_workspace(
     text: String,
     images: Vec<PastedImage>,
     workspace_cwd: Option<&std::path::Path>,
-) -> Vec<agent_client_protocol::ContentBlock> {
+) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
     let allowed: Option<Vec<std::path::PathBuf>> =
         workspace_cwd.map(client_support::placeholder_images::default_allowed_prefixes);
     build_content_blocks_with_prefixes(text, images, allowed.as_deref())
@@ -1179,7 +1179,7 @@ pub fn build_content_blocks_with_prefixes(
     text: String,
     images: Vec<PastedImage>,
     allowed_prefixes: Option<&[std::path::PathBuf]>,
-) -> Vec<agent_client_protocol::ContentBlock> {
+) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
     build_content_blocks_with_prefixes_and_caps(
         text,
         images,
@@ -1201,8 +1201,8 @@ pub fn build_content_blocks_with_prefixes_and_caps(
     images: Vec<PastedImage>,
     allowed_prefixes: Option<&[std::path::PathBuf]>,
     aggregate_max: usize,
-) -> Vec<agent_client_protocol::ContentBlock> {
-    use agent_client_protocol::{ContentBlock, ImageContent, TextContent};
+) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
+    use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
     use base64::Engine as _;
 
     // Phase 1: rewrite the text to strip failed-load placeholders, and
@@ -1275,8 +1275,8 @@ fn resolve_orphan_placeholders(
     images: &[PastedImage],
     allowed_prefixes: Option<&[std::path::PathBuf]>,
     aggregate_max: usize,
-) -> (String, Vec<agent_client_protocol::ImageContent>) {
-    use agent_client_protocol::ImageContent;
+) -> (String, Vec<agent_client_protocol::schema::v1::ImageContent>) {
+    use agent_client_protocol::schema::v1::ImageContent;
     use base64::Engine as _;
 
     let Some(allowed) = allowed_prefixes else {
@@ -1541,7 +1541,7 @@ mod tests {
     /// pasted images land under that origin, not the process cwd.
     #[test]
     fn session_images_dir_keys_off_the_passed_cwd() {
-        let id = agent_client_protocol::SessionId::new("sid-xyz");
+        let id = agent_client_protocol::schema::v1::SessionId::new("sid-xyz");
         let a = session_images_dir(Some(&id), std::path::Path::new("/origin/a")).unwrap();
         let b = session_images_dir(Some(&id), std::path::Path::new("/origin/b")).unwrap();
         assert_ne!(
@@ -3570,7 +3570,7 @@ mod tests {
     fn build_blocks_no_workspace(
         text: String,
         images: Vec<PastedImage>,
-    ) -> Vec<agent_client_protocol::ContentBlock> {
+    ) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
         build_content_blocks_with_workspace(text, images, None)
     }
 
@@ -3580,7 +3580,7 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert!(matches!(
             &blocks[0],
-            agent_client_protocol::ContentBlock::Text(_)
+            agent_client_protocol::schema::v1::ContentBlock::Text(_)
         ));
     }
 
@@ -3589,7 +3589,7 @@ mod tests {
         let img = make_real_image(100, 80);
         let blocks = build_blocks_no_workspace("look at this [Image #1]".into(), vec![img]);
         assert_eq!(blocks.len(), 2);
-        if let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] {
+        if let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] {
             assert_eq!(ic.mime_type, "image/png");
             assert!(!ic.data.is_empty());
             assert!(ic.uri.is_none());
@@ -3619,7 +3619,7 @@ mod tests {
         };
         let blocks = build_blocks_no_workspace("text".into(), vec![img]);
         assert_eq!(blocks.len(), 2);
-        if let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] {
+        if let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] {
             assert!(!ic.data.is_empty());
             // The durable session copy is surfaced through `uri` even for
             // clipboard pastes (no `source_path`) so the attachment can be
@@ -3641,7 +3641,7 @@ mod tests {
         img.source_path = Some(PathBuf::from("/Users/test/logo.png"));
         let blocks = build_blocks_no_workspace("text".into(), vec![img]);
         assert_eq!(blocks.len(), 2);
-        if let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] {
+        if let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] {
             assert!(ic.uri.is_none());
             assert!(!ic.data.is_empty());
         } else {
@@ -3661,7 +3661,7 @@ mod tests {
         img.source_path = Some(visible.clone());
 
         let blocks = build_blocks_no_workspace("text".into(), vec![img]);
-        let agent_client_protocol::ContentBlock::Image(image) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(image) = &blocks[1] else {
             panic!("expected image");
         };
         let canonical_target = dunce::canonicalize(&target).unwrap();
@@ -3678,7 +3678,7 @@ mod tests {
         img.display_number = 3;
         let blocks = build_blocks_no_workspace("text [Image #3]".into(), vec![img]);
         assert_eq!(blocks.len(), 2);
-        let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] else {
             panic!("expected Image block");
         };
         assert_eq!(
@@ -3695,7 +3695,7 @@ mod tests {
         img.session_image_path = Some(PathBuf::from("/Users/test/.grow/session/image.png"));
         let blocks = build_blocks_no_workspace("text".into(), vec![img]);
         assert_eq!(blocks.len(), 2);
-        if let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] {
+        if let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] {
             assert_eq!(
                 ic.uri.as_deref(),
                 Some("file:///Users/test/.grow/session/image.png"),
@@ -3748,7 +3748,7 @@ mod tests {
 
         // Text block + 1 recovered image.
         assert_eq!(blocks.len(), 2);
-        let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] else {
             panic!("expected recovered Image block");
         };
         assert_eq!(ic.mime_type, "image/png");
@@ -3770,7 +3770,7 @@ mod tests {
         // to call `Read` on the path (and the path component would
         // tempt it to). The bracketed `[Image #N]` form preserves the
         // positional anchor inside the prose.
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("first block must be text");
         };
         assert!(
@@ -3808,14 +3808,14 @@ mod tests {
         let blocks = build_content_blocks_with_prefixes(text, vec![img], Some(&[]));
 
         assert_eq!(blocks.len(), 2, "expected text + 1 inline image");
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("first block must be text");
         };
         assert_eq!(
             t.text, "what is that?[Image #1] thanks",
             "placeholder path must be stripped while the anchor survives"
         );
-        let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] else {
             panic!("second block must be the inline image");
         };
         assert_eq!(ic.mime_type, "image/png");
@@ -3832,7 +3832,7 @@ mod tests {
         let blocks = build_content_blocks_with_prefixes(text, vec![], Some(&allowed));
         // No image attached, only text block.
         assert_eq!(blocks.len(), 1);
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("expected text block");
         };
         // Pin the exact post-strip text — the strip seam (space
@@ -3878,7 +3878,7 @@ mod tests {
         // Text + the PastedImage's own block; no orphan recovery
         // (skipped because `display_number` matches).
         assert_eq!(blocks.len(), 2);
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("first block must be text");
         };
         // Phase 2 universal strip: the anchor `[Image #1]` survives so
@@ -3909,7 +3909,7 @@ mod tests {
         let blocks = build_content_blocks_with_workspace(text.into(), vec![], None);
         // Text block only — no recovery without a workspace.
         assert_eq!(blocks.len(), 1);
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("expected text block");
         };
         assert!(
@@ -3952,7 +3952,7 @@ mod tests {
             build_content_blocks_with_prefixes_and_caps(text, vec![], Some(&allowed), png.len());
         // Text + 1 recovered image (not 2).
         assert_eq!(blocks.len(), 2);
-        let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] else {
             panic!("expected recovered Image block");
         };
         let attached_uri = ic.uri.as_deref().unwrap();
@@ -3972,7 +3972,7 @@ mod tests {
         // preserved so the model still sees the in-prose position;
         // path is gone because the image isn't attached and a bare
         // path would tempt a `Read`.
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("expected text block");
         };
         assert!(
@@ -4007,7 +4007,7 @@ mod tests {
         // decode the base64 data and assert byte-for-byte equality
         // with the on-disk PNG so a regression emitting wrong bytes
         // at the inclusive boundary is caught.
-        let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Image(ic) = &blocks[1] else {
             panic!("expected recovered Image block");
         };
         assert_eq!(ic.mime_type, "image/png");
@@ -4045,7 +4045,7 @@ mod tests {
         // Cap below image size → no recovered image; only the text
         // block remains.
         assert_eq!(blocks.len(), 1);
-        let agent_client_protocol::ContentBlock::Text(t) = &blocks[0] else {
+        let agent_client_protocol::schema::v1::ContentBlock::Text(t) = &blocks[0] else {
             panic!("expected text block");
         };
         // Placeholder anchor is NOT stripped on aggregate-cap

@@ -2,7 +2,7 @@ use crate::agent::mvp_agent::MvpAgent;
 use crate::extensions::routing::RequestMeta;
 use crate::session::ExtMethodResult;
 use crate::terminal::{self, KillOutcome};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

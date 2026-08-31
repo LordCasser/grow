@@ -961,7 +961,7 @@ mod tests {
         let store = WorkflowRunStore::new(None, persist_tx.clone());
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),
@@ -1084,7 +1084,7 @@ mod tests {
         let store = WorkflowRunStore::new(None, persist_tx.clone());
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),
@@ -1160,7 +1160,7 @@ mod tests {
         let store = WorkflowRunStore::new(None, persist_tx.clone());
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let notify = WorkflowNotifySender::new(
-            agent_client_protocol::SessionId::new("test-session"),
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
             store.clone(),

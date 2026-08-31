@@ -51,7 +51,10 @@ mod tests {
         skills: Vec::new(),
     };
 
-    fn ctx_with_session(models: &ModelState, sid: Option<&agent_client_protocol::SessionId>) {
+    fn ctx_with_session(
+        models: &ModelState,
+        sid: Option<&agent_client_protocol::schema::v1::SessionId>,
+    ) {
         let mut ctx = CommandExecCtx {
             models,
             session_id: sid,
@@ -75,7 +78,7 @@ mod tests {
     #[test]
     fn with_session_dispatches_show_queue() {
         let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("s1".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("s1".to_string());
         ctx_with_session(&models, Some(&sid));
     }
 }

@@ -55,7 +55,7 @@ fn from_config_uses_only_explicit_provider_models() {
 fn apply_config_preserves_an_existing_session_selection() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
     let revision = manager.catalog_revision();
-    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    manager.set_current_model_id(crate::agent::models::ModelId::new("local/beta"));
     manager
         .apply_config(two_model_config("local/alpha"))
         .unwrap();
@@ -66,7 +66,7 @@ fn apply_config_preserves_an_existing_session_selection() {
 #[test]
 fn apply_config_reselects_when_current_model_disappears() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
-    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    manager.set_current_model_id(crate::agent::models::ModelId::new("local/beta"));
     let next = config(
         r#"
         [provider.local.models.alpha]
@@ -82,9 +82,9 @@ fn apply_config_reselects_when_current_model_disappears() {
 fn explicit_selection_bumps_model_switch_generation_once() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
     let before = manager.model_switch_generation();
-    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    manager.set_current_model_id(crate::agent::models::ModelId::new("local/beta"));
     assert_eq!(manager.model_switch_generation(), before + 1);
-    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    manager.set_current_model_id(crate::agent::models::ModelId::new("local/beta"));
     assert_eq!(manager.model_switch_generation(), before + 1);
 }
 
@@ -138,7 +138,7 @@ fn sampling_config_uses_selected_provider_credentials() {
 #[test]
 fn invalid_reload_leaves_the_live_snapshot_unchanged() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
-    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    manager.set_current_model_id(crate::agent::models::ModelId::new("local/beta"));
     let before_models = manager.models();
     let before_current = manager.current_model_id();
     let before_route = manager

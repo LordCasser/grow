@@ -2,7 +2,7 @@ use super::support::{create_test_actor, record_test_prompt, seed_test_timeline};
 
 use crate::sampling::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 fn prompt(text: &str, index: usize) -> ConversationItem {
     let mut item = ConversationItem::user(text);

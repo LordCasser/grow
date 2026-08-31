@@ -3,7 +3,7 @@
 use crate::app::actions::Effect;
 use crate::app::root::AppView;
 use crate::app::session::AgentId;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use diagnostics::session_ctx::log_event;
 
 /// Max post-install MCP-list re-probes while waiting for a just-installed

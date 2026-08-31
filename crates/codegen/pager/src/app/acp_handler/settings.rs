@@ -3,7 +3,9 @@ use serde::Deserialize;
 
 /// Handle `grow/models/update` — model list changed (etag-triggered refresh).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
+    if let Ok(model_state) =
+        serde_json::from_str::<shell::agent::models::SessionModelState>(notif.params.get())
+    {
         apply_models_state_update(model_state, app)
     } else {
         tracing::warn!("Failed to parse grow/models/update");
@@ -12,7 +14,7 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
 }
 
 pub(crate) fn apply_models_state_update(
-    model_state: acp::SessionModelState,
+    model_state: shell::agent::models::SessionModelState,
     app: &mut AppView,
 ) -> bool {
     use crate::acp::model_state::ModelState;
@@ -65,8 +67,8 @@ fn retry_authoritative_controls_recursively(agent: &mut crate::app::agent_view::
 /// root's catalog makes a later `ModelChanged` impossible to resolve there.
 fn update_model_catalog_recursively(
     agent: &mut crate::app::agent_view::AgentView,
-    available: &indexmap::IndexMap<acp::ModelId, acp::ModelInfo>,
-    fallback_current: Option<&acp::ModelId>,
+    available: &indexmap::IndexMap<shell::agent::models::ModelId, shell::agent::models::ModelInfo>,
+    fallback_current: Option<&shell::agent::models::ModelId>,
 ) {
     if let Some(current) = agent.session.models.current.as_ref()
         && !available.contains_key(current)

@@ -58,7 +58,7 @@ pub mod protocol;
 mod server;
 #[cfg(test)]
 pub(crate) mod test_support;
-mod transport;
+pub use crate::local_ipc::transport::listener_is_ready;
 pub use client::{ClientError, DisconnectReason, LeaderClient, LeaderRegistration};
 pub use lock::{
     LEADER_SOCKET_ENV, LeaderLock, LockError, lock_path, lock_path_in, socket_path, socket_path_in,
@@ -79,7 +79,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-pub use transport::listener_is_ready;
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
@@ -1133,7 +1132,7 @@ pub async fn connect_or_spawn(
     let mut lock = LeaderLock::new();
     let sock_path = lock.socket_path().clone();
     let mut replacing_stale = false;
-    if crate::leader::transport::listener_is_ready(&sock_path) {
+    if crate::local_ipc::transport::listener_is_ready(&sock_path) {
         let skip_connect = if let Some(pid) = lock.read_pid() {
             if crate::util::is_process_alive(pid) {
                 debug!(pid, "Leader PID is alive, attempting connection");
@@ -1422,7 +1421,7 @@ pub(crate) async fn wait_for_socket_connectable(
     let deadline = tokio::time::Instant::now() + SPAWN_WAIT_TIMEOUT;
     let mut last_error = None;
     while tokio::time::Instant::now() < deadline {
-        if crate::leader::transport::listener_is_ready(sock_path) {
+        if crate::local_ipc::transport::listener_is_ready(sock_path) {
             match connect_to_leader(sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => return Ok(conn),
                 Err(error) if is_incompatible_protocol_failure(&error) => return Err(error),

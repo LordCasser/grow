@@ -303,7 +303,7 @@ pub(crate) fn restore_descendant_state(
                 _ => None,
             };
             notification.session_id =
-                agent_client_protocol::SessionId::new(parent_session_id.clone());
+                agent_client_protocol::schema::v1::SessionId::new(parent_session_id.clone());
             let mut meta = notification
                 .meta
                 .take()
@@ -314,7 +314,7 @@ pub(crate) fn restore_descendant_state(
             let Ok(raw) = serde_json::value::to_raw_value(&notification) else {
                 continue;
             };
-            let ext = agent_client_protocol::ExtNotification::new(
+            let ext = agent_client_protocol::schema::v1::ExtNotification::new(
                 "grow/session_notification",
                 std::sync::Arc::from(raw),
             );
@@ -546,7 +546,7 @@ mod tests {
     use crate::app::session::{AgentId, AgentSession};
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::state::ScrollbackState;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Instant;
@@ -692,9 +692,11 @@ mod tests {
             id: acp::SessionId::new(child_sid),
             cwd: "/tmp".into(),
         };
-        let mut summary =
-            shell::session::persistence::Summary::new(&info, acp::ModelId::new("test-model"))
-                .unwrap();
+        let mut summary = shell::session::persistence::Summary::new(
+            &info,
+            shell::agent::models::ModelId::new("test-model"),
+        )
+        .unwrap();
         summary.session_kind = Some("subagent".into());
         std::fs::write(
             session_dir.join("summary.json"),
@@ -947,12 +949,12 @@ mod tests {
             .join(session_id);
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let info = shell::session::info::Info {
-            id: agent_client_protocol::SessionId::new(session_id),
+            id: agent_client_protocol::schema::v1::SessionId::new(session_id),
             cwd: cwd.to_string_lossy().into_owned(),
         };
         let summary = shell::session::persistence::Summary::new(
             &info,
-            agent_client_protocol::ModelId::new("test-model"),
+            shell::agent::models::ModelId::new("test-model"),
         )
         .unwrap();
         std::fs::write(

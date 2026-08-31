@@ -2403,6 +2403,19 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(result);
                         });
                     }
+                    SessionCommand::RunCoordinationInquiry { inquiry } => {
+                        session.enqueue_coordination_inquiry(inquiry);
+                    }
+                    SessionCommand::RecordCoordinationNotice { notice, respond_to } => {
+                        let result = session.persist_ui_notice(notice).await;
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::InstallCoordinationBackend { backend, respond_to } => {
+                        *session.rebuild_spec.coordination_backend.write() = Some(backend.clone());
+                        let bridge = session.agent.borrow().tool_bridge().clone();
+                        bridge.update_resource(backend).await;
+                        let _ = respond_to.send(());
+                    }
                     SessionCommand::Recap { auto } => {
                         let s = session.clone();
                         let activity = session

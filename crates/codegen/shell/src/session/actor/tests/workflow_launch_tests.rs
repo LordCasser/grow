@@ -128,7 +128,7 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
             let (workflow_gateway_tx, _workflow_gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel();
             let notify = WorkflowNotifySender::new(
-                agent_client_protocol::SessionId::new("workflow-launch-test"),
+                agent_client_protocol::schema::v1::SessionId::new("workflow-launch-test"),
                 acp_transport::AcpAgentGatewaySender::new(workflow_gateway_tx),
                 workflow_persistence_tx,
                 store.clone(),

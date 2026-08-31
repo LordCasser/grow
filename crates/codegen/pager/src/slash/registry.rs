@@ -17,7 +17,7 @@ use super::command::{CommandKind, CommandSource, SlashCommand};
 use super::mode_support::ModeSupport;
 
 fn client_collision_qualified_name(
-    cmd: &agent_client_protocol::AvailableCommand,
+    cmd: &agent_client_protocol::schema::v1::AvailableCommand,
 ) -> Option<String> {
     let meta = cmd.meta.as_ref()?;
     meta.get("path").and_then(|v| v.as_str())?;
@@ -443,7 +443,7 @@ impl CommandRegistry {
     /// `rebuild_triggers()` per generation bump.
     pub fn set_acp_state(
         &mut self,
-        commands: &[agent_client_protocol::AvailableCommand],
+        commands: &[agent_client_protocol::schema::v1::AvailableCommand],
         tools: Option<HashSet<String>>,
     ) {
         self.apply_acp_commands(commands);
@@ -462,12 +462,18 @@ impl CommandRegistry {
     /// Triggers a full `rebuild_triggers()`. Prefer `set_acp_state`
     /// when also updating the agent's tool list so both mutations
     /// share one rebuild.
-    pub fn set_acp_commands(&mut self, commands: &[agent_client_protocol::AvailableCommand]) {
+    pub fn set_acp_commands(
+        &mut self,
+        commands: &[agent_client_protocol::schema::v1::AvailableCommand],
+    ) {
         self.apply_acp_commands(commands);
         self.rebuild_triggers();
     }
 
-    fn apply_acp_commands(&mut self, commands: &[agent_client_protocol::AvailableCommand]) {
+    fn apply_acp_commands(
+        &mut self,
+        commands: &[agent_client_protocol::schema::v1::AvailableCommand],
+    ) {
         // Remove old ACP-sourced commands.
         let mut i = 0;
         while i < self.commands.len() {
@@ -728,7 +734,7 @@ mod tests {
         assert_eq!(registry.command_count(), 1);
 
         // Add ACP commands.
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+        let acp_cmds = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "flush".to_string(),
             "Flush memory".to_string(),
         )];
@@ -843,7 +849,7 @@ mod tests {
     fn restricted_applies_to_acp_commands() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "exit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+        registry.set_acp_commands(&[agent_client_protocol::schema::v1::AvailableCommand::new(
             "flush".to_string(),
             "Flush memory".to_string(),
         )]);
@@ -853,7 +859,7 @@ mod tests {
         assert!(registry.get("flush").is_none());
 
         // Deny list survives an ACP catalog resync.
-        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+        registry.set_acp_commands(&[agent_client_protocol::schema::v1::AvailableCommand::new(
             "flush".to_string(),
             "Flush memory".to_string(),
         )]);
@@ -887,7 +893,7 @@ mod tests {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "quit" });
         let mut registry = CommandRegistry::new(vec![builtin]);
 
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+        let acp_cmds = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "quit".to_string(),
             "Should be skipped".to_string(),
         )];
@@ -896,13 +902,16 @@ mod tests {
         assert_eq!(registry.command_count(), 1);
     }
 
-    fn acp_skill(name: &str, scope: &str) -> agent_client_protocol::AvailableCommand {
+    fn acp_skill(name: &str, scope: &str) -> agent_client_protocol::schema::v1::AvailableCommand {
         let meta = serde_json::json!({ "scope": scope, "path": "/x/SKILL.md" })
             .as_object()
             .cloned()
             .unwrap();
-        agent_client_protocol::AvailableCommand::new(name.to_string(), format!("{name} skill"))
-            .meta(meta)
+        agent_client_protocol::schema::v1::AvailableCommand::new(
+            name.to_string(),
+            format!("{name} skill"),
+        )
+        .meta(meta)
     }
 
     #[test]
@@ -933,7 +942,7 @@ mod tests {
             .as_object()
             .cloned()
             .unwrap();
-        let cmd = agent_client_protocol::AvailableCommand::new(
+        let cmd = agent_client_protocol::schema::v1::AvailableCommand::new(
             "login".to_string(),
             "malformed".to_string(),
         )
@@ -975,7 +984,7 @@ mod tests {
     fn acp_nonskill_colliding_with_builtin_is_dropped() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand { name: "login" });
         let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+        registry.set_acp_commands(&[agent_client_protocol::schema::v1::AvailableCommand::new(
             "login".to_string(),
             "shell login".to_string(),
         )]);

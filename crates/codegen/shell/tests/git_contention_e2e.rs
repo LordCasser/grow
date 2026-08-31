@@ -34,7 +34,7 @@ use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
-use agent_client_protocol::{self as acp, Agent as _};
+use acp_transport::{AcpAgentHandler as _, protocol as acp};
 use serde_json::{Value, json};
 use shell::agent::config::Config as AgentConfig;
 use shell::agent::mvp_agent::MvpAgent;
@@ -154,7 +154,7 @@ fn text_sse(text: &str) -> ScriptedResponse {
 struct AutoApproveClient;
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for AutoApproveClient {
+impl acp_transport::AcpClientHandler for AutoApproveClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -188,7 +188,7 @@ struct RunStats {
 }
 
 async fn prompt_turn(
-    client_conn: &acp::ClientSideConnection,
+    client_conn: &acp_transport::ClientSideConnection,
     session_id: &acp::SessionId,
     text: &str,
     label: &str,
@@ -288,15 +288,19 @@ async fn run_storm(
             let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
 
             let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
-            let (agent_conn, agent_io) =
-                acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
+            let (agent_conn, agent_io) = acp_transport::connect_agent_v1(
+                agent,
+                a2c_a.compat_write(),
+                agent_incoming,
+                |fut| {
                     tokio::task::spawn_local(fut);
-                });
+                },
+            );
             tokio::task::spawn_local(GatewayReceiver::new(gw_rx, agent_conn).run());
             tokio::task::spawn_local(agent_io);
 
             let client_incoming = LineBufferedRead::spawn_local(a2c_b.compat());
-            let (client_conn, client_io) = acp::ClientSideConnection::new(
+            let (client_conn, client_io) = acp_transport::connect_client_v1(
                 AutoApproveClient,
                 c2a_a.compat_write(),
                 client_incoming,

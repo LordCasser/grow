@@ -1,10 +1,10 @@
 //! A real agent behind a leader server, in this process rather than a child.
 
+use acp_transport::protocol as acp;
 use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
-use agent_client_protocol as acp;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, simplex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -31,10 +31,14 @@ pub fn spawn_agent(
         let agent =
             MvpAgent::new(GatewaySender::new(gateway_tx), &config).expect("valid agent config");
         let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
-        let (conn, handle_io) =
-            acp::AgentSideConnection::new(agent, agent_out_write.compat_write(), incoming, |fut| {
+        let (conn, handle_io) = acp_transport::connect_agent_v1(
+            agent,
+            agent_out_write.compat_write(),
+            incoming,
+            |fut| {
                 tokio::task::spawn_local(fut);
-            });
+            },
+        );
         tokio::task::spawn_local(GatewayReceiver::new(gateway_rx, conn).run());
         let _ = handle_io.await;
     });

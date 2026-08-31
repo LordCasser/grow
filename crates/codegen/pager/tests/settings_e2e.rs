@@ -3932,11 +3932,11 @@ fn pr14_default_model_picker_commits_resolved_model_id() {
         available_models: vec![
             (
                 "Grow 4.5".to_string(),
-                agent_client_protocol::ModelId::new(std::sync::Arc::from("grow-4.5")),
+                shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5")),
             ),
             (
                 "Grow 3".to_string(),
-                agent_client_protocol::ModelId::new(std::sync::Arc::from("grow-3")),
+                shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3")),
             ),
         ],
         ..PagerLocalSnapshot::default()
@@ -3988,7 +3988,7 @@ fn pr14_default_model_picker_row_zero_commits_clear_action() {
     let snapshot = PagerLocalSnapshot {
         available_models: vec![(
             "Grow 3".to_string(),
-            agent_client_protocol::ModelId::new(std::sync::Arc::from("grow-3")),
+            shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3")),
         )],
         ..PagerLocalSnapshot::default()
     };
@@ -4025,7 +4025,7 @@ fn pr14_mouse_click_on_dynamic_enum_row_opens_picker() {
     let snapshot = PagerLocalSnapshot {
         available_models: vec![(
             "Grow 3".to_string(),
-            agent_client_protocol::ModelId::new(std::sync::Arc::from("grow-3")),
+            shell::agent::models::ModelId::new(std::sync::Arc::from("grow-3")),
         )],
         ..PagerLocalSnapshot::default()
     };

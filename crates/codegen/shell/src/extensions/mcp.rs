@@ -12,7 +12,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use agent_client_protocol::{self as acp, Client};
+use acp_transport::AcpClientHandler as _;
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 // rmcp is quarantined in mcp; see that crate's docs.

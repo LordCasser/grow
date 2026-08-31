@@ -13,7 +13,7 @@ use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
 use crate::app::bundle::BundleState;
 use crate::slash::mode_support::ModeSupport;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
@@ -155,7 +155,7 @@ pub enum CommandResult {
     /// `prompt_blocks` is the actual content sent to the model.
     InjectSkill {
         display_text: String,
-        prompt_blocks: Vec<agent_client_protocol::ContentBlock>,
+        prompt_blocks: Vec<agent_client_protocol::schema::v1::ContentBlock>,
         /// Whether to display as a skill invocation (teal accent) in scrollback.
         /// `true` for real skills (e.g. /commit), `false` for built-in commands
         /// like /loop that inject structured prompts but aren't skills.

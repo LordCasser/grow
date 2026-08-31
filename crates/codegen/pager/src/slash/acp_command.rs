@@ -9,7 +9,7 @@
 //! sends structured prompt blocks directly. Non-skill ACP commands are
 //! classified for the shell command plane.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tools::implementations::skills::types::SkillScope;
 
 use super::command::{

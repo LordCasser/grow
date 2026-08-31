@@ -1,6 +1,6 @@
 //! Session status, usage, and info dispatchers.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::ctx::get_active_agent;
 use crate::app::actions::Effect;

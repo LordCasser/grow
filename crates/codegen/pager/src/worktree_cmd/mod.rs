@@ -6,7 +6,7 @@ use fast_worktree::WorktreeRecord;
 use tokio_util::sync::CancellationToken;
 
 use acp_transport::acp_send;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use shell::agent::config::Config as AgentConfig;
 
 /// Local response types matching the ACP response shapes.

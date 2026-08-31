@@ -215,6 +215,8 @@ fn default_grow_build_toolset() -> ToolServerConfig {
             (&grow_build::GetGoalTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
+            (&grow_build::ListActiveSessionsTool).into(),
+            (&grow_build::AskSessionTool).into(),
         ],
     }
 }
@@ -238,6 +240,8 @@ fn grow_build_concise_toolset() -> ToolServerConfig {
             (&grow_build::GetGoalTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
+            (&grow_build::ListActiveSessionsTool).into(),
+            (&grow_build::AskSessionTool).into(),
         ],
     }
 }

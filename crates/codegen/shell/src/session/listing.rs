@@ -183,7 +183,7 @@ fn normalize_cwd(cwd: &str) -> String {
 mod tests {
     use super::*;
     use crate::session::info::Info;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use chrono::{TimeZone, Utc};
 
     fn summary(id: &str, cwd: &str, title: &str, messages: usize) -> Summary {
@@ -202,7 +202,7 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
             num_messages: messages,
-            current_model_id: acp::ModelId::new("test/model"),
+            current_model_id: crate::agent::models::ModelId::new("test/model"),
             parent_session_id: None,
             forked_at: None,
             session_format_version: crate::session::persistence::SESSION_FORMAT_VERSION,

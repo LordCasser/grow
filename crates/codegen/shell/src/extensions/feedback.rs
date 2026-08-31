@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tokio::sync::oneshot;
 
 use super::{ExtResult, parse_params};

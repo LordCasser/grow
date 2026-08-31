@@ -172,7 +172,7 @@ use crate::app::root::dispatch;
 /// that one pending create operation, including its prompt and routing.
 #[derive(Debug)]
 pub(crate) struct PendingProjectCreate {
-    pub model_id: Option<agent_client_protocol::ModelId>,
+    pub model_id: Option<shell::agent::models::ModelId>,
     pub prompt: Option<StashedPrompt>,
     /// Whether the parked composer is an already-submitted prompt or merely
     /// a draft that must be restored after the directory is chosen.
@@ -1796,7 +1796,7 @@ pub(crate) mod test_fixtures {
     use crate::app::prompt_queue::QueueEntryWire;
     use crate::app::session::{AgentId, AgentSession, AgentState};
     use crate::scrollback::state::ScrollbackState;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     /// Simulate the authoritative QueueChanged(running) acknowledgement for a
     /// locally submitted prompt before driving tracker activity in tests.
@@ -2787,7 +2787,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
         AgentSession::new(
             crate::app::session::AgentId(0),
             tx,
-            session_id.map(agent_client_protocol::SessionId::new),
+            session_id.map(agent_client_protocol::schema::v1::SessionId::new),
             crate::acp::model_state::ModelState::default(),
             cwd,
             shell::util::config::PermissionMode::Ask,

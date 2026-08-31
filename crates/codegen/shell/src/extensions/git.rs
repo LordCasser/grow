@@ -13,7 +13,7 @@
 use super::{Empty, ExtResult, parse_params, to_ext_response, to_ext_response_partial};
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -285,7 +285,7 @@ async fn try_resolve_git_root(
     #[serde(rename_all = "camelCase")]
     struct Probe {
         git_root: Option<String>,
-        session_id: Option<agent_client_protocol::SessionId>,
+        session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     }
     let probe: Probe = serde_json::from_str(args.params.get()).ok()?;
     if let Some(root) = probe.git_root {

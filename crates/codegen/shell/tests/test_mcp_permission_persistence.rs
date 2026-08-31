@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use acp_transport::protocol as acp;
 use acp_transport::{AcpAgentGatewaySender, AcpClientMessage};
-use agent_client_protocol as acp;
 use paths::AbsPathBuf;
 use serial_test::serial;
 use tokio::sync::{mpsc, oneshot};

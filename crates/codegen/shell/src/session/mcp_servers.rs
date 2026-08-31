@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ::mcp::servers as inner;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 fn resolve_overrides(
     server_name: &str,

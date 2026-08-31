@@ -433,7 +433,7 @@ mod goal_admission_tests {
                 actor
                     .admit_session_model_selection(
                         SessionActor::selection_route_for_test(
-                            acp::ModelId::new("queued/model"),
+                            crate::agent::models::ModelId::new("queued/model"),
                             sampler::SamplerConfig::default(),
                             85,
                         ),
@@ -593,7 +593,7 @@ mod goal_admission_tests {
                     .pending_step_controls
                     .admit_sampling(
                         SessionActor::selection_route_for_test(
-                            acp::ModelId::new("next/model"),
+                            crate::agent::models::ModelId::new("next/model"),
                             sampler::SamplerConfig::default(),
                             85,
                         ),
@@ -863,9 +863,11 @@ impl SessionActor {
             self.behavior
                 .lock()
                 .select_behavior(tool_types::BehaviorId::Normal);
-            self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                tool_types::BehaviorId::Normal.as_id(),
-            ));
+            self.enqueue_current_mode_update(
+                agent_client_protocol::schema::v1::SessionModeId::new(
+                    tool_types::BehaviorId::Normal.as_id(),
+                ),
+            );
         }
         self.sync_goal_usage_window();
         self.send_available_commands_update().await;
@@ -973,7 +975,7 @@ impl SessionActor {
         self.behavior.lock().select_behavior(BehaviorId::Goal);
         self.sync_goal_usage_window();
         drop(workflow_admission);
-        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+        self.enqueue_current_mode_update(agent_client_protocol::schema::v1::SessionModeId::new(
             BehaviorId::Goal.as_id(),
         ));
         self.send_available_commands_update().await;
@@ -1116,9 +1118,9 @@ impl SessionActor {
         *self.goal_tracker.lock() = next_tracker;
         if next_behavior != previous_behavior {
             self.behavior.lock().select_behavior(next_behavior);
-            self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                next_behavior.as_id(),
-            ));
+            self.enqueue_current_mode_update(
+                agent_client_protocol::schema::v1::SessionModeId::new(next_behavior.as_id()),
+            );
             self.arm_terminal_preemption_if_running().await;
         }
         self.sync_goal_usage_window();

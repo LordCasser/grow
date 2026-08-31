@@ -23,7 +23,7 @@ mod common;
 
 use std::time::Duration;
 
-use agent_client_protocol::{self as acp, Agent as _};
+use acp_transport::{AcpAgentHandler as _, protocol as acp};
 use test_support::leader::{
     LeaderFixture, leader_log, wait_for_live_leader, wait_for_replay_notifications,
 };
@@ -280,9 +280,10 @@ async fn test_prompt_sent_during_outage_is_delivered_after_recovery() {
                         .expect("replacement leader");
                     clients[0]
                         .conn
-                        .set_session_model(acp::SetSessionModelRequest::new(
+                        .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
                             session,
-                            acp::ModelId::new("test-model"),
+                            "model",
+                            acp::SessionConfigOptionValue::value_id("test-model"),
                         ))
                         .await
                         .expect("set model after recovery");

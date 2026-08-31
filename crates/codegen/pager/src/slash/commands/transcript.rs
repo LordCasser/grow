@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn with_session_dispatches_open_transcript_pager() {
         let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("s1".to_string());
+        let sid = agent_client_protocol::schema::v1::SessionId::from("s1".to_string());
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: Some(&sid),

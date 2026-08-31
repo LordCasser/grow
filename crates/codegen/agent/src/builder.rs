@@ -161,6 +161,28 @@ fn apply_workflow_tool_gates(
         tool_config.tools.push((&WorkflowTool).into());
     }
 }
+
+fn apply_coordination_tool_gates(
+    tool_config: &mut tools::registry::types::ToolServerConfig,
+    prompt_audience: crate::prompt::context::PromptAudience,
+) {
+    use tools::implementations::grow_build::{
+        ASK_SESSION_TOOL_NAME, AskSessionTool, LIST_ACTIVE_SESSIONS_TOOL_NAME,
+        ListActiveSessionsTool,
+    };
+    use tools::types::tool::ToolNamespace;
+
+    let namespace = ToolNamespace::Grow;
+    let list_id = format!("{namespace}:{LIST_ACTIVE_SESSIONS_TOOL_NAME}");
+    let ask_id = format!("{namespace}:{ASK_SESSION_TOOL_NAME}");
+    tool_config
+        .tools
+        .retain(|tool| tool.id != list_id && tool.id != ask_id);
+    if prompt_audience == crate::prompt::context::PromptAudience::Primary {
+        tool_config.tools.push((&ListActiveSessionsTool).into());
+        tool_config.tools.push((&AskSessionTool).into());
+    }
+}
 impl AgentBuilder {
     pub fn new(
         working_directory: PathBuf,
@@ -601,6 +623,7 @@ impl AgentBuilder {
             self.background_workflows_enabled,
             self.prompt_audience,
         );
+        apply_coordination_tool_gates(&mut tool_config, self.prompt_audience);
         let task_tool_id = format!("{}:{}", tools::types::tool::ToolNamespace::Grow, "task");
         let mut task_stripped = false;
         if !self.subagents_enabled {
@@ -1038,6 +1061,48 @@ mod tests {
             crate::prompt::context::PromptAudience::Primary,
         );
         assert!(disabled.tools.is_empty());
+    }
+
+    #[test]
+    fn coordination_tools_are_primary_only_and_canonical() {
+        use tools::implementations::grow_build::{
+            ASK_SESSION_TOOL_NAME, LIST_ACTIVE_SESSIONS_TOOL_NAME,
+        };
+
+        let duplicate = tools::registry::types::ToolConfig::from_id(format!(
+            "{}:{ASK_SESSION_TOOL_NAME}",
+            tools::types::tool::ToolNamespace::Grow
+        ));
+        let mut primary = tools::registry::types::ToolServerConfig {
+            tools: vec![duplicate],
+        };
+        apply_coordination_tool_gates(
+            &mut primary,
+            crate::prompt::context::PromptAudience::Primary,
+        );
+        assert_eq!(
+            primary
+                .tools
+                .iter()
+                .filter(|tool| tool.id.ends_with(LIST_ACTIVE_SESSIONS_TOOL_NAME))
+                .count(),
+            1
+        );
+        assert_eq!(
+            primary
+                .tools
+                .iter()
+                .filter(|tool| tool.id.ends_with(ASK_SESSION_TOOL_NAME))
+                .count(),
+            1
+        );
+
+        let mut subagent = primary;
+        apply_coordination_tool_gates(
+            &mut subagent,
+            crate::prompt::context::PromptAudience::Subagent,
+        );
+        assert!(subagent.tools.is_empty());
     }
 
     /// reqwest is built with `rustls-no-provider` (see the vendoring notes on

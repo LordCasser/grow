@@ -103,7 +103,10 @@ impl AgentView {
     /// event-id history (a stale cursor relies on exact-match failure for
     /// safety; a stale highwater could dedup-drop the new session's events
     /// outright).
-    pub(crate) fn bind_session_id(&mut self, session_id: agent_client_protocol::SessionId) {
+    pub(crate) fn bind_session_id(
+        &mut self,
+        session_id: agent_client_protocol::schema::v1::SessionId,
+    ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.session.last_seen_event_id = None;
@@ -1038,7 +1041,7 @@ impl AgentView {
 mod behavior_capability_tests {
     use super::*;
     use crate::acp::meta::NotificationMeta;
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema::v1 as acp;
 
     #[test]
     fn structured_projection_replaces_bootstrap_command_inference() {
@@ -1304,7 +1307,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_uses_bg_task_description() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::session::{BgTaskState, BgTaskStatus};
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
         let mut view = running_view();
@@ -1378,7 +1381,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_falls_back_to_short_command() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::session::{BgTaskState, BgTaskStatus};
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
         let mut view = running_view();
@@ -1433,7 +1436,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_multi_id_uses_full_task_count() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::session::{BgTaskState, BgTaskStatus};
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
         let mut view = running_view();
@@ -1496,7 +1499,7 @@ mod resolve_turn_activity_tests {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
         use crate::app::session::{BgTaskState, BgTaskStatus};
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
         let long_desc = "L".repeat(80);
@@ -1565,7 +1568,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_resolves_subagent_by_subagent_id() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::subagent::SubagentInfo;
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::Instant;
         let mut view = running_view();
@@ -1642,7 +1645,7 @@ mod resolve_turn_activity_tests {
     fn task_output_wait_long_command_keeps_generic_label() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::session::{BgTaskState, BgTaskStatus};
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         use std::sync::Arc;
         use std::time::SystemTime;
         let long_cmd = "cargo test --release --workspace --all-features -- --nocapture".to_string();
@@ -1747,7 +1750,7 @@ mod status_window_tests {
     fn session_rebind_and_replay_invalidate_minimal_btw() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         let old_request = crate::minimal_api::start_minimal_btw(&mut agent, "old question".into());
-        agent.bind_session_id(agent_client_protocol::SessionId::new("s2"));
+        agent.bind_session_id(agent_client_protocol::schema::v1::SessionId::new("s2"));
         assert!(agent.btw_state.is_none());
         assert!(agent.minimal_btw_lifecycle.is_none());
         assert!(!crate::minimal_api::finish_minimal_btw(

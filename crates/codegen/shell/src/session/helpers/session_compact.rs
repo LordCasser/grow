@@ -4,7 +4,7 @@ use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, ConversationItem, ConversationRequest,
     SamplingClient as OaiCompatClient, SamplingError, conversation_to_chat_messages,
 };
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
 pub use chat_state::compaction_utils::{
     AUTO_CONTINUE_PROMPT, extract_last_real_user_query, extract_last_user_query,

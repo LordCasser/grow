@@ -195,13 +195,13 @@ use std::sync::Arc;
 /// - `stream: false` → LocalTerminalRunner (silent, fire-and-forget)
 pub struct TerminalRunner {
     notifier: Arc<dyn SessionNotificationSender>,
-    session_id: agent_client_protocol::SessionId,
+    session_id: agent_client_protocol::schema::v1::SessionId,
 }
 
 impl TerminalRunner {
     pub fn new(
         notifier: Arc<dyn SessionNotificationSender>,
-        session_id: agent_client_protocol::SessionId,
+        session_id: agent_client_protocol::schema::v1::SessionId,
     ) -> Self {
         Self {
             notifier,

@@ -135,6 +135,8 @@ pub(super) fn project_call_access(
         | ToolInput::ContextRecall(_)
         | ToolInput::Lsp(_)
         | ToolInput::SchedulerList(_)
+        | ToolInput::ListActiveSessions(_)
+        | ToolInput::AskSession(_)
         | ToolInput::GetGoal(_) => ToolAccess::Read,
         ToolInput::SearchReplace(_) | ToolInput::HashlineEdit(_) => ToolAccess::ReadWrite,
         ToolInput::Write(_) => ToolAccess::Write,

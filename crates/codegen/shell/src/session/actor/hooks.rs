@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use ::diagnostics::events::ClientHookGateOutcome;
 use ::hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
-use agent_client_protocol as acp;
-use agent_client_protocol::Client as _;
+use acp_transport::AcpClientHandler as _;
+use acp_transport::protocol as acp;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use serde_json::value::RawValue;
 

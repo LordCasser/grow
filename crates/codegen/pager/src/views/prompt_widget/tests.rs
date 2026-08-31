@@ -1454,7 +1454,7 @@
         );
 
         // Sync ACP commands with "flush".
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+        let acp_cmds = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "flush".to_string(),
             "Flush memory".to_string(),
         )];
@@ -1661,10 +1661,10 @@
 
         let mut pw = PromptWidget::new();
         let mut models = crate::acp::model_state::ModelState::default();
-        let model_id = agent_client_protocol::ModelId::new(Arc::from("grow-4.5"));
+        let model_id = shell::agent::models::ModelId::new(Arc::from("grow-4.5"));
         models.available.insert(
             model_id.clone(),
-            agent_client_protocol::ModelInfo::new(model_id, "Grow 4.5".to_string()),
+            shell::agent::models::ModelInfo::new(model_id, "Grow 4.5".to_string()),
         );
 
         // Type "/model gr" and position cursor at end (in args).
@@ -1745,7 +1745,7 @@
 
         // Sync adds "session-info" — sync_acp_commands internally
         // calls refresh_slash, so the snapshot should already show it.
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+        let acp_cmds = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "session-info".to_string(),
             "Show session info".to_string(),
         )];
@@ -1765,7 +1765,7 @@
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
 
-        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+        let acp_cmds = vec![agent_client_protocol::schema::v1::AvailableCommand::new(
             "flush".to_string(),
             "Flush memory".to_string(),
         )];

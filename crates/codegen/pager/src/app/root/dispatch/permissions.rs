@@ -5,7 +5,7 @@ use super::modes::set_permission_mode;
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 /// Shown when the user answers a permission request whose requester has
 /// already disconnected (response channel closed) — the answer cannot be

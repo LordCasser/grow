@@ -6,7 +6,7 @@
 //! - `memory/rewrite`: rewrite a raw memory note into structured markdown via
 //!   a one-shot LLM call.
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 

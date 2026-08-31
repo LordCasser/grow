@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use acp_transport::LineBufferedRead;
-use agent_client_protocol::{self as acp, Agent as _};
+use acp_transport::{AcpAgentHandler as _, LineBufferedRead, protocol as acp};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::env::grow_binary;
@@ -34,7 +33,7 @@ struct LeaderAcpClient {
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for LeaderAcpClient {
+impl acp_transport::AcpClientHandler for LeaderAcpClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -139,7 +138,7 @@ impl Drop for FixtureClientRegistration {
 
 /// A `grow agent --leader stdio` client subprocess speaking ACP over pipes.
 pub struct LeaderStdioClient {
-    pub conn: acp::ClientSideConnection,
+    pub conn: acp_transport::ClientSideConnection,
     process: TestProcess,
     capture: Arc<Capture>,
     registration: Option<FixtureClientRegistration>,
@@ -639,7 +638,7 @@ impl LeaderStdioClient {
         };
         let incoming = LineBufferedRead::spawn_local(incoming);
         let (conn, handle_io) =
-            acp::ClientSideConnection::new(client, outgoing, incoming, |future| {
+            acp_transport::connect_client_v1(client, outgoing, incoming, |future| {
                 tokio::task::spawn_local(future);
             });
         tokio::task::spawn_local(handle_io);

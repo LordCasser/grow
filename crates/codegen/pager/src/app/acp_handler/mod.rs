@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acp_transport::AcpClientMessage;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 
 use super::actions::Effect;
 use shell::extensions::notification::{SessionNotification, SessionUpdate as GrowSessionUpdate};

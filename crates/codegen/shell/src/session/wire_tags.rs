@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tools::types::TaskSnapshot;
 
 use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;

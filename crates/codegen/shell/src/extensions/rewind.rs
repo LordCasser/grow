@@ -12,7 +12,7 @@ use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::session::handle::SessionHandle;
 use crate::session::{RewindMode, RewindRequest, SessionCommand};
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 #[tracing::instrument(skip_all, fields(method = %args.method))]

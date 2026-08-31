@@ -10,7 +10,7 @@ use crate::app::subagent::SubagentInfo;
 use crate::scrollback::EntryId;
 use crate::scrollback::state::ScrollbackState;
 use acp_transport::AcpAgentTx;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use shell::sampling::types::ReasoningEffort;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -526,8 +526,8 @@ impl AgentState {
 /// already-finalized turn (see [`AgentSession::finalized_pr_meta`]).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FinalizedPrMeta {
-    /// Typed token usage from the late response (`PromptResponse.usage`).
-    pub(crate) usage: Option<agent_client_protocol::Usage>,
+    /// Grow prompt usage decoded from the stable ACP response's `_meta`.
+    pub(crate) usage: Option<shell::extensions::notification::PromptUsage>,
     /// `_meta.structuredOutput` / `_meta.structuredOutputError` from the late
     /// response: `Ok(value)` when the model produced schema-validated output,
     /// `Err(message)` when the shell reported a structured-output failure.
@@ -675,7 +675,7 @@ impl SessionControlToken {
 #[derive(Debug, Clone)]
 pub(crate) enum PendingSessionControl {
     Model {
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
         /// True when the model id is only a local display hint and Shell must
         /// compose the effort with its newest desired Sampling target.
@@ -1038,9 +1038,9 @@ pub struct AgentSession {
     /// it). History-replay silent-revert of a prior choice is suppressed on the
     /// shell side via `ReconnectState::user_selected_model`; the pager still
     /// applies live remote switches and updates this field to match.
-    pub user_model_preference: Option<acp::ModelId>,
+    pub user_model_preference: Option<shell::agent::models::ModelId>,
     /// `/model X [effort]` issued before the session was ready, applied on SessionCreated.
-    pub deferred_model_switch: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    pub deferred_model_switch: Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)>,
     /// Whether the confirmed Behavior is Plan. Derived only from
     /// `CurrentModeUpdate`; tool titles never change it.
     pub(crate) plan_mode_active: bool,
@@ -1528,7 +1528,7 @@ impl AgentSession {
                 SessionControlDomain::Sampling,
                 sampling.sequence,
                 PendingSessionControl::Model {
-                    model_id: acp::ModelId::new(sampling.model_id),
+                    model_id: shell::agent::models::ModelId::new(sampling.model_id),
                     effort: sampling.effort,
                     effort_patch: sampling.effort_patch,
                 },
@@ -1670,7 +1670,7 @@ impl AgentSession {
 
     pub(crate) fn has_pending_model_control(
         &self,
-        model_id: &acp::ModelId,
+        model_id: &shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
     ) -> bool {
         let slot = &self.controls.sampling;
@@ -1830,7 +1830,7 @@ impl AgentSession {
     /// following `/effort` compose against the old model.
     pub(crate) fn resolve_sampling_control(
         &mut self,
-        model_id: &acp::ModelId,
+        model_id: &shell::agent::models::ModelId,
         effort: Option<ReasoningEffort>,
     ) -> bool {
         let Some((token, matches)) = self.controls.sampling.in_flight.as_ref().map(|pending| {
@@ -2008,7 +2008,7 @@ impl AgentSession {
     /// model.
     pub(crate) fn sampling_control_target(
         &self,
-    ) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
+    ) -> Option<(shell::agent::models::ModelId, Option<ReasoningEffort>)> {
         let pending = self.controls.sampling.in_flight.as_ref();
         pending
             .and_then(|pending| match &pending.control {
@@ -2311,7 +2311,7 @@ impl AgentSession {
     #[cfg(test)]
     pub(crate) fn begin_model_switch_for_test(&mut self) -> SessionControlToken {
         let _ = self.enqueue_control(PendingSessionControl::Model {
-            model_id: acp::ModelId::new("test-model-control"),
+            model_id: shell::agent::models::ModelId::new("test-model-control"),
             effort: None,
             effort_patch: false,
         });
@@ -3491,10 +3491,10 @@ mod tests {
     #[test]
     fn reconnect_rearms_only_the_latest_sampling_target() {
         let mut s = test_session();
-        let model_id = acp::ModelId::new("grow-test");
+        let model_id = shell::agent::models::ModelId::new("grow-test");
         s.models.available.insert(
             model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Grow Test".to_owned()),
+            shell::agent::models::ModelInfo::new(model_id.clone(), "Grow Test".to_owned()),
         );
         s.models.set_current(model_id.clone(), None);
         let old = s
@@ -3537,15 +3537,15 @@ mod tests {
     #[test]
     fn effort_intent_projects_the_latest_pending_model_without_committing_it() {
         let mut s = test_session();
-        let old = acp::ModelId::new("provider/old");
-        let pending = acp::ModelId::new("provider/pending");
+        let old = shell::agent::models::ModelId::new("provider/old");
+        let pending = shell::agent::models::ModelId::new("provider/pending");
         s.models.available.insert(
             old.clone(),
-            acp::ModelInfo::new(old.clone(), "Old".to_owned()),
+            shell::agent::models::ModelInfo::new(old.clone(), "Old".to_owned()),
         );
         s.models.available.insert(
             pending.clone(),
-            acp::ModelInfo::new(pending.clone(), "Pending".to_owned()).meta(
+            shell::agent::models::ModelInfo::new(pending.clone(), "Pending".to_owned()).meta(
                 serde_json::json!({
                     "reasoningEfforts": ["low", "high"],
                     "reasoningEffort": "high"

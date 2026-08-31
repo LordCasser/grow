@@ -61,10 +61,10 @@
             let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
                 .get_mut("child-session")
                 .unwrap();
-            let model_id = acp::ModelId::new("grow-child");
+            let model_id = shell::agent::models::ModelId::new("grow-child");
             child.session.models.available.insert(
                 model_id.clone(),
-                acp::ModelInfo::new(model_id, "Grow Child"),
+                shell::agent::models::ModelInfo::new(model_id, "Grow Child"),
             );
         }
 
@@ -325,10 +325,10 @@
                 let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views
                     .get_mut(child_sid)
                     .unwrap();
-                let model = acp::ModelId::new("restored-model");
+                let model = shell::agent::models::ModelId::new("restored-model");
                 child.session.models.available.insert(
                     model.clone(),
-                    acp::ModelInfo::new(model, "Restored Model"),
+                    shell::agent::models::ModelInfo::new(model, "Restored Model"),
                 );
             }
             let before_restore = app.agents[&AgentId(0)].scrollback.len();

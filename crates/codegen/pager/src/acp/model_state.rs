@@ -1,6 +1,5 @@
 //! Model state — tracks available models and current selection.
 
-use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use shell::sampling::types::{
     ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
@@ -47,8 +46,8 @@ impl EffortTokenError {
 /// Per-agent model state.
 #[derive(Debug, Clone, Default)]
 pub struct ModelState {
-    pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
-    pub current: Option<acp::ModelId>,
+    pub available: IndexMap<shell::agent::models::ModelId, shell::agent::models::ModelInfo>,
+    pub current: Option<shell::agent::models::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of
@@ -137,8 +136,8 @@ impl ModelState {
     /// Replace the available models, preserving current selection if still valid.
     pub fn update_catalog(
         &mut self,
-        new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
-        fallback_current: Option<acp::ModelId>,
+        new_available: IndexMap<shell::agent::models::ModelId, shell::agent::models::ModelInfo>,
+        fallback_current: Option<shell::agent::models::ModelId>,
     ) {
         let previous_current_model = self.current.clone();
         self.available = new_available;
@@ -164,7 +163,7 @@ impl ModelState {
     /// Set the current model and resolve reasoning effort from catalog meta.
     pub fn set_current(
         &mut self,
-        model_id: acp::ModelId,
+        model_id: shell::agent::models::ModelId,
         effort_override: Option<ReasoningEffort>,
     ) {
         self.current = Some(model_id.clone());
@@ -201,7 +200,7 @@ impl ModelState {
     /// reasoning effort. No client-side menu is synthesized.
     pub(crate) fn reasoning_effort_options_for(
         &self,
-        id: &acp::ModelId,
+        id: &shell::agent::models::ModelId,
     ) -> Vec<ReasoningEffortOption> {
         let Some(info) = self.available.get(id) else {
             return Vec::new();
@@ -226,7 +225,7 @@ impl ModelState {
     /// [`Self::resolve_effort_token`] scoped to a specific catalog model id.
     pub(crate) fn resolve_effort_token_for(
         &self,
-        id: &acp::ModelId,
+        id: &shell::agent::models::ModelId,
         token: &str,
     ) -> Option<ReasoningEffort> {
         let options = self.reasoning_effort_options_for(id);
@@ -249,7 +248,7 @@ impl ModelState {
     /// each caller only maps the [`EffortTokenError`] to its own surface.
     pub(crate) fn resolve_effort_for_model(
         &self,
-        id: &acp::ModelId,
+        id: &shell::agent::models::ModelId,
         token: &str,
     ) -> Result<ReasoningEffort, EffortTokenError> {
         let supports = self
@@ -275,7 +274,7 @@ impl ModelState {
 
     /// Resolve a user-supplied catalog id (`provider/model`) case-insensitively.
     /// Display names are not accepted.
-    pub fn resolve_by_id(&self, query: &str) -> Option<acp::ModelId> {
+    pub fn resolve_by_id(&self, query: &str) -> Option<shell::agent::models::ModelId> {
         self.available.iter().find_map(|(id, _)| {
             if id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
@@ -286,12 +285,12 @@ impl ModelState {
     }
 
     /// Catalog id string for UI labels (`provider/model`).
-    pub fn display_name_for(&self, id: &acp::ModelId) -> String {
+    pub fn display_name_for(&self, id: &shell::agent::models::ModelId) -> String {
         id.0.to_string()
     }
 
     /// Cycle to the next model.
-    pub fn next_model(&self) -> Option<acp::ModelId> {
+    pub fn next_model(&self) -> Option<shell::agent::models::ModelId> {
         if self.available.is_empty() {
             None
         } else if let Some(ref current) = self.current {
@@ -304,8 +303,8 @@ impl ModelState {
     }
 }
 
-impl From<Option<acp::SessionModelState>> for ModelState {
-    fn from(state: Option<acp::SessionModelState>) -> Self {
+impl From<Option<shell::agent::models::SessionModelState>> for ModelState {
+    fn from(state: Option<shell::agent::models::SessionModelState>) -> Self {
         state
             .map(|state| {
                 let mut models = IndexMap::new();
@@ -337,15 +336,15 @@ mod tests {
 
     fn sample_models() -> ModelState {
         let mut state = ModelState::default();
-        let id_a = acp::ModelId::new(Arc::from("model-a"));
-        let id_b = acp::ModelId::new(Arc::from("model-b"));
+        let id_a = shell::agent::models::ModelId::new(Arc::from("model-a"));
+        let id_b = shell::agent::models::ModelId::new(Arc::from("model-b"));
         state.available.insert(
             id_a.clone(),
-            acp::ModelInfo::new(id_a.clone(), "Model A".to_string()),
+            shell::agent::models::ModelInfo::new(id_a.clone(), "Model A".to_string()),
         );
         state.available.insert(
             id_b.clone(),
-            acp::ModelInfo::new(id_b.clone(), "Model B".to_string()),
+            shell::agent::models::ModelInfo::new(id_b.clone(), "Model B".to_string()),
         );
         state.current = Some(id_a);
         state
@@ -367,7 +366,7 @@ mod tests {
     #[test]
     fn test_next_model_wraps() {
         let mut state = sample_models();
-        state.current = Some(acp::ModelId::new(Arc::from("model-b")));
+        state.current = Some(shell::agent::models::ModelId::new(Arc::from("model-b")));
         let next = state.next_model().unwrap();
         assert_eq!(next.0.as_ref(), "model-a");
     }
@@ -380,8 +379,12 @@ mod tests {
         assert!(state.next_model().is_none());
     }
 
-    fn model_with_effort(id: &str, name: &str, effort: &str) -> acp::ModelInfo {
-        acp::ModelInfo::new(acp::ModelId::new(Arc::from(id)), name.to_string()).meta(
+    fn model_with_effort(id: &str, name: &str, effort: &str) -> shell::agent::models::ModelInfo {
+        shell::agent::models::ModelInfo::new(
+            shell::agent::models::ModelId::new(Arc::from(id)),
+            name.to_string(),
+        )
+        .meta(
             serde_json::json!({
                 "reasoningEffort": effort,
                 "reasoningEfforts": [
@@ -397,7 +400,7 @@ mod tests {
 
     #[test]
     fn update_catalog_preserves_user_effort_when_model_unchanged() {
-        let id = acp::ModelId::new(Arc::from("grow-build"));
+        let id = shell::agent::models::ModelId::new(Arc::from("grow-build"));
         let mut state = ModelState::default();
         state
             .available
@@ -419,7 +422,7 @@ mod tests {
 
     #[test]
     fn update_catalog_rederives_effort_when_current_model_changes() {
-        let id_a = acp::ModelId::new(Arc::from("model-a"));
+        let id_a = shell::agent::models::ModelId::new(Arc::from("model-a"));
         let mut state = ModelState::default();
         state.available.insert(
             id_a.clone(),
@@ -428,7 +431,7 @@ mod tests {
         state.set_current(id_a.clone(), Some(ReasoningEffort::Xhigh));
 
         // Refresh drops model-a; fall back to model-b whose default is low.
-        let id_b = acp::ModelId::new(Arc::from("model-b"));
+        let id_b = shell::agent::models::ModelId::new(Arc::from("model-b"));
         let mut refreshed = IndexMap::new();
         refreshed.insert(id_b.clone(), model_with_effort("model-b", "Model B", "low"));
         state.update_catalog(refreshed, Some(id_b.clone()));
@@ -438,11 +441,11 @@ mod tests {
     }
 
     fn state_with_meta(meta: Option<serde_json::Value>) -> ModelState {
-        let id = acp::ModelId::new(Arc::from("m"));
+        let id = shell::agent::models::ModelId::new(Arc::from("m"));
         let mut state = ModelState::default();
         state.available.insert(
             id.clone(),
-            acp::ModelInfo::new(id.clone(), "M".to_string())
+            shell::agent::models::ModelInfo::new(id.clone(), "M".to_string())
                 .meta(meta.and_then(|v| v.as_object().cloned())),
         );
         state.current = Some(id);

@@ -1761,11 +1761,14 @@ mod tests {
         use crate::acp::model_state::ModelState;
         use crate::app::session::AgentSession;
         use crate::scrollback::state::ScrollbackState;
-        use agent_client_protocol as acp;
+        use agent_client_protocol::schema::v1 as acp;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut models = ModelState::default();
         if let Some(m) = model {
-            models.set_current(acp::ModelId::new(std::sync::Arc::from(m)), None);
+            models.set_current(
+                shell::agent::models::ModelId::new(std::sync::Arc::from(m)),
+                None,
+            );
         }
         let session = {
             let session = AgentSession::new(

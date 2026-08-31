@@ -1841,7 +1841,6 @@ mod leader_key_tests {
     use crate::app::actions::Action;
     use crate::app::root::InputOutcome;
     use crate::views::modal::ActiveModal;
-    use agent_client_protocol as acp;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn ctrl_x() -> Event {
@@ -1857,10 +1856,10 @@ mod leader_key_tests {
         let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        let id = acp::ModelId::new("configured-model");
+        let id = shell::agent::models::ModelId::new("configured-model");
         agent.session.models.available.insert(
             id.clone(),
-            acp::ModelInfo::new(id.clone(), "Configured Model"),
+            shell::agent::models::ModelInfo::new(id.clone(), "Configured Model"),
         );
         agent.session.models.current = Some(id);
 
@@ -1919,7 +1918,7 @@ mod leader_key_tests {
             .prompt
             .slash_controller
             .registry_mut()
-            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            .set_acp_commands(&[agent_client_protocol::schema::v1::AvailableCommand::new(
                 "goal".to_string(),
                 "Goal".to_string(),
             )]);

@@ -23,7 +23,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
@@ -496,7 +496,7 @@ fn write_summary(
         created_at: active_at - ChronoDuration::minutes(5),
         updated_at: active_at,
         num_messages: 8 + ordinal % 24,
-        current_model_id: acp::ModelId::new("benchmark-model"),
+        current_model_id: crate::agent::models::ModelId::new("benchmark-model"),
         parent_session_id: None,
         forked_at: None,
         session_format_version: shell::session::persistence::SESSION_FORMAT_VERSION,

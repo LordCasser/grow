@@ -3,7 +3,6 @@
 use super::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::root::{ActiveView, AppView};
-use agent_client_protocol as acp;
 
 /// Set multiline input mode — swap Enter and Shift+Enter behavior.
 ///
@@ -1436,7 +1435,7 @@ pub(in crate::app::root::dispatch) fn preview_auto_light_theme(
 /// if the catalog contains `id`; `false` otherwise.
 pub(in crate::app::root::dispatch) fn set_default_model_inner(
     app: &mut AppView,
-    id: &acp::ModelId,
+    id: &shell::agent::models::ModelId,
 ) -> bool {
     if !app.models.available.contains_key(id) {
         return false;
@@ -1456,7 +1455,7 @@ fn save_default_model_toast(value: &str) -> String {
 /// session.
 pub(in crate::app::root::dispatch) fn set_default_model(
     app: &mut AppView,
-    new_id: acp::ModelId,
+    new_id: shell::agent::models::ModelId,
 ) -> Vec<Effect> {
     let prev_id = app.models.current.clone();
     let available_has_new = app.models.available.contains_key(&new_id);
@@ -1585,7 +1584,7 @@ fn save_fork_secondary_model_toast(value: &str) -> String {
 /// Mirror + persist + toast. Idempotent: same-id → no-op.
 pub(in crate::app::root::dispatch) fn set_fork_secondary_model(
     app: &mut AppView,
-    new_id: acp::ModelId,
+    new_id: shell::agent::models::ModelId,
 ) -> Vec<Effect> {
     let ActiveView::Agent(aid) = app.active_view else {
         tracing::error!(

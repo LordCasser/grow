@@ -1,9 +1,11 @@
 mod channel;
 mod common;
+mod connection;
 mod gateway;
+mod handler;
 mod line_reader;
 mod message;
-mod normalize;
+pub mod protocol;
 mod stdin_reader;
 
 pub use self::{
@@ -12,10 +14,12 @@ pub use self::{
         AcpAgentRx, AcpAgentTx, AcpChannelFailure, AcpClientRx, AcpClientTx, AcpResult, AcpRxo,
         AcpTxo, acp_channel_failure, acp_internal_error,
     },
+    connection::{AgentSideConnection, ClientSideConnection, connect_agent_v1, connect_client_v1},
     gateway::{
         AcpAgentGatewayReceiver, AcpAgentGatewaySender, AcpClientGatewayReceiver,
         AcpClientGatewaySender, AcpGatewayReceiver, AcpGatewaySender, acp_gateway,
     },
+    handler::{AcpAgentHandler, AcpClientHandler},
     message::{
         AcpAgentMessage, AcpAgentMessageBox, AcpAgentMessageGeneric, AcpArgs, AcpArgsBox,
         AcpClientMessage, AcpClientMessageBox, AcpClientMessageGeneric, AcpMethod, AcpRequest,

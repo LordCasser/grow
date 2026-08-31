@@ -492,9 +492,11 @@ impl SessionActor {
                 count,
                 "base64 images extracted from tool result",
             );
-            let acp_images: Vec<agent_client_protocol::ImageContent> = extracted_images
+            let acp_images: Vec<agent_client_protocol::schema::v1::ImageContent> = extracted_images
                 .into_iter()
-                .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
+                .map(|img| {
+                    agent_client_protocol::schema::v1::ImageContent::new(img.data, img.mime_type)
+                })
                 .collect();
             let mut norm_result =
                 crate::session::image_normalize::normalize_images(acp_images).await;

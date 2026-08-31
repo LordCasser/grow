@@ -1,7 +1,7 @@
 //! MCP server configuration value types, extracted from shell
 //! (config dependency inversion).
 
-use agent_client_protocol as acp;
+use agent_client_protocol::schema::v1 as acp;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

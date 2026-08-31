@@ -6,7 +6,7 @@
 use super::acp_types::*;
 use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use tokio::sync::oneshot;
 
 /// One user-visible invocation on the Shell-owned command plane.
@@ -392,7 +392,8 @@ pub enum SessionCommand {
         /// is already the complete authority.
         catalog: Option<std::sync::Arc<crate::agent::models::PublishedModelCatalog>>,
         intent: Option<ControlIntent>,
-        responds_to: oneshot::Sender<Result<DesiredStateOutcome<acp::ModelId>, acp::Error>>,
+        responds_to:
+            oneshot::Sender<Result<DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>>,
     },
     /// Patch reasoning effort onto the actor's latest desired Sampling model.
     /// This is distinct from `SetSessionModel`: composing at the actor is what
@@ -401,7 +402,8 @@ pub enum SessionCommand {
         effort: sampling_types::ReasoningEffort,
         authority: SessionEffortAuthority,
         intent: Option<ControlIntent>,
-        responds_to: oneshot::Sender<Result<DesiredStateOutcome<acp::ModelId>, acp::Error>>,
+        responds_to:
+            oneshot::Sender<Result<DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>>,
     },
     /// Apply a validated hot-reload snapshot to an existing session without
     /// changing its harness or treating the update as a user model switch.
@@ -758,6 +760,25 @@ pub enum SessionCommand {
     SideQuestion {
         question: String,
         respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
+    },
+    /// Admit a process-local coordination inquiry into this Session's own
+    /// bounded FIFO. The target actor is the sole owner of context snapshot,
+    /// cross-workspace approval, and Sideband execution.
+    RunCoordinationInquiry {
+        inquiry: crate::coordination::InboundInquiry,
+    },
+    /// Persist and publish one coordination audit fact through the Session's
+    /// canonical UiNotice timeline. The acknowledgement is a durability
+    /// barrier: callers must not continue remote execution if it fails.
+    RecordCoordinationNotice {
+        notice: crate::extensions::notification::UiNotice,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Bind the primary Session's process-level coordination backend into
+    /// both the live tool bridge and the canonical rebuild recipe.
+    InstallCoordinationBackend {
+        backend: tools::implementations::grow_build::coordination::CoordinationBackendResource,
+        respond_to: oneshot::Sender<()>,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.

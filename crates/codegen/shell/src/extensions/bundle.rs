@@ -7,7 +7,7 @@ use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
 use crate::bundle::{self, BundleManifest};
 use crate::remote::fetch_bundle;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::Path;

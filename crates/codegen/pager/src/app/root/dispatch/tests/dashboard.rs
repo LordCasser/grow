@@ -523,7 +523,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
     seed_model(&mut app, "grow-4.5", "Grow 4.5");
     open_dashboard(&mut app);
     app.cwd_has_git_ancestor = true;
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
@@ -1024,10 +1024,10 @@ fn dashboard_roster_switches_on_leader_mode() {
 }
 /// Seed a model into the app catalog for `/model` tests.
 fn seed_model(app: &mut AppView, id: &str, name: &str) {
-    let model_id = acp::ModelId::new(std::sync::Arc::from(id));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from(id));
     app.models.available.insert(
         model_id.clone(),
-        acp::ModelInfo::new(model_id, name.to_string()),
+        shell::agent::models::ModelInfo::new(model_id, name.to_string()),
     );
 }
 /// `/model <name>` on the dashboard stages the model for the next
@@ -1091,11 +1091,12 @@ fn dashboard_slash_effort_reports_next_session_staging() {
     use shell::sampling::types::ReasoningEffort;
 
     let mut app = test_app();
-    let model_id = acp::ModelId::new(std::sync::Arc::from("reasoning-model"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("reasoning-model"));
     let mut meta = serde_json::Map::new();
     meta.insert("reasoningEfforts".into(), serde_json::json!(["high"]));
     let info =
-        acp::ModelInfo::new(model_id.clone(), "Reasoning Model".to_string()).meta(Some(meta));
+        shell::agent::models::ModelInfo::new(model_id.clone(), "Reasoning Model".to_string())
+            .meta(Some(meta));
     app.models.available.insert(model_id.clone(), info);
     app.models.current = Some(model_id);
     open_dashboard(&mut app);
@@ -1361,7 +1362,7 @@ fn dashboard_open_reseeds_pending_dispatch_config() {
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
-            id: acp::ModelId::new(std::sync::Arc::from("grow-4.5")),
+            id: shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5")),
             effort: None,
             display: "grow-4.5".to_string(),
         });
@@ -1522,7 +1523,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     let mut app = test_app();
     seed_model(&mut app, "grow-4.5", "Grow 4.5");
     open_dashboard(&mut app);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
@@ -1563,7 +1564,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     let mut app = test_app();
     seed_model(&mut app, "grow-4.5", "Grow 4.5");
     open_dashboard(&mut app);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
+    let model_id = shell::agent::models::ModelId::new(std::sync::Arc::from("grow-4.5"));
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
@@ -2080,8 +2081,11 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         id: acp::SessionId::new(child_sid.clone()),
         cwd: "/tmp".into(),
     };
-    let mut summary =
-        shell::session::persistence::Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+    let mut summary = shell::session::persistence::Summary::new(
+        &info,
+        shell::agent::models::ModelId::new("test-model"),
+    )
+    .unwrap();
     summary.session_kind = Some("subagent".into());
     std::fs::write(
         session_dir.join("summary.json"),

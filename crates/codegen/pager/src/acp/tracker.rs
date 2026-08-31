@@ -18,7 +18,7 @@ use crate::scrollback::blocks::tool::{
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::state::verb_group::verb_group_kind_changed;
-use agent_client_protocol as acp;
+use acp_transport::protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use std::borrow::Cow;
 use std::collections::HashMap;
